@@ -5,6 +5,8 @@
  * Provides unified interface for retrieving and formatting prompts.
  */
 
+import { PROMPTS } from '../config/prompts';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -62,7 +64,7 @@ class PromptTemplateService {
    * Initialize default prompt templates
    */
   private initializeDefaultTemplates(): void {
-    // SQL Generation Template
+    // SQL Generation Template (using centralized prompts)
     this.addTemplate({
       name: 'sql-generation',
       system: `You are a Perfetto SQL expert. Generate accurate SQL queries to analyze trace data.
@@ -72,6 +74,8 @@ IMPORTANT RULES:
 2. All timestamps are in NANOSECONDS - convert to ms with /1e6 or seconds with /1e9
 3. Use proper JOIN conditions with foreign keys (track_id, utid, upid)
 4. Use thread_track for thread tracks, not track directly
+
+${PROMPTS.SQL_GENERATION.withSchema}
 
 {schema}
 
@@ -83,19 +87,14 @@ Respond with the SQL query wrapped in \`\`\`sql ... \`\`\` code blocks, followed
       temperature: 0.3,
     });
 
-    // SQL Fix Template
+    // SQL Fix Template (using centralized prompts)
     this.addTemplate({
       name: 'sql-fix',
       system: `You are a Perfetto SQL expert. Your task is to fix SQL queries that failed to execute.
 
 [SQL EXECUTION ERROR]
 
-The previous SQL query failed:
-\`\`\`sql
-{sql}
-\`\`\`
-
-Error: {error}
+${PROMPTS.ERROR_FIX.syntax}
 
 Please FIX the SQL query and try again. Common issues:
 - Wrong column names (check schema)
@@ -108,19 +107,14 @@ Generate ONE corrected SQL query wrapped in \`\`\`sql ... \`\`\` code blocks.`,
       temperature: 0.2,
     });
 
-    // SQL Adjust Template
+    // SQL Adjust Template (using centralized prompts)
     this.addTemplate({
       name: 'sql-adjust',
       system: `You are a Perfetto SQL expert. Your task is to adjust SQL queries that returned no results.
 
 [QUERY RESULT - 0 ROWS]
 
-The previous SQL query returned no results:
-\`\`\`sql
-{sql}
-\`\`\`
-
-Explanation: {explanation}
+${PROMPTS.ERROR_FIX.noResults}
 
 This means:
 - Your WHERE conditions are too restrictive
@@ -132,10 +126,12 @@ Please ADJUST your approach and try a different query.`,
       temperature: 0.4,
     });
 
-    // Analysis Summary Template
+    // Analysis Summary Template (using centralized prompts)
     this.addTemplate({
       name: 'analysis-summary',
       system: `You are a Perfetto trace analysis expert. Provide a clear, comprehensive answer to the user based on the query results.
+
+${PROMPTS.ANALYSIS_SUMMARY.detailed}
 
 {schema}
 
