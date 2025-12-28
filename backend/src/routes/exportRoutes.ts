@@ -16,10 +16,29 @@ router.post('/result', async (req, res) => {
   try {
     const { result, format = 'json', options = {} } = req.body;
 
-    if (!result || !result.columns || !result.rows) {
+    // Validate format
+    if (format !== 'csv' && format !== 'json') {
       return res.status(400).json({
         success: false,
-        error: 'Invalid result data. Must include columns and rows.',
+        error: 'Invalid format. Must be "csv" or "json"'
+      });
+    }
+
+    // Validate delimiter for CSV format
+    if (format === 'csv' && options.delimiter) {
+      if (typeof options.delimiter !== 'string' || options.delimiter.length !== 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'Delimiter must be a single character'
+        });
+      }
+    }
+
+    // Validate result structure
+    if (!result || !Array.isArray(result.columns) || !Array.isArray(result.rows)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid result data. Must include columns (array) and rows (array).'
       });
     }
 
@@ -41,6 +60,24 @@ router.post('/result', async (req, res) => {
 router.post('/session', async (req, res) => {
   try {
     const { results, format = 'json', options = {} } = req.body;
+
+    // Validate format
+    if (format !== 'csv' && format !== 'json') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid format. Must be "csv" or "json"'
+      });
+    }
+
+    // Validate delimiter for CSV format
+    if (format === 'csv' && options.delimiter) {
+      if (typeof options.delimiter !== 'string' || options.delimiter.length !== 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'Delimiter must be a single character'
+        });
+      }
+    }
 
     if (!Array.isArray(results)) {
       return res.status(400).json({

@@ -150,29 +150,31 @@ export class SessionPersistenceService {
    * List sessions with optional filtering
    */
   listSessions(filter: SessionFilter = {}): SessionListResponse {
-    let query = 'SELECT * FROM sessions WHERE 1=1';
+    const conditions: string[] = ['1=1'];
     const params: any[] = [];
 
     if (filter.traceId) {
-      query += ' AND trace_id = ?';
+      conditions.push('trace_id = ?');
       params.push(filter.traceId);
     }
     if (filter.startDate) {
-      query += ' AND created_at >= ?';
+      conditions.push('created_at >= ?');
       params.push(filter.startDate);
     }
     if (filter.endDate) {
-      query += ' AND created_at <= ?';
+      conditions.push('created_at <= ?');
       params.push(filter.endDate);
     }
 
+    const whereClause = conditions.join(' AND ');
+
     // Get total count
-    const countQuery = query.replace('*', 'COUNT(*) as count');
+    const countQuery = `SELECT COUNT(*) as count FROM sessions WHERE ${whereClause}`;
     const countResult = this.db.prepare(countQuery).get(...params) as { count: number };
     const totalCount = countResult.count;
 
-    // Add pagination
-    query += ' ORDER BY created_at DESC';
+    // Build main query with pagination
+    let query = `SELECT * FROM sessions WHERE ${whereClause} ORDER BY created_at DESC`;
     if (filter.limit) {
       query += ' LIMIT ?';
       params.push(filter.limit);
