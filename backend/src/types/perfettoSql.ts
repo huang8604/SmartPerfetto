@@ -615,6 +615,7 @@ export enum PerfettoSkillType {
   INPUT = 'input',
   BINDER = 'binder',
   BUFFER_FLOW = 'bufferflow',
+  SLOW_FUNCTIONS = 'slow_functions',
 }
 
 /**

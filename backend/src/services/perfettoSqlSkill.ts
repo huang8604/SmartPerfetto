@@ -124,6 +124,14 @@ const SKILL_PATTERNS: SkillPattern[] = [
       /buffer.*queue|buffer.*flow/i,
     ],
   },
+  {
+    skillType: PerfettoSkillType.SLOW_FUNCTIONS,
+    keywords: ['slow', 'function', 'method', 'latency', '耗时', '慢函数', '函数耗时'],
+    patterns: [
+      /slow.*function|method.*latency/i,
+      /慢函数|函数耗时|耗时.*函数/i,
+    ],
+  },
 ];
 
 // ============================================================================
@@ -198,6 +206,9 @@ export class PerfettoSqlSkill {
         break;
       case PerfettoSkillType.BUFFER_FLOW:
         result = await this.analyzeBufferFlow(traceId);
+        break;
+      case PerfettoSkillType.SLOW_FUNCTIONS:
+        result = await this.analyzeSlowFunctions(traceId, packageName);
         break;
       default:
         // Fallback to generic SQL generation
@@ -327,6 +338,10 @@ export class PerfettoSqlSkill {
       case PerfettoSkillType.SYSTEM_SERVER:
         sql = this.getSystemServerSql();
         summary = `Execute this SQL to analyze SystemServer performance. Look for system service call latencies.`;
+        break;
+      case PerfettoSkillType.SLOW_FUNCTIONS:
+        sql = this.getSlowFunctionsSql(packageName);
+        summary = `Execute this SQL to analyze slow functions. Look for slices > 16ms (missed frame threshold).`;
         break;
       default:
         // Generic query - suggest exploring tables
@@ -554,6 +569,28 @@ SELECT
   interface_name
 FROM system_server_calls
 ORDER BY ts DESC
+LIMIT 50;
+    `;
+  }
+
+  private getSlowFunctionsSql(packageName?: string): string {
+    const processFilter = packageName ? `WHERE p.name GLOB '${packageName}*'` : '';
+    return `
+-- Slow Functions Analysis (>16ms)
+SELECT
+  s.name as function_name,
+  COUNT(*) as count,
+  AVG(s.dur) / 1e6 as avg_dur_ms,
+  MAX(s.dur) / 1e6 as max_dur_ms,
+  SUM(s.dur) / 1e6 as total_dur_ms,
+  p.name as process_name
+FROM slice s
+JOIN track t ON s.track_id = t.id
+JOIN process_track pt ON t.id = pt.id
+JOIN process p ON pt.upid = p.upid
+${processFilter.replace('WHERE', 'AND')} AND s.dur > 16000000
+GROUP BY s.name, p.name
+ORDER BY total_dur_ms DESC
 LIMIT 50;
     `;
   }
@@ -1766,6 +1803,110 @@ LIMIT 50;
     };
   }
 
+  /**
+   * Analyze slow functions (>16ms)
+   * Detects functions that exceed the 16.6ms frame budget
+   */
+  async analyzeSlowFunctions(traceId: string, packageName?: string): Promise<PerfettoSqlResponse> {
+    let processFilter = '';
+    if (packageName) {
+      processFilter = `AND p.name GLOB '${packageName}*'`;
+    }
+
+    // Find slow functions (>16ms - frame budget for 60fps)
+    const sql = `
+      WITH slow_functions AS (
+        SELECT
+          s.name as function_name,
+          s.dur / 1e6 as dur_ms,
+          s.ts / 1e6 as ts_ms,
+          t.name as thread_name,
+          p.name as process_name
+        FROM slice s
+        JOIN track tr ON s.track_id = tr.id
+        JOIN thread_track tt ON tr.id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE s.dur > 16000000
+          ${processFilter}
+      ),
+      aggregated AS (
+        SELECT
+          function_name,
+          process_name,
+          COUNT(*) as count,
+          AVG(dur_ms) as avg_dur_ms,
+          MAX(dur_ms) as max_dur_ms,
+          SUM(dur_ms) as total_dur_ms
+        FROM slow_functions
+        GROUP BY function_name, process_name
+      )
+      SELECT
+        function_name,
+        process_name,
+        count,
+        avg_dur_ms,
+        max_dur_ms,
+        total_dur_ms
+      FROM aggregated
+      ORDER BY total_dur_ms DESC
+      LIMIT 50
+    `;
+
+    const queryResult = await this.traceProcessor.query(traceId, sql);
+
+    if (queryResult.error) {
+      return {
+        analysisType: 'slow_functions',
+        sql,
+        rows: [],
+        rowCount: 0,
+        summary: `Error analyzing slow functions: ${queryResult.error}`,
+      };
+    }
+
+    const rows = queryResult.rows as any[];
+
+    // Get top slowest individual instances
+    const topSlowestSql = `
+      SELECT
+        s.name as function_name,
+        s.dur / 1e6 as dur_ms,
+        s.ts / 1e6 as ts_ms,
+        t.name as thread_name,
+        p.name as process_name
+      FROM slice s
+      JOIN track tr ON s.track_id = tr.id
+      JOIN thread_track tt ON tr.id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE s.dur > 16000000
+        ${processFilter}
+      ORDER BY s.dur DESC
+      LIMIT 20
+    `;
+
+    const topSlowestResult = await this.traceProcessor.query(traceId, topSlowestSql);
+    const topSlowest = topSlowestResult.rows || [];
+
+    const summary = this.formatSlowFunctionsSummary(rows, topSlowest as any[]);
+
+    return {
+      analysisType: 'slow_functions',
+      sql,
+      rows,
+      rowCount: rows.length,
+      summary,
+      metrics: {
+        totalSlowFunctions: rows.length,
+        threshold: '16ms (frame budget)',
+      },
+      details: {
+        topSlowest,
+      },
+    };
+  }
+
   // ========================================================================
   // Summary Formatting Methods
   // ========================================================================
@@ -2074,6 +2215,31 @@ LIMIT 50;
 
     return `Found ${totalOps} SystemServer operations (>10ms). ` +
       `Total time: ${totalDur.toFixed(2)}ms, average: ${avgDur.toFixed(2)}ms.`;
+  }
+
+  private formatSlowFunctionsSummary(
+    rows: Record<string, unknown>[],
+    topSlowest: Record<string, unknown>[]
+  ): string {
+    if (rows.length === 0) {
+      return 'No slow functions found in trace. All functions completed within the 16ms frame budget.';
+    }
+
+    const totalCount = rows.reduce((sum, r: any) => sum + r.count, 0);
+    const totalDur = rows.reduce((sum, r: any) => sum + r.total_dur_ms, 0);
+    const avgDur = rows.reduce((sum, r: any) => sum + r.avg_dur_ms * r.count, 0) / totalCount;
+
+    let summary = `Found ${rows.length} types of slow functions (>16ms threshold). `;
+    summary += `Total occurrences: ${totalCount}. `;
+    summary += `Total time: ${totalDur.toFixed(2)}ms, average: ${avgDur.toFixed(2)}ms.`;
+
+    if (topSlowest.length > 0) {
+      const slowest = topSlowest[0] as any;
+      summary += ` Slowest instance: ${slowest.function_name} at ${slowest.dur_ms.toFixed(2)}ms ` +
+        `in ${slowest.thread_name} thread (${slowest.process_name}).`;
+    }
+
+    return summary;
   }
 
   // ========================================================================

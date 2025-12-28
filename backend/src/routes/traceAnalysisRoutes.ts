@@ -9,7 +9,6 @@ import { AnalysisSessionService, getSessionService } from '../services/analysisS
 import { PerfettoAnalysisOrchestrator } from '../services/perfettoAnalysisOrchestrator';
 import { PerfettoSqlSkill } from '../services/perfettoSqlSkill';
 import { getTraceProcessorService } from '../services/traceProcessorService';
-import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import {
   CreateAnalysisRequest,
   FollowupRequest,
@@ -24,7 +23,6 @@ let _traceProcessorService: any = null;
 let _sessionService: any = null;
 let _perfettoSqlSkill: any = null;
 let _orchestrator: any = null;
-let _sessionPersistenceService: any = null;
 
 function getServices() {
   if (!_orchestrator) {
@@ -39,14 +37,13 @@ function getServices() {
       undefined,
       _perfettoSqlSkill
     );
-    _sessionPersistenceService = SessionPersistenceService.getInstance();
     console.log('[TraceAnalysisRoutes] Services initialized, AI configured:', _orchestrator.isConfigured);
   }
   return {
     traceProcessorService: _traceProcessorService,
     sessionService: _sessionService,
     orchestrator: _orchestrator,
-    sessionPersistenceService: _sessionPersistenceService,
+    perfettoSqlSkill: _perfettoSqlSkill,
   };
 }
 
@@ -582,166 +579,115 @@ router.get('/status/:analysisId', (req, res) => {
 });
 
 /**
- * GET /api/trace-analysis/sessions
+ * POST /api/trace-analysis/analyze/slow
  *
- * Get all sessions (optional filters)
+ * Slow function detection endpoint
+ * Detects functions > 16ms (missed frame threshold)
  *
- * Query params:
- * - userId: Filter by user
- * - traceId: Filter by trace
- * - active: Only active sessions
- *
- * Response:
- * {
- *   "sessions": [...]
- * }
+ * Body: { traceId, packageName? }
+ * Response: { success: true, result: { ... } }
  */
-router.get('/sessions', (req, res) => {
+router.post('/analyze/slow', async (req, res) => {
   try {
-    const { userId, traceId, active } = req.query;
+    const { traceId, packageName } = req.body;
 
-    let sessions = s().sessionService.getAllSessions();
-
-    if (userId) {
-      sessions = sessions.filter((session: any) => session.userId === userId);
-    }
-    if (traceId) {
-      sessions = sessions.filter((session: any) => session.traceId === traceId);
-    }
-    if (active === 'true') {
-      sessions = sessions.filter(
-        (session: any) => session.status !== 'completed' && session.status !== 'failed'
-      );
+    if (!traceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'traceId is required',
+      });
     }
 
-    // Return simplified session info
-    const simplified = sessions.map((session: any) => ({
-      sessionId: session.id,
-      traceId: session.traceId,
-      status: session.status,
-      question: session.question,
-      createdAt: session.createdAt.toISOString(),
-      updatedAt: session.updatedAt.toISOString(),
-      currentIteration: session.currentIteration,
-      maxIterations: session.maxIterations,
-    }));
+    // Verify trace exists
+    const trace = s().traceProcessorService.getTrace(traceId);
+    if (!trace) {
+      return res.status(404).json({
+        success: false,
+        error: 'Trace not found in backend',
+        hint: 'Please upload the trace to the backend first using the upload button',
+        code: 'TRACE_NOT_UPLOADED',
+      });
+    }
 
-    res.json({ sessions: simplified });
+    // Run slow functions analysis
+    const result = await s().perfettoSqlSkill.analyzeSlowFunctions(traceId, packageName);
+
+    res.json({
+      success: true,
+      result: {
+        analysisType: result.analysisType,
+        sql: result.sql,
+        rows: result.rows,
+        rowCount: result.rowCount,
+        summary: result.summary,
+        metrics: result.metrics,
+        details: result.details,
+      },
+    });
   } catch (error: any) {
-    console.error('[TraceAnalysis] Sessions error:', error);
+    console.error('[TraceAnalysis] Slow functions analysis error:', error);
     res.status(500).json({
       success: false,
-      error: error.message || 'Failed to get sessions',
+      error: error.message || 'Slow functions analysis failed',
     });
   }
 });
 
-// ============================================================================
-// Session Persistence Routes
-// ============================================================================
-
 /**
- * GET /api/trace-analysis/sessions
+ * POST /api/trace-analysis/analyze/memory
  *
- * List all sessions with pagination
+ * Memory analysis endpoint
+ * Analyzes heap usage, GC events, and allocations
  *
- * Query params:
- * - traceId: Filter by trace ID
- * - limit: Number of sessions to return (default: 20)
- * - offset: Number of sessions to skip (default: 0)
- *
- * Response:
- * {
- *   "success": true,
- *   "sessions": [...],
- *   "totalCount": 100,
- *   "hasMore": true
- * }
+ * Body: { traceId, packageName? }
+ * Response: { success: true, result: { ... } }
  */
-router.get('/sessions', async (req, res) => {
+router.post('/analyze/memory', async (req, res) => {
   try {
-    const { traceId, limit, offset } = req.query;
+    const { traceId, packageName } = req.body;
 
-    const result = s().sessionPersistenceService.listSessions({
-      traceId: traceId as string | undefined,
-      limit: limit ? parseInt(limit as string) : 20,
-      offset: offset ? parseInt(offset as string) : 0,
-    });
-
-    res.json({ success: true, ...result });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-/**
- * GET /api/trace-analysis/sessions/:id
- *
- * Get specific session by ID
- *
- * Response:
- * {
- *   "success": true,
- *   "session": {...}
- * }
- */
-router.get('/sessions/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const session = s().sessionPersistenceService.getSession(id);
-    if (!session) {
-      return res.status(404).json({ success: false, error: 'Session not found' });
+    if (!traceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'traceId is required',
+      });
     }
 
-    res.json({ success: true, session });
+    // Verify trace exists
+    const trace = s().traceProcessorService.getTrace(traceId);
+    if (!trace) {
+      return res.status(404).json({
+        success: false,
+        error: 'Trace not found in backend',
+        hint: 'Please upload the trace to the backend first using the upload button',
+        code: 'TRACE_NOT_UPLOADED',
+      });
+    }
+
+    // Run memory analysis
+    const result = await s().perfettoSqlSkill.analyzeMemory(traceId, packageName);
+
+    res.json({
+      success: true,
+      result: {
+        analysisType: result.analysisType,
+        sql: result.sql,
+        rows: result.rows,
+        rowCount: result.rowCount,
+        summary: result.summary,
+        metrics: result.metrics,
+        details: result.details,
+      },
+    });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('[TraceAnalysis] Memory analysis error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Memory analysis failed',
+    });
   }
 });
 
-/**
- * DELETE /api/trace-analysis/sessions/:id
- *
- * Delete a session
- *
- * Response:
- * {
- *   "success": true,
- *   "deleted": true
- * }
- */
-router.delete('/sessions/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const deleted = s().sessionPersistenceService.deleteSession(id);
-    res.json({ success: true, deleted });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-/**
- * GET /api/trace-analysis/sessions/export/:traceId?
- *
- * Export sessions as JSON
- *
- * Response: JSON file download
- */
-router.get('/sessions/export/:traceId?', async (req, res) => {
-  try {
-    const { traceId } = req.params;
-
-    const jsonData = s().sessionPersistenceService.exportSessions(traceId);
-
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename="sessions-${Date.now()}.json"`);
-    res.send(jsonData);
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 // Export for use in other parts of the app
 export { s, getServices };
