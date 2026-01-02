@@ -10,7 +10,6 @@ import path from 'path';
 import sqlRoutes from './routes/sql';
 import traceRoutes from './routes/trace';
 import traceProcessorRoutes from './routes/traceProcessorRoutes';
-import articleRoutes from './routes/articles';
 import advancedAIRoutes from './routes/advancedAIRoutes';
 import simpleTraceRoutes from './routes/simpleTraceRoutes';
 import perfettoLocalRoutes from './routes/perfettoLocalRoutes';
@@ -24,8 +23,6 @@ import templateAnalysisRoutes from './routes/templateAnalysisRoutes';
 import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 
-// Import article aggregator initialization
-import { initArticleAggregator } from './controllers/articleController';
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
 import { getPortPool, resetPortPool } from './services/portPool';
@@ -77,8 +74,7 @@ app.get('/debug', (req, res) => {
 // API routes
 app.use('/api/sql', sqlRoutes);
 app.use('/api/trace', traceRoutes);
-app.use('/api/traces', simpleTraceRoutes); // Use our simple trace routes
-app.use('/api/articles', articleRoutes);
+app.use('/api/traces', simpleTraceRoutes);
 app.use('/chat', aiChatRoutes); // Separate endpoint for AI chat without auth
 app.use('/api/ai', advancedAIRoutes);
 app.use('/api/perfetto', perfettoLocalRoutes);
@@ -118,7 +114,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // Initialize services
 // Kill orphan trace_processor processes from previous runs
 killOrphanProcessors();
-initArticleAggregator();
 
 // Graceful shutdown handler
 function gracefulShutdown(signal: string) {
