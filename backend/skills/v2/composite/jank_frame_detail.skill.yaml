@@ -20,14 +20,14 @@
 # - 2+2+4 配置：CPU 0-3 小核，CPU 4-5 中核，CPU 6-7 大核
 
 name: jank_frame_detail
-version: "2.1"
+version: "3.2"
 type: composite
 
 meta:
   display_name: "掉帧帧详细分析"
-  description: "分析单个掉帧帧的 CPU、Binder、锁、大小核、四象限等详细信息"
+  description: "分析单个掉帧帧的详细信息。优化：使用窗口函数代替时间窗口JOIN，只分析主线程运行过的CPU频率，只输出频率变化点，避免重复计算"
   icon: "bug_report"
-  tags: [jank, frame, detail, analysis, cpu, core, quadrant]
+  tags: [jank, frame, detail, analysis, cpu, core, quadrant, frequency, ramp, dedup, optimized]
 
 prerequisites:
   modules:
@@ -137,46 +137,129 @@ steps:
         COALESCE(${pid}, 0) as pid
     save_as: frame_basic
 
-  # ========== 主线程 Slice 分析 ==========
+  # ========== 主线程 Slice 分析（去重优化）==========
   - id: main_thread_slices
     type: atomic
     name: "主线程耗时操作"
     display:
       level: key
-      title: "主线程耗时操作"
+      title: "主线程耗时操作（已去重）"
     sql: |
-      -- 使用主线程区间 (main_start_ts → main_end_ts)
+      -- 主线程耗时操作分析 - 方案4：分层过滤 + 白名单
+      -- 1. 过滤掉"纯壳子"节点（子节点占比 > 80%）
+      -- 2. 保留白名单节点（drawFrame, doFrame, performTraversals, handleMessage）
+      -- 3. 只保留 >= 4ms 的操作
+      -- 4. 显示层级路径
       WITH main_thread AS (
         SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name
         FROM thread t
         JOIN process p ON t.upid = p.upid
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND t.tid = p.pid  -- 主线程
+          AND t.tid = p.pid
       ),
-      slices_in_range AS (
+      -- 获取所有 >= 4ms 的 slices
+      all_slices AS (
         SELECT
+          s.id,
           s.name,
+          s.dur,
           s.dur / 1e6 as dur_ms,
           s.depth,
-          s.ts
+          s.ts,
+          s.ts + s.dur as end_ts
         FROM slice s
         JOIN thread_track tt ON s.track_id = tt.id
         WHERE tt.utid IN (SELECT utid FROM main_thread)
           AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
           AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
-          AND s.dur > 1000000  -- > 1ms
+          AND s.dur >= 4000000  -- >= 4ms
+      ),
+      -- 为每个 slice 找其直接子 slices（通过时间范围和 depth 判断）
+      with_children AS (
+        SELECT
+          p.id as parent_id,
+          p.name as parent_name,
+          p.dur as parent_dur,
+          p.depth as parent_depth,
+          c.id as child_id,
+          c.name as child_name,
+          c.dur as child_dur,
+          -- 计算子 slice 占父 slice 的比例
+          ROUND(100.0 * c.dur / p.dur, 1) as child_pct
+        FROM all_slices p
+        JOIN all_slices c ON c.ts >= p.ts
+          AND c.ts + c.dur <= p.ts + p.dur
+          AND c.depth = p.depth + 1
+          AND c.id != p.id  -- 不是自己
+      ),
+      -- 计算每个父 slice 的最大子 slice 占比
+      parent_max_child AS (
+        SELECT
+          parent_id,
+          MAX(child_pct) as max_child_pct,
+          SUM(child_dur) as total_children_dur
+        FROM with_children
+        GROUP BY parent_id
+      ),
+      -- 标记哪些 slices 应该被保留
+      -- 保留条件：1) 在白名单中 OR 2) 没有子节点 OR 3) 最大子节点占比 <= 80%
+      keep_slices AS (
+        SELECT
+          a.id,
+          a.name,
+          a.dur_ms,
+          a.depth,
+          a.ts,
+          pmc.max_child_pct,
+          -- 判断是否保留
+          CASE
+            WHEN a.name IN ('drawFrame', 'doFrame', 'performTraversals', 'handleMessage',
+                             'Choreographer$FrameHandler', 'queueIdle', 'run',
+                             'RecyclerView', 'onLayout', 'onMeasure') THEN 1  -- 白名单
+            WHEN pmc.max_child_pct IS NULL THEN 1  -- 没有子节点
+            WHEN pmc.max_child_pct <= 80 THEN 1  -- 子节点占比 <= 80%
+            ELSE 0  -- 过滤掉"壳子"节点
+          END as should_keep
+        FROM all_slices a
+        LEFT JOIN parent_max_child pmc ON a.id = pmc.parent_id
+      ),
+      -- 为保留的 slices 构建层级路径
+      -- 从当前 slice 向上遍历父节点，构建路径
+      with_path AS (
+        SELECT
+          ks.id,
+          ks.name,
+          ks.dur_ms,
+          ks.depth,
+          ks.ts,
+          -- 使用递归 CTE 构建路径（Perfetto 可能不支持，改用子查询）
+          -- 简化：只显示直接父节点
+          (
+            SELECT p.name
+            FROM all_slices p
+            WHERE p.ts <= ks.ts
+              AND p.ts + p.dur >= ks.ts + ks.dur
+              AND p.depth = ks.depth - 1
+            LIMIT 1
+          ) as parent_name
+        FROM keep_slices ks
+        WHERE ks.should_keep = 1
       )
       SELECT
+        CASE
+          WHEN parent_name IS NOT NULL THEN parent_name || ' > ' || name
+          ELSE name
+        END as display_name,
         name,
+        dur_ms,
         COUNT(*) as count,
-        ROUND(SUM(dur_ms), 2) as total_ms,
         ROUND(MAX(dur_ms), 2) as max_ms,
         ROUND(AVG(dur_ms), 2) as avg_ms
-      FROM slices_in_range
-      GROUP BY name
-      HAVING total_ms > 1
-      ORDER BY total_ms DESC
-      LIMIT 15
+      FROM with_path
+      GROUP BY display_name, name
+      HAVING SUM(dur_ms) > 1
+      ORDER BY SUM(dur_ms) DESC
+      LIMIT 20
     save_as: main_slices
 
   # ========== Binder 调用分析 ==========
@@ -205,15 +288,19 @@ steps:
     save_as: binder_analysis
     optional: true
 
-  # ========== RenderThread Slice 分析 ==========
+  # ========== RenderThread Slice 分析（去重优化）==========
   - id: render_thread_slices
     type: atomic
     name: "RenderThread耗时操作"
     display:
       level: key
-      title: "RenderThread耗时操作"
+      title: "RenderThread耗时操作（已去重）"
     sql: |
-      -- 使用 RenderThread 区间 (render_start_ts → render_end_ts)
+      -- RenderThread 耗时操作分析 - 方案4：分层过滤 + 白名单
+      -- 1. 过滤掉"纯壳子"节点（子节点占比 > 80%）
+      -- 2. 保留白名单节点
+      -- 3. 只保留 >= 4ms 的操作
+      -- 4. 显示层级路径
       WITH render_thread AS (
         SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name
         FROM thread t
@@ -221,30 +308,104 @@ steps:
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
           AND t.name = 'RenderThread'
       ),
-      slices_in_range AS (
+      -- 获取所有 >= 4ms 的 slices
+      all_slices AS (
         SELECT
+          s.id,
           s.name,
+          s.dur,
           s.dur / 1e6 as dur_ms,
           s.depth,
-          s.ts
+          s.ts,
+          s.ts + s.dur as end_ts
         FROM slice s
         JOIN thread_track tt ON s.track_id = tt.id
         WHERE tt.utid IN (SELECT utid FROM render_thread)
           AND s.ts >= COALESCE(${render_start_ts}, ${start_ts})
           AND s.ts < COALESCE(${render_end_ts}, ${end_ts})
-          AND s.dur > 500000  -- > 0.5ms
+          AND s.dur >= 4000000  -- >= 4ms
+      ),
+      -- 为每个 slice 找其直接子 slices
+      with_children AS (
+        SELECT
+          p.id as parent_id,
+          p.name as parent_name,
+          p.dur as parent_dur,
+          p.depth as parent_depth,
+          c.id as child_id,
+          c.name as child_name,
+          c.dur as child_dur,
+          ROUND(100.0 * c.dur / p.dur, 1) as child_pct
+        FROM all_slices p
+        JOIN all_slices c ON c.ts >= p.ts
+          AND c.ts + c.dur <= p.ts + p.dur
+          AND c.depth = p.depth + 1
+          AND c.id != p.id
+      ),
+      -- 计算每个父 slice 的最大子 slice 占比
+      parent_max_child AS (
+        SELECT
+          parent_id,
+          MAX(child_pct) as max_child_pct,
+          SUM(child_dur) as total_children_dur
+        FROM with_children
+        GROUP BY parent_id
+      ),
+      -- 标记哪些 slices 应该被保留
+      keep_slices AS (
+        SELECT
+          a.id,
+          a.name,
+          a.dur_ms,
+          a.depth,
+          a.ts,
+          pmc.max_child_pct,
+          CASE
+            WHEN a.name IN ('drawFrame', 'doFrame', 'syncAndDrawFrame',
+                             'RenderThread', 'onDisplayReady',
+                             'createDisplayList', 'RecordViewHandler',
+                             'dequeueBuffer', 'queueBuffer') THEN 1  -- 白名单
+            WHEN pmc.max_child_pct IS NULL THEN 1  -- 没有子节点
+            WHEN pmc.max_child_pct <= 80 THEN 1
+            ELSE 0
+          END as should_keep
+        FROM all_slices a
+        LEFT JOIN parent_max_child pmc ON a.id = pmc.parent_id
+      ),
+      -- 构建层级路径
+      with_path AS (
+        SELECT
+          ks.id,
+          ks.name,
+          ks.dur_ms,
+          ks.depth,
+          ks.ts,
+          (
+            SELECT p.name
+            FROM all_slices p
+            WHERE p.ts <= ks.ts
+              AND p.ts + p.dur >= ks.ts + ks.dur
+              AND p.depth = ks.depth - 1
+            LIMIT 1
+          ) as parent_name
+        FROM keep_slices ks
+        WHERE ks.should_keep = 1
       )
       SELECT
+        CASE
+          WHEN parent_name IS NOT NULL THEN parent_name || ' > ' || name
+          ELSE name
+        END as display_name,
         name,
+        dur_ms,
         COUNT(*) as count,
-        ROUND(SUM(dur_ms), 2) as total_ms,
         ROUND(MAX(dur_ms), 2) as max_ms,
         ROUND(AVG(dur_ms), 2) as avg_ms
-      FROM slices_in_range
-      GROUP BY name
-      HAVING total_ms > 0.5
-      ORDER BY total_ms DESC
-      LIMIT 10
+      FROM with_path
+      GROUP BY display_name, name
+      HAVING SUM(dur_ms) > 1
+      ORDER BY SUM(dur_ms) DESC
+      LIMIT 15
     save_as: render_slices
 
   # ========== CPU 调度分析 ==========
@@ -399,8 +560,7 @@ steps:
             WHEN cpu >= 0 THEN 'little'
             ELSE 'unknown'
           END as core_type,
-          value as freq_khz,
-          dur
+          value as freq_khz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
         WHERE t.name = 'cpufreq'
@@ -419,6 +579,263 @@ steps:
       ORDER BY core_type DESC
     save_as: freq_analysis
     optional: true
+
+  # ========== 帧内 CPU 频率时间序列（细粒度）==========
+  - id: frame_freq_timeline
+    type: atomic
+    name: "帧内频率时间序列"
+    display:
+      level: key
+      title: "帧内CPU频率时间序列（仅变化点）"
+    sql: |
+      -- 输出帧内 CPU 频率的时间序列
+      -- 优化：只输出频率变化点，过滤掉连续相同的值
+      -- cpufreq 是事件驱动的，每次频率变化都会记录
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.tid = p.pid
+      ),
+      -- 只获取主线程实际运行过的 CPU 的频率数据
+      active_cpus AS (
+        SELECT DISTINCT ts.cpu
+        FROM thread_state ts
+        WHERE ts.utid IN (SELECT utid FROM main_thread)
+          AND ts.ts >= ${start_ts}
+          AND ts.ts < ${end_ts}
+          AND ts.state = 'Running'
+          AND ts.cpu IS NOT NULL
+      ),
+      -- 获取这些 CPU 的频率变化（使用窗口函数找到前后值）
+      freq_changes AS (
+        SELECT
+          t.cpu,
+          c.ts,
+          c.value as freq_khz,
+          ROUND((c.ts - ${start_ts}) / 1e6, 2) as offset_ms,
+          ROUND(c.value / 1000000, 2) as freq_ghz,
+          ROUND(c.value / 1000, 0) as freq_mhz,
+          CASE
+            WHEN t.cpu >= 4 THEN 'big'
+            ELSE 'little'
+          END as core_type,
+          -- 用窗口函数获取相邻值
+          LAG(c.value) OVER (PARTITION BY t.cpu ORDER BY c.ts) as prev_freq,
+          LEAD(c.value) OVER (PARTITION BY t.cpu ORDER BY c.ts) as next_freq,
+          LEAD(c.ts) OVER (PARTITION BY t.cpu ORDER BY c.ts) as next_ts
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+          AND t.cpu IN (SELECT cpu FROM active_cpus)
+          AND c.ts >= ${start_ts}
+          AND c.ts < ${end_ts}
+      )
+      -- 只输出频率变化的点（前后值不同）
+      SELECT
+        core_type,
+        cpu,
+        offset_ms,
+        freq_ghz,
+        freq_mhz,
+        -- 计算频率变化量
+        CASE
+          WHEN prev_freq IS NOT NULL THEN ROUND((freq_khz - prev_freq) / 1000, 0)
+          ELSE NULL
+        END as delta_from_prev_mhz,
+        CASE
+          WHEN next_freq IS NOT NULL THEN ROUND((next_freq - freq_khz) / 1000, 0)
+          ELSE NULL
+        END as delta_to_next_mhz,
+        -- 计算持续时间（到下一个变化点）
+        CASE
+          WHEN next_ts IS NOT NULL THEN ROUND((next_ts - ts) / 1e6, 2)
+          ELSE NULL
+        END as duration_ms
+      FROM freq_changes
+      WHERE prev_freq IS NULL  -- 第一个记录
+         OR prev_freq != freq_khz  -- 频率发生了变化
+      ORDER BY offset_ms, cpu
+    save_as: freq_timeline_detail
+
+  # ========== 频率爬升分析 ==========
+  - id: freq_ramp_analysis
+    type: atomic
+    name: "频率爬升分析"
+    display:
+      level: key
+      title: "CPU频率爬升速度分析"
+    sql: |
+      -- 分析 CPU 频率爬升速度，用于诊断是否因频率爬升太慢导致掉帧
+      -- 优化：使用窗口函数，避免复杂的时间窗口 JOIN
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.tid = p.pid
+      ),
+      -- 获取主线程运行的 CPU
+      active_cpus AS (
+        SELECT DISTINCT ts.cpu
+        FROM thread_state ts
+        WHERE ts.utid IN (SELECT utid FROM main_thread)
+          AND ts.ts >= ${start_ts}
+          AND ts.ts < ${end_ts}
+          AND ts.state = 'Running'
+          AND ts.cpu IS NOT NULL
+      ),
+      -- 获取频率数据并计算变化
+      freq_with_changes AS (
+        SELECT
+          t.cpu,
+          c.ts,
+          c.value as freq_khz,
+          ROUND((c.ts - ${start_ts}) / 1e6, 2) as offset_ms,
+          ROUND(c.value / 1000000, 2) as freq_ghz,
+          -- 计算与下一个采样点的差值和时间差
+          LEAD(c.value) OVER (PARTITION BY t.cpu ORDER BY c.ts) - c.value as freq_delta,
+          LEAD(c.ts) OVER (PARTITION BY t.cpu ORDER BY c.ts) - c.ts as time_delta_ns
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+          AND t.cpu IN (SELECT cpu FROM active_cpus)
+          AND c.ts >= ${start_ts}
+          AND c.ts < ${end_ts}
+      )
+      -- 只分析频率上升的时刻
+      SELECT
+        cpu,
+        ROUND(freq_khz / 1000, 0) as start_freq_mhz,
+        ROUND((freq_khz + freq_delta) / 1000, 0) as end_freq_mhz,
+        ROUND(freq_delta / 1000, 0) as ramp_amount_mhz,
+        offset_ms as start_offset_ms,
+        -- 爬升持续时间
+        ROUND(time_delta_ns / 1e6, 2) as ramp_duration_ms,
+        -- 爬升速率 (MHz/ms)
+        CASE
+          WHEN time_delta_ns > 0 THEN ROUND(freq_delta / time_delta_ns / 1000, 1)
+          ELSE NULL
+        END as ramp_rate_mhz_per_ms,
+        freq_ghz as start_freq_ghz
+      FROM freq_with_changes
+      WHERE freq_delta > 0  -- 只关注频率上升
+      ORDER BY cpu, offset_ms
+    save_as: freq_ramp
+
+  # ========== 主线程操作与对应频率 ==========
+  - id: main_slice_with_freq
+    type: atomic
+    name: "主线程操作对应频率"
+    display:
+      level: key
+      title: "主线程操作及其执行时的CPU频率"
+    sql: |
+      -- 分析主线程每个耗时操作执行时的 CPU 频率
+      -- 优化：使用窗口函数代替 ±50ms 时间窗口 JOIN
+      -- cpufreq 是事件驱动的，每次频率变化都会记录
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.tid = p.pid
+      ),
+      -- 主线程的主要操作（使用去重后的阈值 >= 4ms）
+      main_slices AS (
+        SELECT
+          s.name as slice_name,
+          s.dur as slice_dur,
+          s.ts as slice_ts,
+          s.ts + s.dur as slice_end,
+          ROUND((s.ts - ${start_ts}) / 1e6, 2) as offset_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        WHERE tt.utid IN (SELECT utid FROM main_thread)
+          AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
+          AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
+          AND s.dur >= 4000000  -- >= 4ms
+      ),
+      -- 获取每个操作期间主线程运行的 CPU
+      slice_cpus AS (
+        SELECT DISTINCT
+          ms.slice_name,
+          ms.slice_dur,
+          ms.offset_ms,
+          ms.slice_ts,
+          ms.slice_end,
+          ts.cpu
+        FROM main_slices ms
+        JOIN thread_state ts ON ts.utid IN (SELECT utid FROM main_thread)
+          AND ts.state = 'Running'
+          AND ts.cpu IS NOT NULL
+          AND ts.ts < ms.slice_end
+          AND ts.ts + ts.dur > ms.slice_ts
+      ),
+      -- 获取涉及的 CPU，然后获取这些 CPU 的频率数据
+      active_cpus AS (
+        SELECT DISTINCT cpu FROM slice_cpus
+      ),
+      -- 为每个 CPU 获取频率数据，并用窗口函数标记有效期
+      freq_with_validity AS (
+        SELECT
+          t.cpu,
+          c.ts,
+          c.value as freq_khz,
+          LEAD(c.ts) OVER (PARTITION BY t.cpu ORDER BY c.ts) as next_ts
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+          AND t.cpu IN (SELECT cpu FROM active_cpus)
+          AND c.ts >= ${start_ts} - 100000000  -- 向前100ms（用于查找第一个值）
+          AND c.ts < ${end_ts}
+      ),
+      -- 将 slice 的时间点与频率数据匹配
+      -- 对于 slice 开始时间：找到最后一个 ts <= slice_ts 的频率记录
+      start_freq_match AS (
+        SELECT
+          sc.slice_name,
+          sc.slice_dur,
+          sc.offset_ms,
+          sc.cpu,
+          sc.slice_ts,
+          f.freq_khz as start_freq_khz
+        FROM slice_cpus sc
+        JOIN freq_with_validity f ON f.cpu = sc.cpu
+          AND f.ts <= sc.slice_ts
+          AND (f.next_ts IS NULL OR f.next_ts > sc.slice_ts)
+      ),
+      -- 对于 slice 结束时间：找到最后一个 ts <= slice_end 的频率记录
+      end_freq_match AS (
+        SELECT
+          sc.slice_name,
+          sc.cpu,
+          f.freq_khz as end_freq_khz
+        FROM slice_cpus sc
+        JOIN freq_with_validity f ON f.cpu = sc.cpu
+          AND f.ts <= sc.slice_end
+          AND (f.next_ts IS NULL OR f.next_ts > sc.slice_end)
+      )
+      SELECT
+        sf.slice_name,
+        ROUND(sf.slice_dur / 1e6, 2) as dur_ms,
+        sf.offset_ms,
+        sf.cpu,
+        CASE
+          WHEN sf.cpu >= 4 THEN 'big'
+          ELSE 'little'
+        END as core_type,
+        ROUND(sf.start_freq_khz / 1000000, 2) as start_freq_ghz,
+        ROUND(sf.start_freq_khz / 1000, 0) as start_freq_mhz,
+        ROUND(ef.end_freq_khz / 1000000, 2) as end_freq_ghz,
+        ROUND(ef.end_freq_khz / 1000, 0) as end_freq_mhz,
+        ROUND((ef.end_freq_khz - sf.start_freq_khz) / 1000, 0) as freq_delta_mhz
+      FROM start_freq_match sf
+      LEFT JOIN end_freq_match ef ON sf.slice_name = ef.slice_name AND sf.cpu = ef.cpu
+      ORDER BY sf.offset_ms
+      LIMIT 30
+    save_as: slice_freq
 
   # ========== 四大象限分析（主线程 + 渲染线程）==========
   - id: quadrant_analysis
@@ -502,7 +919,7 @@ steps:
     display:
       level: key
       title: "掉帧原因诊断"
-    inputs: [frame_basic, main_slices, binder_analysis, scheduling, locks, core_analysis, quadrant, freq_analysis]
+    inputs: [frame_basic, main_slices, binder_analysis, scheduling, locks, core_analysis, quadrant, freq_analysis, slice_freq, freq_ramp]
     rules:
       # Binder 调用耗时过长
       - condition: "${binder_analysis.data[0]?.total_ms > 5}"
@@ -560,6 +977,39 @@ steps:
           - "系统可能处于省电模式"
           - "检查温控是否限频"
           - "确保性能模式已开启"
+
+      # ========== 新增：频率爬升过慢诊断 ==========
+      # 操作开始时频率过低
+      - condition: "${slice_freq.data[0]?.start_freq_mhz < 1000}"
+        severity: warning
+        diagnosis: "'${slice_freq.data[0].slice_name}' 开始时 CPU 频率仅 ${slice_freq.data[0].start_freq_mhz}MHz（${slice_freq.data[0].core_type}核）"
+        confidence: high
+        suggestions:
+          - "频率爬升太慢可能导致操作执行时间延长"
+          - "检查 Governor 的 up_transition_delay 配置"
+          - "考虑使用 performance 模式"
+
+      # 操作期间频率变化为负（下降）
+      - condition: "${slice_freq.data[0]?.freq_delta_mhz < -300}"
+        severity: warning
+        diagnosis: "'${slice_freq.data[0].slice_name}' 执行期间频率下降 ${Math.abs(slice_freq.data[0].freq_delta_mhz)}MHz"
+        confidence: medium
+        suggestions:
+          - "操作执行过程中频率下降严重影响性能"
+          - "检查温控策略是否过于激进"
+          - "避免在负载高时触发温控降频"
+
+      # 频率爬升速率过慢（新增）
+      - condition: "${freq_ramp.data.length > 0 && freq_ramp.data[0]?.ramp_rate_mhz_per_ms < 5}"
+        severity: warning
+        diagnosis: "CPU${freq_ramp.data[0].cpu} 频率爬升速率仅 ${freq_ramp.data[0].ramp_rate_mhz_per_ms}MHz/ms（从${freq_ramp.data[0].start_freq_mhz}MHz爬升到${freq_ramp.data[0].end_freq_mhz}MHz）"
+        confidence: high
+        suggestions:
+          - "频率爬升太慢是导致掉帧的常见原因"
+          - "建议调整 Governor 的 sampling_rate 和 up_threshold"
+          - "考虑使用性能模式锁定高频"
+
+      # ========== 其他诊断规则 ==========
 
       # 锁竞争
       - condition: "${locks.data[0]?.total_wait_ms > 2}"

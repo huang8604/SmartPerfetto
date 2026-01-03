@@ -323,12 +323,13 @@ export class SkillAnalysisAdapterV2 {
       level: DisplayLevel;
       format: string;
       data: any;
+      sql?: string;  // 新增：原始 SQL
     }>
   ): Record<string, any> {
     const sections: Record<string, any> = {};
 
     for (const result of displayResults) {
-      sections[result.stepId] = {
+      const section: any = {
         title: result.title,
         level: result.level,
         format: result.format,
@@ -336,7 +337,19 @@ export class SkillAnalysisAdapterV2 {
           ? this.rowsToObjects(result.data.columns, result.data.rows)
           : result.data.text ? [{ text: result.data.text }] : [],
         rowCount: result.data.rows ? result.data.rows.length : 0,
+        columns: result.data.columns,
+        sql: result.sql,  // 保存 SQL
       };
+
+      // 包含可展开数据和汇总（用于 iterator 类型的结果）
+      if (result.data.expandableData) {
+        section.expandableData = result.data.expandableData;
+      }
+      if (result.data.summary) {
+        section.summary = result.data.summary;
+      }
+
+      sections[result.stepId] = section;
     }
 
     return sections;

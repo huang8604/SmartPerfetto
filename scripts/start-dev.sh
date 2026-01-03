@@ -31,6 +31,24 @@ lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 lsof -ti:10000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
+# Build backend
+echo "Building backend..."
+cd "$PROJECT_ROOT/backend"
+npm run build 2>&1 | tee -a "$BACKEND_LOG"
+if [ $? -ne 0 ]; then
+  echo "Backend build failed!"
+  exit 1
+fi
+
+# Build frontend
+echo "Building frontend..."
+cd "$PROJECT_ROOT/perfetto/ui"
+node build.js 2>&1 | tee -a "$FRONTEND_LOG"
+if [ $? -ne 0 ]; then
+  echo "Frontend build failed!"
+  exit 1
+fi
+
 # Start backend
 echo "Starting backend..."
 cd "$PROJECT_ROOT/backend"

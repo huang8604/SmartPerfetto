@@ -352,8 +352,26 @@ export interface DisplayResult {
     rows?: any[][];
     text?: string;
     chart?: any;
+    // 可展开行数据：每行的详细内容（用于 iterator 类型的结果展示）
+    expandableData?: Array<{
+      // 原始 item 数据
+      item: Record<string, any>;
+      // 详细分析结果（包含所有子步骤的结果）
+      result: {
+        success: boolean;
+        sections?: Record<string, any>;
+        error?: string;
+      };
+    }>;
+    // 汇总报告（用于 iterator 结果的整体分析）
+    summary?: {
+      title: string;
+      content: string;
+    };
   };
   highlight?: HighlightRule[];
+  /** 原始 SQL 查询（用于 HTML 报告生成） */
+  sql?: string;
 }
 
 export interface DiagnosticResult {

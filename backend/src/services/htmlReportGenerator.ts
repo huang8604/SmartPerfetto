@@ -189,6 +189,10 @@ export class HTMLReportGenerator {
       margin-bottom: 15px;
     }
 
+    .sql-block.collapsed .sql-content {
+      display: none;
+    }
+
     .sql-block .sql-header {
       display: flex;
       justify-content: space-between;
@@ -196,11 +200,25 @@ export class HTMLReportGenerator {
       margin-bottom: 10px;
       padding-bottom: 10px;
       border-bottom: 1px solid #333;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .sql-block .sql-header .toggle-icon {
+      margin-right: 8px;
+      transition: transform 0.2s ease;
+      font-size: 12px;
+      color: #888;
+    }
+
+    .sql-block.collapsed .sql-header .toggle-icon {
+      transform: rotate(-90deg);
     }
 
     .sql-block .sql-header .title {
       color: #4ec9b0;
       font-weight: 600;
+      flex: 1;
     }
 
     .sql-block .sql-header .copy-btn {
@@ -217,16 +235,145 @@ export class HTMLReportGenerator {
       background: #1177bb;
     }
 
-    .query-result {
-      margin-top: 15px;
+    .sql-content {
+      margin-top: 10px;
     }
 
-    .query-result .result-header {
-      background: #2d2d2d;
+    .query-result {
+      margin-top: 15px;
+      border: 1px solid #eaeaea;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .query-result.collapsed .query-body {
+      display: none;
+    }
+
+    .query-result-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px 20px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #eaeaea;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .query-result-header:hover {
+      background: #f0f1f3;
+    }
+
+    .query-result-header .toggle-icon {
+      margin-right: 8px;
+      transition: transform 0.2s ease;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .query-result.collapsed .query-result-header .toggle-icon {
+      transform: rotate(-90deg);
+    }
+
+    .query-result-header h3 {
+      flex: 1;
+      font-size: 16px;
+      font-weight: 600;
+      color: #2c3e50;
+      margin: 0;
+    }
+
+    .query-result-header .meta {
+      font-size: 14px;
+      color: #666;
+      font-weight: normal;
+    }
+
+    .query-body {
+      padding: 20px;
+      background: #fafafa;
+    }
+
+    .table-container {
+      border-radius: 8px;
+      border: 1px solid #eaeaea;
+      overflow: hidden;
+    }
+
+    .table-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
       padding: 10px 15px;
-      border-radius: 4px 4px 0 0;
+      background: #f0f1f3;
+      border-bottom: 1px solid #eaeaea;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .table-header:hover {
+      background: #e9ecef;
+    }
+
+    .table-header .toggle-icon {
+      margin-right: 6px;
+      transition: transform 0.2s ease;
+      font-size: 12px;
+      color: #666;
+    }
+
+    .table-header .table-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #495057;
+    }
+
+    .table-header .row-count {
       font-size: 13px;
-      color: #9cdcfe;
+      color: #666;
+    }
+
+    .table-wrapper {
+      max-height: 400px;
+      overflow-y: auto;
+      overflow-x: auto;
+      transition: max-height 0.3s ease;
+    }
+
+    .table-wrapper.collapsed {
+      max-height: 0;
+      overflow: hidden;
+    }
+
+    .table-wrapper::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    .table-wrapper::-webkit-scrollbar-thumb {
+      background: #d1d5db;
+      border-radius: 3px;
+    }
+
+    .table-rows-more {
+      padding: 12px 15px;
+      background: #fffbeb;
+      border-top: 1px solid #eaeaea;
+      text-align: center;
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+      color: #f59e0b;
+      font-weight: 500;
+    }
+
+    .table-rows-more:hover {
+      background: #fef3c7;
+    }
+
+    .table-rows-more .toggle-text {
+      margin-left: 4px;
     }
 
     table {
@@ -501,16 +648,65 @@ export class HTMLReportGenerator {
   </div>
 
   <script>
+    // Toggle query result section (默认展开)
+    function toggleQueryResult(header) {
+      const queryResult = header.parentElement;
+      queryResult.classList.toggle('collapsed');
+    }
+
+    // Toggle SQL block (默认折叠)
+    function toggleSqlBlock(event, sqlBlock) {
+      event.stopPropagation();
+      sqlBlock.classList.toggle('collapsed');
+    }
+
     // Copy SQL functionality
+    function copySql(btn) {
+      const sql = btn.getAttribute('data-sql');
+      navigator.clipboard.writeText(sql).then(() => {
+        const originalText = btn.textContent;
+        btn.textContent = '已复制!';
+        setTimeout(() => {
+          btn.textContent = originalText;
+        }, 2000);
+      });
+    }
+
+    // Toggle table rows (show/hide more)
+    function toggleTableRows(btn, hiddenCount) {
+      const tableContainer = btn.parentElement;
+      const table = tableContainer.querySelector('table');
+      const hiddenRows = table.querySelectorAll('.hidden-row');
+
+      if (hiddenRows.length > 0) {
+        const isHidden = hiddenRows[0].style.display === 'none';
+
+        hiddenRows.forEach(row => {
+          row.style.display = isHidden ? '' : 'none';
+        });
+
+        const span = btn.querySelector('span');
+        if (isHidden) {
+          span.innerHTML = '▲ 收起更多';
+        } else {
+          span.innerHTML = '▼ 显示更多 ' + hiddenCount + ' 条记录';
+        }
+      }
+    }
+
+    // Legacy copy button handler for backward compatibility
     document.querySelectorAll('.copy-btn').forEach(btn => {
       btn.addEventListener('click', function() {
         const sql = this.getAttribute('data-sql');
-        navigator.clipboard.writeText(sql).then(() => {
-          this.textContent = '已复制!';
-          setTimeout(() => {
-            this.textContent = '复制 SQL';
-          }, 2000);
-        });
+        if (sql) {
+          navigator.clipboard.writeText(sql).then(() => {
+            const originalText = this.textContent;
+            this.textContent = '已复制!';
+            setTimeout(() => {
+              this.textContent = originalText;
+            }, 2000);
+          });
+        }
       });
     });
   </script>
@@ -605,12 +801,15 @@ export class HTMLReportGenerator {
                 <span class="count">${data.data.length} 条记录</span>
               </div>
               ${data.sql ? `
-                <div class="sql-block">
+                <div class="sql-block collapsed" onclick="toggleSqlBlock(event, this)">
                   <div class="sql-header">
+                    <span class="toggle-icon">▼</span>
                     <span class="title">SQL 查询</span>
-                    <button class="copy-btn" data-sql="${this.escapeHtml(data.sql)}">复制 SQL</button>
+                    <button class="copy-btn" data-sql="${this.escapeHtml(data.sql)}" onclick="event.stopPropagation(); copySql(this)">复制 SQL</button>
                   </div>
-                  <pre>${this.escapeHtml(data.sql)}</pre>
+                  <div class="sql-content">
+                    <pre>${this.escapeHtml(data.sql)}</pre>
+                  </div>
                 </div>
               ` : ''}
               ${this.generateTable(columns, data.data)}
@@ -625,63 +824,77 @@ export class HTMLReportGenerator {
   }
 
   /**
-   * Generate query result section
+   * Generate query result section with collapsible support
    */
   private generateQueryResultSection(result: CollectedResult, stepNumber: number): string {
-    return `
-      <div class="query-result" style="background: #fafafa; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
-        <h3 style="font-size: 16px; margin-bottom: 15px; color: #2c3e50;">
-          查询 #${stepNumber}
-          <span style="float: right; font-weight: normal; font-size: 14px; color: #666;">
-            ${result.result.rowCount} 行 · ${result.result.durationMs}ms
-          </span>
-        </h3>
+    // 如果 insight 是 section title，将其作为主标题显示
+    const displayTitle = result.insight && result.insight !== result.sql
+      ? result.insight
+      : `查询 #${stepNumber}`;
 
-        <div class="sql-block">
-          <div class="sql-header">
-            <span class="title">SQL 查询</span>
-            <button class="copy-btn" data-sql="${this.escapeHtml(result.sql)}">复制 SQL</button>
-          </div>
-          <pre>${this.escapeHtml(result.sql)}</pre>
+    return `
+      <div class="query-result">
+        <div class="query-result-header" onclick="toggleQueryResult(this)">
+          <span class="toggle-icon">▼</span>
+          <h3>${this.escapeHtml(displayTitle)}</h3>
+          <span class="meta">${result.result.rowCount} 行 · ${result.result.durationMs}ms</span>
         </div>
 
-        ${result.result.error ? `
-          <div class="diagnostic critical">
-            <div class="severity">ERROR</div>
-            <div>${this.escapeHtml(result.result.error)}</div>
+        <div class="query-body">
+          <!-- SQL Block (默认折叠) -->
+          <div class="sql-block collapsed" onclick="toggleSqlBlock(event, this)">
+            <div class="sql-header">
+              <span class="toggle-icon">▼</span>
+              <span class="title">SQL 查询</span>
+              <button class="copy-btn" data-sql="${this.escapeHtml(result.sql)}" onclick="event.stopPropagation(); copySql(this)">复制 SQL</button>
+            </div>
+            <div class="sql-content">
+              <pre>${this.escapeHtml(result.sql)}</pre>
+            </div>
           </div>
-        ` : result.result.rowCount > 0 ? `
-          ${this.generateTable(result.result.columns, this.rowsToObjects(result.result.columns, result.result.rows))}
-        ` : `
-          <div class="empty-state" style="padding: 20px; background: #f8f9fa; border-radius: 8px;">
-            查询返回空结果
-          </div>
-        `}
 
-        ${result.insight ? `
-          <div style="margin-top: 15px; padding: 15px; background: #f0f9ff; border-radius: 8px; border-left: 4px solid #3b82f6;">
-            <strong>AI 分析:</strong><br>
-            ${this.formatAnswer(result.insight)}
-          </div>
-        ` : ''}
+          ${result.result.error ? `
+            <div class="diagnostic critical">
+              <div class="severity">ERROR</div>
+              <div>${this.escapeHtml(result.result.error)}</div>
+            </div>
+          ` : result.result.rowCount > 0 ? `
+            ${this.generateTable(result.result.columns, this.rowsToObjects(result.result.columns, result.result.rows))}
+          ` : `
+            <div class="empty-state" style="padding: 20px; background: #f8f9fa; border-radius: 8px;">
+              查询返回空结果
+            </div>
+          `}
+
+          ${result.insight ? `
+            <div style="margin-top: 15px; padding: 15px; background: #f0f9ff; border-radius: 8px; border-left: 4px solid #3b82f6;">
+              <strong>AI 分析:</strong><br>
+              ${this.formatAnswer(result.insight)}
+            </div>
+          ` : ''}
+        </div>
       </div>
     `;
   }
 
   /**
-   * Generate HTML table from data
+   * Generate HTML table from data (with collapsible rows for large tables)
    */
   private generateTable(columns: string[], rows: any[]): string {
     if (!rows || rows.length === 0) {
       return '<div class="empty-state">无数据</div>';
     }
 
-    // For very large tables, show first 1000 rows
-    const displayRows = rows.slice(0, 1000);
-    const hasMore = rows.length > 1000;
+    const totalRows = rows.length;
+    const defaultVisibleRows = 10;
+    const hasMore = totalRows > defaultVisibleRows;
+
+    // Always render all rows, but hide extra rows via CSS class
+    const visibleRows = rows.slice(0, defaultVisibleRows);
+    const hiddenRows = hasMore ? rows.slice(defaultVisibleRows) : [];
 
     return `
-      <div style="overflow-x: auto; border-radius: 8px; border: 1px solid #eaeaea;">
+      <div class="table-container">
         <table>
           <thead>
             <tr>
@@ -690,15 +903,25 @@ export class HTMLReportGenerator {
             </tr>
           </thead>
           <tbody>
-            ${displayRows.map((row, idx) => `
+            ${visibleRows.map((row, idx) => `
               <tr>
                 <td style="color: #666; font-weight: 500;">${idx + 1}</td>
                 ${columns.map(col => `<td>${this.formatCellValue(row[col])}</td>`).join('')}
               </tr>
             `).join('')}
+            ${hiddenRows.map((row, idx) => `
+              <tr class="hidden-row" style="display: none;">
+                <td style="color: #666; font-weight: 500;">${defaultVisibleRows + idx + 1}</td>
+                ${columns.map(col => `<td>${this.formatCellValue(row[col])}</td>`).join('')}
+              </tr>
+            `).join('')}
           </tbody>
         </table>
-        ${hasMore ? '<div style="padding: 15px; text-align: center; color: #666; background: #f8f9fa;">... 还有 ' + (rows.length - 1000) + ' 条记录 (表格限制显示 1000 条)</div>' : ''}
+        ${hasMore ? `
+          <div class="table-rows-more" onclick="toggleTableRows(this, ${totalRows - defaultVisibleRows})">
+            <span>▼ 显示更多 ${totalRows - defaultVisibleRows} 条记录</span>
+          </div>
+        ` : ''}
       </div>
     `;
   }

@@ -321,9 +321,51 @@ export class PerfettoAnalysisOrchestrator {
           this.emitSkillDiagnostics(sessionId, skillResult.diagnostics);
         }
 
-        // Collect results for final answer
-        const collectedResult: CollectedResult = {
-          sql: `-- Skill: ${skillResult.skillId}`,
+        // Collect results for final answer - 为每个有 SQL 的 section 创建单独的 CollectedResult
+        let sectionCount = 0;
+        for (const [sectionId, sectionData] of Object.entries(skillResult.sections)) {
+          if (!sectionData) continue;
+          sectionCount++;
+
+          const sectionSql = (sectionData as any).sql;
+          const sectionTitle = (sectionData as any).title || sectionId;
+
+          // 如果有 SQL，创建单独的 CollectedResult
+          if (sectionSql) {
+            // 获取表格数据
+            let queryResult: QueryResult;
+            if (sectionData.data && Array.isArray(sectionData.data) && sectionData.data.length > 0) {
+              const columns = Object.keys(sectionData.data[0]);
+              const rows = sectionData.data.map((row: any) => columns.map(col => row[col]));
+              queryResult = {
+                columns,
+                rows,
+                rowCount: rows.length,
+                durationMs: Math.round(skillResult.executionTimeMs / sectionCount),  // 平均估算
+              };
+            } else {
+              queryResult = {
+                columns: [],
+                rows: [],
+                rowCount: 0,
+                durationMs: 0,
+              };
+            }
+
+            const collectedResult: CollectedResult = {
+              sql: sectionSql,
+              result: queryResult,
+              insight: sectionTitle,
+              timestamp: Date.now(),
+              stepNumber: iteration,
+            };
+            this.sessionService.addCollectedResult(sessionId, collectedResult);
+          }
+        }
+
+        // 创建一个汇总的 CollectedResult（用于显示概览）
+        const summaryResult: CollectedResult = {
+          sql: `-- Skill: ${skillResult.skillId} (Summary)`,
           result: {
             columns: ['section', 'data'],
             rows: Object.entries(skillResult.sections).map(([k, v]) => [k, JSON.stringify(v)]),
@@ -334,7 +376,7 @@ export class PerfettoAnalysisOrchestrator {
           timestamp: Date.now(),
           stepNumber: iteration,
         };
-        this.sessionService.addCollectedResult(sessionId, collectedResult);
+        this.sessionService.addCollectedResult(sessionId, summaryResult);
 
         // Generate final answer from skill results
         console.log('[Orchestrator] Generating final answer from Skill Engine results...');

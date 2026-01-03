@@ -436,7 +436,8 @@ export class SkillExecutorV2 {
                     step.id,
                     ('name' in step ? step.name : step.id) || step.id,
                     stepResult,
-                    this.getDisplayConfig(step)
+                    this.getDisplayConfig(step),
+                    ('sql' in step ? (step as AtomicStep).sql : undefined)
                   ));
                 }
 
@@ -1092,7 +1093,8 @@ export class SkillExecutorV2 {
     stepId: string,
     title: string,
     stepResult: StepResult,
-    displayConfig?: DisplayConfig
+    displayConfig?: DisplayConfig,
+    sql?: string
   ): DisplayResult {
     const config = displayConfig || { level: 'summary', format: 'table' };
     const data = stepResult.data;
@@ -1136,6 +1138,7 @@ export class SkillExecutorV2 {
       format: config.format || 'table',
       data: displayData,
       highlight: config.highlight,
+      sql,  // 保存原始 SQL
     };
   }
 
@@ -1179,7 +1182,159 @@ export class SkillExecutorV2 {
       return row;
     });
 
-    return { columns, rows };
+    // 提取可展开的详细数据 - 使用 displayResults 而不是 sections
+    const expandableData = data.map((iterItem, idx) => ({
+      item: iterItem.item,
+      result: {
+        success: iterItem.result?.success ?? false,
+        // 将 displayResults 转换为 sections 格式
+        sections: this.convertDisplayResultsToSections(iterItem.result?.displayResults || []),
+        error: iterItem.result?.error,
+      },
+    }));
+
+    // 生成汇总报告
+    const summary = this.generateIteratorSummary(data, expandableData);
+
+    return { columns, rows, expandableData, summary };
+  }
+
+  /**
+   * 生成迭代器结果的汇总报告
+   */
+  private generateIteratorSummary(
+    data: any[],
+    expandableData: Array<{ item: Record<string, any>; result: { success: boolean; sections?: Record<string, any>; error?: string } }>
+  ): { title: string; content: string } | undefined {
+    if (data.length === 0) return undefined;
+
+    const successCount = expandableData.filter(d => d.result.success).length;
+    const failCount = data.length - successCount;
+
+    // 尝试从 sections 中提取关键指标生成汇总
+    const summaryLines: string[] = [];
+    summaryLines.push(`**掉帧分析汇总**`);
+    summaryLines.push('');
+    summaryLines.push(`共分析 ${data.length} 个掉帧帧，成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}。`);
+    summaryLines.push('');
+
+    // 收集所有帧的关键发现
+    const keyFindings: string[] = [];
+    for (const { item, result } of expandableData) {
+      if (!result.success || !result.sections) continue;
+
+      const frameId = item.frame_id || item.id || '?';
+      const jankType = item.jank_type || 'Unknown';
+      const durMs = item.dur_ms || 0;
+
+      // 从各个 section 中提取关键信息
+      const frameFindings: string[] = [];
+
+      // 主线程耗时操作
+      const mainSlices = result.sections.main_slices || result.sections['主线程耗时操作'];
+      if (mainSlices?.data && mainSlices.data.length > 0) {
+        const topSlice = mainSlices.data[0];
+        frameFindings.push(`主线程 "${topSlice.name}" 耗时 ${topSlice.total_ms}ms`);
+      }
+
+      // CPU 频率变化时间线
+      const freqTimeline = result.sections.freq_timeline || result.sections['主线程操作CPU频率变化'];
+      if (freqTimeline?.data && freqTimeline.data.length > 0) {
+        const topFreq = freqTimeline.data[0];
+        if (topFreq.freq_timeline && topFreq.state_count > 2) {
+          frameFindings.push(`${topFreq.slice_name}(${topFreq.total_dur_ms}ms): ${topFreq.freq_timeline}`);
+        }
+      }
+
+      // 大小核占比
+      const coreAnalysis = result.sections.core_analysis || result.sections['大小核分析'];
+      if (coreAnalysis?.data && coreAnalysis.data.length > 0) {
+        const mainCore = coreAnalysis.data[0];
+        if (mainCore.big_core_pct !== undefined) {
+          frameFindings.push(`大核占比 ${mainCore.big_core_pct}%`);
+        }
+      }
+
+      // 四大象限
+      const quadrant = result.sections.quadrant || result.sections['四象限分析'];
+      if (quadrant?.data && quadrant.data.length > 0) {
+        const q = quadrant.data[0];
+        if (q.q3_runnable_ms > 5) {
+          frameFindings.push(`Runnable 等待 ${q.q3_runnable_ms}ms`);
+        }
+      }
+
+      // Binder 调用
+      const binder = result.sections.binder_analysis || result.sections['Binder 调用'];
+      if (binder?.data && binder.data.length > 0) {
+        const topBinder = binder.data[0];
+        if (topBinder.total_ms > 5) {
+          frameFindings.push(`Binder 调用耗时 ${topBinder.total_ms}ms`);
+        }
+      }
+
+      // 诊断结果
+      const diagnosis = result.sections.frame_diagnosis || result.sections['帧诊断'];
+      if (diagnosis?.diagnostics && diagnosis.diagnostics.length > 0) {
+        const diag = diagnosis.diagnostics[0];
+        if (diag.message) {
+          frameFindings.push(`诊断: ${diag.message}`);
+        }
+      }
+
+      if (frameFindings.length > 0) {
+        keyFindings.push(`**帧 #${frameId}** (${jankType}, ${durMs.toFixed(1)}ms): ${frameFindings.join(', ')}`);
+      }
+    }
+
+    if (keyFindings.length > 0) {
+      summaryLines.push('**关键发现：**');
+      summaryLines.push(...keyFindings.slice(0, 10)); // 最多显示 10 个帧的发现
+      if (keyFindings.length > 10) {
+        summaryLines.push(`... (还有 ${keyFindings.length - 10} 个帧)`);
+      }
+      summaryLines.push('');
+    }
+
+    summaryLines.push('---');
+    summaryLines.push('*点击每行可展开查看详细分析*');
+
+    return {
+      title: '掉帧帧详细分析',
+      content: summaryLines.join('\n'),
+    };
+  }
+
+  /**
+   * 将 displayResults 转换为 sections 格式（用于 iterator 结果）
+   */
+  private convertDisplayResultsToSections(displayResults: Array<{
+    stepId: string;
+    title: string;
+    data: any;
+  }>): Record<string, any> {
+    const sections: Record<string, any> = {};
+    for (const dr of displayResults) {
+      // 从 displayResult 的 data 字段中提取实际数据
+      const drData = dr.data;
+      const dataRows = drData?.rows || [];
+      const dataColumns = drData?.columns || [];
+
+      // 将 rows 转换为对象数组（像 adapter 中的 rowsToObjects）
+      const objects = dataRows.map((row: any[]) => {
+        const obj: Record<string, any> = {};
+        dataColumns.forEach((col: string, idx: number) => {
+          obj[col] = row[idx];
+        });
+        return obj;
+      });
+
+      sections[dr.stepId] = {
+        title: dr.title,
+        data: objects,
+      };
+    }
+    return sections;
   }
 
   /**

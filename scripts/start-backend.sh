@@ -15,6 +15,14 @@ lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 sleep 1
 
 cd "$PROJECT_ROOT/backend"
+
+# Build backend
+echo "Building backend..."
+npm run build
+if [ $? -ne 0 ]; then
+  echo "Backend build failed!"
+  exit 1
+fi
 npm run dev 2>&1 | tee "$BACKEND_LOG" &
 
 # Create symlink to latest
