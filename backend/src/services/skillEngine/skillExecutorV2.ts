@@ -374,6 +374,7 @@ function transformL4FrameAnalysis(displayResults: any[]): { diagnosis_summary: s
     main_thread_slices: [],
     render_thread_slices: [],
     cpu_freq_timeline: [],
+    lock_contentions: [],
   };
   let diagnosisSummary = '';
 
@@ -471,6 +472,19 @@ function transformL4FrameAnalysis(displayResults: any[]): { diagnosis_summary: s
           freq_mhz: f.freq_mhz || 0,
           prev_freq_mhz: f.prev_freq_mhz || 0,
           change_direction: f.change_direction || 'stable',
+        }));
+        break;
+
+      case 'lock_contention':
+      case 'lock_data':
+        fullAnalysis.lock_contentions = dataArray.map((l: any) => ({
+          blocking_method: l.blocking_method || '',
+          blocking_thread_name: l.blocking_thread_name || '',
+          blocked_method: l.blocked_method || '',
+          blocked_thread_name: l.blocked_thread_name || '',
+          main_blocked: l.main_blocked || 0,
+          wait_ms: l.wait_ms || 0,
+          waiter_count: l.waiter_count || 0,
         }));
         break;
 

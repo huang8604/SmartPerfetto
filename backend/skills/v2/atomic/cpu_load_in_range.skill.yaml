@@ -1,0 +1,106 @@
+name: cpu_load_in_range
+version: "1.0"
+type: atomic
+
+meta:
+  display_name: "CPU 负载分析 (时间范围)"
+  description: "分析指定时间范围内各 CPU 核心的负载情况"
+  icon: "memory"
+  tags: [cpu, load, utilization, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+  - name: end_ts
+    type: timestamp
+    required: true
+
+steps:
+  - id: cpu_utilization
+    type: atomic
+    name: "CPU 利用率"
+    display:
+      level: detail
+      title: "CPU 利用率"
+    sql: |
+      WITH cpu_time AS (
+        SELECT
+          cpu,
+          CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+          state,
+          SUM(dur) as total_dur
+        FROM sched_slice
+        WHERE ts >= ${start_ts}
+          AND ts < ${end_ts}
+        GROUP BY cpu, state
+      ),
+      cpu_total AS (
+        SELECT
+          cpu,
+          core_type,
+          SUM(total_dur) as cpu_total_dur
+        FROM cpu_time
+        GROUP BY cpu
+      )
+      SELECT
+        ct.core_type,
+        COUNT(DISTINCT ct.cpu) as cpu_count,
+        ROUND(100.0 * SUM(CASE WHEN ctime.state != 'idle' THEN ctime.total_dur ELSE 0 END) / SUM(ct.cpu_total_dur), 1) as utilization_pct,
+        ROUND(SUM(ct.cpu_total_dur) / 1e6, 2) as total_time_ms
+      FROM cpu_total ct
+      LEFT JOIN cpu_time ctime ON ct.cpu = ctime.cpu
+      GROUP BY ct.core_type
+      ORDER BY ct.core_type DESC
+    save_as: utilization
+
+  - id: runqueue_depth
+    type: atomic
+    name: "运行队列深度"
+    display:
+      level: detail
+      title: "运行队列"
+    sql: |
+      SELECT
+        cpu,
+        CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+        ROUND(AVG(value), 2) as avg_runqueue,
+        MAX(value) as max_runqueue
+      FROM counter c
+      JOIN cpu_counter_track t ON c.track_id = t.id
+      WHERE t.name = 'runqueue_length'
+        AND c.ts >= ${start_ts}
+        AND c.ts < ${end_ts}
+      GROUP BY cpu
+      ORDER BY cpu
+    save_as: runqueue
+    optional: true
+
+  - id: thread_migrations
+    type: atomic
+    name: "线程迁移"
+    display:
+      level: summary
+      title: "线程迁移"
+    sql: |
+      WITH migrations AS (
+        SELECT
+          utid,
+          cpu,
+          LAG(cpu) OVER (PARTITION BY utid ORDER BY ts) as prev_cpu
+        FROM sched_slice
+        WHERE ts >= ${start_ts}
+          AND ts < ${end_ts}
+      )
+      SELECT
+        COUNT(*) as migration_count,
+        SUM(CASE 
+          WHEN (prev_cpu < 4 AND cpu >= 4) OR (prev_cpu >= 4 AND cpu < 4) 
+          THEN 1 ELSE 0 
+        END) as cross_cluster_migrations
+      FROM migrations
+      WHERE prev_cpu IS NOT NULL AND cpu != prev_cpu
+    save_as: migrations
+
+output:
+  format: structured

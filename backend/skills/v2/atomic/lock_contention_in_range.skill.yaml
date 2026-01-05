@@ -1,0 +1,66 @@
+name: lock_contention_in_range
+version: "1.0"
+type: atomic
+
+meta:
+  display_name: "锁竞争分析 (时间范围)"
+  description: "分析指定时间范围内的 Java Monitor 锁竞争事件"
+  icon: "lock"
+  tags: [lock, contention, monitor, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+  - name: end_ts
+    type: timestamp
+    required: true
+  - name: package
+    type: string
+    required: false
+
+steps:
+  - id: lock_contentions
+    type: atomic
+    name: "锁竞争事件"
+    display:
+      level: detail
+      title: "锁竞争"
+    sql: |
+      SELECT
+        short_blocking_method as blocking_method,
+        blocking_thread_name,
+        short_blocked_method as blocked_method,
+        blocked_thread_name,
+        is_blocked_thread_main as main_blocked,
+        ROUND(dur / 1e6, 2) as wait_ms,
+        waiter_count
+      FROM android_monitor_contention
+      WHERE ts >= ${start_ts}
+        AND ts < ${end_ts}
+        AND (process_name GLOB '${package}*' OR '${package}' = '')
+        AND dur >= 1000000
+      ORDER BY dur DESC
+      LIMIT 10
+    save_as: contentions
+
+  - id: lock_summary
+    type: atomic
+    name: "锁竞争汇总"
+    display:
+      level: summary
+      title: "锁竞争汇总"
+    sql: |
+      SELECT
+        COUNT(*) as total_contentions,
+        ROUND(SUM(dur) / 1e6, 2) as total_wait_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_wait_ms,
+        SUM(CASE WHEN is_blocked_thread_main THEN 1 ELSE 0 END) as main_thread_blocked_count
+      FROM android_monitor_contention
+      WHERE ts >= ${start_ts}
+        AND ts < ${end_ts}
+        AND (process_name GLOB '${package}*' OR '${package}' = '')
+    save_as: summary
+
+output:
+  format: structured

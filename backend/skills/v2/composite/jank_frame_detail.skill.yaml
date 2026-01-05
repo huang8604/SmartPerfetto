@@ -279,14 +279,55 @@ steps:
     save_as: freq_timeline
     optional: true
 
+  - id: lock_contention
+    type: atomic
+    name: "锁竞争分析"
+    display:
+      level: detail
+      title: "锁竞争"
+    sql: |
+      SELECT
+        short_blocking_method as blocking_method,
+        blocking_thread_name,
+        short_blocked_method as blocked_method,
+        blocked_thread_name,
+        CASE WHEN is_blocked_thread_main THEN 1 ELSE 0 END as main_blocked,
+        ROUND(dur / 1e6, 2) as wait_ms,
+        waiter_count
+      FROM android_monitor_contention
+      WHERE ts >= ${start_ts}
+        AND ts < ${end_ts}
+        AND (process_name GLOB '${package}*' OR '${package}' = '')
+        AND dur >= 500000
+      ORDER BY dur DESC
+      LIMIT 5
+    save_as: lock_data
+    optional: true
+
   - id: frame_diagnosis
     type: diagnostic
     name: "帧诊断"
     display:
       level: key
       title: "诊断结果"
-    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline]
+    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data]
     rules:
+      - condition: "lock_data.data[0]?.wait_ms > 2"
+        severity: warning
+        diagnosis: "锁竞争等待 ${lock_data.data[0].wait_ms}ms (${lock_data.data[0].blocking_method})"
+        confidence: high
+        suggestions:
+          - "检查持锁线程是否在做耗时操作"
+          - "考虑减少锁粒度或使用无锁数据结构"
+
+      - condition: "lock_data.data[0]?.main_blocked === 1"
+        severity: warning
+        diagnosis: "主线程被锁阻塞 (等待 ${lock_data.data[0].blocking_thread_name})"
+        confidence: high
+        suggestions:
+          - "避免在持锁时做 Binder/IO 操作"
+          - "考虑使用异步锁或拆分锁"
+
       - condition: "binder_data.data[0]?.total_ms > 5"
         severity: warning
         diagnosis: "Binder 调用耗时过长 (${binder_data.data[0].total_ms}ms)"

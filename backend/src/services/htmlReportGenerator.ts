@@ -1768,6 +1768,7 @@ export class HTMLReportGenerator {
     const mainSlices = analysis.main_thread_slices || [];
     const renderSlices = analysis.render_thread_slices || [];
     const freqTimeline = analysis.cpu_freq_timeline || [];
+    const lockContentions = analysis.lock_contentions || [];
 
     let html = '';
 
@@ -1991,6 +1992,34 @@ export class HTMLReportGenerator {
             }).join('')}
             ${freqTimeline.length > 20 ? `<div style="color: #64748b; font-style: italic;">... 还有 ${freqTimeline.length - 20} 次变化</div>` : ''}
           </div>
+        </div>
+      `;
+    }
+
+    if (lockContentions.length > 0) {
+      html += `
+        <div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px; color: #2c3e50;">锁竞争</div>
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <thead style="background: #f1f5f9;">
+              <tr>
+                <th style="padding: 8px; text-align: left; border-bottom: 1px solid #e2e8f0;">阻塞方法</th>
+                <th style="padding: 8px; text-align: left; border-bottom: 1px solid #e2e8f0;">持锁线程</th>
+                <th style="padding: 8px; text-align: right; border-bottom: 1px solid #e2e8f0;">等待时间</th>
+                <th style="padding: 8px; text-align: center; border-bottom: 1px solid #e2e8f0;">主线程</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${lockContentions.slice(0, 5).map((l: any) => `
+                <tr>
+                  <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; font-family: monospace; font-size: 11px;">${this.escapeHtml(l.blocking_method || '')}</td>
+                  <td style="padding: 8px; border-bottom: 1px solid #e2e8f0;">${this.escapeHtml(l.blocking_thread_name || '')}</td>
+                  <td style="padding: 8px; text-align: right; border-bottom: 1px solid #e2e8f0;">${(l.wait_ms || 0).toFixed(2)} ms</td>
+                  <td style="padding: 8px; text-align: center; border-bottom: 1px solid #e2e8f0;">${l.main_blocked ? '⚠️' : ''}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
         </div>
       `;
     }
