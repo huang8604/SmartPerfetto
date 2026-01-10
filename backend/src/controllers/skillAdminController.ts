@@ -8,12 +8,12 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import { skillRegistryV2, ensureSkillRegistryV2Initialized, getSkillsDir } from '../services/skillEngine/skillLoaderV2';
-import { SkillDefinitionV2, VendorType } from '../services/skillEngine/types_v2';
+import { skillRegistry, ensureSkillRegistryInitialized, getSkillsDir } from '../services/skillEngine/skillLoader';
+import { SkillDefinition, VendorType } from '../services/skillEngine/types';
 import { ErrorResponse } from '../types';
 
 const SKILLS_DIR = getSkillsDir();
-const V2_COMPOSITE_DIR = path.join(SKILLS_DIR, 'v2', 'composite');
+const COMPOSITE_DIR = path.join(SKILLS_DIR, 'composite');
 const VENDORS_DIR = path.join(SKILLS_DIR, 'vendors');
 const CUSTOM_DIR = path.join(SKILLS_DIR, 'custom');
 
@@ -22,7 +22,7 @@ class SkillAdminController {
    * Ensure skill registry is initialized
    */
   private async ensureInitialized(): Promise<void> {
-    await ensureSkillRegistryV2Initialized();
+    await ensureSkillRegistryInitialized();
   }
 
   /**
@@ -33,7 +33,7 @@ class SkillAdminController {
     try {
       await this.ensureInitialized();
 
-      const skills = skillRegistryV2.getAllSkills();
+      const skills = skillRegistry.getAllSkills();
 
       const result = skills.map(skill => ({
         id: skill.name,
@@ -70,7 +70,7 @@ class SkillAdminController {
       const { skillId } = req.params;
       await this.ensureInitialized();
 
-      const skill = skillRegistryV2.getSkill(skillId);
+      const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
         return res.status(404).json({
           error: 'Skill not found',
@@ -80,8 +80,8 @@ class SkillAdminController {
 
       // Try to find the YAML file
       const possiblePaths = [
-        path.join(V2_COMPOSITE_DIR, `${skillId}.skill.yaml`),
-        path.join(SKILLS_DIR, 'v2', 'atomic', `${skillId}.skill.yaml`),
+        path.join(COMPOSITE_DIR, `${skillId}.skill.yaml`),
+        path.join(SKILLS_DIR, 'atomic', `${skillId}.skill.yaml`),
         path.join(CUSTOM_DIR, `${skillId}.skill.yaml`),
       ];
 
@@ -116,18 +116,18 @@ class SkillAdminController {
   /**
    * Create a new custom skill
    * POST /api/admin/skills
-   * Body: { yaml: string } or { definition: SkillDefinitionV2 }
+   * Body: { yaml: string } or { definition: SkillDefinition }
    */
   createSkill = async (req: Request, res: Response) => {
     try {
       const { yaml: yamlContent, definition } = req.body;
 
-      let skillDef: SkillDefinitionV2;
+      let skillDef: SkillDefinition;
       let yamlToSave: string;
 
       if (yamlContent) {
         // Parse YAML
-        skillDef = yaml.load(yamlContent) as SkillDefinitionV2;
+        skillDef = yaml.load(yamlContent) as SkillDefinition;
         yamlToSave = yamlContent;
       } else if (definition) {
         skillDef = definition;
@@ -167,7 +167,7 @@ class SkillAdminController {
       fs.writeFileSync(filePath, yamlToSave, 'utf-8');
 
       // Reload skills
-      await skillRegistryV2.reload();
+      await skillRegistry.reload();
 
       res.status(201).json({
         success: true,
@@ -188,7 +188,7 @@ class SkillAdminController {
   /**
    * Update an existing custom skill
    * PUT /api/admin/skills/:skillId
-   * Body: { yaml: string } or { definition: SkillDefinitionV2 }
+   * Body: { yaml: string } or { definition: SkillDefinition }
    */
   updateSkill = async (req: Request, res: Response) => {
     try {
@@ -197,7 +197,7 @@ class SkillAdminController {
 
       await this.ensureInitialized();
 
-      const skill = skillRegistryV2.getSkill(skillId);
+      const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
         return res.status(404).json({
           error: 'Skill not found',
@@ -232,7 +232,7 @@ class SkillAdminController {
       fs.writeFileSync(filePath, yamlToSave, 'utf-8');
 
       // Reload skills
-      await skillRegistryV2.reload();
+      await skillRegistry.reload();
 
       res.json({
         success: true,
@@ -259,7 +259,7 @@ class SkillAdminController {
 
       await this.ensureInitialized();
 
-      const skill = skillRegistryV2.getSkill(skillId);
+      const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
         return res.status(404).json({
           error: 'Skill not found',
@@ -286,7 +286,7 @@ class SkillAdminController {
       }
 
       // Reload skills
-      await skillRegistryV2.reload();
+      await skillRegistry.reload();
 
       res.json({
         success: true,
@@ -323,9 +323,9 @@ class SkillAdminController {
       const warnings: string[] = [];
 
       // Parse YAML
-      let skillDef: SkillDefinitionV2;
+      let skillDef: SkillDefinition;
       try {
-        skillDef = yaml.load(yamlContent) as SkillDefinitionV2;
+        skillDef = yaml.load(yamlContent) as SkillDefinition;
       } catch (e: any) {
         return res.json({
           valid: false,
@@ -478,9 +478,9 @@ class SkillAdminController {
    */
   reloadSkills = async (req: Request, res: Response) => {
     try {
-      await skillRegistryV2.reload();
+      await skillRegistry.reload();
 
-      const skills = skillRegistryV2.getAllSkills();
+      const skills = skillRegistry.getAllSkills();
 
       res.json({
         success: true,

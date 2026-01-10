@@ -5,7 +5,7 @@
  * 当 AI 服务不可用时作为兜底方案
  */
 
-import { DisplayResult, DiagnosticResult, DisplayLevel } from './types_v2';
+import { DisplayResult, DiagnosticResult, DisplayLevel } from './types';
 
 // =============================================================================
 // 类型定义

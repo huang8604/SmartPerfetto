@@ -7,22 +7,22 @@
 import { Request, Response } from 'express';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import {
-  SkillAnalysisAdapterV2,
-  SkillAnalysisRequestV2,
-  createSkillAnalysisAdapterV2,
-} from '../services/skillEngine/skillAnalysisAdapterV2';
+  SkillAnalysisAdapter,
+  SkillAnalysisRequest,
+  createSkillAnalysisAdapter,
+} from '../services/skillEngine/skillAnalysisAdapter';
 import { ErrorResponse } from '../types';
 
 class SkillController {
-  private adapter: SkillAnalysisAdapterV2 | null = null;
+  private adapter: SkillAnalysisAdapter | null = null;
 
   /**
    * Get or create the adapter instance
    */
-  private getAdapter(): SkillAnalysisAdapterV2 {
+  private getAdapter(): SkillAnalysisAdapter {
     if (!this.adapter) {
       const traceProcessor = getTraceProcessorService();
-      this.adapter = createSkillAnalysisAdapterV2(traceProcessor);
+      this.adapter = createSkillAnalysisAdapter(traceProcessor);
     }
     return this.adapter;
   }
@@ -129,7 +129,7 @@ class SkillController {
 
       const adapter = this.getAdapter();
 
-      const request: SkillAnalysisRequestV2 = {
+      const request: SkillAnalysisRequest = {
         traceId,
         skillId,
         packageName,
@@ -173,7 +173,7 @@ class SkillController {
 
       const adapter = this.getAdapter();
 
-      const request: SkillAnalysisRequestV2 = {
+      const request: SkillAnalysisRequest = {
         traceId,
         skillId,
         question,

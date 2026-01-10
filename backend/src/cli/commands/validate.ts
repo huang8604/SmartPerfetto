@@ -8,7 +8,7 @@ import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import { SkillDefinitionV2, SkillStep } from '../../services/skillEngine/types_v2';
+import { SkillDefinition, SkillStep } from '../../services/skillEngine/types';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -32,7 +32,7 @@ const SKILLS_DIR = path.join(__dirname, '../../../skills');
 /**
  * Validate a skill definition
  */
-function validateSkillDefinition(skill: SkillDefinitionV2, filePath: string): ValidationResult {
+function validateSkillDefinition(skill: SkillDefinition, filePath: string): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -191,7 +191,7 @@ function extractVariableReferences(sql: string): string[] {
 function validateFile(filePath: string): ValidationResult {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    const skill = yaml.load(content) as SkillDefinitionV2;
+    const skill = yaml.load(content) as SkillDefinition;
 
     if (!skill) {
       return {
@@ -252,10 +252,10 @@ export const validateCommand = new Command('validate')
     let files: string[] = [];
 
     if (skillId) {
-      // Validate specific skill - check V2 directories first
+      // Validate specific skill
       const possiblePaths = [
-        path.join(SKILLS_DIR, 'v2', 'composite', `${skillId}.skill.yaml`),
-        path.join(SKILLS_DIR, 'v2', 'atomic', `${skillId}.skill.yaml`),
+        path.join(SKILLS_DIR, 'composite', `${skillId}.skill.yaml`),
+        path.join(SKILLS_DIR, 'atomic', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'custom', `${skillId}.skill.yaml`),
       ];
 
@@ -267,9 +267,9 @@ export const validateCommand = new Command('validate')
         process.exit(1);
       }
     } else {
-      // Validate all V2 skills
-      files = findSkillFiles(path.join(SKILLS_DIR, 'v2', 'composite'), /\.skill\.ya?ml$/);
-      files.push(...findSkillFiles(path.join(SKILLS_DIR, 'v2', 'atomic'), /\.skill\.ya?ml$/));
+      // Validate all skills
+      files = findSkillFiles(path.join(SKILLS_DIR, 'composite'), /\.skill\.ya?ml$/);
+      files.push(...findSkillFiles(path.join(SKILLS_DIR, 'atomic'), /\.skill\.ya?ml$/));
 
       if (options.all) {
         files.push(...findSkillFiles(path.join(SKILLS_DIR, 'vendors'), /\.override\.ya?ml$/));

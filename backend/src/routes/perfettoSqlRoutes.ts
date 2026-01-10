@@ -13,7 +13,7 @@ import express from 'express';
 import { PerfettoSqlSkill } from '../services/perfettoSqlSkill';
 import { PerfettoSkillType } from '../types/perfettoSql';
 import type { PerfettoSqlRequest } from '../types/perfettoSql';
-import { SkillAnalysisAdapterV2, createSkillAnalysisAdapterV2 } from '../services/skillEngine/skillAnalysisAdapterV2';
+import { SkillAnalysisAdapter, createSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 
 const router = express.Router();
 
@@ -24,13 +24,13 @@ import { getTraceProcessorService } from '../services/traceProcessorService';
 const traceProcessorService = getTraceProcessorService();
 const perfettoSqlSkill = new PerfettoSqlSkill(traceProcessorService);
 
-// Skill Engine adapter V2 (uses YAML-based skills from skills/v2/)
-let skillAdapterV2: SkillAnalysisAdapterV2 | null = null;
-const getSkillAdapter = (): SkillAnalysisAdapterV2 => {
-  if (!skillAdapterV2) {
-    skillAdapterV2 = createSkillAnalysisAdapterV2(traceProcessorService);
+// Skill Engine adapter (uses YAML-based skills from skills/)
+let skillAdapter: SkillAnalysisAdapter | null = null;
+const getSkillAdapter = (): SkillAnalysisAdapter => {
+  if (!skillAdapter) {
+    skillAdapter = createSkillAnalysisAdapter(traceProcessorService);
   }
-  return skillAdapterV2;
+  return skillAdapter;
 };
 
 // Mapping from route skill names to YAML skill IDs

@@ -1,7 +1,7 @@
 /**
- * Skill Engine Type Definitions v2.0
+ * Skill Engine Type Definitions
  *
- * 新架构支持：
+ * 支持：
  * - Skill 可组合（composite）
  * - Skill 可迭代（iterator）
  * - AI 协作（ai_decision, ai_summary）
@@ -19,7 +19,41 @@ export type DisplayLevel = 'none' | 'debug' | 'detail' | 'summary' | 'key';
 
 export type DisplayFormat = 'table' | 'chart' | 'text' | 'timeline' | 'summary';
 
-export type DisplayLayer = 'L1' | 'L2' | 'L3' | 'L4';
+/**
+ * Display Layer - 控制结果在 UI 中的层级展示
+ *
+ * 语义说明：
+ * - overview: 顶层概览指标（如 FPS、掉帧率）
+ * - list: 列表级数据（如滑动会话列表、启动事件列表）
+ * - session: 会话级详情（如单个滑动会话的详细数据）
+ * - deep: 深度分析数据（如帧级分析、调用栈）
+ */
+export type DisplayLayer = 'overview' | 'list' | 'session' | 'deep';
+
+/**
+ * @deprecated 使用语义化的 DisplayLayer 值代替
+ * - L1 → 'overview'
+ * - L2 → 'list'
+ * - L3 → 'session'
+ * - L4 → 'deep'
+ */
+export type LegacyDisplayLayer = 'L1' | 'L2' | 'L3' | 'L4';
+
+/** Layer 名称映射（用于 YAML 兼容） */
+export const LAYER_MAPPING: Record<LegacyDisplayLayer, DisplayLayer> = {
+  L1: 'overview',
+  L2: 'list',
+  L3: 'session',
+  L4: 'deep',
+};
+
+/** 反向映射（用于调试输出） */
+export const LAYER_REVERSE_MAPPING: Record<DisplayLayer, LegacyDisplayLayer> = {
+  overview: 'L1',
+  list: 'L2',
+  session: 'L3',
+  deep: 'L4',
+};
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
 
@@ -48,7 +82,7 @@ export interface SkillOutput {
 export interface DisplayConfig {
   show?: boolean;
   level?: DisplayLevel;
-  layer?: DisplayLayer;         // 新增：分层展示层级
+  layer?: DisplayLayer;         // 分层展示层级
   title?: string;
   format?: DisplayFormat;
   columns?: string[];           // 指定展示哪些列
@@ -209,10 +243,10 @@ export type SkillStep =
   | ConditionalStep;
 
 // =============================================================================
-// Skill 定义 v2
+// Skill 定义
 // =============================================================================
 
-export interface SkillMetaV2 {
+export interface SkillMeta {
   display_name: string;
   description: string;
   icon?: string;
@@ -221,7 +255,7 @@ export interface SkillMetaV2 {
   version?: string;
 }
 
-export interface SkillTriggersV2 {
+export interface SkillTriggers {
   keywords?: {
     zh?: string[];
     en?: string[];
@@ -234,13 +268,13 @@ export interface SkillTriggersV2 {
   };
 }
 
-export interface SkillPrerequisitesV2 {
+export interface SkillPrerequisites {
   required_tables?: string[];
   optional_tables?: string[];
   modules?: string[];
 }
 
-export interface SkillOutputConfigV2 {
+export interface SkillOutputConfig {
   display?: DisplayConfig;
   fields?: {
     name: string;
@@ -249,16 +283,16 @@ export interface SkillOutputConfigV2 {
   }[];
 }
 
-export interface SkillDefinitionV2 {
+export interface SkillDefinition {
   name: string;
   version: string;
   type: SkillType;           // 'atomic' | 'composite' | 'iterator' | 'diagnostic'
   category?: string;
   priority?: string;
 
-  meta: SkillMetaV2;
-  triggers?: SkillTriggersV2;
-  prerequisites?: SkillPrerequisitesV2;
+  meta: SkillMeta;
+  triggers?: SkillTriggers;
+  prerequisites?: SkillPrerequisites;
 
   // 输入参数
   inputs?: SkillInput[];
@@ -276,7 +310,7 @@ export interface SkillDefinitionV2 {
   rules?: DiagnosticRule[];
 
   // 输出配置
-  output?: SkillOutputConfigV2;
+  output?: SkillOutputConfig;
 
   // 阈值定义（用于诊断）
   thresholds?: Record<string, {
@@ -289,7 +323,7 @@ export interface SkillDefinitionV2 {
 // 执行上下文
 // =============================================================================
 
-export interface SkillExecutionContextV2 {
+export interface SkillExecutionContext {
   traceId: string;
   packageName?: string;
   vendor?: string;
@@ -325,7 +359,7 @@ export interface StepResult {
 // 执行结果
 // =============================================================================
 
-export interface SkillExecutionResultV2 {
+export interface SkillExecutionResult {
   skillId: string;
   skillName: string;
   success: boolean;
@@ -350,7 +384,7 @@ export interface DisplayResult {
   stepId: string;
   title: string;
   level: DisplayLevel;
-  layer?: DisplayLayer;         // 新增：分层展示层级
+  layer?: DisplayLayer;         // 分层展示层级
   format: DisplayFormat;
   data: {
     columns?: string[];
@@ -439,7 +473,7 @@ export interface AIResponseEvent extends SkillEvent {
 }
 
 // =============================================================================
-// Vendor Types (migrated from v1)
+// Vendor Types
 // =============================================================================
 
 export type VendorType = 'oppo' | 'vivo' | 'xiaomi' | 'honor' | 'transsion' | 'mtk' | 'qualcomm' | 'samsung' | 'aosp' | 'unknown';
@@ -451,7 +485,7 @@ export interface VendorDetectionResult {
 }
 
 // =============================================================================
-// Legacy Compatibility Types (for migration)
+// Loaded Skill
 // =============================================================================
 
 /**
@@ -459,14 +493,14 @@ export interface VendorDetectionResult {
  */
 export interface LoadedSkill {
   id: string;
-  definition: SkillDefinitionV2;
+  definition: SkillDefinition;
   filePath: string;
 }
 
 /**
- * Skill Execution Result - simplified result type
+ * Simplified Skill Result - for compatibility with adapters
  */
-export interface SkillExecutionResult {
+export interface SimplifiedSkillResult {
   skillId: string;
   skillName: string;
   success: boolean;
@@ -477,3 +511,28 @@ export interface SkillExecutionResult {
   displayResults?: DisplayResult[];
   aiSummary?: string;
 }
+
+// =============================================================================
+// Legacy Aliases (for backward compatibility during migration)
+// =============================================================================
+
+/** @deprecated Use SkillMeta instead */
+export type SkillMetaV2 = SkillMeta;
+
+/** @deprecated Use SkillTriggers instead */
+export type SkillTriggersV2 = SkillTriggers;
+
+/** @deprecated Use SkillPrerequisites instead */
+export type SkillPrerequisitesV2 = SkillPrerequisites;
+
+/** @deprecated Use SkillOutputConfig instead */
+export type SkillOutputConfigV2 = SkillOutputConfig;
+
+/** @deprecated Use SkillDefinition instead */
+export type SkillDefinitionV2 = SkillDefinition;
+
+/** @deprecated Use SkillExecutionContext instead */
+export type SkillExecutionContextV2 = SkillExecutionContext;
+
+/** @deprecated Use SkillExecutionResult instead */
+export type SkillExecutionResultV2 = SkillExecutionResult;

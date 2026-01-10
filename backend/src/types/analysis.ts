@@ -323,18 +323,25 @@ export interface SkillDiagnosticsEvent extends SSEEvent {
 
 /**
  * Skill layered result event - emits interactive layered view results
+ * 支持语义名称 (overview/list/session/deep) 和旧名称 (L1/L2/L3/L4)
  */
 export interface SkillLayeredResultEvent extends SSEEvent {
   type: 'skill_layered_result';
   data: {
     result: {
       layers: {
+        // 语义名称
+        overview?: Record<string, any>;
+        list?: Record<string, any>;
+        session?: Record<string, Record<string, any>>;
+        deep?: Record<string, Record<string, any>>;
+        // 向后兼容名称 (@deprecated)
         L1?: Record<string, any>;
         L2?: Record<string, any>;
         L3?: Record<string, Record<string, any>>;
         L4?: Record<string, Record<string, any>>;
       };
-      defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+      defaultExpanded: ('overview' | 'list' | 'session' | 'deep' | 'L1' | 'L2' | 'L3' | 'L4')[];
       metadata: {
         skillName: string;
         version: string;
@@ -413,15 +420,21 @@ export interface AISQLResponse {
     directAnswer?: string;
     summary?: string;
     questionType?: string;
-    // 分层结果（L1/L2/L3/L4）
+    // 分层结果 - 支持语义名称 (overview/list/session/deep) 和旧名称 (L1/L2/L3/L4)
     layeredResult?: {
       layers: {
+        // 语义名称
+        overview?: Record<string, any>;
+        list?: Record<string, any>;
+        session?: Record<string, Record<string, any>>;
+        deep?: Record<string, Record<string, any>>;
+        // 向后兼容名称 (@deprecated)
         L1?: Record<string, any>;
         L2?: Record<string, any>;
         L3?: Record<string, Record<string, any>>;
         L4?: Record<string, Record<string, any>>;
       };
-      defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+      defaultExpanded: ('overview' | 'list' | 'session' | 'deep' | 'L1' | 'L2' | 'L3' | 'L4')[];
       metadata: {
         skillName: string;
         version: string;

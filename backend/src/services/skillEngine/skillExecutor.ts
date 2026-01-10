@@ -1,5 +1,5 @@
 /**
- * Skill Executor v2.0
+ * Skill Executor
  *
  * 核心执行引擎，支持：
  * - Skill 组合（composite）
@@ -10,7 +10,7 @@
  */
 
 import {
-  SkillDefinitionV2,
+  SkillDefinition,
   SkillStep,
   AtomicStep,
   SkillRefStep,
@@ -20,33 +20,74 @@ import {
   AIDecisionStep,
   AISummaryStep,
   ConditionalStep,
-  SkillExecutionContextV2,
-  SkillExecutionResultV2,
+  SkillExecutionContext,
+  SkillExecutionResult,
   StepResult,
   DisplayResult,
   DiagnosticResult,
   DisplayConfig,
   DisplayLevel,
   SkillEvent,
-} from './types_v2';
+} from './types';
 
 // =============================================================================
 // Layered Result Types
 // =============================================================================
 
+import { LAYER_MAPPING, LegacyDisplayLayer, DisplayLayer } from './types';
+
+/**
+ * 分层结果结构
+ *
+ * 语义层级：
+ * - overview: 顶层概览（原 L1）
+ * - list: 列表数据（原 L2）
+ * - session: 会话详情（原 L3）
+ * - deep: 深度分析（原 L4）
+ */
 export interface LayeredResult {
   layers: {
+    /** 概览层 - 聚合指标（如 FPS、掉帧率） */
+    overview?: Record<string, StepResult>;
+    /** 列表层 - 会话/事件列表 */
+    list?: Record<string, StepResult>;
+    /** 会话层 - 单个会话的详情 */
+    session?: Record<string, Record<string, StepResult>>;
+    /** 深度层 - 帧级/调用级分析 */
+    deep?: Record<string, Record<string, StepResult>>;
+
+    // 向后兼容别名（@deprecated）
+    /** @deprecated Use 'overview' instead */
     L1?: Record<string, StepResult>;
+    /** @deprecated Use 'list' instead */
     L2?: Record<string, StepResult>;
+    /** @deprecated Use 'session' instead */
     L3?: Record<string, Record<string, StepResult>>;
+    /** @deprecated Use 'deep' instead */
     L4?: Record<string, Record<string, StepResult>>;
   };
-  defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+  defaultExpanded: DisplayLayer[];
   metadata: {
     skillName: string;
     version: string;
     executedAt: string;
   };
+}
+
+/**
+ * 将 YAML 中的 layer 值规范化为语义名称
+ */
+export function normalizeLayer(layer: string | undefined): DisplayLayer | undefined {
+  if (!layer) return undefined;
+  // 如果已经是语义名称，直接返回
+  if (['overview', 'list', 'session', 'deep'].includes(layer)) {
+    return layer as DisplayLayer;
+  }
+  // 转换旧的 L1/L2/L3/L4 名称
+  if (layer in LAYER_MAPPING) {
+    return LAYER_MAPPING[layer as LegacyDisplayLayer];
+  }
+  return undefined;
 }
 
 // =============================================================================
@@ -58,7 +99,7 @@ class ExpressionEvaluator {
    * 在上下文中求值表达式
    * 支持：${variable}、${step.field}、比较运算符等
    */
-  static evaluate(expression: string, context: SkillExecutionContextV2): any {
+  static evaluate(expression: string, context: SkillExecutionContext): any {
     // 检查是否是完整的 ${...} 表达式（整个字符串被包裹）
     const fullExprMatch = expression.match(/^\$\{(.+)\}$/s);
     if (fullExprMatch) {
@@ -94,7 +135,7 @@ class ExpressionEvaluator {
    * 评估 JavaScript 表达式
    * 例如: performance_summary.data[0]?.app_jank_rate > 10
    */
-  private static evaluateJsExpression(expr: string, context: SkillExecutionContextV2): any {
+  private static evaluateJsExpression(expr: string, context: SkillExecutionContext): any {
     try {
       // 从表达式中提取根变量名
       const rootVarNames = this.extractRootVariables(expr);
@@ -125,14 +166,7 @@ class ExpressionEvaluator {
         }
       }
 
-      // Debug: Log scope for condition evaluation
-        'scope values:', JSON.stringify(Object.fromEntries(
-          Object.entries(scope).map(([k, v]) => [k, {
-            hasData: 'data' in v,
-            dataLength: Array.isArray(v?.data) ? v.data.length : 'N/A',
-            firstDataItem: Array.isArray(v?.data) && v.data.length > 0 ? v.data[0] : null
-          }])
-        )));
+      // Debug log removed for cleaner output
 
       // 构建并执行函数
       const varNames = Object.keys(scope);
@@ -195,7 +229,7 @@ class ExpressionEvaluator {
    * 解析路径引用，支持深层嵌套和数组索引
    * 例如: "step1.data[0].field" 或 "performance_summary.data[0].app_jank_rate"
    */
-  static resolvePath(path: string, context: SkillExecutionContextV2): any {
+  static resolvePath(path: string, context: SkillExecutionContext): any {
     // 解析路径为 token 数组，支持 . 分隔和 [n] 数组索引
     const tokens = this.parsePath(path);
     if (tokens.length === 0) return undefined;
@@ -300,7 +334,7 @@ class ExpressionEvaluator {
    * 条件表达式始终作为 JavaScript 表达式求值（不需要 ${} 包裹）
    * 例如: environment.data[0]?.frame_data_status === 'available'
    */
-  static evaluateCondition(condition: string, context: SkillExecutionContextV2): boolean {
+  static evaluateCondition(condition: string, context: SkillExecutionContext): boolean {
     try {
       // 条件表达式始终作为 JavaScript 表达式求值
       const result = this.evaluateJsExpression(condition, context);
@@ -323,7 +357,7 @@ class ExpressionEvaluator {
 // SQL 变量替换
 // =============================================================================
 
-function substituteVariables(sql: string, context: SkillExecutionContextV2): string {
+function substituteVariables(sql: string, context: SkillExecutionContext): string {
   let result = sql;
 
   // 替换所有 ${xxx} 格式的变量
@@ -335,7 +369,7 @@ function substituteVariables(sql: string, context: SkillExecutionContextV2): str
       if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(path)) {
         return '';
       }
-      console.warn(`[SkillExecutorV2] Variable not found: ${path}`);
+      console.warn(`[SkillExecutor] Variable not found: ${path}`);
       return match;
     }
     return String(value);
@@ -354,7 +388,7 @@ function substituteVariables(sql: string, context: SkillExecutionContextV2): str
  */
 function processDisplayConfig(
   display: any,
-  context: SkillExecutionContextV2
+  context: SkillExecutionContext
 ): DisplayConfig {
   const processed: DisplayConfig = { ...display };
 
@@ -473,6 +507,12 @@ function transformL4FrameAnalysis(displayResults: any[]): { diagnosis_summary: s
 
 function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
   const layers: LayeredResult['layers'] = {
+    // 语义名称（主要）
+    overview: {},
+    list: {},
+    session: {},
+    deep: {},
+    // 向后兼容别名
     L1: {},
     L2: {},
     L3: {},
@@ -480,10 +520,13 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
   };
 
   for (const step of steps) {
-    const layer = step.display?.layer;
-    if (!layer) {
+    const rawLayer = step.display?.layer;
+    if (!rawLayer) {
       continue;
     }
+
+    // 规范化 layer 名称（支持 L1/L2/L3/L4 和 overview/list/session/deep）
+    const layer = normalizeLayer(rawLayer) || rawLayer as DisplayLayer;
 
     // Ensure failed steps have empty array data for consistent handling
     const normalizedStep: StepResult = step.success ? step : {
@@ -493,17 +536,30 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
     };
 
     switch (layer) {
-      case 'L1':
-      case 'L2':
+      case 'overview':  // 原 L1
+      case 'list':      // 原 L2
         const targetLayer = layers[layer];
+        const legacyLayer = layer === 'overview' ? layers.L1 : layers.L2;
         if (targetLayer) {
           targetLayer[normalizedStep.stepId] = normalizedStep;
         }
+        // 同时写入向后兼容的 L1/L2
+        if (legacyLayer) {
+          legacyLayer[normalizedStep.stepId] = normalizedStep;
+        }
         break;
-      case 'L3':
-        // L3 数据需要按 session_id 组织
-        // 从 normalizedStep.data 中提取 session_id
+      case 'session':  // 原 L3
+        // session 数据需要按 session_id 组织
+        const sessionLayer = layers.session;
         const l3 = layers.L3;
+        if (sessionLayer) {
+          const sessionId3 = extractSessionId(normalizedStep);
+          if (!sessionLayer[sessionId3]) {
+            sessionLayer[sessionId3] = {};
+          }
+          sessionLayer[sessionId3][normalizedStep.stepId] = normalizedStep;
+        }
+        // 向后兼容
         if (l3) {
           const sessionId3 = extractSessionId(normalizedStep);
           if (!l3[sessionId3]) {
@@ -512,7 +568,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
           l3[sessionId3][normalizedStep.stepId] = normalizedStep;
         }
         break;
-      case 'L4':
+      case 'deep':  // 原 L4
         // L4 数据需要按 session_id 和 frame_id 组织
         const l4 = layers.L4;
         if (l4) {
@@ -521,11 +577,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
             // Iterator 返回 { itemIndex, item, result }[] 数组
             for (let i = 0; i < normalizedStep.data.length; i++) {
               const iterItem: any = normalizedStep.data[i];
-                hasItem: !!iterItem?.item,
-                hasResult: !!iterItem?.result,
-                itemKeys: iterItem?.item ? Object.keys(iterItem.item) : [],
-                resultDisplayResultsCount: iterItem?.result?.displayResults?.length || 0,
-              }));
+              // Debug log removed for cleaner output
 
               const item: any = iterItem?.item;
               if (!item) {
@@ -554,7 +606,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
                 display: {
                   title: `帧 #${item.frame_id || item.frame_index || i} - ${item.jank_type || 'Unknown'}`,
                   level: 'key',
-                  layer: 'L4',
+                  layer: 'deep',
                   format: 'table',
                 },
               };
@@ -591,7 +643,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
                   display: {
                     title: `帧 #${item.frame_id || item.frame_index || i} - ${item.jank_type || 'Unknown'}`,
                     level: 'key',
-                    layer: 'L4',
+                    layer: 'deep',
                     format: 'table',
                   },
                 };
@@ -623,11 +675,21 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
     }
   }
 
-    L1: Object.keys(layers.L1 || {}).length,
-    L2: Object.keys(layers.L2 || {}).length,
-    L3: Object.keys(layers.L3 || {}).length,
-    L4: Object.keys(layers.L4 || {}).length,
-  });
+  // 同步语义名称和向后兼容名称的数据
+  // deep 和 L4 应该包含相同的数据
+  if (layers.L4 && Object.keys(layers.L4).length > 0) {
+    layers.deep = { ...layers.deep, ...layers.L4 };
+  }
+  if (layers.deep && Object.keys(layers.deep).length > 0) {
+    layers.L4 = { ...layers.L4, ...layers.deep };
+  }
+  // session 和 L3 应该包含相同的数据
+  if (layers.L3 && Object.keys(layers.L3).length > 0) {
+    layers.session = { ...layers.session, ...layers.L3 };
+  }
+  if (layers.session && Object.keys(layers.session).length > 0) {
+    layers.L3 = { ...layers.L3, ...layers.session };
+  }
 
   return layers;
 }
@@ -652,13 +714,13 @@ function extractFrameId(step: StepResult): string {
 }
 
 // =============================================================================
-// Skill Executor V2
+// Skill Executor
 // =============================================================================
 
-export class SkillExecutorV2 {
+export class SkillExecutor {
   private traceProcessor: any;
   private aiService: any;  // AI 服务（用于 ai_decision, ai_summary）
-  private skillRegistry: Map<string, SkillDefinitionV2>;
+  private skillRegistry: Map<string, SkillDefinition>;
   private eventEmitter?: (event: SkillEvent) => void;
 
   constructor(
@@ -675,14 +737,14 @@ export class SkillExecutorV2 {
   /**
    * 注册 skill
    */
-  registerSkill(skill: SkillDefinitionV2): void {
+  registerSkill(skill: SkillDefinition): void {
     this.skillRegistry.set(skill.name, skill);
   }
 
   /**
    * 批量注册 skills
    */
-  registerSkills(skills: SkillDefinitionV2[]): void {
+  registerSkills(skills: SkillDefinition[]): void {
     for (const skill of skills) {
       this.registerSkill(skill);
     }
@@ -708,7 +770,7 @@ export class SkillExecutorV2 {
     traceId: string,
     params: Record<string, any> = {},
     inherited: Record<string, any> = {}
-  ): Promise<SkillExecutionResultV2> {
+  ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
     const skill = this.skillRegistry.get(skillId);
@@ -731,7 +793,7 @@ export class SkillExecutorV2 {
     });
 
     // 创建执行上下文
-    const context: SkillExecutionContextV2 = {
+    const context: SkillExecutionContext = {
       traceId,
       params,
       inherited,
@@ -745,7 +807,7 @@ export class SkillExecutorV2 {
         try {
           await this.traceProcessor.query(traceId, `INCLUDE PERFETTO MODULE ${module};`);
         } catch (e: any) {
-          console.warn(`[SkillExecutorV2] Module not available: ${module}`);
+          console.warn(`[SkillExecutor] Module not available: ${module}`);
         }
       }
     }
@@ -854,9 +916,9 @@ export class SkillExecutorV2 {
    * This is an alternative execution path that organizes output by layers (L1/L2/L3/L4)
    */
   async executeCompositeSkill(
-    skill: SkillDefinitionV2,
+    skill: SkillDefinition,
     inputs: Record<string, any>,
-    context: Partial<SkillExecutionContextV2>
+    context: Partial<SkillExecutionContext>
   ): Promise<LayeredResult> {
     const startTime = Date.now();
 
@@ -867,8 +929,11 @@ export class SkillExecutorV2 {
 
     if (!skill.steps || skill.steps.length === 0) {
       return {
-        layers: { L1: {}, L2: {}, L3: {}, L4: {} },
-        defaultExpanded: ['L1', 'L2'],
+        layers: {
+          overview: {}, list: {}, session: {}, deep: {},
+          L1: {}, L2: {}, L3: {}, L4: {}  // 向后兼容
+        },
+        defaultExpanded: ['overview', 'list'],
         metadata: {
           skillName: 'unknown',
           version: 'unknown',
@@ -878,7 +943,7 @@ export class SkillExecutorV2 {
     }
 
     // Create execution context
-    const execContext: SkillExecutionContextV2 = {
+    const execContext: SkillExecutionContext = {
       traceId: context.traceId || '',
       params: inputs,
       inherited: context.inherited || {},
@@ -904,7 +969,7 @@ export class SkillExecutorV2 {
         }
 
         // IMPORTANT: Add display config from step definition to stepResult
-        // This is needed for organizeByLayer to correctly place results in L1/L2/L3/L4
+        // This is needed for organizeByLayer to correctly place results in layers
         // Process display config with template variable substitution (e.g., ${frame_id})
         if ('display' in step && typeof step.display === 'object') {
           stepResult.display = processDisplayConfig(step.display, execContext);
@@ -914,14 +979,7 @@ export class SkillExecutorV2 {
       }
     }
 
-      stepId: sr.stepId,
-      stepType: sr.stepType,
-      success: sr.success,
-      hasDisplay: !!sr.display,
-      displayLayer: sr.display?.layer,
-      dataIsArray: Array.isArray(sr.data),
-      dataLength: Array.isArray(sr.data) ? sr.data.length : 'N/A',
-    })), null, 2));
+    // Debug log removed for cleaner output
 
     // Return layered structure
     try {
@@ -929,16 +987,15 @@ export class SkillExecutorV2 {
 
       const result: LayeredResult = {
         layers,
-        defaultExpanded: ['L1', 'L2'],
+        defaultExpanded: ['overview', 'list'],
         metadata: {
           skillName: skill.name,
           version: skill.version || '1.0.0',
           executedAt: new Date().toISOString()
         }
       };
-        const layer = layers[k as keyof typeof layers];
-        return layer && Object.keys(layer).length > 0;
-      }));
+
+      // Debug log removed for cleaner output
 
       return result;
     } catch (error) {
@@ -951,8 +1008,8 @@ export class SkillExecutorV2 {
    * 执行原子 skill（单个 SQL）
    */
   private async executeAtomicSkill(
-    skill: SkillDefinitionV2,
-    context: SkillExecutionContextV2
+    skill: SkillDefinition,
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
 
@@ -1006,7 +1063,7 @@ export class SkillExecutorV2 {
    */
   private async executeStep(
     step: SkillStep,
-    context: SkillExecutionContextV2,
+    context: SkillExecutionContext,
     parentSkillId: string
   ): Promise<StepResult> {
     const startTime = Date.now();
@@ -1112,7 +1169,7 @@ export class SkillExecutorV2 {
    */
   private async executeAtomicStep(
     step: AtomicStep,
-    context: SkillExecutionContextV2
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
     const sql = substituteVariables(step.sql, context);
@@ -1121,13 +1178,7 @@ export class SkillExecutorV2 {
     try {
       const result = await this.traceProcessor.query(context.traceId, sql);
 
-      // Debug: Log exactly what trace_processor returns
-        hasError: !!result.error,
-        errorMsg: result.error,
-        columns: result.columns,
-        rowCount: result.rows?.length ?? 'undefined',
-        firstRow: result.rows?.[0] ?? 'none',
-      }));
+      // Debug log removed for cleaner output
 
       if (result.error) {
         if (step.optional) {
@@ -1179,7 +1230,7 @@ export class SkillExecutorV2 {
    */
   private async executeSkillRefStep(
     step: SkillRefStep,
-    context: SkillExecutionContextV2
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
 
@@ -1218,7 +1269,7 @@ export class SkillExecutorV2 {
    */
   private async executeIteratorStep(
     step: IteratorStep,
-    context: SkillExecutionContextV2,
+    context: SkillExecutionContext,
     parentSkillId: string
   ): Promise<StepResult> {
     const startTime = Date.now();
@@ -1290,7 +1341,7 @@ export class SkillExecutorV2 {
    */
   private async executeParallelStep(
     step: ParallelStep,
-    context: SkillExecutionContextV2,
+    context: SkillExecutionContext,
     parentSkillId: string
   ): Promise<StepResult> {
     const startTime = Date.now();
@@ -1324,7 +1375,7 @@ export class SkillExecutorV2 {
    */
   private async executeDiagnosticStep(
     step: DiagnosticStep,
-    context: SkillExecutionContextV2
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
     const diagnostics: DiagnosticResult[] = [];
@@ -1347,12 +1398,16 @@ export class SkillExecutorV2 {
         // Substitute variables in diagnosis message
         const diagnosis = ExpressionEvaluator.evaluate(rule.diagnosis, context);
 
+        // 收集 evidence 数据
+        const evidence = this.collectDiagnosticEvidence(rule, context, inputs);
+
         diagnostics.push({
           id: `${step.id}_${diagnostics.length}`,
           diagnosis,
           confidence,
           severity: confidence >= 0.8 ? 'critical' : confidence >= 0.6 ? 'warning' : 'info',
           suggestions: rule.suggestions,
+          evidence,
           source: 'rule',
         });
       }
@@ -1382,11 +1437,146 @@ export class SkillExecutorV2 {
   }
 
   /**
+   * 收集诊断结论的数据依据
+   * 从 rule.evidence_fields 或自动从 condition 解析引用的数据源
+   */
+  private collectDiagnosticEvidence(
+    rule: any,
+    context: SkillExecutionContext,
+    inputs: Record<string, any>
+  ): Record<string, any> {
+    const evidence: Record<string, any> = {};
+
+    // 1. 如果规则定义了 evidence_fields，使用它们
+    if (rule.evidence_fields && Array.isArray(rule.evidence_fields)) {
+      for (const field of rule.evidence_fields) {
+        const value = this.resolveEvidenceField(field, context, inputs);
+        if (value !== undefined) {
+          evidence[field] = value;
+        }
+      }
+    }
+
+    // 2. 自动从 condition 中提取数据源引用
+    const conditionSources = this.extractDataSources(rule.condition);
+    for (const source of conditionSources) {
+      // 只提取第一行数据作为 evidence（避免数据过大）
+      const sourceData = inputs[source];
+      if (sourceData && !evidence[source]) {
+        if (Array.isArray(sourceData) && sourceData.length > 0) {
+          // 只取第一条记录的关键字段
+          const firstRow = sourceData[0];
+          evidence[source] = {
+            _summary: `共 ${sourceData.length} 条记录`,
+            _firstRow: this.extractKeyFields(firstRow),
+          };
+        } else if (typeof sourceData === 'object') {
+          evidence[source] = this.extractKeyFields(sourceData);
+        }
+      }
+    }
+
+    // 3. 添加时间戳用于 Perfetto 跳转
+    const tsField = this.findTimestampField(inputs, conditionSources);
+    if (tsField) {
+      evidence._perfettoTs = tsField;
+    }
+
+    return Object.keys(evidence).length > 0 ? evidence : undefined as any;
+  }
+
+  /**
+   * 从表达式中提取数据源名称
+   * 例如: "lock_data.data[0]?.wait_ms > 2" => ["lock_data"]
+   */
+  private extractDataSources(expression: string): string[] {
+    const sources: Set<string> = new Set();
+    // 匹配 xxx.data 或 xxx.xxx 形式的数据源引用
+    const matches = expression.match(/(\w+)\.data/g);
+    if (matches) {
+      for (const match of matches) {
+        const source = match.replace('.data', '');
+        sources.add(source);
+      }
+    }
+    return Array.from(sources);
+  }
+
+  /**
+   * 解析 evidence_fields 中的字段路径
+   * 支持格式: "source.field" 或 "source.data[0].field"
+   */
+  private resolveEvidenceField(
+    field: string,
+    context: SkillExecutionContext,
+    inputs: Record<string, any>
+  ): any {
+    try {
+      // 尝试从 inputs 中解析
+      const parts = field.split('.');
+      let value: any = inputs;
+      for (const part of parts) {
+        if (value === undefined) return undefined;
+        // 处理数组索引，如 data[0]
+        const arrayMatch = part.match(/^(\w+)\[(\d+)\]$/);
+        if (arrayMatch) {
+          value = value[arrayMatch[1]]?.[parseInt(arrayMatch[2])];
+        } else {
+          value = value[part];
+        }
+      }
+      return value;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 从对象中提取关键字段（排除大型嵌套对象）
+   */
+  private extractKeyFields(obj: any): Record<string, any> {
+    if (!obj || typeof obj !== 'object') return obj;
+    const result: Record<string, any> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // 跳过大型数组和深层嵌套对象
+      if (Array.isArray(value)) {
+        result[key] = `[Array(${value.length})]`;
+      } else if (value && typeof value === 'object') {
+        // 只保留一层深度
+        result[key] = '[Object]';
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 从输入数据中找到时间戳字段用于 Perfetto 跳转
+   */
+  private findTimestampField(inputs: Record<string, any>, sources: string[]): string | undefined {
+    for (const source of sources) {
+      const data = inputs[source];
+      if (Array.isArray(data) && data.length > 0) {
+        const firstRow = data[0];
+        // 常见的时间戳字段名
+        const tsFields = ['ts', 'start_ts', 'timestamp', 'begin_ts'];
+        for (const field of tsFields) {
+          if (firstRow[field]) {
+            return String(firstRow[field]);
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * 执行 AI 决策步骤
    */
   private async executeAIDecisionStep(
     step: AIDecisionStep,
-    context: SkillExecutionContextV2
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
 
@@ -1432,7 +1622,7 @@ export class SkillExecutorV2 {
    */
   private async executeAISummaryStep(
     step: AISummaryStep,
-    context: SkillExecutionContextV2
+    context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
 
@@ -1478,7 +1668,7 @@ export class SkillExecutorV2 {
    */
   private async executeConditionalStep(
     step: ConditionalStep,
-    context: SkillExecutionContextV2,
+    context: SkillExecutionContext,
     parentSkillId: string
   ): Promise<StepResult> {
     const startTime = Date.now();
@@ -1523,7 +1713,7 @@ export class SkillExecutorV2 {
   /**
    * 调用 AI 服务
    */
-  private async callAI(prompt: string, context: SkillExecutionContextV2): Promise<string> {
+  private async callAI(prompt: string, context: SkillExecutionContext): Promise<string> {
     if (!this.aiService) {
       return '';
     }
@@ -1533,7 +1723,7 @@ export class SkillExecutorV2 {
       const response = await this.aiService.chat(prompt);
       return response;
     } catch (error: any) {
-      console.error('[SkillExecutorV2] AI call failed:', error.message);
+      console.error('[SkillExecutor] AI call failed:', error.message);
       return '';
     }
   }
@@ -1868,10 +2058,20 @@ export class SkillExecutorV2 {
 // 工厂函数
 // =============================================================================
 
-export function createSkillExecutorV2(
+export function createSkillExecutor(
   traceProcessor: any,
   aiService?: any,
   eventEmitter?: (event: SkillEvent) => void
-): SkillExecutorV2 {
-  return new SkillExecutorV2(traceProcessor, aiService, eventEmitter);
+): SkillExecutor {
+  return new SkillExecutor(traceProcessor, aiService, eventEmitter);
 }
+
+// =============================================================================
+// 向后兼容别名 (deprecated)
+// =============================================================================
+
+/** @deprecated Use SkillExecutor instead */
+export const SkillExecutorV2 = SkillExecutor;
+
+/** @deprecated Use createSkillExecutor instead */
+export const createSkillExecutorV2 = createSkillExecutor;

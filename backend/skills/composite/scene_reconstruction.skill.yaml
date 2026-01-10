@@ -31,7 +31,7 @@ steps:
     name: "Trace 时间范围"
     display:
       level: summary
-      layer: L1
+      layer: overview
       title: "Trace 概览"
     sql: |
       SELECT
@@ -55,7 +55,7 @@ steps:
     name: "屏幕状态变化"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "屏幕状态"
     sql: |
       WITH RECURSIVE screen_data AS (
@@ -86,7 +86,7 @@ steps:
     name: "Top App 切换"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "应用切换"
     sql: |
       WITH RECURSIVE battery_check AS (
@@ -116,7 +116,7 @@ steps:
     name: "用户手势识别"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "用户操作"
     sql: |
       WITH RECURSIVE input_check AS (
@@ -184,7 +184,7 @@ steps:
     name: "App 启动事件"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "App 启动"
     sql: |
       WITH RECURSIVE startup_check AS (
@@ -221,7 +221,7 @@ steps:
     name: "系统事件"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "系统事件"
     sql: |
       SELECT
@@ -263,7 +263,7 @@ steps:
     name: "掉帧事件"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "性能事件"
     sql: |
       SELECT
@@ -301,7 +301,7 @@ steps:
     name: "合并时间线"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "操作时间线"
     sql: |
       WITH all_events AS (
@@ -469,7 +469,7 @@ steps:
     name: "场景还原报告"
     display:
       level: summary
-      layer: L1
+      layer: overview
       title: "场景还原报告"
     inputs:
       - trace_time_range

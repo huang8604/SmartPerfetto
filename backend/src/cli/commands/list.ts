@@ -31,15 +31,15 @@ export const listCommand = new Command('list')
   .action(async (options: { verbose?: boolean; json?: boolean }) => {
     try {
       // Dynamic import to avoid loading heavy dependencies
-      const { skillRegistryV2, ensureSkillRegistryV2Initialized } = await import('../../services/skillEngine/skillLoaderV2');
+      const { skillRegistry, ensureSkillRegistryInitialized } = await import('../../services/skillEngine/skillLoader');
 
       // Initialize
       if (!options.json) {
         console.log(colors.gray('Loading skills...'));
       }
-      await ensureSkillRegistryV2Initialized();
+      await ensureSkillRegistryInitialized();
 
-      const skills = skillRegistryV2.getAllSkills();
+      const skills = skillRegistry.getAllSkills();
 
       if (options.json) {
         // JSON output

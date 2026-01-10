@@ -2,7 +2,7 @@
  * Detailed analysis of user trace - debug data flow
  */
 
-import { getSkillAnalysisAdapterV2 } from '../services/skillEngine/skillAnalysisAdapterV2';
+import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import path from 'path';
 
@@ -17,7 +17,7 @@ async function analyzeUserTrace() {
   console.log('Size:', (require('fs').statSync(tracePath).size / 1024 / 1024).toFixed(2), 'MB\n');
 
   const traceProcessor = getTraceProcessorService();
-  const skillAdapter = getSkillAnalysisAdapterV2(traceProcessor);
+  const skillAdapter = getSkillAnalysisAdapter(traceProcessor);
 
   // Load trace
   console.log('⏳ Loading trace...');

@@ -35,12 +35,13 @@ import { EvaluatorAgent } from '../agents/evaluatorAgent';
 import { AnalysisWorker } from '../agents/workers/analysisWorker';
 
 // 默认配置
+// 注意：降低 minQualityScore 从 0.7 到 0.5，减少不必要的迭代循环
 const DEFAULT_CONFIG: Partial<MasterOrchestratorConfig> = {
-  maxTotalIterations: 5,
+  maxTotalIterations: 3,  // 降低最大迭代次数，避免过度循环
   enableTraceRecording: true,
   evaluationCriteria: {
-    minQualityScore: 0.7,
-    minCompletenessScore: 0.6,
+    minQualityScore: 0.5,  // 降低阈值，Skills 系统已经产出高质量结果
+    minCompletenessScore: 0.5,  // 降低阈值
     maxContradictions: 0,
     requiredAspects: [],
   },
@@ -68,6 +69,7 @@ export class MasterOrchestrator extends EventEmitter {
   private currentSessionId: string | null = null;
   private totalIterations: number = 0;
   private emittedFindingIds: Set<string> = new Set();  // 已发送的 Finding IDs，防止重复
+  private emittedDiagnosticHashes: Set<string> = new Set();  // 内容哈希去重 diagnostics
 
   constructor(config: Partial<MasterOrchestratorConfig> = {}) {
     super();
@@ -146,7 +148,11 @@ export class MasterOrchestrator extends EventEmitter {
       const session = await this.sessionStore.createSession(traceId, query);
       this.currentSessionId = session.sessionId;
       this.emittedFindingIds.clear();  // 重置已发送的 Finding IDs
+      this.emittedDiagnosticHashes.clear();  // 重置内容哈希
       this.totalIterations = 0;  // 重置迭代计数
+
+      // 重置 AnalysisWorker 的会话状态（用于 skill_data 去重）
+      this.analysisWorker.resetForNewSession(session.sessionId);
 
       // 2. 初始化状态机
       this.stateMachine = AgentStateMachine.create(session.sessionId, traceId);
@@ -172,6 +178,14 @@ export class MasterOrchestrator extends EventEmitter {
 
       while (this.totalIterations < this.config.maxTotalIterations) {
         this.totalIterations++;
+
+        // emit iteration_state 事件：通知前端当前迭代状态
+        this.emitUpdate('iteration_state' as any, {
+          current: this.totalIterations,
+          max: this.config.maxTotalIterations,
+          phase: 'execute',
+          previousScore: evaluation?.qualityScore,
+        });
 
         // 检查断路器
         const circuitCheck = this.circuitBreaker.canExecute();
@@ -483,12 +497,22 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
       result.findings
     );
 
-    // 过滤已发送的 Finding，防止重复
+    // 过滤已发送的 Finding，防止重复（双重去重：ID + 内容哈希）
     const newFindings = result.findings.filter(f => {
+      // 1. ID 去重
       if (this.emittedFindingIds.has(f.id)) {
         return false;
       }
+
+      // 2. 内容哈希去重（防止相同诊断文字重复出现）
+      const contentHash = this.hashFindingContent(f);
+      if (this.emittedDiagnosticHashes.has(contentHash)) {
+        console.log(`[MasterOrchestrator] Skipping duplicate finding by content hash: ${f.title}`);
+        return false;
+      }
+
       this.emittedFindingIds.add(f.id);
+      this.emittedDiagnosticHashes.add(contentHash);
       return true;
     });
 
@@ -496,6 +520,14 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
     if (newFindings.length > 0) {
       this.emitUpdate('finding', { stage: stage.id, findings: newFindings });
     }
+  }
+
+  /**
+   * 计算 Finding 内容哈希（用于去重）
+   */
+  private hashFindingContent(f: Finding): string {
+    // 使用标题+描述+严重程度作为内容标识
+    return `${f.title}::${f.description}::${f.severity}`;
   }
 
   /**
@@ -754,17 +786,34 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
 
     // AnalysisWorker 的 skill_data 事件 - 发送层级数据到前端
     this.analysisWorker.on('skill_data', (data) => {
+      // 兼容新旧层级命名
+      const layers = data.layers || {};
       console.log('[MasterOrchestrator] Received skill_data event from AnalysisWorker:', {
         skillId: data.skillId,
         skillName: data.skillName,
-        hasLayers: !!data.layers,
-        L1Keys: data.layers?.L1 ? Object.keys(data.layers.L1) : [],
-        L2Keys: data.layers?.L2 ? Object.keys(data.layers.L2) : [],
-        L4Keys: data.layers?.L4 ? Object.keys(data.layers.L4) : [],
+        hasLayers: !!layers,
+        // 语义名称（新）
+        overviewKeys: layers.overview ? Object.keys(layers.overview) : [],
+        listKeys: layers.list ? Object.keys(layers.list) : [],
+        deepKeys: layers.deep ? Object.keys(layers.deep) : [],
+        // 兼容名称（旧）- 应与语义名称相同
+        L1Keys: layers.L1 ? Object.keys(layers.L1) : [],
+        L2Keys: layers.L2 ? Object.keys(layers.L2) : [],
+        L4Keys: layers.L4 ? Object.keys(layers.L4) : [],
         diagnosticsCount: data.diagnostics?.length || 0,
       });
       console.log('[MasterOrchestrator] Forwarding skill_data to frontend via emitUpdate');
       this.emitUpdate('skill_data' as any, data);
+    });
+
+    // AnalysisWorker 的 worker_thought 事件 - 发送 Worker 思考过程到前端
+    this.analysisWorker.on('worker_thought', (data) => {
+      console.log('[MasterOrchestrator] Received worker_thought event:', {
+        agent: data.agent,
+        skillId: data.skillId,
+        step: data.step,
+      });
+      this.emitUpdate('worker_thought' as any, data);
     });
   }
 

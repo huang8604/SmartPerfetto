@@ -5,7 +5,7 @@
  * This helps identify issues in the layered architecture implementation
  */
 
-import { getSkillAnalysisAdapterV2 } from '../services/skillEngine/skillAnalysisAdapterV2';
+import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import { AnalysisState } from '../types/analysis';
@@ -38,7 +38,7 @@ async function runScrollingSkillTest() {
   try {
     // Initialize services
     const traceProcessor = getTraceProcessorService();
-    const skillAdapter = getSkillAnalysisAdapterV2(traceProcessor);
+    const skillAdapter = getSkillAnalysisAdapter(traceProcessor);
 
     // Load trace
     console.log('⏳ Loading trace into TraceProcessor...');

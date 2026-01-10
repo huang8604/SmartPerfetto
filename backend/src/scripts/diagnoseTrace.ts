@@ -2,7 +2,7 @@
  * Simple diagnostic script to check trace data consistency
  */
 
-import { getSkillAnalysisAdapterV2 } from '../services/skillEngine/skillAnalysisAdapterV2';
+import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import path from 'path';
 
@@ -12,7 +12,7 @@ async function diagnose() {
   console.log('Size:', (require('fs').statSync(tracePath).size / 1024 / 1024).toFixed(2), 'MB\n');
 
   const traceProcessor = getTraceProcessorService();
-  const skillAdapter = getSkillAnalysisAdapterV2(traceProcessor);
+  const skillAdapter = getSkillAnalysisAdapter(traceProcessor);
 
   console.log('⏳ Loading trace...');
   const traceId = await traceProcessor.loadTraceFromFilePath(tracePath);

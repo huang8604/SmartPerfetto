@@ -7,7 +7,7 @@
  * 3. 性能分析
  */
 
-import { SkillEvent, SkillEventType } from './types_v2';
+import { SkillEvent, SkillEventType } from './types';
 
 // =============================================================================
 // 类型定义

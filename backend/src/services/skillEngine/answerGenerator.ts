@@ -5,7 +5,7 @@
  * 将结构化数据转换为用户可理解的答案
  */
 
-import { DiagnosticResult, DisplayResult } from './types_v2';
+import { DiagnosticResult, DisplayResult } from './types';
 
 // =============================================================================
 // 类型定义

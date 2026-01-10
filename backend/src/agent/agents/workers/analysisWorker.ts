@@ -13,7 +13,7 @@
  *        ↓
  *   AnalysisWorker (本文件 - 桥接层)
  *        ↓
- *   SkillInvokerTool → SkillAnalysisAdapterV2 → YAML Skills
+ *   SkillInvokerTool → SkillAnalysisAdapter → YAML Skills
  */
 
 import { EventEmitter } from 'events';
@@ -64,9 +64,22 @@ const DEFAULT_SKILLS = ['scrolling_analysis', 'scene_reconstruction'];
 export class AnalysisWorker extends EventEmitter implements StageExecutor {
   private modelRouter: ModelRouter;
 
+  // 去重：跟踪已 emit 过 skill_data 的 skill（session 级别）
+  private emittedSkillIds: Set<string> = new Set();
+  private currentSessionId: string | null = null;
+
   constructor(modelRouter: ModelRouter) {
     super();
     this.modelRouter = modelRouter;
+  }
+
+  /**
+   * 重置会话状态（新分析开始时调用）
+   */
+  resetForNewSession(sessionId: string): void {
+    this.currentSessionId = sessionId;
+    this.emittedSkillIds.clear();
+    console.log(`[AnalysisWorker] Reset for new session: ${sessionId}`);
   }
 
   /**
@@ -126,8 +139,20 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
     const findings: Finding[] = [];
 
     // 1. 确定要执行的 Skills
-    const skillIds = this.determineSkills(context);
+    const { skillIds, selectionReason } = this.determineSkillsWithReason(context);
     console.log(`[AnalysisWorker] Determined skills: ${skillIds.join(', ')}`);
+
+    // emit worker_thought：Skill 选择理由
+    this.emit('worker_thought', {
+      agent: 'AnalysisWorker',
+      skillId: skillIds.join(', '),
+      step: 'skill_selection',
+      reasoning: selectionReason,
+      data: {
+        selectedSkills: skillIds,
+        intent: context.intent?.primaryGoal,
+      },
+    });
 
     // 2. 检查是否有 traceProcessorService
     if (!context.traceProcessorService || !context.traceId) {
@@ -167,6 +192,25 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
       traceId: context.traceId,
     };
 
+    // 检查是否已经处理过这个 skill（会话级别去重）
+    const skillKey = `${context.sessionId || 'default'}:${skillId}`;
+    const isAlreadyProcessed = this.emittedSkillIds.has(skillKey);
+
+    if (isAlreadyProcessed) {
+      console.log(`[AnalysisWorker.invokeSkill] SKIPPING duplicate skill: ${skillId} (already processed in this session)`);
+      // 仍然返回 findings（可能需要用于评估），但不重复 emit skill_data
+    }
+
+    // emit worker_thought 事件：正在执行 skill
+    this.emit('worker_thought', {
+      agent: 'AnalysisWorker',
+      skillId,
+      step: isAlreadyProcessed ? 'reusing_cached' : 'invoking',
+      reasoning: isAlreadyProcessed
+        ? `跳过重复执行 ${skillId}，使用缓存结果`
+        : `开始执行 ${skillId} 分析`,
+    });
+
     console.log(`[AnalysisWorker.invokeSkill] Invoking skill: ${skillId}`);
     const result = await skillInvokerTool.execute({ skillId }, toolContext);
 
@@ -185,70 +229,108 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
     // 架构原则：Backend 只做数据规范化，不做显示格式化
     const skillData = result.data;
 
+    // 兼容新旧层级名称
+    const layerData = skillData?.data || {};
+    const hasOverview = !!layerData.overview || !!layerData.L1;
+    const hasList = !!layerData.list || !!layerData.L2;
+    const hasDeep = !!layerData.deep || !!layerData.L4;
+
     console.log(`[AnalysisWorker.invokeSkill] skillData structure:`, {
       hasSkillData: !!skillData,
-      hasNestedData: !!skillData?.data,
-      dataKeys: skillData?.data ? Object.keys(skillData.data) : [],
-      hasL1: !!skillData?.data?.L1,
-      hasL2: !!skillData?.data?.L2,
-      hasL4: !!skillData?.data?.L4,
-      L1Keys: skillData?.data?.L1 ? Object.keys(skillData.data.L1) : [],
-      L2Keys: skillData?.data?.L2 ? Object.keys(skillData.data.L2) : [],
-      L4Keys: skillData?.data?.L4 ? Object.keys(skillData.data.L4) : [],
+      hasNestedData: !!layerData,
+      dataKeys: Object.keys(layerData),
+      hasOverview, hasList, hasDeep,
+      overviewKeys: (layerData.overview || layerData.L1) ? Object.keys(layerData.overview || layerData.L1) : [],
+      listKeys: (layerData.list || layerData.L2) ? Object.keys(layerData.list || layerData.L2) : [],
+      deepKeys: (layerData.deep || layerData.L4) ? Object.keys(layerData.deep || layerData.L4) : [],
     });
 
     if (skillData?.data) {
       const layers: Record<string, any> = {};
 
-      // 规范化 L1/L2 数据（保持 StepResult 结构）
-      if (skillData.data.L1) {
-        layers.L1 = this.normalizeLayerData(skillData.data.L1);
-        console.log(`[AnalysisWorker.invokeSkill] Normalized L1:`, {
-          inputKeys: Object.keys(skillData.data.L1),
-          outputKeys: Object.keys(layers.L1),
-        });
-      }
-      if (skillData.data.L2) {
-        layers.L2 = this.normalizeLayerData(skillData.data.L2);
-        console.log(`[AnalysisWorker.invokeSkill] Normalized L2:`, {
-          inputKeys: Object.keys(skillData.data.L2),
-          outputKeys: Object.keys(layers.L2),
+      // 规范化 overview/L1 数据（保持 StepResult 结构）
+      // 同时支持新旧命名：优先使用语义名称，回退到旧名称
+      const overviewData = layerData.overview || layerData.L1;
+      if (overviewData) {
+        const normalized = this.normalizeLayerData(overviewData);
+        // 同时写入语义名称和兼容名称
+        layers.overview = normalized;
+        layers.L1 = normalized;
+        console.log(`[AnalysisWorker.invokeSkill] Normalized overview/L1:`, {
+          inputKeys: Object.keys(overviewData),
+          outputKeys: Object.keys(normalized),
         });
       }
 
-      // 规范化 L4 数据（保持嵌套结构：sessionId -> frameId -> frameData）
-      if (skillData.data.L4) {
-        layers.L4 = this.normalizeL4Data(skillData.data.L4);
-        const sessionIds = Object.keys(layers.L4);
+      // 规范化 list/L2 数据
+      const listData = layerData.list || layerData.L2;
+      if (listData) {
+        const normalized = this.normalizeLayerData(listData);
+        layers.list = normalized;
+        layers.L2 = normalized;
+        console.log(`[AnalysisWorker.invokeSkill] Normalized list/L2:`, {
+          inputKeys: Object.keys(listData),
+          outputKeys: Object.keys(normalized),
+        });
+      }
+
+      // 规范化 deep/L4 数据（保持嵌套结构：sessionId -> frameId -> frameData）
+      const deepData = layerData.deep || layerData.L4;
+      if (deepData) {
+        const normalized = this.normalizeDeepData(deepData);
+        layers.deep = normalized;
+        layers.L4 = normalized;
+        const sessionIds = Object.keys(normalized);
         const frameCountPerSession = sessionIds.map(sid =>
-          `${sid}: ${Object.keys(layers.L4[sid] || {}).length} frames`
+          `${sid}: ${Object.keys(normalized[sid] || {}).length} frames`
         );
-        console.log(`[AnalysisWorker.invokeSkill] Normalized L4:`, {
-          inputSessionIds: Object.keys(skillData.data.L4),
+        console.log(`[AnalysisWorker.invokeSkill] Normalized deep/L4:`, {
+          inputSessionIds: Object.keys(deepData),
           outputSessionIds: sessionIds,
           frameCountPerSession,
         });
       }
 
       // 只有当有层级数据时才发出事件
-      const l1Count = Object.keys(layers.L1 || {}).length;
-      const l2Count = Object.keys(layers.L2 || {}).length;
-      const l4Count = Object.keys(layers.L4 || {}).length;
-      const hasData = l1Count > 0 || l2Count > 0 || l4Count > 0;
+      const overviewCount = Object.keys(layers.overview || {}).length;
+      const listCount = Object.keys(layers.list || {}).length;
+      const deepCount = Object.keys(layers.deep || {}).length;
+      const hasLayerData = overviewCount > 0 || listCount > 0 || deepCount > 0;
 
       console.log(`[AnalysisWorker.invokeSkill] Layer data check:`, {
-        l1Count, l2Count, l4Count, hasData,
+        overviewCount, listCount, deepCount, hasLayerData,
       });
 
-      if (hasData) {
-        console.log(`[AnalysisWorker.invokeSkill] EMITTING skill_data event for ${skillId}`);
-        this.emit('skill_data', {
-          skillId,
-          skillName: skillData.skillName || skillId,
-          layers,
-          diagnostics: skillData.diagnostics || [],
-        });
-        console.log(`[AnalysisWorker.invokeSkill] skill_data event emitted successfully`);
+      if (hasLayerData) {
+        // 去重检查：只在首次处理时 emit skill_data
+        if (!isAlreadyProcessed) {
+          console.log(`[AnalysisWorker.invokeSkill] EMITTING skill_data event for ${skillId}`);
+          this.emit('skill_data', {
+            skillId,
+            skillName: skillData.skillName || skillId,
+            layers,
+            diagnostics: skillData.diagnostics || [],
+          });
+          // 标记为已处理
+          this.emittedSkillIds.add(skillKey);
+          console.log(`[AnalysisWorker.invokeSkill] skill_data event emitted successfully, marked as processed`);
+
+          // emit worker_thought：完成分析
+          this.emit('worker_thought', {
+            agent: 'AnalysisWorker',
+            skillId,
+            step: 'completed',
+            reasoning: `${skillId} 分析完成`,
+            data: {
+              overviewCount,
+              listCount,
+              deepCount,
+              diagnosticsCount: skillData.diagnostics?.length || 0,
+            },
+          });
+        } else {
+          console.log(`[AnalysisWorker.invokeSkill] SKIPPING duplicate skill_data emit for ${skillId}`);
+        }
       } else {
         console.log(`[AnalysisWorker.invokeSkill] NO DATA to emit for ${skillId} - layers are empty`);
       }
@@ -322,21 +404,21 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
   }
 
   /**
-   * 规范化 L4 帧级数据
+   * 规范化 deep/L4 帧级数据
    *
-   * L4 数据结构特殊：{ sessionId: { frameId: StepResult } }
+   * deep 数据结构特殊：{ sessionId: { frameId: StepResult } }
    * 每个 StepResult.data 包含 { diagnosis_summary, full_analysis }
    *
    * 架构原则：
    * - 保持嵌套结构：{ sessionId: { frameId: frameData } }
-   * - L2SessionList 期望 L4Data[sessionId][frameId] 的格式
+   * - list 层的 SessionList 期望 deepData[sessionId][frameId] 的格式
    * - 保留完整的分析数据和诊断信息
    * - 不做显示格式化（列名翻译等由 Frontend 处理）
    */
-  private normalizeL4Data(l4Data: Record<string, Record<string, any>>): Record<string, Record<string, any>> {
+  private normalizeDeepData(deepData: Record<string, Record<string, any>>): Record<string, Record<string, any>> {
     const normalized: Record<string, Record<string, any>> = {};
 
-    for (const [sessionId, frames] of Object.entries(l4Data)) {
+    for (const [sessionId, frames] of Object.entries(deepData)) {
       if (!frames || typeof frames !== 'object') continue;
 
       // 保持嵌套结构: normalized[sessionId][frameId]
@@ -369,7 +451,7 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
           // 显示配置
           display: stepResult.display || {
             title: `Frame ${item.frame_id || frameId}`,
-            layer: 'L4',
+            layer: 'deep',  // 使用语义名称
           },
         };
       }
@@ -399,10 +481,11 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
       }
     }
 
-    // 2. 从 L1 摘要数据创建概览 Finding
-    if (skillResult.data?.L1) {
-      const l1Data = skillResult.data.L1;
-      const summary = this.buildL1Summary(skillId, l1Data);
+    // 2. 从 overview/L1 摘要数据创建概览 Finding
+    // 同时支持新旧命名
+    const overviewData = skillResult.data?.overview || skillResult.data?.L1;
+    if (overviewData) {
+      const summary = this.buildOverviewSummary(skillId, overviewData);
       if (summary) {
         findings.push({
           id: `${skillId}-summary`,
@@ -410,7 +493,7 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
           severity: 'info',
           title: `${skillResult.skillName || skillId} 分析摘要`,
           description: summary,
-          evidence: [l1Data],
+          evidence: [overviewData],
         });
       }
     }
@@ -431,29 +514,29 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
   }
 
   /**
-   * 构建 L1 层摘要
+   * 构建 overview/L1 层摘要
    */
-  private buildL1Summary(skillId: string, l1Data: Record<string, any>): string | null {
+  private buildOverviewSummary(skillId: string, overviewData: Record<string, any>): string | null {
     const parts: string[] = [];
 
     // 根据不同的 Skill 提取关键指标
     if (skillId === 'scrolling_analysis') {
-      if (l1Data.scroll_summary?.data?.[0]) {
-        const summary = l1Data.scroll_summary.data[0];
+      if (overviewData.scroll_summary?.data?.[0]) {
+        const summary = overviewData.scroll_summary.data[0];
         parts.push(`总帧数: ${summary.total_frames || 0}`);
         parts.push(`卡顿帧: ${summary.jank_frames || 0}`);
         if (summary.jank_rate) parts.push(`卡顿率: ${summary.jank_rate}`);
         if (summary.avg_fps) parts.push(`平均 FPS: ${summary.avg_fps}`);
       }
     } else if (skillId === 'startup_analysis') {
-      if (l1Data.startup_summary?.data?.[0]) {
-        const summary = l1Data.startup_summary.data[0];
+      if (overviewData.startup_summary?.data?.[0]) {
+        const summary = overviewData.startup_summary.data[0];
         if (summary.total_time_ms) parts.push(`启动耗时: ${summary.total_time_ms}ms`);
         if (summary.startup_type) parts.push(`启动类型: ${summary.startup_type}`);
       }
     } else if (skillId === 'janky_frame_analysis') {
-      if (l1Data.jank_summary?.data?.[0]) {
-        const summary = l1Data.jank_summary.data[0];
+      if (overviewData.jank_summary?.data?.[0]) {
+        const summary = overviewData.jank_summary.data[0];
         parts.push(`严重卡顿帧数: ${summary.severe_jank_count || 0}`);
         if (summary.max_jank_duration_ms) {
           parts.push(`最长卡顿: ${summary.max_jank_duration_ms}ms`);
@@ -461,9 +544,9 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
       }
     }
 
-    // 通用处理：遍历 L1 数据寻找关键字段
+    // 通用处理：遍历 overview 数据寻找关键字段
     if (parts.length === 0) {
-      for (const [key, value] of Object.entries(l1Data)) {
+      for (const [key, value] of Object.entries(overviewData)) {
         if (value?.data?.[0]) {
           const row = value.data[0];
           const keyMetrics = Object.entries(row)
@@ -483,11 +566,12 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
   }
 
   /**
-   * 确定要执行的 Skills
+   * 确定要执行的 Skills（带选择理由）
    */
-  private determineSkills(context: SubAgentContext): string[] {
+  private determineSkillsWithReason(context: SubAgentContext): { skillIds: string[]; selectionReason: string } {
     const { intent, plan } = context;
     const skills = new Set<string>();
+    const matchedKeywords: string[] = [];
 
     // 1. 从 intent 的 primaryGoal 匹配
     if (intent?.primaryGoal) {
@@ -495,6 +579,7 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
       for (const [keyword, skillList] of Object.entries(INTENT_TO_SKILLS)) {
         if (goal.includes(keyword)) {
           skillList.forEach(s => skills.add(s));
+          matchedKeywords.push(`intent:${keyword}`);
         }
       }
     }
@@ -506,6 +591,7 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
         for (const [keyword, skillList] of Object.entries(INTENT_TO_SKILLS)) {
           if (lowerAspect.includes(keyword)) {
             skillList.forEach(s => skills.add(s));
+            matchedKeywords.push(`aspect:${keyword}`);
           }
         }
       }
@@ -518,17 +604,29 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
         for (const [keyword, skillList] of Object.entries(INTENT_TO_SKILLS)) {
           if (objective.includes(keyword)) {
             skillList.forEach(s => skills.add(s));
+            matchedKeywords.push(`task:${keyword}`);
           }
         }
       }
     }
 
     // 4. 如果没有匹配到任何 skill，使用默认
+    let selectionReason: string;
     if (skills.size === 0) {
       DEFAULT_SKILLS.forEach(s => skills.add(s));
+      selectionReason = `未匹配到特定关键词，使用默认分析 Skills: ${DEFAULT_SKILLS.join(', ')}`;
+    } else {
+      selectionReason = `基于关键词 [${matchedKeywords.join(', ')}] 选择 Skills: ${Array.from(skills).join(', ')}`;
     }
 
-    return Array.from(skills);
+    return { skillIds: Array.from(skills), selectionReason };
+  }
+
+  /**
+   * 确定要执行的 Skills（简化版，兼容旧代码）
+   */
+  private determineSkills(context: SubAgentContext): string[] {
+    return this.determineSkillsWithReason(context).skillIds;
   }
 
   /**

@@ -41,20 +41,20 @@ export const testCommand = new Command('test')
 
     try {
       // Dynamic imports to avoid loading heavy dependencies at CLI startup
-      const { skillRegistryV2, ensureSkillRegistryV2Initialized } = await import('../../services/skillEngine/skillLoaderV2');
-      const { SkillExecutorV2, createSkillExecutorV2 } = await import('../../services/skillEngine/skillExecutorV2');
+      const { skillRegistry, ensureSkillRegistryInitialized } = await import('../../services/skillEngine/skillLoader');
+      const { SkillExecutor, createSkillExecutor } = await import('../../services/skillEngine/skillExecutor');
       const { getTraceProcessorService } = await import('../../services/traceProcessorService');
 
       // Initialize
       console.log(colors.gray('Initializing skill registry...'));
-      await ensureSkillRegistryV2Initialized();
+      await ensureSkillRegistryInitialized();
 
       // Check if skill exists
-      const skill = skillRegistryV2.getSkill(skillId);
+      const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
         console.log(colors.red(`\nSkill not found: ${skillId}`));
         console.log(colors.gray('\nAvailable skills:'));
-        const allSkills = skillRegistryV2.getAllSkills();
+        const allSkills = skillRegistry.getAllSkills();
         for (const s of allSkills) {
           console.log(`  - ${s.name}`);
         }
@@ -75,8 +75,8 @@ export const testCommand = new Command('test')
       console.log(colors.bold('Executing skill...\n'));
       const startTime = Date.now();
 
-      const executor = createSkillExecutorV2(traceProcessor);
-      executor.registerSkills(skillRegistryV2.getAllSkills());
+      const executor = createSkillExecutor(traceProcessor);
+      executor.registerSkills(skillRegistry.getAllSkills());
       const result = await executor.execute(skillId, traceId, { package: options.package });
 
       const executionTime = Date.now() - startTime;

@@ -5,7 +5,7 @@
  * to verify the complete scrolling analysis functionality.
  */
 
-import { getSkillAnalysisAdapterV2 } from '../services/skillEngine/skillAnalysisAdapterV2';
+import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import fs from 'fs';
@@ -32,7 +32,7 @@ async function runScrollingTestWithRealData() {
 
   try {
     const traceProcessor = getTraceProcessorService();
-    const skillAdapter = getSkillAnalysisAdapterV2(traceProcessor);
+    const skillAdapter = getSkillAnalysisAdapter(traceProcessor);
 
     console.log('⏳ Loading trace into TraceProcessor...');
     const traceId = await traceProcessor.loadTraceFromFilePath(testTracePath);

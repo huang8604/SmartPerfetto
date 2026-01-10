@@ -5,7 +5,7 @@
  * analysis workflows in YAML files without modifying code.
  *
  * Features:
- * - YAML-based skill definitions (v2 format)
+ * - YAML-based skill definitions
  * - Composite skills with multi-step analysis
  * - AI-assisted diagnostics and summaries
  * - Automatic skill matching based on keywords and patterns
@@ -16,39 +16,44 @@
 // =============================================================================
 // Types
 // =============================================================================
-export * from './types_v2';
+export * from './types';
 
 // =============================================================================
 // Skill Loader
 // =============================================================================
-export * from './skillLoaderV2';
+export * from './skillLoader';
 
 export {
-  skillRegistryV2,
-  ensureSkillRegistryV2Initialized,
+  skillRegistry,
+  ensureSkillRegistryInitialized,
   getSkillsDir,
-} from './skillLoaderV2';
+} from './skillLoader';
 
 // =============================================================================
 // Skill Executor
 // =============================================================================
-export * from './skillExecutorV2';
+export * from './skillExecutor';
 
 export {
-  SkillExecutorV2,
-  createSkillExecutorV2,
-} from './skillExecutorV2';
+  SkillExecutor,
+  createSkillExecutor,
+  LayeredResult,
+} from './skillExecutor';
 
 // =============================================================================
 // Skill Analysis Adapter
 // =============================================================================
-export * from './skillAnalysisAdapterV2';
+export * from './skillAnalysisAdapter';
 
 export {
-  SkillAnalysisAdapterV2,
-  createSkillAnalysisAdapterV2,
-  getSkillAnalysisAdapterV2,
-} from './skillAnalysisAdapterV2';
+  SkillAnalysisAdapter,
+  createSkillAnalysisAdapter,
+  getSkillAnalysisAdapter,
+  SkillAnalysisRequest,
+  SkillAnalysisResponse,
+  SkillListItem,
+  AdaptedResult,
+} from './skillAnalysisAdapter';
 
 // =============================================================================
 // Utilities
@@ -70,11 +75,12 @@ export {
 // Legacy Aliases (for backwards compatibility during migration)
 // =============================================================================
 
-// Alias V2 as the default
-export { skillRegistryV2 as skillRegistry } from './skillLoaderV2';
-export { ensureSkillRegistryV2Initialized as initializeSkills } from './skillLoaderV2';
-export { SkillAnalysisAdapterV2 as SkillAnalysisAdapter } from './skillAnalysisAdapterV2';
-export { createSkillAnalysisAdapterV2 as createSkillAnalysisAdapter } from './skillAnalysisAdapterV2';
-export { getSkillAnalysisAdapterV2 as getSkillAnalysisAdapter } from './skillAnalysisAdapterV2';
-export { SkillExecutorV2 as SkillExecutor } from './skillExecutorV2';
-export { createSkillExecutorV2 as createSkillExecutor } from './skillExecutorV2';
+// @deprecated - These aliases will be removed in a future version
+export { skillRegistry as skillRegistryV2 } from './skillLoader';
+export { ensureSkillRegistryInitialized as ensureSkillRegistryV2Initialized } from './skillLoader';
+export { ensureSkillRegistryInitialized as initializeSkills } from './skillLoader';
+export { SkillAnalysisAdapter as SkillAnalysisAdapterV2 } from './skillAnalysisAdapter';
+export { createSkillAnalysisAdapter as createSkillAnalysisAdapterV2 } from './skillAnalysisAdapter';
+export { getSkillAnalysisAdapter as getSkillAnalysisAdapterV2 } from './skillAnalysisAdapter';
+export { SkillExecutor as SkillExecutorV2 } from './skillExecutor';
+export { createSkillExecutor as createSkillExecutorV2 } from './skillExecutor';

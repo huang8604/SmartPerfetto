@@ -16,9 +16,9 @@ import { TraceProcessorService } from './traceProcessorService';
 import { AnalysisSessionService } from './analysisSessionService';
 import SQLValidator from './sqlValidator';
 import { PerfettoSqlSkill } from './perfettoSqlSkill';
-import { SkillAnalysisAdapterV2, getSkillAnalysisAdapterV2 } from './skillEngine/skillAnalysisAdapterV2';
+import { SkillAnalysisAdapter, getSkillAnalysisAdapter } from './skillEngine/skillAnalysisAdapter';
 import { SkillEventCollector, createEventCollector } from './skillEngine/eventCollector';
-import { SkillEvent } from './skillEngine/types_v2';
+import { SkillEvent } from './skillEngine/types';
 import { SessionPersistenceService } from './sessionPersistenceService';
 import { StoredSession, StoredMessage } from '../models/sessionSchema';
 import { getHTMLReportGenerator } from './htmlReportGenerator';
@@ -51,7 +51,7 @@ export class PerfettoAnalysisOrchestrator {
   private openai?: OpenAI;
   private isConfigured: boolean;
   private perfettoSqlSkill?: PerfettoSqlSkill;
-  private skillAdapter: SkillAnalysisAdapterV2;
+  private skillAdapter: SkillAnalysisAdapter;
   private skillEngineInitialized: boolean = false;
 
   constructor(
@@ -64,7 +64,7 @@ export class PerfettoAnalysisOrchestrator {
     this.sessionService = sessionService;
     this.sqlValidator = new SQLValidator();
     this.perfettoSqlSkill = perfettoSqlSkill;
-    this.skillAdapter = getSkillAnalysisAdapterV2(traceProcessor);
+    this.skillAdapter = getSkillAnalysisAdapter(traceProcessor);
 
     // Default configuration
     this.config = {
@@ -273,7 +273,7 @@ export class PerfettoAnalysisOrchestrator {
             // Handle for_each steps: array of {itemIndex, item, data, rowCount}
             let tableData: { columns: string[]; rows: any[][]; rowCount: number } | null = null;
             let sectionTitle = sectionId;
-            // 提取 expandableData 和 summary（来自 skillExecutorV2 的输出）
+            // 提取 expandableData 和 summary（来自 skillExecutor 的输出）
             const expandableData = (sectionData as any).expandableData;
             const summary = (sectionData as any).summary;
 
@@ -1660,19 +1660,26 @@ LIMIT 50;`,
 
   /**
    * Emit skill layered result event for interactive layered view
-   * This is used when a skill has L1/L2/L3/L4 layer specifications
+   * This is used when a skill has layer specifications
+   * 支持语义名称 (overview/list/session/deep) 和旧名称 (L1/L2/L3/L4)
    */
   private emitSkillLayeredResult(
     sessionId: string,
     layeredData: {
       result: {
         layers: {
+          // 语义名称
+          overview?: Record<string, any>;
+          list?: Record<string, any>;
+          session?: Record<string, Record<string, any>>;
+          deep?: Record<string, Record<string, any>>;
+          // 向后兼容名称 (@deprecated)
           L1?: Record<string, any>;
           L2?: Record<string, any>;
           L3?: Record<string, Record<string, any>>;
           L4?: Record<string, Record<string, any>>;
         };
-        defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+        defaultExpanded: ('overview' | 'list' | 'session' | 'deep' | 'L1' | 'L2' | 'L3' | 'L4')[];
         metadata: {
           skillName: string;
           version: string;

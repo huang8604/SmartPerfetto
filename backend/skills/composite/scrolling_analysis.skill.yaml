@@ -36,7 +36,7 @@ steps:
     name: "Vsync 配置"
     display:
       level: summary
-      layer: L1
+      layer: overview
       title: "显示配置"
     sql: |
       WITH
@@ -98,7 +98,7 @@ steps:
     name: "帧性能汇总"
     display:
       level: summary
-      layer: L1
+      layer: overview
       title: "滑动性能概览"
     sql: |
       WITH 
@@ -184,7 +184,7 @@ steps:
     name: "掉帧类型统计"
     display:
       level: summary
-      layer: L1
+      layer: overview
       title: "掉帧类型分布"
     sql: |
       SELECT
@@ -217,7 +217,7 @@ steps:
     name: "滑动区间列表"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "滑动区间"
     sql: |
       WITH frame_gaps AS (
@@ -272,7 +272,7 @@ steps:
     name: "区间掉帧统计"
     display:
       level: detail
-      layer: L2
+      layer: list
       title: "区间掉帧"
     sql: |
       WITH frame_gaps AS (
@@ -472,7 +472,7 @@ steps:
     name: "逐帧详细分析"
     display:
       level: key
-      layer: L4
+      layer: deep
       title: "帧详细分析"
     source: app_jank_frames
     max_items: 50

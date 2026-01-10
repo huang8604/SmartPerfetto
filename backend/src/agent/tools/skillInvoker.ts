@@ -170,13 +170,13 @@ export const skillInvokerTool: Tool<SkillInvokerParams, SkillInvokerResult> = {
         };
       }
 
-      // 动态导入 SkillAnalysisAdapterV2 以避免循环依赖
-      const { SkillAnalysisAdapterV2 } = await import(
-        '../../services/skillEngine/skillAnalysisAdapterV2'
+      // 动态导入 SkillAnalysisAdapter 以避免循环依赖
+      const { SkillAnalysisAdapter } = await import(
+        '../../services/skillEngine/skillAnalysisAdapter'
       );
 
       // 创建 adapter 实例
-      const adapter = new SkillAnalysisAdapterV2(context.traceProcessorService);
+      const adapter = new SkillAnalysisAdapter(context.traceProcessorService);
 
       // 构建请求
       const request = {
@@ -206,28 +206,38 @@ export const skillInvokerTool: Tool<SkillInvokerParams, SkillInvokerResult> = {
       };
 
       // 提取关键数据用于 Agent 分析
+      // 同时支持语义名称 (overview/list/deep) 和旧名称 (L1/L2/L4)
       if (response.layeredResult?.layers) {
-        const { L1, L2, L4 } = response.layeredResult.layers;
+        const layers = response.layeredResult.layers;
 
-        // 扁平化 L1 数据
-        if (L1) {
-          result.data.L1 = {};
-          for (const [key, value] of Object.entries(L1)) {
-            result.data.L1[key] = value;
+        // 扁平化 overview/L1 数据
+        const overviewData = layers.overview || layers.L1;
+        if (overviewData) {
+          const flattened: Record<string, any> = {};
+          for (const [key, value] of Object.entries(overviewData)) {
+            flattened[key] = value;
           }
+          // 同时写入语义名称和兼容名称
+          result.data.overview = flattened;
+          result.data.L1 = flattened;
         }
 
-        // 扁平化 L2 数据
-        if (L2) {
-          result.data.L2 = {};
-          for (const [key, value] of Object.entries(L2)) {
-            result.data.L2[key] = value;
+        // 扁平化 list/L2 数据
+        const listData = layers.list || layers.L2;
+        if (listData) {
+          const flattened: Record<string, any> = {};
+          for (const [key, value] of Object.entries(listData)) {
+            flattened[key] = value;
           }
+          result.data.list = flattened;
+          result.data.L2 = flattened;
         }
 
-        // L4 数据（如果有）
-        if (L4 && Object.keys(L4).length > 0) {
-          result.data.L4 = L4;
+        // deep/L4 数据（如果有）
+        const deepData = layers.deep || layers.L4;
+        if (deepData && Object.keys(deepData).length > 0) {
+          result.data.deep = deepData;
+          result.data.L4 = deepData;
         }
       }
 

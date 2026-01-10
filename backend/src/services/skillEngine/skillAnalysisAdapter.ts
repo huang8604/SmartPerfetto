@@ -1,14 +1,14 @@
 /**
- * Skill Analysis Adapter v2.0
+ * Skill Analysis Adapter
  *
- * Integrates SkillExecutorV2 with the orchestrator.
+ * Integrates SkillExecutor with the orchestrator.
  * Provides intent detection, skill execution, and result conversion.
  */
 
 import { TraceProcessorService } from '../traceProcessorService';
-import { SkillExecutorV2, createSkillExecutorV2, LayeredResult } from './skillExecutorV2';
-import { skillRegistryV2, ensureSkillRegistryV2Initialized, getSkillsDir } from './skillLoaderV2';
-import { SkillDefinitionV2, SkillEvent, DisplayLevel } from './types_v2';
+import { SkillExecutor, createSkillExecutor, LayeredResult } from './skillExecutor';
+import { skillRegistry, ensureSkillRegistryInitialized, getSkillsDir } from './skillLoader';
+import { SkillDefinition, SkillEvent, DisplayLevel, DisplayLayer, LegacyDisplayLayer } from './types';
 import { smartSummaryGenerator } from './smartSummaryGenerator';
 import { answerGenerator, GeneratedAnswer } from './answerGenerator';
 import { SkillEventCollector, createEventCollector, EventSummary, ProgressInfo } from './eventCollector';
@@ -17,14 +17,14 @@ import { SkillEventCollector, createEventCollector, EventSummary, ProgressInfo }
 // Types
 // =============================================================================
 
-export interface SkillAnalysisRequestV2 {
+export interface SkillAnalysisRequest {
   traceId: string;
   skillId?: string;
   question?: string;
   packageName?: string;
 }
 
-export interface SkillAnalysisResponseV2 {
+export interface SkillAnalysisResponse {
   skillId: string;
   skillName: string;
   success: boolean;
@@ -39,7 +39,7 @@ export interface SkillAnalysisResponseV2 {
   executionTimeMs: number;
   vendor?: string;
 
-  // v2 新增
+  // Display results
   displayResults?: Array<{
     stepId: string;
     title: string;
@@ -65,7 +65,7 @@ export interface SkillAnalysisResponseV2 {
   eventSummary?: EventSummary;
 }
 
-export interface SkillListItemV2 {
+export interface SkillListItem {
   id: string;
   name: string;
   displayName: string;
@@ -78,17 +78,18 @@ export interface SkillListItemV2 {
 export interface AdaptedResult {
   format: 'layered';
   layers: LayeredResult['layers'];
-  defaultExpanded: ('L1' | 'L2' | 'L3' | 'L4')[];
+  // 支持语义名称和旧名称
+  defaultExpanded: (DisplayLayer | LegacyDisplayLayer)[];
   metadata: LayeredResult['metadata'];
 }
 
 // =============================================================================
-// Skill Analysis Adapter V2
+// Skill Analysis Adapter
 // =============================================================================
 
-export class SkillAnalysisAdapterV2 {
+export class SkillAnalysisAdapter {
   private traceProcessor: TraceProcessorService;
-  private executor: SkillExecutorV2;
+  private executor: SkillExecutor;
   private initialized = false;
   private eventHandler?: (event: SkillEvent) => void;
   private currentEventCollector?: SkillEventCollector;
@@ -101,7 +102,7 @@ export class SkillAnalysisAdapterV2 {
     this.eventHandler = eventHandler;
 
     // 创建 executor，传入事件处理器
-    this.executor = createSkillExecutorV2(
+    this.executor = createSkillExecutor(
       traceProcessor,
       undefined,  // AI service 稍后注入
       eventHandler
@@ -112,7 +113,7 @@ export class SkillAnalysisAdapterV2 {
    * 设置 AI 服务（用于 ai_decision 和 ai_summary 步骤）
    */
   setAIService(aiService: any): void {
-    // SkillExecutorV2 需要支持 setAIService 方法
+    // SkillExecutor 需要支持 setAIService 方法
     (this.executor as any).aiService = aiService;
   }
 
@@ -130,14 +131,14 @@ export class SkillAnalysisAdapterV2 {
   async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
 
-    await ensureSkillRegistryV2Initialized();
+    await ensureSkillRegistryInitialized();
 
     // 将所有 skills 注册到 executor
-    const skills = skillRegistryV2.getAllSkills();
+    const skills = skillRegistry.getAllSkills();
     this.executor.registerSkills(skills);
 
     this.initialized = true;
-    console.log(`[SkillAnalysisAdapterV2] Initialized with ${skills.length} skills`);
+    console.log(`[SkillAnalysisAdapter] Initialized with ${skills.length} skills`);
   }
 
   /**
@@ -145,7 +146,7 @@ export class SkillAnalysisAdapterV2 {
    * 返回匹配的 skill ID 或 null
    */
   detectIntent(question: string): string | null {
-    const skill = skillRegistryV2.findMatchingSkill(question);
+    const skill = skillRegistry.findMatchingSkill(question);
     return skill ? skill.name : null;
   }
 
@@ -174,7 +175,7 @@ export class SkillAnalysisAdapterV2 {
         };
       }
     } catch (error) {
-      console.warn('[SkillAnalysisAdapterV2] Vendor detection failed:', error);
+      console.warn('[SkillAnalysisAdapter] Vendor detection failed:', error);
     }
 
     return { vendor: 'aosp', confidence: 0.5 };
@@ -183,7 +184,7 @@ export class SkillAnalysisAdapterV2 {
   /**
    * 检测 skill 是否使用分层输出（L1/L2/L3/L4）
    */
-  private hasLayeredOutput(skill: SkillDefinitionV2): boolean {
+  private hasLayeredOutput(skill: SkillDefinition): boolean {
     if (!skill.steps || skill.steps.length === 0) {
       return false;
     }
@@ -197,7 +198,7 @@ export class SkillAnalysisAdapterV2 {
    * 执行 skill 分析
    * 这是主要的入口点
    */
-  async analyze(request: SkillAnalysisRequestV2): Promise<SkillAnalysisResponseV2> {
+  async analyze(request: SkillAnalysisRequest): Promise<SkillAnalysisResponse> {
     await this.ensureInitialized();
 
     const { traceId, skillId, question, packageName } = request;
@@ -229,7 +230,7 @@ export class SkillAnalysisAdapterV2 {
     }
 
     // 获取 skill 信息
-    const skill = skillRegistryV2.getSkill(targetSkillId);
+    const skill = skillRegistry.getSkill(targetSkillId);
     if (!skill) {
       return {
         skillId: targetSkillId,
@@ -271,21 +272,21 @@ export class SkillAnalysisAdapterV2 {
 
     // 检测是否使用分层输出
     const useLayeredOutput = this.hasLayeredOutput(skill);
-    console.log(`[SkillAnalysisAdapterV2] Skill ${targetSkillId} has layered output:`, useLayeredOutput);
+    console.log(`[SkillAnalysisAdapter] Skill ${targetSkillId} has layered output:`, useLayeredOutput);
 
     let result: any;
     let layeredResult: LayeredResult | undefined;
 
     if (useLayeredOutput) {
       // 使用分层输出模式（executeCompositeSkill）
-      console.log('[SkillAnalysisAdapterV2] Using layered output mode for skill', targetSkillId);
+      console.log('[SkillAnalysisAdapter] Using layered output mode for skill', targetSkillId);
       try {
         layeredResult = await (this.executor as any).executeCompositeSkill(
           skill,
           params,
           { traceId, vendor: vendorResult.vendor }
         );
-        console.log('[SkillAnalysisAdapterV2] executeCompositeSkill completed. layeredResult:', JSON.stringify({
+        console.log('[SkillAnalysisAdapter] executeCompositeSkill completed. layeredResult:', JSON.stringify({
           hasLayers: !!layeredResult?.layers,
           layerKeys: layeredResult?.layers ? Object.keys(layeredResult.layers) : [],
           L1Count: layeredResult?.layers?.L1 ? Object.keys(layeredResult.layers.L1).length : 0,
@@ -296,9 +297,9 @@ export class SkillAnalysisAdapterV2 {
         }, null, 2));
 
         // 将 LayeredResult 转换为 displayResults 格式
-        console.log('[SkillAnalysisAdapterV2] Calling convertLayeredResultToDisplayResults...');
+        console.log('[SkillAnalysisAdapter] Calling convertLayeredResultToDisplayResults...');
         const displayResults = this.convertLayeredResultToDisplayResults(layeredResult!);
-        console.log('[SkillAnalysisAdapterV2] convertLayeredResultToDisplayResults completed with', displayResults.length, 'items');
+        console.log('[SkillAnalysisAdapter] convertLayeredResultToDisplayResults completed with', displayResults.length, 'items');
 
         result = {
           success: true,
@@ -307,12 +308,12 @@ export class SkillAnalysisAdapterV2 {
           executionTimeMs: 0,
         };
       } catch (error) {
-        console.error('[SkillAnalysisAdapterV2] executeCompositeSkill failed:', error);
+        console.error('[SkillAnalysisAdapter] executeCompositeSkill failed:', error);
         throw error;
       }
     } else {
       // 使用传统输出模式（execute）
-      console.log('[SkillAnalysisAdapterV2] Using traditional output mode for skill', targetSkillId);
+      console.log('[SkillAnalysisAdapter] Using traditional output mode for skill', targetSkillId);
       result = await this.executor.execute(
         targetSkillId,
         traceId,
@@ -326,8 +327,8 @@ export class SkillAnalysisAdapterV2 {
     const eventSummary = eventCollector.getSummary();
 
     // 转换结果格式
-    console.log('[SkillAnalysisAdapterV2] displayResults count:', result.displayResults.length);
-    console.log('[SkillAnalysisAdapterV2] displayResults:', JSON.stringify(result.displayResults.map((dr: any) => ({
+    console.log('[SkillAnalysisAdapter] displayResults count:', result.displayResults.length);
+    console.log('[SkillAnalysisAdapter] displayResults:', JSON.stringify(result.displayResults.map((dr: any) => ({
       stepId: dr.stepId,
       title: dr.title,
       hasData: !!dr.data,
@@ -336,9 +337,9 @@ export class SkillAnalysisAdapterV2 {
 
     const sections = this.convertDisplayResultsToSections(result.displayResults);
 
-    console.log('[SkillAnalysisAdapterV2] sections count:', Object.keys(sections).length);
-    console.log('[SkillAnalysisAdapterV2] sections keys:', Object.keys(sections));
-    console.log('[SkillAnalysisAdapterV2] result.success:', result.success);
+    console.log('[SkillAnalysisAdapter] sections count:', Object.keys(sections).length);
+    console.log('[SkillAnalysisAdapter] sections keys:', Object.keys(sections));
+    console.log('[SkillAnalysisAdapter] result.success:', result.success);
 
     const diagnostics = result.diagnostics.map((d: any) => ({
       id: d.id,
@@ -636,12 +637,12 @@ export class SkillAnalysisAdapterV2 {
   /**
    * 获取所有可用的 skills 列表
    */
-  async listSkills(): Promise<SkillListItemV2[]> {
+  async listSkills(): Promise<SkillListItem[]> {
     await this.ensureInitialized();
 
-    const skills = skillRegistryV2.getAllSkills();
+    const skills = skillRegistry.getAllSkills();
 
-    return skills.map((skill: SkillDefinitionV2) => {
+    return skills.map((skill: SkillDefinition) => {
       const triggers = skill.triggers;
       let keywords: string[] = [];
 
@@ -668,9 +669,9 @@ export class SkillAnalysisAdapterV2 {
   /**
    * 获取指定 skill 的详细信息
    */
-  async getSkillDetail(skillId: string): Promise<SkillDefinitionV2 | null> {
+  async getSkillDetail(skillId: string): Promise<SkillDefinition | null> {
     await this.ensureInitialized();
-    return skillRegistryV2.getSkill(skillId) || null;
+    return skillRegistry.getSkill(skillId) || null;
   }
 
   /**
@@ -692,21 +693,43 @@ export class SkillAnalysisAdapterV2 {
 // Singleton Instance
 // =============================================================================
 
-let adapterInstanceV2: SkillAnalysisAdapterV2 | null = null;
+let adapterInstance: SkillAnalysisAdapter | null = null;
 
-export function getSkillAnalysisAdapterV2(
+export function getSkillAnalysisAdapter(
   traceProcessor: TraceProcessorService,
   eventHandler?: (event: SkillEvent) => void
-): SkillAnalysisAdapterV2 {
-  if (!adapterInstanceV2) {
-    adapterInstanceV2 = new SkillAnalysisAdapterV2(traceProcessor, eventHandler);
+): SkillAnalysisAdapter {
+  if (!adapterInstance) {
+    adapterInstance = new SkillAnalysisAdapter(traceProcessor, eventHandler);
   }
-  return adapterInstanceV2;
+  return adapterInstance;
 }
 
-export function createSkillAnalysisAdapterV2(
+export function createSkillAnalysisAdapter(
   traceProcessor: TraceProcessorService,
   eventHandler?: (event: SkillEvent) => void
-): SkillAnalysisAdapterV2 {
-  return new SkillAnalysisAdapterV2(traceProcessor, eventHandler);
+): SkillAnalysisAdapter {
+  return new SkillAnalysisAdapter(traceProcessor, eventHandler);
 }
+
+// =============================================================================
+// 向后兼容别名 (deprecated)
+// =============================================================================
+
+/** @deprecated Use SkillAnalysisRequest instead */
+export type SkillAnalysisRequestV2 = SkillAnalysisRequest;
+
+/** @deprecated Use SkillAnalysisResponse instead */
+export type SkillAnalysisResponseV2 = SkillAnalysisResponse;
+
+/** @deprecated Use SkillListItem instead */
+export type SkillListItemV2 = SkillListItem;
+
+/** @deprecated Use SkillAnalysisAdapter instead */
+export const SkillAnalysisAdapterV2 = SkillAnalysisAdapter;
+
+/** @deprecated Use getSkillAnalysisAdapter instead */
+export const getSkillAnalysisAdapterV2 = getSkillAnalysisAdapter;
+
+/** @deprecated Use createSkillAnalysisAdapter instead */
+export const createSkillAnalysisAdapterV2 = createSkillAnalysisAdapter;
