@@ -341,14 +341,183 @@ steps:
     save_as: lock_data
     optional: true
 
+  # ===== 根因分析总结：综合所有数据给出明确结论 =====
+  - id: root_cause_summary
+    type: atomic
+    name: "根因分析"
+    display:
+      level: key
+      title: "🎯 根因分析"
+    sql: |
+      -- 根因分析: 综合四象限、CPU频率、耗时操作等数据，输出明确的根因结论
+      WITH
+      -- 1. 获取目标线程
+      target_threads AS (
+        SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name,
+          CASE
+            WHEN t.tid = p.pid THEN 'MainThread'
+            WHEN t.name = 'RenderThread' THEN 'RenderThread'
+            ELSE 'Other'
+          END as thread_type
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND (t.tid = p.pid OR t.name = 'RenderThread')
+      ),
+      -- 2. 线程状态分析 (四象限)
+      thread_states AS (
+        SELECT
+          tt.thread_type,
+          CASE
+            WHEN ts.state = 'Running' AND ts.cpu >= 4 THEN 'Q1'
+            WHEN ts.state = 'Running' AND ts.cpu < 4 THEN 'Q2'
+            WHEN ts.state = 'R' THEN 'Q3'
+            WHEN ts.state IN ('S', 'D', 'I') THEN 'Q4'
+            ELSE 'Other'
+          END as quadrant,
+          SUM(ts.dur) as dur_ns
+        FROM thread_state ts
+        JOIN target_threads tt ON ts.utid = tt.utid
+        WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
+        GROUP BY tt.thread_type, quadrant
+      ),
+      -- 3. 计算各线程四象限百分比
+      quadrant_pct AS (
+        SELECT
+          thread_type,
+          quadrant,
+          dur_ns,
+          ROUND(100.0 * dur_ns / SUM(dur_ns) OVER (PARTITION BY thread_type), 1) as pct
+        FROM thread_states
+        WHERE quadrant != 'Other'
+      ),
+      main_summary AS (
+        SELECT
+          COALESCE(SUM(CASE WHEN quadrant = 'Q1' THEN pct ELSE 0 END), 0) as q1,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q2' THEN pct ELSE 0 END), 0) as q2,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q3' THEN pct ELSE 0 END), 0) as q3,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4' THEN pct ELSE 0 END), 0) as q4
+        FROM quadrant_pct WHERE thread_type = 'MainThread'
+      ),
+      render_summary AS (
+        SELECT
+          COALESCE(SUM(CASE WHEN quadrant = 'Q1' THEN pct ELSE 0 END), 0) as q1,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q2' THEN pct ELSE 0 END), 0) as q2,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q3' THEN pct ELSE 0 END), 0) as q3,
+          COALESCE(SUM(CASE WHEN quadrant = 'Q4' THEN pct ELSE 0 END), 0) as q4
+        FROM quadrant_pct WHERE thread_type = 'RenderThread'
+      ),
+      -- 4. 获取最耗时的主线程操作
+      main_thread_utid AS (
+        SELECT t.utid
+        FROM thread t JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '') AND t.tid = p.pid
+      ),
+      top_slice AS (
+        SELECT s.name, ROUND(s.dur / 1e6, 2) as dur_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        WHERE tt.utid IN (SELECT utid FROM main_thread_utid)
+          AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
+          AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
+          AND s.dur >= 1000000
+        ORDER BY s.dur DESC
+        LIMIT 1
+      ),
+      -- 5. 获取 CPU 频率
+      freq_info AS (
+        SELECT
+          MAX(CASE WHEN cpu >= 4 THEN ROUND(value / 1000, 0) ELSE 0 END) as big_freq,
+          MAX(CASE WHEN cpu < 4 THEN ROUND(value / 1000, 0) ELSE 0 END) as little_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+          AND c.ts >= ${start_ts} AND c.ts < ${end_ts}
+      ),
+      -- 6. 综合根因判断
+      analysis AS (
+        SELECT
+          (SELECT dur_ms FROM top_slice) as slice_dur,
+          (SELECT name FROM top_slice) as slice_name,
+          (SELECT q1 FROM main_summary) as main_q1,
+          (SELECT q2 FROM main_summary) as main_q2,
+          (SELECT q3 FROM main_summary) as main_q3,
+          (SELECT q4 FROM main_summary) as main_q4,
+          (SELECT q1 FROM render_summary) as render_q1,
+          (SELECT q2 FROM render_summary) as render_q2,
+          (SELECT q3 FROM render_summary) as render_q3,
+          (SELECT q4 FROM render_summary) as render_q4,
+          (SELECT big_freq FROM freq_info) as big_freq,
+          (SELECT little_freq FROM freq_info) as little_freq
+      )
+      SELECT
+        CASE
+          -- 优先级1: 主线程有明确耗时操作 (>8ms)
+          WHEN slice_dur > 8 THEN
+            '主线程耗时操作 "' || slice_name || '" 占用 ' || slice_dur || 'ms'
+          -- 优先级2: 主线程大量等待调度 (Q3 > 20%)
+          WHEN main_q3 > 20 THEN
+            '主线程 CPU 争抢严重 (' || main_q3 || '% 时间在等待调度)'
+          -- 优先级3: 主线程被阻塞 (Q4 > 30%)
+          WHEN main_q4 > 30 THEN
+            '主线程阻塞等待 (Binder/IO/锁)，休眠占比 ' || main_q4 || '%'
+          -- 优先级4: RenderThread 休眠 (Q4 > 50%)
+          WHEN render_q4 > 50 THEN
+            'RenderThread 长时间休眠 (' || render_q4 || '%)，等待主线程或 GPU'
+          -- 优先级5: 主线程在小核运行 (Q2 > 50%)
+          WHEN main_q2 > 50 THEN
+            '主线程被调度到小核 (' || main_q2 || '%)，CPU 能力不足'
+          -- 优先级6: CPU 频率问题
+          WHEN big_freq < 1200 AND big_freq > 0 THEN
+            '大核频率过低 (' || big_freq || 'MHz)，可能触发温控限频'
+          -- 优先级7: 有小额耗时操作
+          WHEN slice_dur > 3 THEN
+            '主线程操作 "' || slice_name || '" 耗时 ' || slice_dur || 'ms'
+          -- 默认
+          ELSE '帧耗时 ${dur_ms}ms 超过 VSync 周期'
+        END as primary_cause,
+        CASE
+          WHEN big_freq > 0 AND big_freq < 1500 THEN '大核频率 ' || big_freq || 'MHz'
+          WHEN main_q2 > 30 THEN '小核运行占比 ' || main_q2 || '%'
+          ELSE NULL
+        END as secondary_info,
+        CASE
+          WHEN slice_dur > 8 THEN '高'
+          WHEN main_q3 > 20 THEN '高'
+          WHEN main_q4 > 30 THEN '中'
+          WHEN slice_dur > 3 THEN '中'
+          ELSE '低'
+        END as confidence,
+        CASE
+          WHEN slice_dur > 8 THEN 'slice'
+          WHEN main_q3 > 20 THEN 'cpu_contention'
+          WHEN main_q4 > 30 THEN 'blocking'
+          WHEN render_q4 > 50 THEN 'render_wait'
+          WHEN main_q2 > 50 THEN 'small_core'
+          WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
+          ELSE 'unknown'
+        END as cause_type,
+        ${dur_ms} as frame_dur_ms,
+        '${jank_type}' as jank_type
+      FROM analysis
+    save_as: root_cause
+
   - id: frame_diagnosis
     type: diagnostic
     name: "帧诊断"
     display:
-      level: key
-      title: "诊断结果"
-    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data]
+      level: detail
+      title: "详细诊断"
+    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data, root_cause]
     rules:
+      # ===== 最高优先级：根因分析总结 =====
+      - condition: "root_cause.data?.[0]?.primary_cause"
+        severity: critical
+        diagnosis: "${root_cause.data[0].primary_cause}"
+        confidence: "${root_cause.data[0].confidence === '高' ? 'high' : root_cause.data[0].confidence === '中' ? 'medium' : 'low'}"
+        suggestions:
+          - "${root_cause.data[0].secondary_info || '查看下方详细数据分析具体原因'}"
+
       # ===== 高优先级：锁竞争 =====
       - condition: "lock_data.data?.length > 0 && lock_data.data[0]?.wait_ms > 1"
         severity: critical
@@ -453,18 +622,7 @@ steps:
         diagnosis: "掉帧: SF 跳过 ${vsync_missed} 帧 VSync"
         confidence: high
         suggestions:
-          - "查看上方各项数据分析原因"
-          - "可能是多个因素共同导致"
-
-      # ===== 基础诊断：帧耗时本身 =====
-      # 如果没有其他诊断，至少提供帧耗时信息
-      - condition: "true"
-        severity: info
-        diagnosis: "帧耗时超过 Vsync 周期"
-        confidence: low
-        suggestions:
-          - "查看上方各项数据分析原因"
-          - "可能是多个因素共同导致"
+          - "查看上方四象限和耗时操作数据"
 
 output:
   format: structured
