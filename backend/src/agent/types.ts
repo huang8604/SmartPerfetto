@@ -660,3 +660,63 @@ export interface RecoveryResult {
   result?: MasterOrchestratorResult;
   error?: string;
 }
+
+// =============================================================================
+// Multi-turn Dialogue Types (Phase 5)
+// =============================================================================
+
+/**
+ * Represents a single conversation turn in multi-turn dialogue
+ * Used to track history and enable context-aware responses
+ */
+export interface ConversationTurn {
+  /** Unique turn identifier */
+  id: string;
+  /** Turn timestamp in milliseconds */
+  timestamp: number;
+  /** User's query for this turn */
+  query: string;
+  /** Understood intent for this query */
+  intent: Intent;
+  /** Analysis result from this turn */
+  result?: SubAgentResult;
+  /** Findings discovered in this turn */
+  findings: Finding[];
+  /** Turn index (0-based) */
+  turnIndex: number;
+  /** Whether this turn completed successfully */
+  completed: boolean;
+}
+
+/**
+ * Finding reference used to link between turns
+ */
+export interface FindingReference {
+  /** Finding ID to reference */
+  findingId: string;
+  /** Turn ID where finding was discovered */
+  turnId: string;
+  /** Type of reference */
+  refType: 'continuation' | 'clarification' | 'contrast' | 'expansion';
+}
+
+/**
+ * Context summary for LLM consumption
+ */
+export interface ContextSummary {
+  /** Total number of turns */
+  turnCount: number;
+  /** Summary of conversation so far */
+  conversationSummary: string;
+  /** Key findings from all turns */
+  keyFindings: Array<{
+    id: string;
+    title: string;
+    severity: string;
+    turnIndex: number;
+  }>;
+  /** Topics discussed */
+  topicsDiscussed: string[];
+  /** Open questions remaining */
+  openQuestions: string[];
+}

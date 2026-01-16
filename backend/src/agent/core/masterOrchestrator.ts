@@ -71,6 +71,10 @@ import {
   ExpertOutput,
   AnalysisIntent,
 } from '../experts';
+import {
+  EnhancedSessionContext,
+  sessionContextManager,
+} from '../context/enhancedSessionContext';
 
 // 默认配置
 // 注意：降低 minQualityScore 从 0.7 到 0.5，减少不必要的迭代循环
@@ -115,6 +119,7 @@ export class MasterOrchestrator extends EventEmitter {
   private emittedDiagnosticHashes: Set<string> = new Set();  // 内容哈希去重 diagnostics
   private currentArchitecture: ArchitectureInfo | null = null;  // 当前检测到的渲染架构
   private expertModeEnabled: boolean = false;  // 是否启用专家模式（Phase 3）
+  private sessionContext: EnhancedSessionContext | null = null;  // 多轮对话上下文（Phase 5）
 
   constructor(config: Partial<MasterOrchestratorConfig> = {}) {
     super();
@@ -217,6 +222,9 @@ export class MasterOrchestrator extends EventEmitter {
       this.emittedDiagnosticHashes.clear();  // 重置内容哈希
       this.totalIterations = 0;  // 重置迭代计数
 
+      // 初始化多轮对话上下文（Phase 5）
+      this.sessionContext = sessionContextManager.getOrCreate(session.sessionId, traceId);
+
       // 初始化会话树（用于 Fork）
       if (this.forkManager.isEnabled()) {
         this.forkManager.initializeSession(session.sessionId, 'main');
@@ -276,6 +284,9 @@ export class MasterOrchestrator extends EventEmitter {
       const intent = await this.understandIntent(query, traceId, options);
       await this.sessionStore.updateIntent(session.sessionId, intent);
       this.stateMachine.transition({ type: 'INTENT_UNDERSTOOD', payload: { intent } });
+
+      // 记录对话轮次（Phase 5: Multi-turn Dialogue）
+      const currentTurn = this.sessionContext?.addTurn(query, intent);
 
       this.emitUpdate('progress', { phase: 'planning', message: '规划分析任务' });
 
@@ -408,7 +419,18 @@ export class MasterOrchestrator extends EventEmitter {
       this.emitUpdate('progress', { phase: 'synthesizing', message: '综合分析结论' });
       const synthesizedAnswer = await this.synthesize(stageResults, intent, evaluation!);
 
-      // 7. 完成
+      // 7. 完成对话轮次（Phase 5: Multi-turn Dialogue）
+      if (currentTurn && this.sessionContext) {
+        const allFindings = this.collectFindings(stageResults);
+        this.sessionContext.completeTurn(currentTurn.id, {
+          success: true,
+          findings: allFindings,
+          data: { answer: synthesizedAnswer },
+          confidence: evaluation!.qualityScore,
+        }, allFindings);
+      }
+
+      // 8. 完成
       this.stateMachine.transition({ type: 'ANALYSIS_COMPLETE' });
       await this.sessionStore.updatePhase(session.sessionId, 'completed');
 
@@ -551,6 +573,7 @@ export class MasterOrchestrator extends EventEmitter {
 
   /**
    * 综合最终答案
+   * Phase 5: 支持多轮对话上下文感知
    */
   private async synthesize(
     results: StageResult[],
@@ -559,8 +582,23 @@ export class MasterOrchestrator extends EventEmitter {
   ): Promise<string> {
     const findings = this.collectFindings(results);
 
-    const prompt = `基于以下分析结果，生成简洁的分析结论：
+    // 构建上下文部分（Phase 5: Multi-turn Dialogue）
+    let contextSection = '';
+    if (this.sessionContext) {
+      const turns = this.sessionContext.getAllTurns();
+      if (turns.length > 1) {
+        // 有多轮对话时，添加上下文
+        const contextSummary = this.sessionContext.generatePromptContext(300);
+        contextSection = `
+## 对话上下文
+${contextSummary}
 
+`;
+      }
+    }
+
+    const prompt = `基于以下分析结果，生成简洁的分析结论：
+${contextSection}
 用户意图: ${intent.primaryGoal}
 
 分析发现:
@@ -573,7 +611,7 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
 请生成简洁的分析结论，只包括：
 1. 发现的关键问题（简要列出）
 2. 可能的根因（一句话概括）
-
+${contextSection ? '\n注意：请结合对话上下文，回答应与之前的讨论保持连贯。' : ''}
 注意：不要给出优化建议或改进方案，只需要指出问题所在。`;
 
     try {
@@ -1032,6 +1070,38 @@ ${findings.map(f => `- [${f.severity}] ${f.title}`).join('\n')}
    */
   isExpertModeEnabled(): boolean {
     return this.expertModeEnabled;
+  }
+
+  // ==========================================================================
+  // Multi-turn Dialogue Context Methods (Phase 5)
+  // ==========================================================================
+
+  /**
+   * 获取当前会话的对话上下文
+   */
+  getSessionContext(): EnhancedSessionContext | null {
+    return this.sessionContext;
+  }
+
+  /**
+   * 获取会话的上下文摘要（用于 API）
+   */
+  getContextSummary(): ReturnType<EnhancedSessionContext['generateContextSummary']> | null {
+    return this.sessionContext?.generateContextSummary() || null;
+  }
+
+  /**
+   * 查询与关键词相关的对话历史
+   */
+  queryConversationContext(keywords: string[]): ReturnType<EnhancedSessionContext['queryContext']> {
+    return this.sessionContext?.queryContext(keywords) || [];
+  }
+
+  /**
+   * 获取特定 Finding 详情
+   */
+  getFindingById(findingId: string) {
+    return this.sessionContext?.getFinding(findingId);
   }
 
   /**
