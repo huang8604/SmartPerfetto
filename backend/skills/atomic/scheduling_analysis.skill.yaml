@@ -4,14 +4,19 @@
 # 分析指定时间范围内的线程调度情况
 
 name: scheduling_analysis
-version: "2.0"
+version: "1.0"
 type: atomic
+category: kernel
 
 meta:
-  display_name: "调度分析"
-  description: "分析指定时间范围内的线程调度延迟"
+  display_name: "调度延迟分析"
+  description: "分析线程调度延迟 (Runnability)"
   icon: "schedule"
-  tags: [scheduling, cpu, atomic]
+  tags: [scheduling, kernel, latency, atomic]
+
+prerequisites:
+  required_tables:
+    - sched_slice
 
 inputs:
   - name: start_ts
@@ -61,6 +66,35 @@ output:
   display:
     level: detail
     format: table
+    columns:
+      - name: thread_name
+        label: "线程"
+        type: string
+      - name: process_name
+        label: "进程"
+        type: string
+      - name: is_main_thread
+        label: "主线程"
+        type: boolean
+      - name: running_ms
+        label: "运行时间"
+        type: duration
+        format: duration_ms
+      - name: runnable_ms
+        label: "等待调度"
+        type: duration
+        format: duration_ms
+      - name: sleeping_ms
+        label: "休眠时间"
+        type: duration
+        format: duration_ms
+      - name: max_runnable_ms
+        label: "最大等待"
+        type: duration
+        format: duration_ms
+      - name: long_runnable_count
+        label: "长等待次数"
+        type: number
   fields:
     - name: thread_name
       label: "线程"

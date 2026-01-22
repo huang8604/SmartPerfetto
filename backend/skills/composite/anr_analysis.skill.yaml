@@ -21,14 +21,15 @@
 # 5. AI 总结 → 专业根因分析
 
 name: anr_analysis
-version: "3.0"
+version: "1.0"
 type: composite
+category: app_lifecycle
 
 meta:
   display_name: "ANR 分析"
-  description: "先定性再定量的 ANR 全链路根因分析：系统健康检查 → ANR 分类 → 深度分析 → 根因定位"
+  description: "检测和分析应用程序无响应 (ANR) 事件"
   icon: "error"
-  tags: [anr, timeout, block, composite, system, app]
+  tags: [anr, freeze, composite]
 
 triggers:
   keywords:
@@ -66,7 +67,25 @@ steps:
     name: "ANR 检测"
     display:
       level: key
+      layer: overview
       title: "ANR 检测"
+    synthesize:
+      role: overview
+      fields:
+        - key: total_anr_count
+          label: ANR 总数
+        - key: affected_process_count
+          label: 受影响进程数
+        - key: anr_span_seconds
+          label: ANR 时间跨度
+          format: "{{value}} 秒"
+      insights:
+        - condition: "total_anr_count === 0"
+          template: "未检测到 ANR 事件"
+        - condition: "total_anr_count > 0 && total_anr_count <= 3"
+          template: "检测到 {{total_anr_count}} 个 ANR 事件，影响 {{affected_process_count}} 个进程"
+        - condition: "total_anr_count > 3"
+          template: "⚠️ 检测到 {{total_anr_count}} 个 ANR，可能是系统级问题"
     sql: |
       SELECT
         COUNT(*) as total_anr_count,
@@ -86,7 +105,25 @@ steps:
     name: "系统 CPU 健康状况"
     display:
       level: key
+      layer: overview
       title: "系统 CPU 状况"
+    synthesize:
+      role: overview
+      fields:
+        - key: core_type
+          label: 核心类型
+        - key: avg_util_pct
+          label: 平均利用率
+          format: "{{value}}%"
+        - key: status
+          label: 状态
+      insights:
+        - condition: "status === 'overloaded'"
+          template: "⚠️ {{core_type}} 核心过载 ({{avg_util_pct}}%)，系统繁忙"
+        - condition: "status === 'busy'"
+          template: "{{core_type}} 核心较忙 ({{avg_util_pct}}%)"
+        - condition: "status === 'normal'"
+          template: "{{core_type}} 核心负载正常 ({{avg_util_pct}}%)"
     sql: |
       WITH first_anr AS (
         SELECT
@@ -97,10 +134,19 @@ steps:
         ORDER BY ts ASC
         LIMIT 1
       ),
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
       cpu_time AS (
         SELECT
           ss.cpu,
-          CASE WHEN ss.cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+          COALESCE(c.core_type, 'little') as core_type,
           SUM(
             CASE
               WHEN ss.ts < fa.anr_ts AND ss.ts + ss.dur > fa.anr_ts - fa.timeout_ns
@@ -110,6 +156,7 @@ steps:
           ) as active_ns
         FROM sched_slice ss
         CROSS JOIN first_anr fa
+        LEFT JOIN cpu_info c ON ss.cpu = c.cpu
         WHERE ss.ts < fa.anr_ts
           AND ss.ts + ss.dur > fa.anr_ts - fa.timeout_ns
         GROUP BY ss.cpu
@@ -145,6 +192,7 @@ steps:
     name: "内存压力检测"
     display:
       level: detail
+      layer: list
       title: "内存压力"
     sql: |
       WITH first_anr AS (
@@ -176,6 +224,7 @@ steps:
     name: "IO 负载检测"
     display:
       level: detail
+      layer: list
       title: "IO 负载"
     sql: |
       WITH first_anr AS (
@@ -219,6 +268,7 @@ steps:
     name: "系统冻结检测"
     display:
       level: key
+      layer: overview
       title: "系统冻结检测"
     sql: |
       WITH first_anr AS (
@@ -272,7 +322,27 @@ steps:
     name: "ANR 概览统计"
     display:
       level: key
+      layer: overview
       title: "ANR 概览"
+    synthesize:
+      role: overview
+      fields:
+        - key: anr_type
+          label: ANR 类型
+        - key: anr_count
+          label: 数量
+        - key: type_display
+          label: 类型说明
+        - key: avg_anr_dur_ms
+          label: 平均超时时长
+          format: "{{value}} ms"
+      insights:
+        - condition: "anr_type === 'INPUT_DISPATCHING_TIMEOUT'"
+          template: "输入超时 {{anr_count}} 次：主线程 5 秒未响应"
+        - condition: "anr_type === 'BROADCAST_OF_INTENT'"
+          template: "广播超时 {{anr_count}} 次：BroadcastReceiver 处理超时"
+        - condition: "anr_type === 'EXECUTING_SERVICE'"
+          template: "服务超时 {{anr_count}} 次：Service 生命周期方法超时"
     sql: |
       SELECT
         anr_type,
@@ -310,7 +380,27 @@ steps:
     name: "获取 ANR 事件列表"
     display:
       level: key
+      layer: list
       title: "ANR 事件列表"
+    synthesize:
+      role: list
+      groupBy:
+        field: anr_type
+        label: ANR 类型
+        aggregations:
+          - type: count
+            label: 数量
+          - type: avg
+            field: anr_dur_ms
+            label: 平均耗时
+      fields:
+        - key: process_name
+          label: 进程名
+        - key: type_display
+          label: 类型
+        - key: anr_dur_ms
+          label: 超时时长
+          format: "{{value}} ms"
     sql: |
       SELECT
         error_id,
@@ -348,6 +438,7 @@ steps:
     name: "Top CPU 进程"
     display:
       level: detail
+      layer: list
       title: "ANR 期间 Top CPU 进程"
     sql: |
       WITH first_anr AS (
@@ -397,7 +488,24 @@ steps:
     name: "ANR 事件详细分析"
     display:
       level: key
+      layer: deep
       title: "ANR 深度分析"
+    synthesize:
+      role: clusters
+      clusterBy:
+        field: anr_type
+        label: ANR 类型
+      fields:
+        - key: process_name
+          label: 进程名
+        - key: anr_type
+          label: 类型
+        - key: main_thread_state
+          label: 主线程状态
+        - key: blocking_reason
+          label: 阻塞原因
+      insights:
+        - template: "ANR 事件详细分析，按类型分组"
     source: anr_events
     skill: anr_detail
     item_params:
@@ -420,7 +528,23 @@ steps:
     name: "ANR 诊断"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - condition: "severity === 'critical'"
+          template: "🔴 严重问题：{{diagnosis}}"
+        - condition: "severity === 'warning'"
+          template: "🟡 警告：{{diagnosis}}"
+        - template: "ANR 诊断：{{diagnosis}}"
     inputs: [detection, cpu_health, memory_pressure, io_load, freeze_check, overview, anr_events, top_processes]
     rules:
       # === 系统级问题判定 ===
@@ -524,6 +648,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "ANR 分析总结"
     inputs: [detection, cpu_health, memory_pressure, io_load, freeze_check, overview, anr_events, top_processes, analyze_anr_events, anr_diagnosis]
     prompt: |

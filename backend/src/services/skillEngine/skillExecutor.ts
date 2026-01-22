@@ -29,6 +29,15 @@ import {
   DisplayLevel,
   SkillEvent,
 } from './types';
+import logger from '../../utils/logger';
+import {
+  DataEnvelope,
+  ColumnDefinition,
+  createDataEnvelope,
+  buildColumnDefinitions,
+  displayResultToEnvelope,
+  layeredResultToEnvelopes,
+} from '../../types/dataContract';
 
 // =============================================================================
 // Layered Result Types
@@ -498,18 +507,7 @@ function processDisplayConfig(
  * The Skill YAML should output data with field names that match frontend expectations.
  */
 function transformDeepFrameAnalysis(displayResults: any[]): { diagnosis_summary: string; full_analysis: any } {
-  console.log('[transformDeepFrameAnalysis] Input displayResults:', {
-    count: displayResults.length,
-    stepIds: displayResults.map(dr => dr.stepId),
-    // 打印每个步骤的数据结构概要
-    stepDataSummary: displayResults.map(dr => ({
-      stepId: dr.stepId,
-      hasData: !!dr.data,
-      dataType: dr.data ? (Array.isArray(dr.data) ? 'array' : typeof dr.data) : 'null',
-      isTableFormat: !!(dr.data?.columns && dr.data?.rows),
-      rowCount: dr.data?.rows?.length || (Array.isArray(dr.data) ? dr.data.length : 0),
-    })),
-  });
+  logger.debug('SkillExecutor', `transformDeepFrameAnalysis: ${displayResults.length} steps [${displayResults.map(dr => dr.stepId).join(', ')}]`);
 
   const fullAnalysis: any = {
     quadrants: { main_thread: {}, render_thread: {} },
@@ -558,22 +556,13 @@ function transformDeepFrameAnalysis(displayResults: any[]): { diagnosis_summary:
 
     // Handle diagnostic step specially (extracts diagnosis text)
     if (stepId === 'frame_diagnosis') {
-      console.log('[transformDeepFrameAnalysis] Processing frame_diagnosis step:', {
-        hasRawData: !!rawData,
-        rawDataKeys: rawData ? Object.keys(rawData) : [],
-        hasDiagnostics: !!rawData?.diagnostics,
-        diagnosticsLength: rawData?.diagnostics?.length || 0,
-        diagnosticsPreview: rawData?.diagnostics?.slice(0, 2),
-      });
       const diagnostics = rawData?.diagnostics || [];
       if (Array.isArray(diagnostics) && diagnostics.length > 0) {
         diagnosisSummary = diagnostics
           .filter((d: any) => d.diagnosis)
           .map((d: any) => d.diagnosis)
           .join('; ');
-        console.log('[transformDeepFrameAnalysis] Extracted diagnosisSummary:', diagnosisSummary);
-      } else {
-        console.log('[transformDeepFrameAnalysis] No diagnostics found in frame_diagnosis');
+        logger.debug('SkillExecutor', `frame_diagnosis: ${diagnostics.length} diagnostics`);
       }
       continue;
     }
@@ -581,11 +570,6 @@ function transformDeepFrameAnalysis(displayResults: any[]): { diagnosis_summary:
     // Handle root_cause_summary step - extract primary_cause as diagnosis
     // stepId is 'root_cause_summary' (from skill step id), not 'root_cause' (save_as variable name)
     if (stepId === 'root_cause_summary') {
-      console.log('[transformDeepFrameAnalysis] Processing root_cause_summary step:', {
-        hasData: !!rawData,
-        dataLength: Array.isArray(rawData) ? rawData.length : (Array.isArray(dataArray) ? dataArray.length : 'not array'),
-        firstRow: dataArray.length > 0 ? dataArray[0] : null,
-      });
       // Extract primary_cause as the main diagnosis
       if (dataArray.length > 0) {
         const rootCause = dataArray[0];
@@ -595,7 +579,6 @@ function transformDeepFrameAnalysis(displayResults: any[]): { diagnosis_summary:
           if (rootCause.secondary_info) {
             diagnosisSummary += ` (${rootCause.secondary_info})`;
           }
-          console.log('[transformDeepFrameAnalysis] Extracted diagnosis from root_cause_summary:', diagnosisSummary);
         }
       }
       continue;
@@ -729,10 +712,7 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
         if (deepLayer) {
           // 特殊处理 iterator 结果：每个迭代项都是单独的 deep 条目
           if (normalizedStep.stepType === 'iterator' && Array.isArray(normalizedStep.data)) {
-            console.log('[organizeByLayer] Processing iterator step for deep layer:', {
-              stepId: normalizedStep.stepId,
-              dataLength: normalizedStep.data.length,
-            });
+            logger.debug('SkillExecutor', `organizeByLayer: iterator step ${normalizedStep.stepId} with ${normalizedStep.data.length} items`);
 
             // Iterator 返回 { itemIndex, item, result }[] 数组
             for (let i = 0; i < normalizedStep.data.length; i++) {
@@ -772,18 +752,8 @@ function organizeByLayer(steps: StepResult[]): LayeredResult['layers'] {
               (frameStepResult as any).item = item;
 
               deepLayer[sessionId][frameId] = frameStepResult;
-
-              if (i < 3) {
-                console.log(`[organizeByLayer] Added deep frame ${i}:`, {
-                  sessionId,
-                  frameId,
-                  hasData: !!transformedData,
-                  dataKeys: transformedData ? Object.keys(transformedData) : [],
-                  displayResultsCount: displayResults.length,
-                });
-              }
             }
-            console.log('[organizeByLayer] Deep layer after iterator:', Object.keys(deepLayer));
+            logger.debug('SkillExecutor', `organizeByLayer: deep layer sessions: [${Object.keys(deepLayer).join(', ')}]`);
           } else if (normalizedStep.stepType === 'atomic' && Array.isArray(normalizedStep.data) && normalizedStep.data.length > 0) {
             // 检查是否是帧列表数据（如 get_app_jank_frames）
             // 如果 data 是数组且每个元素都有 frame_id 或 frame_index，展开为多个帧
@@ -965,6 +935,20 @@ export class SkillExecutor {
       }
     }
 
+    // 检查表依赖
+    const prereqCheck = await this.checkPrerequisites(skill, traceId);
+    if (!prereqCheck.success) {
+      return {
+        skillId,
+        skillName: skill.meta.display_name,
+        success: false,
+        displayResults: [],
+        diagnostics: [],
+        executionTimeMs: Date.now() - startTime,
+        error: `Skipped: ${prereqCheck.error}`,
+      };
+    }
+
     try {
       const displayResults: DisplayResult[] = [];
       const diagnostics: DiagnosticResult[] = [];
@@ -975,6 +959,24 @@ export class SkillExecutor {
       switch (skill.type) {
         case 'atomic':
           const atomicResult = await this.executeAtomicSkill(skill, context);
+          // Handle atomic skill errors
+          if (!atomicResult.success) {
+            this.emit({
+              type: 'skill_error',
+              skillId,
+              data: { error: atomicResult.error },
+            });
+
+            return {
+              skillId,
+              skillName: skill.meta.display_name,
+              success: false,
+              displayResults: [],
+              diagnostics: [],
+              executionTimeMs: Date.now() - startTime,
+              error: atomicResult.error,
+            };
+          }
           if (atomicResult.display) {
             displayResults.push(this.createDisplayResult('root', skill.meta.display_name, atomicResult, skill.output?.display));
           }
@@ -1087,8 +1089,8 @@ export class SkillExecutor {
         },
         defaultExpanded: ['overview', 'list'],
         metadata: {
-          skillName: 'unknown',
-          version: 'unknown',
+          skillName: skill.name,
+          version: skill.version || '1.0.0',
           executedAt: new Date().toISOString()
         }
       };
@@ -1154,7 +1156,6 @@ export class SkillExecutor {
             success: stepResult.success,
             config,  // 包含 YAML 中定义的配置（如果有）
           });
-          console.log(`[executeCompositeSkill] Collected synthesize data from step: ${step.id}, config: ${config ? config.role : 'legacy'}`);
         }
 
         stepResults.push(stepResult);
@@ -1179,9 +1180,7 @@ export class SkillExecutor {
         synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
       };
 
-      if (synthesizeData.length > 0) {
-        console.log(`[executeCompositeSkill] Collected ${synthesizeData.length} synthesize data items for final summary`);
-      }
+      // synthesizeData collected for final summary (debug logging removed)
 
       return result;
     } catch (error) {
@@ -1408,6 +1407,64 @@ export class SkillExecutor {
         };
       }
       throw error;
+    }
+  }
+
+  /**
+   * 检查 prerequisites 条件 (required_tables, optional_tables)
+   */
+  private async checkPrerequisites(
+    skill: SkillDefinition,
+    traceId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!skill.prerequisites) return { success: true };
+
+    const { required_tables } = skill.prerequisites;
+
+    if (!required_tables || required_tables.length === 0) {
+      return { success: true };
+    }
+
+    try {
+      // 查询 sqlite_master 检查表是否存在
+      const tablesToCheck = required_tables.map(t => `'${t}'`).join(',');
+      const query = `
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table' AND name IN (${tablesToCheck})
+      `;
+
+      const result = await this.traceProcessor.query(traceId, query);
+      const existingTables = new Set<string>();
+
+      // 处理查询结果
+      if (result && result.numRecords > 0) {
+        // 兼容不同的查询结果格式 (columns/rows 或 object array)
+        if (result.columns && result.rows) {
+          const nameIdx = result.columns.indexOf('name');
+          if (nameIdx >= 0) {
+            result.rows.forEach((row: any[]) => existingTables.add(row[nameIdx] as string));
+          }
+        } else if (Array.isArray(result)) {
+          result.forEach((row: any) => existingTables.add(row.name));
+        }
+      }
+
+      // 检查缺少的表
+      const missingTables = required_tables.filter(t => !existingTables.has(t));
+
+      if (missingTables.length > 0) {
+        return {
+          success: false,
+          error: `Trace is missing required tables: ${missingTables.join(', ')}`
+        };
+      }
+
+      return { success: true };
+    } catch (e: any) {
+      console.error(`[SkillExecutor] Failed to check prerequisites: ${e.message}`);
+      //为了健壮性，查询失败时不阻止执行，可能是 traceProcessor 问题
+      return { success: true };
     }
   }
 
@@ -2003,13 +2060,56 @@ export class SkillExecutor {
   }
 
   /**
+   * 创建 DataEnvelope (v2.0 数据契约格式)
+   *
+   * DataEnvelope 是自描述的数据容器，包含:
+   * - meta: 数据来源和版本信息
+   * - data: 实际数据内容
+   * - display: 显示配置（包括列定义）
+   *
+   * 前端可以根据 display.columns 配置进行通用渲染，无需硬编码字段名。
+   */
+  private buildDataEnvelope(
+    skillId: string,
+    stepId: string,
+    title: string,
+    stepResult: StepResult,
+    displayConfig?: DisplayConfig,
+    sql?: string
+  ): DataEnvelope {
+    // First create the DisplayResult using existing logic
+    const displayResult = this.createDisplayResult(stepId, title, stepResult, displayConfig, sql);
+
+    // Extract column definitions from config or infer from data
+    const explicitColumns = (displayConfig as any)?.columns as Partial<ColumnDefinition>[] | undefined;
+
+    // Build the DataEnvelope
+    return displayResultToEnvelope(displayResult, skillId, explicitColumns);
+  }
+
+  /**
+   * 将 SkillExecutionResult 转换为 DataEnvelope 数组
+   *
+   * 用于 v2.0 数据契约，统一 SSE 事件格式
+   */
+  public static toDataEnvelopes(
+    result: SkillExecutionResult,
+    columnDefinitions?: Record<string, Partial<ColumnDefinition>[]>
+  ): DataEnvelope[] {
+    return result.displayResults.map(dr => {
+      const explicitColumns = columnDefinitions?.[dr.stepId];
+      return displayResultToEnvelope(dr, result.skillId, explicitColumns);
+    });
+  }
+
+  /**
    * 检查数据是否是迭代器结果
    */
   private isIteratorResult(data: any[]): boolean {
     if (data.length === 0) return false;
     const first = data[0];
     return typeof first === 'object' && first !== null &&
-           'itemIndex' in first && 'item' in first && 'result' in first;
+      'itemIndex' in first && 'item' in first && 'result' in first;
   }
 
   /**
@@ -2243,6 +2343,311 @@ export class SkillExecutor {
       return obj;
     });
   }
+}
+
+// =============================================================================
+// Module Expert Response Types (Cross-Domain Expert System)
+// =============================================================================
+
+import {
+  FindingSchema,
+  SuggestionSchema,
+} from './types';
+
+/**
+ * Structured finding extracted from module skill execution
+ */
+export interface ExtractedFinding {
+  id: string;
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  description?: string;
+  evidence: Record<string, any>;
+  sourceModule: string;
+  confidence: number;
+}
+
+/**
+ * Structured suggestion for follow-up analysis
+ */
+export interface ExtractedSuggestion {
+  id: string;
+  targetModule: string;
+  questionTemplate: string;
+  params: Record<string, any>;
+  priority: number;
+  reason: string;
+}
+
+/**
+ * Complete response from a module skill invocation
+ * Used by cross-domain experts to understand module analysis results
+ */
+export interface ModuleSkillResponse {
+  success: boolean;
+  data: Record<string, any>;
+  findings: ExtractedFinding[];
+  suggestions: ExtractedSuggestion[];
+  executionTimeMs: number;
+  error?: string;
+}
+
+/**
+ * Extract findings from skill execution results based on findingsSchema
+ */
+export function extractFindings(
+  skillName: string,
+  findingsSchema: FindingSchema[] | undefined,
+  executionContext: SkillExecutionContext,
+  stepResults: Record<string, StepResult>
+): ExtractedFinding[] {
+  if (!findingsSchema || findingsSchema.length === 0) {
+    return [];
+  }
+
+  const findings: ExtractedFinding[] = [];
+
+  for (const schema of findingsSchema) {
+    // Check if this finding type was detected
+    // The condition is implicitly "data exists and has values"
+    // More sophisticated rules can be added later
+    const evidenceData: Record<string, any> = {};
+    let hasEvidence = false;
+
+    // Collect evidence from specified fields
+    if (schema.evidenceFields) {
+      for (const fieldPath of schema.evidenceFields) {
+        const value = resolveFieldPath(fieldPath, executionContext, stepResults);
+        if (value !== undefined && value !== null) {
+          evidenceData[fieldPath] = value;
+          hasEvidence = true;
+        }
+      }
+    }
+
+    // Only create finding if we have evidence
+    if (hasEvidence) {
+      // Substitute template placeholders
+      const title = substituteTemplate(schema.titleTemplate, evidenceData);
+      const description = schema.descriptionTemplate
+        ? substituteTemplate(schema.descriptionTemplate, evidenceData)
+        : undefined;
+
+      findings.push({
+        id: `${skillName}_${schema.id}`,
+        severity: schema.severity,
+        title,
+        description,
+        evidence: evidenceData,
+        sourceModule: skillName,
+        confidence: calculateConfidence(evidenceData, schema.evidenceFields),
+      });
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Extract suggestions from skill execution results based on suggestionsSchema
+ */
+export function extractSuggestions(
+  skillName: string,
+  suggestionsSchema: SuggestionSchema[] | undefined,
+  executionContext: SkillExecutionContext,
+  stepResults: Record<string, StepResult>
+): ExtractedSuggestion[] {
+  if (!suggestionsSchema || suggestionsSchema.length === 0) {
+    return [];
+  }
+
+  const suggestions: ExtractedSuggestion[] = [];
+
+  for (const schema of suggestionsSchema) {
+    // Evaluate the condition to see if this suggestion applies
+    const conditionMet = evaluateSuggestionCondition(
+      schema.condition,
+      executionContext,
+      stepResults
+    );
+
+    if (conditionMet) {
+      // Map parameters from current results to target params
+      const params: Record<string, any> = {};
+      if (schema.paramsMapping) {
+        for (const [targetKey, sourcePath] of Object.entries(schema.paramsMapping)) {
+          const value = resolveFieldPath(sourcePath, executionContext, stepResults);
+          if (value !== undefined) {
+            params[targetKey] = value;
+          }
+        }
+      }
+
+      // Substitute template placeholders in question
+      const questionTemplate = substituteTemplate(schema.questionTemplate, params);
+
+      suggestions.push({
+        id: `${skillName}_${schema.id}`,
+        targetModule: schema.targetModule,
+        questionTemplate,
+        params,
+        priority: schema.priority ?? 100,
+        reason: `Triggered by condition: ${schema.condition}`,
+      });
+    }
+  }
+
+  // Sort by priority (lower = higher priority)
+  suggestions.sort((a, b) => a.priority - b.priority);
+
+  return suggestions;
+}
+
+/**
+ * Resolve a field path to get its value from context or step results
+ * Supports paths like: "step_id.field_name", "params.value", "variables.name"
+ */
+function resolveFieldPath(
+  path: string,
+  context: SkillExecutionContext,
+  stepResults: Record<string, StepResult>
+): any {
+  const parts = path.split('.');
+  if (parts.length === 0) return undefined;
+
+  const root = parts[0];
+  const rest = parts.slice(1);
+
+  let value: any;
+
+  // Try to resolve from different sources
+  if (stepResults[root]?.data !== undefined) {
+    value = stepResults[root].data;
+  } else if (context.variables[root] !== undefined) {
+    value = context.variables[root];
+  } else if (context.params[root] !== undefined) {
+    value = context.params[root];
+  } else if (context.inherited[root] !== undefined) {
+    value = context.inherited[root];
+  } else {
+    return undefined;
+  }
+
+  // Navigate the rest of the path
+  for (const part of rest) {
+    if (value === undefined || value === null) return undefined;
+
+    // Handle array index
+    const arrayMatch = part.match(/^(\w+)\[(\d+)\]$/);
+    if (arrayMatch) {
+      value = value[arrayMatch[1]]?.[parseInt(arrayMatch[2])];
+    } else if (Array.isArray(value) && !isNaN(parseInt(part))) {
+      value = value[parseInt(part)];
+    } else {
+      value = value[part];
+    }
+  }
+
+  return value;
+}
+
+/**
+ * Substitute template placeholders {field_name} with actual values
+ */
+function substituteTemplate(
+  template: string,
+  values: Record<string, any>
+): string {
+  return template.replace(/\{(\w+)\}/g, (_, key) => {
+    const value = values[key];
+    if (value === undefined || value === null) return `{${key}}`;
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  });
+}
+
+/**
+ * Evaluate a suggestion condition expression
+ * Supports simple comparisons like: "field != value", "field > value"
+ */
+function evaluateSuggestionCondition(
+  condition: string,
+  context: SkillExecutionContext,
+  stepResults: Record<string, StepResult>
+): boolean {
+  try {
+    // Parse simple conditions: "field operator value"
+    const operators = ['!=', '==', '>=', '<=', '>', '<', '===', '!=='];
+
+    for (const op of operators) {
+      const parts = condition.split(op).map(s => s.trim());
+      if (parts.length === 2) {
+        const leftPath = parts[0];
+        const rightValue = parts[1];
+
+        const leftValue = resolveFieldPath(leftPath, context, stepResults);
+
+        // Handle quoted string values
+        let right: any = rightValue;
+        if (rightValue.startsWith('"') && rightValue.endsWith('"')) {
+          right = rightValue.slice(1, -1);
+        } else if (rightValue.startsWith("'") && rightValue.endsWith("'")) {
+          right = rightValue.slice(1, -1);
+        } else if (!isNaN(Number(rightValue))) {
+          right = Number(rightValue);
+        } else if (rightValue === 'true') {
+          right = true;
+        } else if (rightValue === 'false') {
+          right = false;
+        } else if (rightValue === 'null' || rightValue === 'undefined') {
+          right = null;
+        } else {
+          // It might be a field path
+          right = resolveFieldPath(rightValue, context, stepResults);
+        }
+
+        // Perform comparison
+        switch (op) {
+          case '!=':
+          case '!==':
+            return leftValue !== right;
+          case '==':
+          case '===':
+            return leftValue === right;
+          case '>':
+            return leftValue > right;
+          case '<':
+            return leftValue < right;
+          case '>=':
+            return leftValue >= right;
+          case '<=':
+            return leftValue <= right;
+        }
+      }
+    }
+
+    // If no operator found, treat as truthy check
+    const value = resolveFieldPath(condition, context, stepResults);
+    return Boolean(value);
+  } catch (e) {
+    console.warn(`[extractSuggestions] Failed to evaluate condition: ${condition}`, e);
+    return false;
+  }
+}
+
+/**
+ * Calculate confidence score based on evidence completeness
+ */
+function calculateConfidence(
+  evidence: Record<string, any>,
+  expectedFields?: string[]
+): number {
+  if (!expectedFields || expectedFields.length === 0) {
+    return Object.keys(evidence).length > 0 ? 0.7 : 0;
+  }
+
+  const foundFields = expectedFields.filter(f => evidence[f] !== undefined);
+  return foundFields.length / expectedFields.length;
 }
 
 // =============================================================================

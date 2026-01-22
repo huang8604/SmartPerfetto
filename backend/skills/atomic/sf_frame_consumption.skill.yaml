@@ -1,12 +1,17 @@
 name: sf_frame_consumption
 version: "1.0"
 type: atomic
+category: rendering
 
 meta:
-  display_name: "SurfaceFlinger 帧消费统计"
-  description: "从 SurfaceFlinger 消费端统计实际帧率（基于 BufferTX/present fence）"
-  icon: "display"
-  tags: [surfaceflinger, fps, consumption, buffer]
+  display_name: "SurfaceFlinger 帧消费分析"
+  description: "分析 SurfaceFlinger 消费帧的情况"
+  icon: "layers"
+  tags: [surfaceflinger, frame, consumption, atomic]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
 
 inputs:
   - name: package

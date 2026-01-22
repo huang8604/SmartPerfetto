@@ -38,6 +38,12 @@ export {
   SkillExecutor,
   createSkillExecutor,
   LayeredResult,
+  // Cross-Domain Expert System types and functions
+  ExtractedFinding,
+  ExtractedSuggestion,
+  ModuleSkillResponse,
+  extractFindings,
+  extractSuggestions,
 } from './skillExecutor';
 
 // =============================================================================
@@ -70,4 +76,39 @@ export {
   EventSummary,
   ProgressInfo,
 } from './eventCollector';
+
+// =============================================================================
+// Data Contract (v2.0 - DataEnvelope refactoring)
+// =============================================================================
+
+// Re-export DataEnvelope types and utilities for convenience
+export {
+  // Core types
+  DataEnvelope,
+  DataEnvelopeMeta,
+  DataEnvelopeDisplay,
+  ColumnDefinition,
+  ColumnType,
+  ColumnFormat,
+  ClickAction,
+  // Validation types
+  VALID_COLUMN_TYPES,
+  VALID_COLUMN_FORMATS,
+  VALID_CLICK_ACTIONS,
+  // Factory and utility functions
+  createDataEnvelope,
+  buildColumnDefinitions,
+  displayResultToEnvelope,
+  layeredResultToEnvelopes,
+  envelopeToDisplayResult,
+  envelopesToLayeredResult,
+  inferColumnDefinition,
+  validateDataEnvelope,
+  validateColumnDefinition,
+  generateEventId,
+  // SSE event types
+  DataEvent,
+  isDataEvent,
+  isLegacySkillEvent,
+} from '../../types/dataContract';
 

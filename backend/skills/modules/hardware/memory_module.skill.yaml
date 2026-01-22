@@ -1,0 +1,439 @@
+# =============================================================================
+# Hardware Memory Module Expert
+# =============================================================================
+# Provides memory analysis capabilities for cross-domain experts.
+# Answers questions about memory usage, LMK, dmabuf, and memory pressure.
+#
+# Key Analysis Areas:
+# - Memory bandwidth and utilization
+# - LMK (Low Memory Killer) events
+# - dmabuf/ion memory allocation
+# - PSI (Pressure Stall Information)
+# - Page fault analysis
+# - Memory pressure indicators
+# =============================================================================
+
+name: memory_module
+version: "1.0"
+type: composite
+category: hardware
+
+meta:
+  display_name: "内存分析"
+  description: "分析内存使用、LMK 事件、dmabuf 和内存压力"
+  tags: ["hardware", "memory", "lmk", "dmabuf", "psi", "oom"]
+
+# Module metadata
+module:
+  layer: hardware
+  component: Memory
+  subsystems:
+    - lmk
+    - dmabuf
+    - psi
+    - page_cache
+  relatedModules:
+    - framework_art
+    - kernel_scheduler
+    - hardware_cpu
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: memory_pressure_analysis
+      questionTemplate: "What is the memory pressure during {start_ts} to {end_ts}?"
+      requiredParams: []
+      optionalParams: [start_ts, end_ts]
+      description: "Analyze system memory pressure"
+
+    - id: lmk_events
+      questionTemplate: "Were there any LMK events affecting {package}?"
+      requiredParams: [package]
+      description: "Check for Low Memory Killer events"
+
+    - id: dmabuf_analysis
+      questionTemplate: "What is the dmabuf usage for package {package}?"
+      requiredParams: [package]
+      description: "Analyze dmabuf/graphics memory allocation"
+
+    - id: allocation_rate
+      questionTemplate: "What is the memory allocation rate for package {package}?"
+      requiredParams: [package]
+      description: "Analyze memory allocation patterns"
+
+    - id: memory_usage_timeline
+      questionTemplate: "How did memory usage change over time?"
+      requiredParams: []
+      description: "Track memory usage timeline"
+
+  findingsSchema:
+    - id: lmk_kill
+      severity: critical
+      titleTemplate: "LMK killed process: {process_name} (oom_adj={oom_adj})"
+      descriptionTemplate: "Low Memory Killer terminated process due to memory pressure"
+      evidenceFields: [process_name, oom_adj, memory_mb, timestamp]
+
+    - id: high_memory_pressure
+      severity: warning
+      titleTemplate: "High memory pressure: PSI {psi_level}%"
+      descriptionTemplate: "System experiencing memory pressure, may affect performance"
+      evidenceFields: [psi_level, free_memory_mb, cache_memory_mb]
+
+    - id: dmabuf_leak
+      severity: warning
+      titleTemplate: "Potential dmabuf leak: {growth_mb}MB growth"
+      descriptionTemplate: "dmabuf memory grew by {growth_mb}MB during trace"
+      evidenceFields: [growth_mb, start_mb, end_mb]
+
+    - id: high_allocation_rate
+      severity: warning
+      titleTemplate: "High allocation rate: {alloc_rate_mb_s}MB/s"
+      descriptionTemplate: "Memory allocation rate may cause GC pressure"
+      evidenceFields: [alloc_rate_mb_s, total_alloc_mb]
+
+    - id: memory_approaching_limit
+      severity: critical
+      titleTemplate: "Memory approaching limit: {usage_pct}% used"
+      descriptionTemplate: "Process memory near limit, risk of OOM"
+      evidenceFields: [usage_pct, used_mb, limit_mb]
+
+  suggestionsSchema:
+    - id: check_gc_activity
+      condition: "high_allocation_rate == true"
+      targetModule: art_module
+      questionTemplate: "Is GC activity high due to allocation rate?"
+      paramsMapping:
+        package: package
+      priority: 1
+
+    - id: check_cpu_during_pressure
+      condition: "psi_level > 50"
+      targetModule: scheduler_module
+      questionTemplate: "How is CPU scheduling affected by memory pressure?"
+      paramsMapping: {}
+      priority: 2
+
+prerequisites:
+  required_tables:
+    - counter
+    - counter_track
+  optional_tables:
+    - memory_snapshot
+    - android_lmk
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "Target package name"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Analysis start timestamp"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "Analysis end timestamp"
+
+steps:
+  # Step 1: System memory overview
+  - id: memory_overview
+    type: atomic
+    name: "系统内存概览"
+    sql: |
+      SELECT
+        ct.name AS memory_type,
+        CAST(MIN(c.value) / 1024 / 1024 AS INTEGER) AS min_mb,
+        CAST(MAX(c.value) / 1024 / 1024 AS INTEGER) AS max_mb,
+        CAST(AVG(c.value) / 1024 / 1024 AS INTEGER) AS avg_mb,
+        COUNT(*) AS sample_count
+      FROM counter c
+      JOIN counter_track ct ON c.track_id = ct.id
+      WHERE ct.name LIKE '%mem%'
+        OR ct.name LIKE '%Mem%'
+        OR ct.name LIKE '%memory%'
+        OR ct.name LIKE '%Memory%'
+        OR ct.name LIKE '%MemFree%'
+        OR ct.name LIKE '%MemAvailable%'
+        OR ct.name LIKE '%Cached%'
+        OR ct.name LIKE '%Buffers%'
+        OR ct.name LIKE '%SwapFree%'
+      GROUP BY ct.name
+      ORDER BY avg_mb DESC
+      LIMIT 20
+    display:
+      level: key
+      layer: overview
+      title: "系统内存概览"
+    save_as: memory_overview
+    synthesize:
+      role: overview
+      fields:
+        - key: memory_type
+          label: 内存类型
+        - key: avg_mb
+          label: 平均值
+          format: "{{value}}MB"
+        - key: max_mb
+          label: 峰值
+          format: "{{value}}MB"
+
+  # Step 2: LMK events
+  - id: lmk_events
+    type: atomic
+    name: "LMK 事件"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS lmk_event,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      WHERE s.name GLOB '*lmk*'
+        OR s.name GLOB '*LMK*'
+        OR s.name GLOB '*lowmemory*'
+        OR s.name GLOB '*oom*'
+        OR s.name GLOB '*OOM*'
+        OR s.name GLOB '*kill*memory*'
+      ORDER BY s.ts DESC
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "LMK 事件"
+    save_as: lmk_events
+    on_empty: "未检测到 LMK 事件"
+
+  # Step 3: dmabuf/ion memory
+  - id: dmabuf_usage
+    type: atomic
+    name: "dmabuf 内存使用"
+    sql: |
+      SELECT
+        ct.name AS buffer_type,
+        CAST(MIN(c.value) / 1024 / 1024 AS INTEGER) AS min_mb,
+        CAST(MAX(c.value) / 1024 / 1024 AS INTEGER) AS max_mb,
+        CAST((MAX(c.value) - MIN(c.value)) / 1024 / 1024 AS INTEGER) AS growth_mb,
+        COUNT(*) AS sample_count
+      FROM counter c
+      JOIN counter_track ct ON c.track_id = ct.id
+      WHERE ct.name GLOB '*dmabuf*'
+        OR ct.name GLOB '*ion*'
+        OR ct.name GLOB '*gpu*mem*'
+        OR ct.name GLOB '*graphics*'
+      GROUP BY ct.name
+      ORDER BY max_mb DESC
+    display:
+      level: detail
+      layer: overview
+      title: "dmabuf 内存"
+    save_as: dmabuf_usage
+
+  # Step 4: Memory pressure (PSI)
+  - id: memory_psi
+    type: atomic
+    name: "内存压力指标"
+    sql: |
+      SELECT
+        ct.name AS psi_type,
+        CAST(AVG(c.value) AS REAL) AS avg_value,
+        CAST(MAX(c.value) AS REAL) AS max_value,
+        COUNT(*) AS sample_count
+      FROM counter c
+      JOIN counter_track ct ON c.track_id = ct.id
+      WHERE ct.name GLOB '*psi*'
+        OR ct.name GLOB '*PSI*'
+        OR ct.name GLOB '*pressure*'
+      GROUP BY ct.name
+      ORDER BY avg_value DESC
+    display:
+      level: detail
+      layer: overview
+      title: "内存压力 (PSI)"
+    save_as: memory_psi
+
+  # Step 5: Process memory counters
+  - id: process_memory
+    type: atomic
+    name: "进程内存"
+    sql: |
+      WITH process_mem AS (
+        SELECT
+          pt.name AS process_name,
+          ct.name AS counter_name,
+          CAST(AVG(c.value) / 1024 / 1024 AS INTEGER) AS avg_mb,
+          CAST(MAX(c.value) / 1024 / 1024 AS INTEGER) AS max_mb
+        FROM counter c
+        JOIN process_counter_track ct ON c.track_id = ct.id
+        JOIN process pt ON ct.upid = pt.upid
+        WHERE ct.name LIKE '%mem%'
+          OR ct.name LIKE '%rss%'
+          OR ct.name LIKE '%RSS%'
+          OR ct.name LIKE '%heap%'
+        GROUP BY pt.name, ct.name
+      )
+      SELECT
+        process_name,
+        counter_name,
+        avg_mb,
+        max_mb
+      FROM process_mem
+      WHERE avg_mb > 1
+      ORDER BY max_mb DESC
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "进程内存使用"
+    save_as: process_memory
+    optional: true
+
+  # Step 6: Memory timeline (sampled)
+  - id: memory_timeline
+    type: atomic
+    name: "内存时间线"
+    sql: |
+      WITH
+      time_range AS (
+        SELECT MIN(ts) as start_ts, MAX(ts) as end_ts FROM counter
+      ),
+      mem_samples AS (
+        SELECT
+          CAST((c.ts - (SELECT start_ts FROM time_range)) / 1e9 AS INTEGER) AS time_sec,
+          ct.name AS memory_type,
+          c.value / 1024 / 1024 AS value_mb
+        FROM counter c
+        JOIN counter_track ct ON c.track_id = ct.id
+        WHERE ct.name LIKE '%MemAvailable%'
+          OR ct.name LIKE '%MemFree%'
+      )
+      SELECT
+        time_sec,
+        memory_type,
+        CAST(AVG(value_mb) AS INTEGER) AS avg_mb
+      FROM mem_samples
+      GROUP BY time_sec, memory_type
+      ORDER BY time_sec
+      LIMIT 120
+    display:
+      level: detail
+      layer: list
+      title: "内存时间线"
+    save_as: memory_timeline
+
+  # Step 7: Page fault analysis
+  - id: page_fault_analysis
+    type: atomic
+    name: "页面错误分析"
+    sql: |
+      SELECT
+        ct.name AS fault_type,
+        CAST(SUM(c.value) AS INTEGER) AS total_faults,
+        CAST(AVG(c.value) AS REAL) AS avg_per_sample,
+        COUNT(*) AS sample_count
+      FROM counter c
+      JOIN counter_track ct ON c.track_id = ct.id
+      WHERE ct.name GLOB '*fault*'
+        OR ct.name GLOB '*pgfault*'
+        OR ct.name GLOB '*page*fault*'
+      GROUP BY ct.name
+      ORDER BY total_faults DESC
+    display:
+      level: detail
+      layer: overview
+      title: "页面错误"
+    save_as: page_faults
+    optional: true
+
+  # Step 8: Memory allocation events for target package
+  - id: allocation_events
+    type: atomic
+    name: "内存分配事件"
+    sql: |
+      SELECT
+        s.name AS alloc_event,
+        COUNT(*) AS event_count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND (s.name GLOB '*alloc*'
+             OR s.name GLOB '*Alloc*'
+             OR s.name GLOB '*malloc*'
+             OR s.name GLOB '*mmap*')
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "内存分配事件"
+    save_as: allocation_events
+
+  # Step 9: Diagnose memory issues
+  - id: memory_diagnosis
+    type: diagnostic
+    name: "内存诊断"
+    inputs: [memory_overview, lmk_events, dmabuf_usage, memory_psi, process_memory]
+    rules:
+      - condition: "lmk_events.data.length > 0"
+        diagnosis: "检测到 ${lmk_events.data.length} 个 LMK 事件，系统内存压力大"
+        confidence: critical
+        suggestions:
+          - "检查内存泄漏"
+          - "减少后台进程内存使用"
+          - "优化缓存策略"
+        evidence_fields:
+          - lmk_events.data.length
+          - lmk_events.data[0]?.lmk_event
+
+      - condition: "dmabuf_usage.data[0]?.growth_mb > 50"
+        diagnosis: "dmabuf 内存增长 ${dmabuf_usage.data[0]?.growth_mb}MB，可能存在泄漏"
+        confidence: high
+        suggestions:
+          - "检查 Surface/Texture 是否正确释放"
+          - "检查 Bitmap 缓存策略"
+          - "使用 Android Studio Memory Profiler 分析"
+        evidence_fields:
+          - dmabuf_usage.data[0]?.growth_mb
+          - dmabuf_usage.data[0]?.max_mb
+
+      - condition: "memory_psi.data[0]?.avg_value > 30"
+        diagnosis: "内存压力指标偏高: PSI 平均 ${memory_psi.data[0]?.avg_value}%"
+        confidence: high
+        suggestions:
+          - "系统内存紧张，考虑释放缓存"
+          - "减少内存密集型操作"
+          - "检查是否有内存泄漏"
+        evidence_fields:
+          - memory_psi.data[0]?.avg_value
+          - memory_psi.data[0]?.max_value
+
+      - condition: "memory_overview.data.find(m => m.memory_type.includes('Free'))?.min_mb < 100"
+        diagnosis: "可用内存最低降至 ${memory_overview.data.find(m => m.memory_type.includes('Free'))?.min_mb}MB"
+        confidence: high
+        suggestions:
+          - "系统内存极低，可能触发 LMK"
+          - "检查大内存消耗进程"
+        evidence_fields:
+          - memory_overview.data[0]?.min_mb
+
+      - condition: "process_memory.data[0]?.max_mb > 500"
+        diagnosis: "进程 ${process_memory.data[0]?.process_name} 内存峰值 ${process_memory.data[0]?.max_mb}MB"
+        confidence: medium
+        suggestions:
+          - "检查是否有大对象或集合"
+          - "考虑使用 LruCache"
+          - "分析堆内存组成"
+        evidence_fields:
+          - process_memory.data[0]?.process_name
+          - process_memory.data[0]?.max_mb
+    display:
+      level: key
+      layer: overview
+      title: "内存诊断结果"

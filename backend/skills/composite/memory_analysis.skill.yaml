@@ -18,6 +18,7 @@
 name: memory_analysis
 version: "2.1"
 type: composite
+category: memory
 
 meta:
   display_name: "内存性能分析"
@@ -51,6 +52,7 @@ steps:
     name: "获取目标进程"
     display:
       level: summary
+      layer: overview
       title: "目标进程"
     sql: |
       SELECT
@@ -70,8 +72,26 @@ steps:
   - id: gc_overview
     type: atomic
     name: "GC 概览"
+    synthesize:
+      role: overview
+      fields:
+        - key: total_gc_count
+          label: GC 次数
+        - key: total_gc_time_ms
+          label: GC 总耗时
+          format: "{{value}} ms"
+        - key: main_thread_gc_count
+          label: 主线程 GC
+        - key: gc_frequency_rating
+          label: 频率评级
+      insights:
+        - condition: "total_gc_count > 100"
+          template: "GC 频繁 ({{total_gc_count}} 次)，可能存在内存抖动"
+        - condition: "main_thread_gc_time_ms > 500"
+          template: "主线程 GC 耗时 {{main_thread_gc_time_ms}}ms，影响流畅度"
     display:
       level: key
+      layer: overview
       title: "GC 总体情况"
     sql: |
       WITH gc_events AS (
@@ -120,8 +140,22 @@ steps:
   - id: gc_stats
     type: atomic
     name: "GC 事件统计"
+    synthesize:
+      role: list
+      groupBy:
+        - field: gc_type
+          title: 按 GC 类型分布
+      fields:
+        - key: gc_type
+          label: GC 类型
+        - key: count
+          label: 次数
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
     display:
       level: key
+      layer: overview
       title: "GC 类型分布"
     sql: |
       SELECT
@@ -156,8 +190,22 @@ steps:
   - id: gc_frame_impact
     type: atomic
     name: "GC 与帧关联"
+    synthesize:
+      role: list
+      groupBy:
+        - field: impact
+          title: 按影响类型分布
+      fields:
+        - key: gc_name
+          label: GC 类型
+        - key: gc_dur_ms
+          label: GC 耗时
+          format: "{{value}} ms"
+        - key: impact
+          label: 影响
     display:
       level: key
+      layer: list
       title: "GC 导致的掉帧分析"
     sql: |
       WITH gc_events AS (
@@ -202,6 +250,7 @@ steps:
     name: "主线程 GC"
     display:
       level: key
+      layer: list
       title: "主线程 GC (可能导致掉帧)"
     sql: |
       SELECT
@@ -237,6 +286,7 @@ steps:
     name: "GC 期间主线程状态"
     display:
       level: detail
+      layer: list
       title: "GC 期间主线程状态分析"
     sql: |
       WITH main_thread AS (
@@ -287,6 +337,7 @@ steps:
     name: "GC 间隔分析"
     display:
       level: detail
+      layer: list
       title: "GC 间隔分析（内存抖动检测）"
     sql: |
       WITH gc_events AS (
@@ -333,6 +384,7 @@ steps:
     name: "长时间 GC"
     display:
       level: key
+      layer: list
       title: "耗时最长的 GC 事件"
     sql: |
       SELECT
@@ -358,8 +410,20 @@ steps:
   - id: memory_diagnosis
     type: diagnostic
     name: "内存诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "内存诊断：{{diagnosis}}"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
     inputs: [gc_overview, gc_stats, main_thread_gc, long_gc, gc_intervals]
     rules:
@@ -425,6 +489,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "内存分析总结"
     inputs: [target_process, gc_overview, gc_stats, main_thread_gc, gc_intervals, memory_diagnosis]
     prompt: |

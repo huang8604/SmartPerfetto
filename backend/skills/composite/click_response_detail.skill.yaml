@@ -9,16 +9,19 @@
 # - Binder 调用分析
 
 name: click_response_detail
-version: "2.0"
+version: "1.0"
 type: composite
+category: interaction
 
 meta:
-  display_name: "慢点击事件详细分析"
-  description: "分析单个慢输入事件的线程状态、Binder、大小核、四象限等详细信息"
-  icon: "hand-pointer"
-  tags: [click, input, detail, analysis, cpu, core, quadrant]
+  display_name: "点击详情分析"
+  description: "深入分析单个点击事件的处理流程"
+  icon: "gesture"
+  tags: [click, detail, interaction, composite]
 
 prerequisites:
+  required_tables:
+    - android_input_events, cpu, core, quadrant]
   modules:
     - android.binder
 
@@ -72,6 +75,7 @@ steps:
     name: "事件基本信息"
     display:
       level: key
+      layer: deep
       title: "事件详情"
     sql: |
       SELECT
@@ -105,6 +109,7 @@ steps:
     name: "大小核占比分析"
     display:
       level: key
+      layer: deep
       title: "大小核占比"
     sql: |
       WITH main_thread AS (
@@ -148,6 +153,7 @@ steps:
     name: "四大象限分析"
     display:
       level: key
+      layer: deep
       title: "四大象限分析"
     sql: |
       WITH main_thread AS (
@@ -205,6 +211,7 @@ steps:
     name: "阻塞原因分析"
     display:
       level: key
+      layer: deep
       title: "阻塞原因 Top5"
     sql: |
       WITH main_thread AS (
@@ -243,6 +250,7 @@ steps:
     name: "Binder 调用分析"
     display:
       level: key
+      layer: deep
       title: "Binder 调用"
     sql: |
       SELECT
@@ -268,6 +276,7 @@ steps:
     name: "慢点击诊断"
     display:
       level: key
+      layer: deep
       title: "问题诊断"
     inputs: [event_basic, cpu_core, quadrant, blocking, binder_calls]
     rules:

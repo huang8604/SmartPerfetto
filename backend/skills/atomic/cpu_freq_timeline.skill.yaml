@@ -1,12 +1,18 @@
 name: cpu_freq_timeline
 version: "1.0"
 type: atomic
+category: hardware
 
 meta:
   display_name: "CPU 频率变化时间线"
   description: "分析指定时间范围内各 CPU 核心的频率变化"
   icon: "speed"
   tags: [cpu, frequency, timeline, atomic]
+
+prerequisites:
+  required_tables:
+    - cpu_counter_track
+    - counter
 
 inputs:
   - name: start_ts
@@ -26,15 +32,37 @@ steps:
       level: detail
       title: "CPU 频率变化"
     sql: |
-      WITH freq_events AS (
+      WITH 
+      -- 动态检测 CPU 集群（基于最大频率）
+      cpu_max_freq AS (
+        SELECT cpu, MAX(value) as max_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq) as val FROM cpu_max_freq
+      ),
+      cpu_clusters AS (
+        SELECT cpu,
+          CASE
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
+            ELSE 'little'
+          END as cluster_type
+        FROM cpu_max_freq
+      ),
+      freq_events AS (
         SELECT
           c.ts,
           t.cpu,
           c.value as freq_khz,
-          CASE WHEN t.cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+          COALESCE(cl.cluster_type, 'unknown') as core_type,
           LAG(c.value) OVER (PARTITION BY t.cpu ORDER BY c.ts) as prev_freq_khz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN cpu_clusters cl ON t.cpu = cl.cpu
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts}
           AND c.ts < ${end_ts}
@@ -63,13 +91,35 @@ steps:
       level: summary
       title: "频率汇总"
     sql: |
-      WITH freq_data AS (
+      WITH 
+      -- 动态检测 CPU 集群
+      cpu_max_freq AS (
+        SELECT cpu, MAX(value) as max_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq) as val FROM cpu_max_freq
+      ),
+      cpu_clusters AS (
+        SELECT cpu,
+          CASE
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
+            ELSE 'little'
+          END as cluster_type
+        FROM cpu_max_freq
+      ),
+      freq_data AS (
         SELECT
           t.cpu,
-          CASE WHEN t.cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
+          COALESCE(cl.cluster_type, 'unknown') as core_type,
           c.value as freq_khz
         FROM counter c
         JOIN cpu_counter_track t ON c.track_id = t.id
+        LEFT JOIN cpu_clusters cl ON t.cpu = cl.cpu
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts}
           AND c.ts < ${end_ts}

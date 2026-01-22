@@ -17,9 +17,14 @@ import {
   AnalysisPlan,
   AnalysisTask,
   PipelineStage,
+  Evaluation,
+  EvaluationFeedback,
 } from '../types';
 import { BaseSubAgent } from './base/baseSubAgent';
 import { ModelRouter } from '../core/modelRouter';
+import {
+  EnhancedSessionContext,
+} from '../context/enhancedSessionContext';
 
 // 默认配置
 const DEFAULT_CONFIG: SubAgentConfig = {
@@ -121,12 +126,36 @@ ${previousContext}`;
 
   /**
    * 理解用户意图
+   * Phase 1.3: Now accepts sessionContext for multi-turn dialogue awareness
    */
-  async understandIntent(query: string, context: SubAgentContext): Promise<Intent> {
+  async understandIntent(
+    query: string,
+    context: SubAgentContext & { sessionContext?: EnhancedSessionContext }
+  ): Promise<Intent> {
+    // Build conversation history context if available (Phase 5: Multi-turn Dialogue)
+    let historyContext = '';
+    if (context.sessionContext) {
+      const turns = context.sessionContext.getAllTurns();
+      if (turns.length > 0) {
+        const recentTurns = turns.slice(-3); // Last 3 turns for context
+        historyContext = `
+对话历史（最近 ${recentTurns.length} 轮）:
+${recentTurns.map((t, i) => `第${t.turnIndex + 1}轮: "${t.query}" → ${t.findings.length} 个发现`).join('\n')}
+
+基于对话历史，用户当前问题可能是：
+1. 深入追问之前的发现
+2. 切换到新的分析维度
+3. 要求澄清或更多细节
+
+请结合历史理解当前查询意图。
+`;
+      }
+    }
+
     const prompt = `分析以下用户查询，提取分析意图：
 
 用户查询: "${query}"
-
+${historyContext}
 请以 JSON 格式返回意图分析结果：
 {
   "primaryGoal": "用户的主要目标",
@@ -157,15 +186,37 @@ ${previousContext}`;
 
   /**
    * 创建分析计划
+   * Phase 1.2: Now accepts previousEvaluation for feedback-driven refinement
    */
-  async createPlan(intent: Intent, context: SubAgentContext): Promise<AnalysisPlan> {
+  async createPlan(
+    intent: Intent,
+    context: SubAgentContext,
+    previousEvaluation?: Evaluation
+  ): Promise<AnalysisPlan> {
+    // Build feedback context from previous evaluation (Phase 1.2)
+    let feedbackContext = '';
+    if (previousEvaluation?.feedback) {
+      const fb = previousEvaluation.feedback;
+      feedbackContext = `
+【上一轮评估反馈 - 请根据此反馈优化计划】
+- 质量分数: ${previousEvaluation.qualityScore.toFixed(2)}
+- 完整性分数: ${previousEvaluation.completenessScore.toFixed(2)}
+${fb.missingAspects.length > 0 ? `- 缺失方面: ${fb.missingAspects.join(', ')}` : ''}
+${fb.weaknesses.length > 0 ? `- 不足之处: ${fb.weaknesses.join('; ')}` : ''}
+${fb.improvementSuggestions.length > 0 ? `- 改进建议: ${fb.improvementSuggestions.join('; ')}` : ''}
+${fb.priorityActions.length > 0 ? `- 优先行动: ${fb.priorityActions.join('; ')}` : ''}
+
+请根据以上反馈调整分析计划，重点解决缺失方面和不足之处。
+`;
+    }
+
     const prompt = `基于以下意图创建分析计划：
 
 意图：
 - 主要目标: ${intent.primaryGoal}
 - 分析方面: ${intent.aspects.join(', ')}
 - 复杂度: ${intent.complexity}
-
+${feedbackContext}
 可用分析专家：
 ${ANALYSIS_DOMAINS.map(d => `- ${d.id}: ${d.name}`).join('\n')}
 

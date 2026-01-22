@@ -1,12 +1,17 @@
 name: cpu_load_in_range
 version: "1.0"
 type: atomic
+category: hardware
 
 meta:
-  display_name: "CPU 负载分析 (时间范围)"
+  display_name: "CPU 负载区间分析"
   description: "分析指定时间范围内各 CPU 核心的负载情况"
-  icon: "memory"
-  tags: [cpu, load, utilization, atomic]
+  icon: "bar_chart"
+  tags: [cpu, load, usage, atomic]
+
+prerequisites:
+  required_tables:
+    - sched_slice
 
 inputs:
   - name: start_ts
@@ -24,16 +29,39 @@ steps:
       level: detail
       title: "CPU 利用率"
     sql: |
-      WITH cpu_time AS (
+      WITH 
+      -- 动态检测 CPU 集群
+      cpu_max_freq AS (
+        SELECT cpu, MAX(value) as max_freq
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq) as val FROM cpu_max_freq
+      ),
+      cpu_clusters AS (
+        SELECT cpu,
+          CASE
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.95 THEN 'prime'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
+            WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
+            ELSE 'little'
+          END as cluster_type
+        FROM cpu_max_freq
+      ),
+      cpu_time AS (
         SELECT
-          cpu,
-          CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
-          state,
-          SUM(dur) as total_dur
-        FROM sched_slice
-        WHERE ts >= ${start_ts}
-          AND ts < ${end_ts}
-        GROUP BY cpu, state
+          ss.cpu,
+          COALESCE(cl.cluster_type, 'little') as core_type,
+          ss.utid,
+          SUM(ss.dur) as total_dur
+        FROM sched_slice ss
+        LEFT JOIN cpu_clusters cl ON ss.cpu = cl.cpu
+        WHERE ss.ts >= ${start_ts}
+          AND ss.ts < ${end_ts}
+        GROUP BY ss.cpu, ss.utid
       ),
       cpu_total AS (
         SELECT
@@ -46,12 +74,19 @@ steps:
       SELECT
         ct.core_type,
         COUNT(DISTINCT ct.cpu) as cpu_count,
-        ROUND(100.0 * SUM(CASE WHEN ctime.state != 'idle' THEN ctime.total_dur ELSE 0 END) / SUM(ct.cpu_total_dur), 1) as utilization_pct,
+        -- utid != 0 implies non-idle work in sched_slice (0 is usually swapper)
+        ROUND(100.0 * SUM(CASE WHEN ctime.utid != 0 THEN ctime.total_dur ELSE 0 END) / NULLIF(SUM(ct.cpu_total_dur), 0), 1) as utilization_pct,
         ROUND(SUM(ct.cpu_total_dur) / 1e6, 2) as total_time_ms
       FROM cpu_total ct
       LEFT JOIN cpu_time ctime ON ct.cpu = ctime.cpu
       GROUP BY ct.core_type
-      ORDER BY ct.core_type DESC
+      ORDER BY 
+        CASE ct.core_type 
+          WHEN 'prime' THEN 1 
+          WHEN 'big' THEN 2 
+          WHEN 'mid' THEN 3 
+          ELSE 4 
+        END
     save_as: utilization
 
   - id: runqueue_depth
@@ -61,18 +96,30 @@ steps:
       level: detail
       title: "运行队列"
     sql: |
+      WITH cpu_clusters AS (
+        SELECT cpu,
+          CASE
+            WHEN MAX(value) >= (SELECT MAX(value) * 0.75 FROM counter c2 JOIN cpu_counter_track t2 ON c2.track_id = t2.id WHERE t2.name = 'cpufreq') THEN 'big'
+            ELSE 'little'
+          END as cluster_type
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY cpu
+      )
       SELECT
-        cpu,
-        CASE WHEN cpu >= 4 THEN 'big' ELSE 'little' END as core_type,
-        ROUND(AVG(value), 2) as avg_runqueue,
-        MAX(value) as max_runqueue
+        c.cpu,
+        COALESCE(cl.cluster_type, 'little') as core_type,
+        ROUND(AVG(c.value), 2) as avg_runqueue,
+        MAX(c.value) as max_runqueue
       FROM counter c
       JOIN cpu_counter_track t ON c.track_id = t.id
+      LEFT JOIN cpu_clusters cl ON t.cpu = cl.cpu
       WHERE t.name = 'runqueue_length'
         AND c.ts >= ${start_ts}
         AND c.ts < ${end_ts}
-      GROUP BY cpu
-      ORDER BY cpu
+      GROUP BY c.cpu
+      ORDER BY c.cpu
     save_as: runqueue
     optional: true
 
@@ -94,8 +141,13 @@ steps:
       )
       SELECT
         COUNT(*) as migration_count,
+        -- 跨集群迁移现在基于动态检测的集群类型
+        -- 简化处理：仍使用频率中位数作为分界
         SUM(CASE 
-          WHEN (prev_cpu < 4 AND cpu >= 4) OR (prev_cpu >= 4 AND cpu < 4) 
+          WHEN (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little') 
+                AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little'))
+               OR (prev_cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type != 'little') 
+                   AND cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'little'))
           THEN 1 ELSE 0 
         END) as cross_cluster_migrations
       FROM migrations

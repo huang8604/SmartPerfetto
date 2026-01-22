@@ -1,0 +1,227 @@
+# Hardware GPU Module Expert
+#
+# Provides GPU hardware analysis capabilities for cross-domain experts.
+# Answers questions about GPU rendering, frequency, and memory.
+
+name: gpu_module
+version: "1.0"
+type: composite
+category: hardware
+
+meta:
+  display_name: "GPU 硬件分析"
+  description: "分析 GPU 渲染、频率和显存使用"
+  tags: ["hardware", "gpu", "render", "frequency", "memory"]
+
+# Module metadata
+module:
+  layer: hardware
+  component: GPU
+  subsystems:
+    - frequency
+    - rendering
+    - memory
+  relatedModules:
+    - framework_surfaceflinger
+    - hardware_cpu
+    - hardware_memory
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: gpu_rendering_analysis
+      questionTemplate: "How is GPU rendering performing for package {package}?"
+      requiredParams: [package]
+      description: "Analyze GPU rendering performance"
+
+    - id: gpu_frequency_analysis
+      questionTemplate: "What is the GPU frequency during the trace?"
+      requiredParams: []
+      description: "Analyze GPU frequency and utilization"
+
+    - id: gpu_memory_analysis
+      questionTemplate: "What is the GPU memory usage?"
+      requiredParams: []
+      optionalParams: [package]
+      description: "Analyze GPU memory allocation"
+
+  findingsSchema:
+    - id: gpu_bottleneck
+      severity: critical
+      titleTemplate: "GPU bottleneck: render time {render_ms}ms exceeds frame budget"
+      descriptionTemplate: "GPU rendering taking {render_ms}ms, causing frame drops"
+      evidenceFields: [render_ms, frame_budget_ms, gpu_util_pct]
+
+    - id: gpu_frequency_low
+      severity: warning
+      titleTemplate: "GPU frequency low: {avg_freq_mhz}MHz"
+      descriptionTemplate: "GPU running at reduced frequency, possible thermal throttling"
+      evidenceFields: [avg_freq_mhz, max_freq_mhz]
+
+    - id: high_overdraw
+      severity: warning
+      titleTemplate: "High overdraw detected: {overdraw_ratio}x"
+      descriptionTemplate: "Screen pixels being drawn {overdraw_ratio} times on average"
+      evidenceFields: [overdraw_ratio]
+
+  suggestionsSchema:
+    - id: check_thermal_for_gpu
+      condition: "gpu_freq_low == true"
+      targetModule: thermal_module
+      questionTemplate: "Is thermal throttling affecting GPU?"
+      paramsMapping: {}
+      priority: 1
+
+    - id: check_surfaceflinger
+      condition: "composition_slow == true"
+      targetModule: surfaceflinger_module
+      questionTemplate: "What is causing slow GPU composition?"
+      paramsMapping:
+        package: package
+      priority: 1
+
+prerequisites:
+  modules:
+    - gpu_counter
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "Target package name"
+
+steps:
+  # Step 1: Get GPU frequency overview
+  - id: gpu_frequency_overview
+    type: atomic
+    name: "GPU 频率概览"
+    sql: |
+      SELECT
+        track.name AS counter_name,
+        CAST(AVG(value) AS INTEGER) AS avg_value,
+        CAST(MAX(value) AS INTEGER) AS max_value,
+        CAST(MIN(value) AS INTEGER) AS min_value
+      FROM counter
+      JOIN gpu_counter_track track ON counter.track_id = track.id
+      WHERE track.name LIKE '%freq%' OR track.name LIKE '%clock%'
+      GROUP BY track.name
+    display:
+      level: key
+      layer: overview
+      title: "GPU 频率概览"
+    save_as: gpu_freq
+    synthesize: true
+
+  # Step 2: Get GPU utilization
+  - id: gpu_utilization
+    type: atomic
+    name: "GPU 利用率"
+    sql: |
+      SELECT
+        track.name AS metric_name,
+        CAST(AVG(value) AS REAL) AS avg_value,
+        CAST(MAX(value) AS REAL) AS max_value
+      FROM counter
+      JOIN gpu_counter_track track ON counter.track_id = track.id
+      WHERE track.name LIKE '%util%' OR track.name LIKE '%busy%' OR track.name LIKE '%load%'
+      GROUP BY track.name
+    display:
+      level: detail
+      layer: overview
+      title: "GPU 利用率"
+    save_as: gpu_util
+
+  # Step 3: Get render thread GPU slices
+  - id: render_thread_gpu
+    type: atomic
+    name: "RenderThread GPU 耗时"
+    sql: |
+      SELECT
+        thread.name AS thread_name,
+        CAST(SUM(slice.dur) / 1e6 AS REAL) AS total_gpu_ms,
+        COUNT(*) AS gpu_calls,
+        CAST(AVG(slice.dur) / 1e6 AS REAL) AS avg_gpu_ms,
+        CAST(MAX(slice.dur) / 1e6 AS REAL) AS max_gpu_ms
+      FROM slice
+      JOIN thread_track ON slice.track_id = thread_track.id
+      JOIN thread ON thread_track.utid = thread.utid
+      WHERE thread.name = 'RenderThread'
+        AND (slice.name LIKE '%draw%' OR slice.name LIKE '%flush%' OR slice.name LIKE '%swap%')
+      GROUP BY thread.name
+    display:
+      level: detail
+      layer: overview
+      title: "RenderThread GPU 耗时"
+    save_as: render_gpu
+    synthesize:
+      role: detail
+      fields:
+        - key: total_gpu_ms
+          label: 总 GPU 耗时
+          format: "{{value}}ms"
+        - key: avg_gpu_ms
+          label: 平均 GPU 耗时
+          format: "{{value}}ms"
+
+  # Step 4: Get slow GPU operations
+  - id: slow_gpu_operations
+    type: atomic
+    name: "慢 GPU 操作"
+    sql: |
+      SELECT
+        slice.ts,
+        slice.name AS operation,
+        CAST(slice.dur / 1e6 AS REAL) AS dur_ms,
+        thread.name AS thread_name
+      FROM slice
+      JOIN thread_track ON slice.track_id = thread_track.id
+      JOIN thread ON thread_track.utid = thread.utid
+      WHERE (slice.name LIKE '%draw%' OR slice.name LIKE '%flush%' OR slice.name LIKE '%eglSwap%')
+        AND slice.dur > 5000000
+      ORDER BY slice.dur DESC
+      LIMIT 20
+    display:
+      level: detail
+      layer: list
+      title: "慢 GPU 操作列表"
+    save_as: slow_gpu_ops
+
+  # Step 5: Diagnose GPU issues
+  - id: gpu_diagnosis
+    type: diagnostic
+    name: "GPU 诊断"
+    inputs: [gpu_freq, gpu_util, render_gpu, slow_gpu_ops]
+    rules:
+      - condition: "render_gpu.data[0]?.avg_gpu_ms > 8"
+        diagnosis: "RenderThread GPU 平均耗时过长 (${render_gpu.data[0]?.avg_gpu_ms}ms)，超过帧预算"
+        confidence: high
+        suggestions:
+          - "减少过度绘制"
+          - "简化 shader 复杂度"
+          - "减少纹理大小"
+        evidence_fields:
+          - render_gpu.data[0].avg_gpu_ms
+          - render_gpu.data[0].max_gpu_ms
+
+      - condition: "slow_gpu_ops.data.length > 10"
+        diagnosis: "存在 ${slow_gpu_ops.data.length} 次慢 GPU 操作"
+        confidence: high
+        suggestions:
+          - "分析具体慢操作的原因"
+          - "检查是否有大纹理上传"
+        evidence_fields:
+          - slow_gpu_ops.data.length
+          - slow_gpu_ops.data[0]?.dur_ms
+
+      - condition: "gpu_util.data[0]?.avg_value > 90"
+        diagnosis: "GPU 利用率过高 (${gpu_util.data[0]?.avg_value}%)，接近饱和"
+        confidence: medium
+        suggestions:
+          - "降低渲染复杂度"
+          - "考虑降低分辨率"
+        evidence_fields:
+          - gpu_util.data[0].avg_value
+    display:
+      level: key
+      layer: overview
+      title: "GPU 诊断结果"

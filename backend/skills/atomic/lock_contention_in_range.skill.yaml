@@ -1,12 +1,20 @@
 name: lock_contention_in_range
 version: "1.0"
 type: atomic
+category: performance
 
 meta:
-  display_name: "锁竞争分析 (时间范围)"
-  description: "分析指定时间范围内的 Java Monitor 锁竞争事件"
+  display_name: "锁竞争分析 (区间)"
+  description: "分析指定时间范围内的锁竞争情况"
   icon: "lock"
-  tags: [lock, contention, monitor, atomic]
+  tags: [lock, contention, performance, atomic]
+
+prerequisites:
+  required_tables:
+    - thread_state
+    - android_monitor_contention
+  modules:
+    - android.monitor_contention
 
 inputs:
   - name: start_ts
@@ -20,12 +28,13 @@ inputs:
     required: false
 
 steps:
-  - id: lock_contentions
+  # Step 1: Java Monitor 锁竞争
+  - id: monitor_contentions
     type: atomic
-    name: "锁竞争事件"
+    name: "Java Monitor 锁竞争"
     display:
       level: detail
-      title: "锁竞争"
+      title: "Java Monitor 锁竞争"
     sql: |
       SELECT
         short_blocking_method as blocking_method,
@@ -34,7 +43,8 @@ steps:
         blocked_thread_name,
         is_blocked_thread_main as main_blocked,
         ROUND(dur / 1e6, 2) as wait_ms,
-        waiter_count
+        waiter_count,
+        'java_monitor' as lock_type
       FROM android_monitor_contention
       WHERE ts >= ${start_ts}
         AND ts < ${end_ts}
@@ -42,8 +52,50 @@ steps:
         AND dur >= 1000000
       ORDER BY dur DESC
       LIMIT 10
-    save_as: contentions
+    save_as: monitor_contentions
+    optional: true
 
+  # Step 2: Futex 等待 (pthread_mutex, ReentrantLock 底层实现)
+  - id: futex_waits
+    type: atomic
+    name: "Futex 等待"
+    display:
+      level: detail
+      title: "Futex/Mutex 等待"
+    sql: |
+      SELECT
+        t.name as thread_name,
+        ts.blocked_function,
+        ROUND(ts.dur / 1e6, 2) as wait_ms,
+        p.name as process_name,
+        CASE
+          WHEN ts.blocked_function GLOB '*futex*' THEN 'futex'
+          WHEN ts.blocked_function GLOB '*mutex*' THEN 'pthread_mutex'
+          WHEN ts.blocked_function GLOB '*rwlock*' THEN 'rwlock'
+          WHEN ts.blocked_function GLOB '*sem*' THEN 'semaphore'
+          WHEN ts.blocked_function GLOB '*cond*' THEN 'condition_var'
+          ELSE 'other'
+        END as lock_type,
+        t.tid = p.pid as is_main_thread
+      FROM thread_state ts
+      JOIN thread t ON ts.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE ts.ts >= ${start_ts}
+        AND ts.ts < ${end_ts}
+        AND (p.name GLOB '${package}*' OR '${package}' = '')
+        AND ts.state IN ('S', 'D')
+        AND ts.dur >= 1000000
+        AND (ts.blocked_function GLOB '*futex*'
+             OR ts.blocked_function GLOB '*mutex*'
+             OR ts.blocked_function GLOB '*rwlock*'
+             OR ts.blocked_function GLOB '*sem_*'
+             OR ts.blocked_function GLOB '*cond_*')
+      ORDER BY ts.dur DESC
+      LIMIT 15
+    save_as: futex_waits
+    optional: true
+
+  # Step 3: 锁竞争汇总
   - id: lock_summary
     type: atomic
     name: "锁竞争汇总"
@@ -51,16 +103,53 @@ steps:
       level: summary
       title: "锁竞争汇总"
     sql: |
+      WITH
+      monitor_stats AS (
+        SELECT
+          COUNT(*) as monitor_count,
+          COALESCE(SUM(dur), 0) as monitor_total_ns,
+          COALESCE(MAX(dur), 0) as monitor_max_ns,
+          SUM(CASE WHEN is_blocked_thread_main THEN 1 ELSE 0 END) as monitor_main_blocked
+        FROM android_monitor_contention
+        WHERE ts >= ${start_ts}
+          AND ts < ${end_ts}
+          AND (process_name GLOB '${package}*' OR '${package}' = '')
+      ),
+      futex_stats AS (
+        SELECT
+          COUNT(*) as futex_count,
+          COALESCE(SUM(ts.dur), 0) as futex_total_ns,
+          COALESCE(MAX(ts.dur), 0) as futex_max_ns,
+          SUM(CASE WHEN t.tid = p.pid THEN 1 ELSE 0 END) as futex_main_blocked
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE ts.ts >= ${start_ts}
+          AND ts.ts < ${end_ts}
+          AND (p.name GLOB '${package}*' OR '${package}' = '')
+          AND ts.state IN ('S', 'D')
+          AND ts.dur >= 1000000
+          AND (ts.blocked_function GLOB '*futex*'
+               OR ts.blocked_function GLOB '*mutex*')
+      )
       SELECT
-        COUNT(*) as total_contentions,
-        ROUND(SUM(dur) / 1e6, 2) as total_wait_ms,
-        ROUND(MAX(dur) / 1e6, 2) as max_wait_ms,
-        SUM(CASE WHEN is_blocked_thread_main THEN 1 ELSE 0 END) as main_thread_blocked_count
-      FROM android_monitor_contention
-      WHERE ts >= ${start_ts}
-        AND ts < ${end_ts}
-        AND (process_name GLOB '${package}*' OR '${package}' = '')
+        (SELECT monitor_count FROM monitor_stats) as java_monitor_count,
+        (SELECT futex_count FROM futex_stats) as futex_mutex_count,
+        (SELECT monitor_count FROM monitor_stats) + (SELECT futex_count FROM futex_stats) as total_contentions,
+        ROUND((SELECT monitor_total_ns FROM monitor_stats) / 1e6, 2) as java_monitor_wait_ms,
+        ROUND((SELECT futex_total_ns FROM futex_stats) / 1e6, 2) as futex_mutex_wait_ms,
+        ROUND(((SELECT monitor_total_ns FROM monitor_stats) + (SELECT futex_total_ns FROM futex_stats)) / 1e6, 2) as total_wait_ms,
+        ROUND(((SELECT monitor_max_ns FROM monitor_stats) + 0) / 1e6, 2) as max_monitor_wait_ms,
+        ROUND(((SELECT futex_max_ns FROM futex_stats) + 0) / 1e6, 2) as max_futex_wait_ms,
+        (SELECT monitor_main_blocked FROM monitor_stats) + (SELECT futex_main_blocked FROM futex_stats) as main_thread_blocked_count
     save_as: summary
 
 output:
   format: structured
+  fields:
+    - name: monitor_contentions
+      description: "Java Monitor 锁竞争事件"
+    - name: futex_waits
+      description: "Futex/pthread_mutex 等待事件"
+    - name: summary
+      description: "锁竞争汇总统计"

@@ -4,26 +4,49 @@
 
 ```
 skills/
-├── base/                    # 基础 Skills (所有设备通用)
-│   ├── startup.skill.yaml   # 启动分析 Skill
-│   ├── startup.sop.md       # 启动分析 SOP 文档
-│   ├── scrolling.skill.yaml # 滑动卡顿分析
-│   ├── scrolling.sop.md
-│   ├── click_response.skill.yaml  # 点击响应分析
-│   ├── navigation.skill.yaml      # 界面跳转分析
-│   ├── memory.skill.yaml          # 内存分析
-│   ├── cpu.skill.yaml             # CPU 分析
-│   ├── binder.skill.yaml          # Binder IPC 分析
-│   └── surfaceflinger.skill.yaml  # SurfaceFlinger 分析
-├── vendors/                 # 厂商定制 Skills
-│   ├── oppo/               # OPPO/ColorOS 定制
-│   ├── vivo/               # vivo/OriginOS 定制
-│   ├── xiaomi/             # 小米/MIUI 定制
-│   ├── honor/              # 荣耀/MagicOS 定制
-│   ├── transsion/          # 传音 定制
-│   ├── mtk/                # 联发科平台定制
-│   └── qualcomm/           # 高通平台定制
-└── custom/                  # 用户自定义 Skills
+├── atomic/                  # 原子能力 Skills (单一 SQL 查询)
+│   ├── cpu_topology_detection.skill.yaml # CPU 拓扑检测
+│   ├── rendering_arch_detection.skill.yaml # 渲染架构检测
+│   ├── vrr_detection.skill.yaml   # VRR/LTPO 检测
+│   ├── game_fps_analysis.skill.yaml # 游戏帧率分析
+│   ├── gpu_metrics.skill.yaml     # GPU 指标分析
+│   └── ...                  # 共 17 个原子技能
+├── composite/               # 组合 Skills (多步骤分析，所有设备通用)
+│   ├── startup_analysis.skill.yaml    # 启动分析
+│   ├── scrolling_analysis.skill.yaml  # 滑动卡顿分析
+│   ├── memory_analysis.skill.yaml     # 内存分析
+│   ├── cpu_analysis.skill.yaml        # CPU 分析
+│   ├── binder_analysis.skill.yaml     # Binder 分析
+│   ├── thermal_throttling.skill.yaml  # 热节流分析
+│   ├── io_pressure.skill.yaml         # IO 压力分析
+│   ├── navigation_analysis.skill.yaml # 界面跳转分析
+│   ├── surfaceflinger_analysis.skill.yaml # SF 合成分析
+│   └── ...                  # 共 28 个组合技能
+├── deep/                    # 深度分析 Skills (调用栈级)
+│   ├── cpu_profiling.skill.yaml
+│   └── callstack_analysis.skill.yaml
+├── modules/                 # 模块专家 Skills (跨领域专家系统)
+│   ├── app/                 # 应用层模块
+│   │   └── third_party_module.skill.yaml
+│   ├── framework/           # 框架层模块
+│   │   ├── ams_module.skill.yaml
+│   │   ├── surfaceflinger_module.skill.yaml
+│   │   ├── input_module.skill.yaml
+│   │   └── art_module.skill.yaml
+│   ├── kernel/              # 内核层模块
+│   │   ├── scheduler_module.skill.yaml
+│   │   └── binder_module.skill.yaml
+│   └── hardware/            # 硬件层模块
+│       ├── cpu_module.skill.yaml
+│       └── gpu_module.skill.yaml
+├── vendors/                 # 厂商定制 Skills (override)
+│   ├── pixel/              # Google Pixel
+│   ├── samsung/            # Samsung OneUI
+│   └── ...
+├── docs/                    # SOP 文档
+│   ├── startup.sop.md
+│   └── scrolling.sop.md
+└── custom/                  # 用户自定义 Skills (可选)
 ```
 
 ## 可用 Skills 一览
@@ -38,6 +61,202 @@ skills/
 | `cpu_analysis` | CPU 分析 | cpu | 线程调度、核心分布 |
 | `binder_analysis` | Binder 分析 | ipc | IPC 调用延迟 |
 | `surfaceflinger_analysis` | SurfaceFlinger 分析 | rendering | 帧合成、GPU、VSYNC |
+
+### 扩展 Skills (Atomic/Deep)
+
+| Skill ID | 名称 | 类型 | 描述 |
+|----------|------|------|------|
+| `cpu_topology_detection` | CPU 拓扑检测 | atomic | 动态识别 Prime/Big/Mid/Little 核心 |
+| `rendering_arch_detection` | 渲染架构检测 | atomic | 识别 Flutter/Unity/WebView/HWUI |
+| `vrr_detection` | VRR 检测 | atomic | 可变刷新率 (LTPO) 使用情况分析 |
+| `game_fps_analysis` | 游戏帧率分析 | atomic | 30/45/60/90/120fps 游戏稳定性 |
+| `gpu_metrics` | GPU 指标分析 | atomic | GPU 频率、利用率、渲染耗时 |
+| `thermal_throttling` | 热节流分析 | composite | 温度监控与频率限制分析 |
+| `io_pressure` | IO 压力分析 | composite | 系统 IO 负载与阻塞分析 |
+| `cpu_profiling` | CPU Profiling | deep | 深度 CPU 调度与负载分析 |
+| `callstack_analysis` | 调用栈分析 | deep | 函数级性能瓶颈分析 |
+
+---
+
+## 模块专家系统 (Cross-Domain Expert System)
+
+### 概述
+
+模块专家系统是 SmartPerfetto 的高级分析架构，模拟真实 Android 性能工程师的分析流程：
+
+```
+                    跨领域专家 (TypeScript "指挥官")
+    ┌─────────────────┬─────────────────┬─────────────────┐
+    │ PerformanceExpert│   PowerExpert   │  ThermalExpert  │
+    │ (卡顿/启动/延迟)  │ (功耗/待机/唤醒) │ (温度/热节流)   │
+    └────────┬─────────┴────────┬────────┴────────┬────────┘
+             │                   │                 │
+             │       对话协议 (Query/Response/Suggestion)
+             │                   │                 │
+    ┌────────▼───────────────────▼─────────────────▼────────┐
+    │                    模块专家 (YAML Skills)              │
+    ├─────────────┬─────────────┬─────────────┬─────────────┤
+    │  App 层     │ Framework 层 │ Kernel 层   │ Hardware 层 │
+    │ ThirdParty  │ AMS/SF/Input │ Sched/Binder│ CPU/GPU     │
+    └─────────────┴─────────────┴─────────────┴─────────────┘
+```
+
+### 模块 Skills 一览
+
+| 模块 | 层级 | 组件 | 能力 |
+|------|------|------|------|
+| `scheduler_module` | kernel | Scheduler | 线程调度延迟、CPU 利用率、Runnable 分析 |
+| `binder_module` | kernel | Binder | Binder 阻塞调用、跨进程延迟 |
+| `surfaceflinger_module` | framework | SurfaceFlinger | 帧卡顿、GPU 合成时序 |
+| `ams_module` | framework | AMS | 启动时序、Activity 生命周期、ANR |
+| `input_module` | framework | Input | 点击响应、输入派发延迟 |
+| `art_module` | framework | ART | GC 暂停、JIT 编译 |
+| `cpu_module` | hardware | CPU | CPU 频率、热节流、大小核分布 |
+| `gpu_module` | hardware | GPU | GPU 渲染、频率、利用率 |
+| `third_party_module` | app | ThirdParty | 应用线程分析、主线程阻塞 |
+
+### 模块 Skill YAML 格式
+
+模块 Skill 在标准 Skill 基础上增加了 `module` 和 `dialogue` 字段：
+
+```yaml
+name: scheduler_module
+version: "1.0"
+type: composite
+category: kernel
+
+meta:
+  display_name: "内核调度分析"
+  description: "分析线程调度延迟、CPU 利用率和大小核分配"
+  tags: ["kernel", "scheduler", "cpu", "runnable"]
+
+# 模块元数据 - 标识这是一个模块专家
+module:
+  layer: kernel                    # app | framework | kernel | hardware
+  component: Scheduler             # 组件名称
+  subsystems:                      # 子系统列表
+    - runqueue
+    - cfs
+    - core_affinity
+  relatedModules:                  # 关联模块
+    - hardware_cpu
+    - framework_ams
+
+# 对话接口 - 定义模块能回答的问题
+dialogue:
+  # 能力列表
+  capabilities:
+    - id: thread_scheduling_delay
+      questionTemplate: "Why was thread {tid} delayed between {start_ts} and {end_ts}?"
+      requiredParams: [tid, start_ts, end_ts]
+      description: "Analyze why a specific thread had scheduling delays"
+
+    - id: cpu_utilization
+      questionTemplate: "What is the CPU utilization for package {package}?"
+      requiredParams: [package]
+      optionalParams: [start_ts, end_ts]
+
+  # 结构化发现模式
+  findingsSchema:
+    - id: high_runnable_time
+      severity: warning
+      titleTemplate: "Thread scheduling delay: {delay_ms}ms in runnable state"
+      descriptionTemplate: "Thread {tid} waited {delay_ms}ms in runnable state"
+      evidenceFields: [tid, delay_ms, core_type, waker_thread]
+
+  # 建议模式 - 引导跨领域专家进行下一步分析
+  suggestionsSchema:
+    - id: check_binder_waker
+      condition: "waker_process != package"      # 触发条件
+      targetModule: binder_module                # 建议的下一个模块
+      questionTemplate: "What Binder calls did {waker_process} make to {package}?"
+      paramsMapping:                             # 参数映射
+        caller: waker_process
+        callee: package
+      priority: 1
+
+# 标准 Skill 字段...
+steps:
+  - id: runnable_analysis
+    type: atomic
+    sql: |
+      SELECT utid, thread.name, SUM(dur)/1e6 AS runnable_ms
+      FROM thread_state
+      JOIN thread USING (utid)
+      WHERE state = 'R'
+      GROUP BY utid
+      ORDER BY runnable_ms DESC
+      LIMIT 20
+    save_as: runnable_data
+    synthesize: true
+```
+
+### 对话协议
+
+跨领域专家通过结构化消息与模块专家交互：
+
+**Query (查询)**:
+```typescript
+{
+  queryId: "q_001",
+  targetModule: "scheduler_module",
+  questionId: "cpu_utilization",
+  params: { package: "com.example.app" },
+  timeRange: { start: 123456789, end: 987654321 }
+}
+```
+
+**Response (响应)**:
+```typescript
+{
+  queryId: "q_001",
+  success: true,
+  data: { ... },
+  findings: [
+    {
+      id: "high_runnable_time",
+      severity: "warning",
+      title: "Thread scheduling delay: 50ms",
+      evidence: { tid: 1234, delay_ms: 50 }
+    }
+  ],
+  suggestions: [
+    {
+      targetModule: "binder_module",
+      questionTemplate: "What Binder calls blocked thread?",
+      priority: 1
+    }
+  ],
+  confidence: 0.85
+}
+```
+
+### 假设管理
+
+跨领域专家通过假设-验证循环找到根因：
+
+1. **初始假设**: 根据用户查询和初步数据生成假设
+2. **证据收集**: 向模块专家查询收集支持/反驳证据
+3. **置信度更新**: 根据证据更新假设置信度
+4. **决策**: 当置信度超过阈值时确认根因，或继续探索
+
+```
+假设: "卡顿由主线程 Binder 调用导致"
+  ├─ [+0.3] scheduler_module: 主线程 Runnable 等待 50ms
+  ├─ [+0.4] binder_module: 发现 10 次同步 Binder 调用
+  └─ [-0.1] art_module: 无 GC 暂停
+最终置信度: 0.6 → 继续收集证据...
+```
+
+### 创建新模块 Skill
+
+1. 在 `skills/modules/{layer}/` 下创建 YAML 文件
+2. 定义 `module` 字段标识层级和组件
+3. 定义 `dialogue.capabilities` 声明能回答的问题
+4. 定义 `dialogue.findingsSchema` 结构化输出格式
+5. 定义 `dialogue.suggestionsSchema` 引导后续分析
+
+---
 
 ## CLI 工具
 
@@ -148,7 +367,10 @@ curl -X POST http://localhost:3001/api/skills/analyze \
 
 | 类型 | 路径 | 权限 |
 |------|------|------|
-| Base Skills | `skills/base/` | 只读 |
+| Atomic Skills | `skills/atomic/` | 只读 |
+| Composite Skills | `skills/composite/` | 只读 |
+| Deep Skills | `skills/deep/` | 只读 |
+| Module Skills | `skills/modules/` | 只读 |
 | Vendor Overrides | `skills/vendors/` | 只读 |
 | Custom Skills | `skills/custom/` | 完全可编辑 |
 
@@ -163,10 +385,10 @@ curl -X POST http://localhost:3001/api/skills/analyze \
 ### 2. Skill YAML 格式
 
 ```yaml
-# skills/base/startup.skill.yaml
+# skills/composite/startup_analysis.skill.yaml
 name: startup_analysis
 version: "1.0.0"
-type: performance
+type: composite
 category: app_lifecycle
 priority: high
 
@@ -332,7 +554,7 @@ diagnostics:
 
 ```yaml
 # skills/vendors/oppo/startup.override.yaml
-extends: base/startup
+extends: composite/startup_analysis
 version: "1.0.0"
 description: "OPPO ColorOS 启动分析"
 
@@ -425,10 +647,13 @@ const url = `...?ts=${ts_str}&dur=${dur_str}&visStart=${startNs}&visEnd=${endNs}
 
 ## Skill 加载顺序
 
-1. 加载 `base/` 目录下的基础 Skills
-2. 检测设备厂商（通过 trace 内容）
-3. 加载对应厂商的 override Skills
-4. 加载 `custom/` 目录下的自定义 Skills
+1. 加载 `atomic/` 目录下的原子 Skills
+2. 加载 `composite/` 目录下的组合 Skills
+3. 加载 `deep/` 目录下的深度分析 Skills
+4. 加载 `modules/` 目录下的模块专家 Skills
+5. 检测设备厂商（通过 trace 内容）
+6. 加载对应厂商的 override Skills (`vendors/`)
+7. 加载 `custom/` 目录下的自定义 Skills（如果存在）
 
 ## 最佳实践
 
@@ -445,7 +670,11 @@ const url = `...?ts=${ts_str}&dur=${dur_str}&visStart=${startNs}&visEnd=${endNs}
 欢迎提交新的 Skill 或改进现有 Skill！
 
 1. Fork 本仓库
-2. 创建 Skill 文件到 `skills/custom/` 或提 PR 到 `skills/base/`
-3. 添加对应的 SOP 文档
+2. 根据 Skill 类型创建文件：
+   - 单一查询 → `skills/atomic/`
+   - 多步骤分析 → `skills/composite/`
+   - 深度分析 → `skills/deep/`
+   - 模块专家 → `skills/modules/{layer}/`
+3. 添加对应的 SOP 文档到 `skills/docs/`
 4. 运行 `npm run skill:validate` 验证
 5. 提交 Pull Request

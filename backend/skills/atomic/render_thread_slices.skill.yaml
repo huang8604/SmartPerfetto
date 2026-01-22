@@ -1,12 +1,18 @@
 name: render_thread_slices
 version: "1.0"
 type: atomic
+category: rendering
 
 meta:
-  display_name: "RenderThread 耗时操作"
-  description: "分析指定时间范围内 RenderThread 的耗时操作"
+  display_name: "渲染线程 Slice 分析"
+  description: "分析渲染线程的时间片分布"
   icon: "brush"
-  tags: [render, thread, slices, atomic]
+  tags: [rendering, thread, slice, atomic]
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread
 
 inputs:
   - name: start_ts

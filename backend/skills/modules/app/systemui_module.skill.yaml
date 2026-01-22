@@ -1,0 +1,561 @@
+# =============================================================================
+# App SystemUI Module Expert
+# =============================================================================
+# Provides SystemUI analysis capabilities for cross-domain experts.
+# Answers questions about status bar, notification shade, quick settings,
+# navigation bar, and other system UI components.
+#
+# Key Analysis Areas:
+# - Status bar rendering and updates
+# - Notification shade expand/collapse
+# - Quick settings panel performance
+# - Navigation bar gestures
+# - Lock screen rendering
+# - SystemUI startup timing
+# =============================================================================
+
+name: systemui_module
+version: "1.0"
+type: composite
+category: app
+
+meta:
+  display_name: "SystemUI 分析"
+  description: "分析状态栏、通知中心、快捷设置和导航栏性能"
+  tags: ["app", "systemui", "statusbar", "notification", "quicksettings", "navbar"]
+
+# Module metadata
+module:
+  layer: app
+  component: SystemUI
+  subsystems:
+    - status_bar
+    - notification_shade
+    - quick_settings
+    - navigation_bar
+    - lock_screen
+    - volume_dialog
+  relatedModules:
+    - framework_wms
+    - framework_input
+    - framework_surfaceflinger
+    - app_launcher
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: systemui_performance
+      questionTemplate: "What is the SystemUI performance?"
+      requiredParams: []
+      description: "Analyze overall SystemUI performance"
+
+    - id: notification_shade_analysis
+      questionTemplate: "Is notification shade expand/collapse smooth?"
+      requiredParams: []
+      description: "Analyze notification shade animation"
+
+    - id: quick_settings_analysis
+      questionTemplate: "Are quick settings tiles responsive?"
+      requiredParams: []
+      description: "Analyze quick settings performance"
+
+    - id: statusbar_update_analysis
+      questionTemplate: "Are status bar updates causing performance issues?"
+      requiredParams: []
+      description: "Analyze status bar update frequency"
+
+  findingsSchema:
+    - id: systemui_startup_slow
+      severity: warning
+      titleTemplate: "Slow SystemUI startup: {startup_ms}ms"
+      descriptionTemplate: "SystemUI took {startup_ms}ms to fully initialize"
+      evidenceFields: [startup_ms, blocking_component]
+
+    - id: shade_animation_jank
+      severity: warning
+      titleTemplate: "Notification shade jank: {jank_frames} frames dropped"
+      descriptionTemplate: "Shade expand/collapse animation is not smooth"
+      evidenceFields: [jank_frames, total_frames, avg_frame_ms]
+
+    - id: quick_settings_slow
+      severity: warning
+      titleTemplate: "Slow quick settings: {tile_name} took {response_ms}ms"
+      descriptionTemplate: "Quick settings tile response time exceeded threshold"
+      evidenceFields: [tile_name, response_ms]
+
+    - id: statusbar_update_frequent
+      severity: info
+      titleTemplate: "Frequent status bar updates: {update_count} times"
+      descriptionTemplate: "Status bar updating frequently, may impact battery"
+      evidenceFields: [update_count, update_source]
+
+    - id: navbar_gesture_slow
+      severity: warning
+      titleTemplate: "Slow navigation gesture: {gesture_ms}ms"
+      descriptionTemplate: "Navigation gesture response exceeded threshold"
+      evidenceFields: [gesture_ms, gesture_type]
+
+  suggestionsSchema:
+    - id: check_wms_for_shade
+      condition: "shade_animation_jank == true"
+      targetModule: wms_module
+      questionTemplate: "What window animations were happening during shade animation?"
+      paramsMapping: {}
+      priority: 1
+
+    - id: check_surfaceflinger_for_jank
+      condition: "shade_animation_jank == true"
+      targetModule: surfaceflinger_module
+      questionTemplate: "Was SurfaceFlinger causing the shade animation jank?"
+      paramsMapping: {}
+      priority: 2
+
+    - id: check_input_for_gesture
+      condition: "navbar_gesture_slow == true"
+      targetModule: input_module
+      questionTemplate: "What was the input dispatch latency for the gesture?"
+      paramsMapping: {}
+      priority: 1
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread
+    - process
+
+inputs: []
+
+steps:
+  # Step 1: Find SystemUI process
+  - id: systemui_process
+    type: atomic
+    name: "SystemUI 进程识别"
+    sql: |
+      SELECT
+        p.upid,
+        p.pid,
+        p.name AS process_name
+      FROM process p
+      WHERE p.name LIKE '%systemui%'
+        OR p.name LIKE '%SystemUI%'
+        OR p.name = 'com.android.systemui'
+      LIMIT 1
+    display:
+      level: detail
+      layer: overview
+      title: "SystemUI 进程"
+    save_as: systemui_process
+
+  # Step 2: SystemUI main thread overview
+  - id: systemui_main_thread
+    type: atomic
+    name: "SystemUI 主线程概览"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid, p.pid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS activity,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE t.tid = su.pid  -- Main thread
+        AND s.dur > 1000000  -- > 1ms
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 25
+    display:
+      level: key
+      layer: overview
+      title: "SystemUI 主线程活动"
+    save_as: systemui_main_thread
+    synthesize:
+      role: overview
+      fields:
+        - key: activity
+          label: 活动
+        - key: count
+          label: 次数
+        - key: total_ms
+          label: 总耗时
+          format: "{{value}}ms"
+    on_empty: "未找到 SystemUI 进程数据"
+
+  # Step 3: SystemUI frame rendering
+  - id: systemui_frames
+    type: atomic
+    name: "SystemUI 帧渲染"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid, p.pid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        COUNT(*) AS total_frames,
+        SUM(CASE WHEN s.dur > 16670000 THEN 1 ELSE 0 END) AS jank_frames,
+        ROUND(SUM(CASE WHEN s.dur > 16670000 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS jank_rate_pct,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_frame_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_frame_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE t.tid = su.pid
+        AND (s.name GLOB '*Choreographer#doFrame*'
+             OR s.name GLOB '*doFrame*'
+             OR s.name GLOB '*DrawFrame*')
+    display:
+      level: key
+      layer: overview
+      title: "SystemUI 帧统计"
+    save_as: systemui_frames
+    synthesize: true
+
+  # Step 4: Status bar activities
+  - id: statusbar_activities
+    type: atomic
+    name: "状态栏活动"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS statusbar_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*StatusBar*'
+        OR s.name GLOB '*statusbar*'
+        OR s.name GLOB '*status_bar*'
+        OR s.name GLOB '*CollapsedStatusBar*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "状态栏活动"
+    save_as: statusbar_activities
+
+  # Step 5: Notification shade activities
+  - id: notification_shade
+    type: atomic
+    name: "通知中心活动"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS shade_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*Notification*'
+        OR s.name GLOB '*notification*'
+        OR s.name GLOB '*Shade*'
+        OR s.name GLOB '*shade*'
+        OR s.name GLOB '*expand*'
+        OR s.name GLOB '*collapse*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 20
+    display:
+      level: detail
+      layer: list
+      title: "通知中心活动"
+    save_as: notification_shade
+
+  # Step 6: Quick settings activities
+  - id: quick_settings
+    type: atomic
+    name: "快捷设置活动"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS qs_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*QuickSettings*'
+        OR s.name GLOB '*QS*'
+        OR s.name GLOB '*Tile*'
+        OR s.name GLOB '*tile*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "快捷设置活动"
+    save_as: quick_settings
+
+  # Step 7: Navigation bar/gesture activities
+  - id: navigation_activities
+    type: atomic
+    name: "导航栏活动"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS nav_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*Navigation*'
+        OR s.name GLOB '*navigation*'
+        OR s.name GLOB '*NavBar*'
+        OR s.name GLOB '*navbar*'
+        OR s.name GLOB '*gesture*'
+        OR s.name GLOB '*Gesture*'
+        OR s.name GLOB '*swipe*'
+        OR s.name GLOB '*Swipe*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "导航栏活动"
+    save_as: navigation_activities
+
+  # Step 8: Lock screen activities
+  - id: lockscreen_activities
+    type: atomic
+    name: "锁屏活动"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS lock_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*Keyguard*'
+        OR s.name GLOB '*keyguard*'
+        OR s.name GLOB '*LockScreen*'
+        OR s.name GLOB '*lockscreen*'
+        OR s.name GLOB '*Bouncer*'
+        OR s.name GLOB '*unlock*'
+        OR s.name GLOB '*Unlock*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "锁屏活动"
+    save_as: lockscreen_activities
+
+  # Step 9: SystemUI Binder calls
+  - id: systemui_binder
+    type: atomic
+    name: "SystemUI Binder 调用"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid, p.pid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS binder_call,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE t.tid = su.pid  -- Main thread
+        AND (s.name GLOB '*binder*'
+             OR s.name GLOB '*Binder*'
+             OR s.name GLOB '*aidl*'
+             OR s.name GLOB '*AIDL*')
+        AND s.dur > 1000000  -- > 1ms
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "SystemUI Binder 调用"
+    save_as: systemui_binder
+
+  # Step 10: Volume dialog activities
+  - id: volume_dialog
+    type: atomic
+    name: "音量对话框"
+    sql: |
+      WITH systemui AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%systemui%'
+          OR p.name LIKE '%SystemUI%'
+          OR p.name = 'com.android.systemui'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS volume_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN systemui su ON t.upid = su.upid
+      WHERE s.name GLOB '*Volume*'
+        OR s.name GLOB '*volume*'
+        OR s.name GLOB '*VolumeDialog*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 10
+    display:
+      level: detail
+      layer: list
+      title: "音量对话框"
+    save_as: volume_dialog
+    optional: true
+
+  # Step 11: Diagnose SystemUI issues
+  - id: systemui_diagnosis
+    type: diagnostic
+    name: "SystemUI 诊断"
+    inputs: [systemui_frames, systemui_main_thread, notification_shade, quick_settings, navigation_activities, systemui_binder]
+    rules:
+      - condition: "systemui_frames.data[0]?.jank_rate_pct > 5"
+        diagnosis: "SystemUI 卡顿率 ${systemui_frames.data[0]?.jank_rate_pct}%，影响系统 UI 体验"
+        confidence: high
+        suggestions:
+          - "检查通知中心动画性能"
+          - "优化快捷设置 Tile 响应"
+          - "减少主线程耗时操作"
+        evidence_fields:
+          - systemui_frames.data[0]?.jank_rate_pct
+          - systemui_frames.data[0]?.jank_frames
+          - systemui_frames.data[0]?.total_frames
+
+      - condition: "systemui_main_thread.data[0]?.max_ms > 100"
+        diagnosis: "SystemUI 主线程存在耗时操作: ${systemui_main_thread.data[0]?.activity} 最长 ${systemui_main_thread.data[0]?.max_ms}ms"
+        confidence: high
+        suggestions:
+          - "将耗时操作移至后台线程"
+          - "优化 UI 更新逻辑"
+        evidence_fields:
+          - systemui_main_thread.data[0]?.activity
+          - systemui_main_thread.data[0]?.max_ms
+
+      - condition: "notification_shade.data[0]?.max_ms > 50"
+        diagnosis: "通知中心活动耗时较高: ${notification_shade.data[0]?.shade_event} 最长 ${notification_shade.data[0]?.max_ms}ms"
+        confidence: medium
+        suggestions:
+          - "优化通知渲染"
+          - "减少通知展开时的计算"
+          - "检查是否有复杂的自定义通知视图"
+        evidence_fields:
+          - notification_shade.data[0]?.shade_event
+          - notification_shade.data[0]?.max_ms
+
+      - condition: "quick_settings.data[0]?.max_ms > 50"
+        diagnosis: "快捷设置耗时较高: ${quick_settings.data[0]?.qs_event} 最长 ${quick_settings.data[0]?.max_ms}ms"
+        confidence: medium
+        suggestions:
+          - "优化 Tile 状态查询"
+          - "减少 Tile 刷新频率"
+        evidence_fields:
+          - quick_settings.data[0]?.qs_event
+          - quick_settings.data[0]?.max_ms
+
+      - condition: "navigation_activities.data[0]?.max_ms > 32"
+        diagnosis: "导航手势响应较慢: ${navigation_activities.data[0]?.nav_event} 最长 ${navigation_activities.data[0]?.max_ms}ms"
+        confidence: medium
+        suggestions:
+          - "检查手势检测逻辑"
+          - "优化动画实现"
+        evidence_fields:
+          - navigation_activities.data[0]?.nav_event
+          - navigation_activities.data[0]?.max_ms
+
+      - condition: "systemui_binder.data[0]?.max_ms > 50"
+        diagnosis: "SystemUI 存在耗时 Binder 调用: ${systemui_binder.data[0]?.binder_call} 最长 ${systemui_binder.data[0]?.max_ms}ms"
+        confidence: medium
+        suggestions:
+          - "检查是否可以异步执行"
+          - "缓存 Binder 调用结果"
+        evidence_fields:
+          - systemui_binder.data[0]?.binder_call
+          - systemui_binder.data[0]?.max_ms
+    display:
+      level: key
+      layer: overview
+      title: "SystemUI 诊断结果"

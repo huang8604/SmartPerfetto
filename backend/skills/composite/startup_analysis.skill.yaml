@@ -24,14 +24,15 @@
 # - android_binder_transaction_slices_for_startup(startup_id, threshold)
 
 name: startup_analysis
-version: "2.2"
+version: "1.0"
 type: composite
+category: app_lifecycle
 
 meta:
-  display_name: "启动性能分析"
-  description: "分析应用冷启动、温启动、热启动的性能，识别启动瓶颈"
+  display_name: "应用启动分析"
+  description: "全方位的应用启动性能分析"
   icon: "rocket"
-  tags: [startup, launch, cold_start, warm_start, composite]
+  tags: [startup, app, composite]
 
 triggers:
   keywords:
@@ -58,9 +59,62 @@ steps:
   - id: get_startups
     type: atomic
     name: "获取启动事件"
+    synthesize:
+      role: overview
+      fields:
+        - key: startup_type
+          label: 启动类型
+        - key: dur_ms
+          label: 启动耗时
+          format: "{{value}} ms"
+        - key: ttid_ms
+          label: TTID
+          format: "{{value}} ms"
+        - key: rating
+          label: 评级
+      insights:
+        - condition: "dur_ms > 2000 && startup_type === 'cold'"
+          template: "冷启动耗时 {{dur_ms}}ms，超过 2s 需要优化"
+        - condition: "dur_ms > 1000 && startup_type === 'warm'"
+          template: "温启动耗时 {{dur_ms}}ms，超过 1s 建议优化"
     display:
       level: key
+      layer: overview
       title: "检测到的启动事件"
+      columns:
+        - name: startup_id
+          label: "启动 ID"
+          type: number
+        - name: package
+          label: "包名"
+          type: string
+        - name: type_display
+          label: "启动类型"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: start_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: end_ts
+          label: "结束时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: start_ts
+        - name: ttid_ms
+          label: "TTID"
+          type: duration
+          format: duration_ms
+        - name: ttfd_ms
+          label: "TTFD"
+          type: duration
+          format: duration_ms
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       SELECT
         s.startup_id,
@@ -102,9 +156,48 @@ steps:
   - id: startup_breakdown
     type: atomic
     name: "启动延迟归因"
+    synthesize:
+      role: list
+      groupBy:
+        - field: category
+          title: 延迟类别分布
+      fields:
+        - key: reason
+          label: 延迟原因
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms ({{percent}}%)"
     display:
       level: key
+      layer: overview
       title: "启动延迟归因分析"
+      columns:
+        - name: reason
+          label: "延迟原因"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: percent
+          label: "占比"
+          type: percentage
+          format: percentage
+        - name: category
+          label: "类别"
+          type: string
     sql: |
       SELECT
         b.reason,
@@ -142,9 +235,54 @@ steps:
   - id: main_thread_slices
     type: atomic
     name: "主线程关键操作"
+    synthesize:
+      role: list
+      groupBy:
+        - field: startup_type
+          title: 按启动类型分布
+      fields:
+        - key: slice_name
+          label: 操作名称
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+        - key: percent_of_startup
+          label: 占比
+          format: "{{value}}%"
     display:
       level: key
+      layer: overview
       title: "主线程耗时操作 Top15"
+      columns:
+        - name: slice_name
+          label: "操作名称"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: percent_of_startup
+          label: "启动占比"
+          type: percentage
+          format: percentage
+        - name: startup_type
+          label: "启动类型"
+          type: string
     sql: |
       SELECT
         ts.slice_name,
@@ -172,9 +310,56 @@ steps:
   - id: startup_binder
     type: atomic
     name: "启动期间 Binder 调用"
+    synthesize:
+      role: list
+      groupBy:
+        - field: server_process
+          title: 按服务进程分布
+      fields:
+        - key: aidl_name
+          label: AIDL 方法
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
+        - key: call_count
+          label: 调用次数
+      insights:
+        - condition: "percent_of_startup > 20"
+          template: "Binder 调用占启动时间 {{percent_of_startup}}%，需优化"
     display:
       level: key
+      layer: overview
       title: "启动期间 Binder 调用"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: main_thread_calls
+          label: "主线程调用"
+          type: number
+        - name: percent_of_startup
+          label: "启动占比"
+          type: percentage
+          format: percentage
     sql: |
       SELECT
         bt.server_process,
@@ -205,7 +390,33 @@ steps:
     name: "主线程 Binder 阻塞"
     display:
       level: detail
+      layer: list
       title: "主线程 Binder 阻塞分析"
+      columns:
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: state
+          label: "阻塞状态"
+          type: string
+        - name: blocked_function
+          label: "阻塞函数"
+          type: string
+          format: code
+        - name: ts_str
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: severity
+          label: "严重程度"
+          type: enum
     sql: |
       SELECT
         bt.server_process,
@@ -245,7 +456,31 @@ steps:
     name: "主线程状态分析"
     display:
       level: key
+      layer: overview
       title: "启动期间主线程状态"
+      columns:
+        - name: state
+          label: "状态"
+          type: string
+        - name: state_desc
+          label: "状态说明"
+          type: string
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: percent
+          label: "占比"
+          type: percentage
+          format: percentage
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: blocked_functions
+          label: "阻塞函数"
+          type: string
+          format: truncate
     sql: |
       SELECT
         ts.state,
@@ -280,7 +515,31 @@ steps:
     name: "类加载分析"
     display:
       level: detail
+      layer: list
       title: "启动期间类加载"
+      columns:
+        - name: slice_name
+          label: "类名"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: percent_of_startup
+          label: "启动占比"
+          type: percentage
+          format: percentage
     sql: |
       SELECT
         cl.slice_name,
@@ -306,7 +565,34 @@ steps:
     name: "GC 影响分析"
     display:
       level: detail
+      layer: list
       title: "启动期间 GC"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: is_main_thread
+          label: "主线程"
+          type: boolean
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: percent_of_startup
+          label: "启动占比"
+          type: percentage
+          format: percentage
     sql: |
       SELECT
         ts.slice_name as gc_type,
@@ -332,7 +618,31 @@ steps:
     name: "调度延迟分析"
     display:
       level: detail
+      layer: list
       title: "启动期间调度延迟"
+      columns:
+        - name: state
+          label: "状态"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_wait_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+        - name: avg_wait_ms
+          label: "平均等待"
+          type: duration
+          format: duration_ms
+        - name: max_wait_ms
+          label: "最大等待"
+          type: duration
+          format: duration_ms
+        - name: severe_delays
+          label: "严重延迟次数"
+          type: number
     sql: |
       SELECT
         ts.state,
@@ -358,8 +668,12 @@ steps:
   - id: analyze_startups
     type: iterator
     name: "启动事件详细分析"
+    synthesize:
+      role: clusters
+      clusterBy: startup_type
     display:
       level: key
+      layer: deep
       title: "启动事件详细分析"
     source: startups
     skill: startup_detail
@@ -380,8 +694,20 @@ steps:
   - id: startup_diagnosis
     type: diagnostic
     name: "启动诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "启动性能诊断：{{diagnosis}}"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
     inputs: [startups, breakdown, main_thread_slices, startup_binder, main_thread_states, gc_during_startup]
     rules:
@@ -438,6 +764,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "启动分析总结"
     inputs: [startups, breakdown, main_thread_slices, startup_binder, main_thread_states, analyze_startups, startup_diagnosis]
     prompt: |

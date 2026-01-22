@@ -14,7 +14,7 @@
 
 name: navigation_analysis
 version: "1.0.0"
-type: performance
+type: composite
 category: app_lifecycle
 priority: high
 sop_doc: navigation.sop.md

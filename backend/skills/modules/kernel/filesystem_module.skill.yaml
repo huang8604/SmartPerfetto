@@ -1,0 +1,419 @@
+# =============================================================================
+# Kernel FileSystem Module Expert
+# =============================================================================
+# Provides file system and I/O analysis capabilities for cross-domain experts.
+# Answers questions about block I/O, file operations, database access, and I/O latency.
+#
+# Key Analysis Areas:
+# - Block I/O latency and throughput
+# - File read/write operations
+# - SQLite/Room database operations
+# - SharedPreferences access
+# - Synchronous vs Asynchronous I/O patterns
+# =============================================================================
+
+name: filesystem_module
+version: "1.0"
+type: composite
+category: kernel
+
+meta:
+  display_name: "文件系统 I/O 分析"
+  description: "分析块 I/O、文件操作、数据库访问和 I/O 延迟"
+  tags: ["kernel", "filesystem", "io", "block", "database", "sqlite"]
+
+# Module metadata
+module:
+  layer: kernel
+  component: FileSystem
+  subsystems:
+    - block_io
+    - file_operations
+    - database
+    - shared_preferences
+  relatedModules:
+    - kernel_scheduler
+    - framework_ams
+    - app_third_party
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: io_during_startup
+      questionTemplate: "What IO operations delayed startup for package {package}?"
+      requiredParams: [package]
+      description: "Analyze IO operations during app startup"
+
+    - id: main_thread_io
+      questionTemplate: "What IO operations happened on main thread for package {package}?"
+      requiredParams: [package]
+      description: "Find synchronous IO on main thread"
+
+    - id: database_operations
+      questionTemplate: "What database operations happened for package {package}?"
+      requiredParams: [package]
+      optionalParams: [start_ts, end_ts]
+      description: "Analyze SQLite/Room database operations"
+
+    - id: io_latency_analysis
+      questionTemplate: "What is the IO latency distribution for package {package}?"
+      requiredParams: [package]
+      description: "Analyze IO latency patterns"
+
+    - id: block_io_summary
+      questionTemplate: "What is the block IO activity during {start_ts} to {end_ts}?"
+      requiredParams: [start_ts, end_ts]
+      description: "Summarize block IO activity in time range"
+
+  findingsSchema:
+    - id: main_thread_io
+      severity: critical
+      titleTemplate: "Main thread IO: {io_type} took {dur_ms}ms"
+      descriptionTemplate: "Synchronous IO on main thread blocked UI for {dur_ms}ms"
+      evidenceFields: [io_type, dur_ms, file_path, thread_name]
+
+    - id: slow_database_query
+      severity: warning
+      titleTemplate: "Slow database query: {query_ms}ms"
+      descriptionTemplate: "Database query took {query_ms}ms, consider optimization"
+      evidenceFields: [query_ms, table_name, operation_type]
+
+    - id: excessive_io_operations
+      severity: warning
+      titleTemplate: "Excessive IO: {io_count} operations totaling {total_ms}ms"
+      descriptionTemplate: "High number of IO operations may cause performance issues"
+      evidenceFields: [io_count, total_ms, avg_ms]
+
+    - id: io_wait_causing_delay
+      severity: critical
+      titleTemplate: "IO wait causing delay: {wait_ms}ms"
+      descriptionTemplate: "Thread spent {wait_ms}ms waiting for IO operations"
+      evidenceFields: [wait_ms, thread_name, io_type]
+
+  suggestionsSchema:
+    - id: check_scheduler_during_io
+      condition: "io_wait_ms > 50"
+      targetModule: scheduler_module
+      questionTemplate: "Why was thread blocked during IO at {ts}?"
+      paramsMapping:
+        ts: io_start_ts
+      priority: 1
+
+    - id: check_memory_pressure
+      condition: "io_type == 'page_fault'"
+      targetModule: memory_module
+      questionTemplate: "Is memory pressure causing page faults?"
+      paramsMapping: {}
+      priority: 2
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread
+    - process
+    - thread_state
+  optional_tables:
+    - io_uring_events
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "Target package name"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Analysis start timestamp"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "Analysis end timestamp"
+
+steps:
+  # Step 1: IO operations overview
+  - id: io_overview
+    type: atomic
+    name: "I/O 操作概览"
+    sql: |
+      SELECT
+        CASE
+          WHEN s.name GLOB '*read*' OR s.name GLOB '*Read*' THEN 'read'
+          WHEN s.name GLOB '*write*' OR s.name GLOB '*Write*' THEN 'write'
+          WHEN s.name GLOB '*sqlite*' OR s.name GLOB '*SQLite*' OR s.name GLOB '*database*' THEN 'database'
+          WHEN s.name GLOB '*SharedPreferences*' OR s.name GLOB '*sharedpref*' THEN 'shared_prefs'
+          WHEN s.name GLOB '*open*' OR s.name GLOB '*Open*' THEN 'open'
+          WHEN s.name GLOB '*flush*' OR s.name GLOB '*sync*' THEN 'sync'
+          ELSE 'other'
+        END AS io_type,
+        COUNT(*) AS operation_count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND (s.name GLOB '*read*'
+             OR s.name GLOB '*Read*'
+             OR s.name GLOB '*write*'
+             OR s.name GLOB '*Write*'
+             OR s.name GLOB '*sqlite*'
+             OR s.name GLOB '*SQLite*'
+             OR s.name GLOB '*database*'
+             OR s.name GLOB '*SharedPreferences*'
+             OR s.name GLOB '*open*'
+             OR s.name GLOB '*flush*'
+             OR s.name GLOB '*sync*'
+             OR s.name GLOB '*File*'
+             OR s.name GLOB '*IO*')
+        AND s.dur > 100000  -- > 0.1ms
+      GROUP BY io_type
+      ORDER BY total_ms DESC
+    display:
+      level: key
+      layer: overview
+      title: "I/O 操作统计"
+    save_as: io_overview
+    synthesize:
+      role: overview
+      fields:
+        - key: io_type
+          label: I/O 类型
+        - key: operation_count
+          label: 操作次数
+        - key: total_ms
+          label: 总耗时
+          format: "{{value}}ms"
+
+  # Step 2: Main thread IO (critical for ANR/Jank)
+  - id: main_thread_io
+    type: atomic
+    name: "主线程 I/O"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS io_operation,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name,
+        p.name AS process_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND t.tid = p.pid  -- Main thread: tid == pid
+        AND (s.name GLOB '*read*'
+             OR s.name GLOB '*Read*'
+             OR s.name GLOB '*write*'
+             OR s.name GLOB '*Write*'
+             OR s.name GLOB '*sqlite*'
+             OR s.name GLOB '*SQLite*'
+             OR s.name GLOB '*SharedPreferences*'
+             OR s.name GLOB '*File*'
+             OR s.name GLOB '*open*'
+             OR s.name GLOB '*flush*')
+        AND s.dur > 1000000  -- > 1ms
+      ORDER BY s.dur DESC
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "主线程 I/O 操作"
+    save_as: main_thread_io
+    synthesize: true
+
+  # Step 3: Database operations
+  - id: database_operations
+    type: atomic
+    name: "数据库操作"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS db_operation,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name,
+        CASE
+          WHEN t.tid = p.pid THEN 'main_thread'
+          ELSE 'background'
+        END AS thread_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND (s.name GLOB '*sqlite*'
+             OR s.name GLOB '*SQLite*'
+             OR s.name GLOB '*database*'
+             OR s.name GLOB '*query*'
+             OR s.name GLOB '*Query*'
+             OR s.name GLOB '*transaction*'
+             OR s.name GLOB '*cursor*'
+             OR s.name GLOB '*Room*')
+        AND s.dur > 500000  -- > 0.5ms
+      ORDER BY s.dur DESC
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "数据库操作"
+    save_as: db_operations
+
+  # Step 4: SharedPreferences operations
+  - id: shared_prefs_operations
+    type: atomic
+    name: "SharedPreferences 操作"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS sp_operation,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name,
+        CASE
+          WHEN t.tid = p.pid THEN 'main_thread'
+          ELSE 'background'
+        END AS thread_type
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND (s.name GLOB '*SharedPreferences*'
+             OR s.name GLOB '*sharedpref*'
+             OR s.name GLOB '*getShared*'
+             OR s.name GLOB '*apply*'
+             OR s.name GLOB '*commit*')
+        AND s.dur > 500000
+      ORDER BY s.dur DESC
+      LIMIT 20
+    display:
+      level: detail
+      layer: list
+      title: "SharedPreferences 操作"
+    save_as: sp_operations
+
+  # Step 5: Thread IO wait state analysis
+  - id: io_wait_state
+    type: atomic
+    name: "I/O 等待状态"
+    sql: |
+      SELECT
+        t.name AS thread_name,
+        CAST(SUM(ts.dur) / 1e6 AS INTEGER) AS io_wait_ms,
+        COUNT(*) AS io_wait_count,
+        CAST(AVG(ts.dur) / 1e6 AS REAL) AS avg_wait_ms
+      FROM thread_state ts
+      JOIN thread t USING (utid)
+      JOIN process p USING (upid)
+      WHERE p.name LIKE '%${package}%'
+        AND ts.state IN ('D', 'DK')  -- Uninterruptible sleep (IO wait)
+        AND ts.dur > 1000000
+      GROUP BY t.utid
+      HAVING io_wait_ms > 5
+      ORDER BY io_wait_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "线程 I/O 等待"
+    save_as: io_wait_state
+    synthesize: true
+
+  # Step 6: Slow IO operations (> 10ms)
+  - id: slow_io_operations
+    type: atomic
+    name: "慢 I/O 操作"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS operation,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name,
+        CASE
+          WHEN t.tid = p.pid THEN 'CRITICAL'
+          ELSE 'normal'
+        END AS severity
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name LIKE '%${package}%'
+        AND (s.name GLOB '*read*'
+             OR s.name GLOB '*write*'
+             OR s.name GLOB '*sqlite*'
+             OR s.name GLOB '*File*'
+             OR s.name GLOB '*IO*'
+             OR s.name GLOB '*flush*')
+        AND s.dur > 10000000  -- > 10ms
+      ORDER BY s.dur DESC
+      LIMIT 20
+    display:
+      level: detail
+      layer: list
+      title: "慢 I/O 操作 (>10ms)"
+    save_as: slow_io
+
+  # Step 7: Diagnose IO issues
+  - id: io_diagnosis
+    type: diagnostic
+    name: "I/O 诊断"
+    inputs: [io_overview, main_thread_io, db_operations, io_wait_state, slow_io]
+    rules:
+      - condition: "main_thread_io.data.length > 0"
+        diagnosis: "检测到 ${main_thread_io.data.length} 次主线程 I/O 操作，最长 ${main_thread_io.data[0]?.dur_ms}ms"
+        confidence: critical
+        suggestions:
+          - "将 I/O 操作移至后台线程"
+          - "使用 Kotlin 协程或 RxJava 异步处理"
+          - "考虑使用 Room 的 suspend 函数"
+        evidence_fields:
+          - main_thread_io.data.length
+          - main_thread_io.data[0]?.dur_ms
+          - main_thread_io.data[0]?.io_operation
+
+      - condition: "db_operations.data.filter(op => op.thread_type === 'main_thread').length > 5"
+        diagnosis: "主线程进行了多次数据库操作"
+        confidence: high
+        suggestions:
+          - "数据库查询应在后台线程执行"
+          - "使用 Room 的 @Query 配合 LiveData/Flow"
+          - "考虑批量处理减少查询次数"
+        evidence_fields:
+          - db_operations.data[0]?.db_operation
+          - db_operations.data[0]?.dur_ms
+
+      - condition: "io_wait_state.data[0]?.io_wait_ms > 50"
+        diagnosis: "线程 I/O 等待时间过长: ${io_wait_state.data[0]?.thread_name} 等待 ${io_wait_state.data[0]?.io_wait_ms}ms"
+        confidence: high
+        suggestions:
+          - "检查存储设备性能"
+          - "减少同步 I/O 操作"
+          - "考虑使用缓存"
+        evidence_fields:
+          - io_wait_state.data[0]?.thread_name
+          - io_wait_state.data[0]?.io_wait_ms
+
+      - condition: "slow_io.data.filter(op => op.severity === 'CRITICAL').length > 0"
+        diagnosis: "主线程存在严重慢 I/O: ${slow_io.data.filter(op => op.severity === 'CRITICAL')[0]?.operation}"
+        confidence: critical
+        suggestions:
+          - "立即将此操作移至后台"
+          - "这可能导致 ANR"
+        evidence_fields:
+          - slow_io.data[0]?.operation
+          - slow_io.data[0]?.dur_ms
+
+      - condition: "io_overview.data[0]?.total_ms > 500"
+        diagnosis: "I/O 操作总耗时 ${io_overview.data[0]?.total_ms}ms，占用大量时间"
+        confidence: medium
+        suggestions:
+          - "优化 I/O 访问模式"
+          - "使用批量读写减少系统调用"
+          - "考虑内存缓存"
+        evidence_fields:
+          - io_overview.data[0]?.io_type
+          - io_overview.data[0]?.total_ms
+    display:
+      level: key
+      layer: overview
+      title: "I/O 诊断结果"

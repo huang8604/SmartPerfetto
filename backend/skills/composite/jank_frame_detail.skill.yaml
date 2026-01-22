@@ -1,14 +1,17 @@
 name: jank_frame_detail
-version: "3.0"
+version: "1.0"
 type: composite
+category: rendering
 
 meta:
-  display_name: "掉帧帧详细分析"
-  description: "分析单帧：四象限、Binder、CPU频率、主线程耗时操作"
-  icon: "bug_report"
-  tags: [jank, frame, detail, quadrant, binder, cpu]
+  display_name: "掉帧详情分析"
+  description: "分析特定掉帧的详细原因"
+  icon: "broken_image"
+  tags: [jank, detail, composite]
 
 prerequisites:
+  required_tables:
+    - actual_frame_timeline
   modules:
     - android.binder
     - android.slices
@@ -83,7 +86,23 @@ steps:
     name: "四象限分析"
     display:
       level: key
+      layer: deep
       title: "四大象限"
+      columns:
+        - name: quadrant
+          label: "象限"
+          type: string
+        - name: name
+          label: "名称"
+          type: string
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: percentage
+          label: "占比"
+          type: percentage
+          format: percentage
     sql: |
       WITH target_threads AS (
         SELECT t.utid, t.tid, t.name as thread_name, p.pid, p.name as process_name,
@@ -166,7 +185,27 @@ steps:
     name: "Binder 调用"
     display:
       level: detail
+      layer: deep
       title: "Binder 调用"
+      columns:
+        - name: interface
+          label: "服务进程"
+          type: string
+        - name: count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: sync_count
+          label: "同步调用"
+          type: number
     sql: |
       SELECT
         server_process as interface,
@@ -198,7 +237,21 @@ steps:
     name: "CPU频率"
     display:
       level: detail
+      layer: deep
       title: "CPU 频率"
+      columns:
+        - name: core_type
+          label: "核心类型"
+          type: string
+        - name: avg_freq_mhz
+          label: "平均频率"
+          type: number
+        - name: max_freq_mhz
+          label: "最大频率"
+          type: number
+        - name: min_freq_mhz
+          label: "最小频率"
+          type: number
     sql: |
       WITH freq_data AS (
         SELECT
@@ -236,7 +289,28 @@ steps:
     name: "主线程耗时操作"
     display:
       level: key
+      layer: deep
       title: "主线程耗时操作"
+      columns:
+        - name: name
+          label: "操作名"
+          type: string
+        - name: dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: ts
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
     sql: |
       WITH main_thread AS (
         SELECT t.utid
@@ -278,7 +352,32 @@ steps:
     name: "RenderThread 耗时操作"
     display:
       level: key
+      layer: deep
       title: "RenderThread 耗时操作"
+      columns:
+        - name: name
+          label: "操作名"
+          type: string
+        - name: dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: max_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: ts
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
     sql: |
       WITH render_thread AS (
         SELECT t.utid
@@ -321,7 +420,29 @@ steps:
     name: "CPU 频率变化时间线"
     display:
       level: detail
+      layer: deep
       title: "CPU 频率变化"
+      columns:
+        - name: ts
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: relative_ms
+          label: "相对时间"
+          type: duration
+          format: duration_ms
+        - name: cpu
+          label: "CPU"
+          type: number
+        - name: core_type
+          label: "核心类型"
+          type: string
+        - name: freq_mhz
+          label: "频率"
+          type: number
+        - name: change_direction
+          label: "变化"
+          type: enum
     sql: |
       WITH freq_events AS (
         SELECT
@@ -360,7 +481,33 @@ steps:
     name: "锁竞争分析"
     display:
       level: detail
+      layer: deep
       title: "锁竞争"
+      columns:
+        - name: blocking_method
+          label: "持锁方法"
+          type: string
+          format: code
+        - name: blocking_thread_name
+          label: "持锁线程"
+          type: string
+        - name: blocked_method
+          label: "等锁方法"
+          type: string
+          format: code
+        - name: blocked_thread_name
+          label: "等锁线程"
+          type: string
+        - name: main_blocked
+          label: "主线程被阻"
+          type: boolean
+        - name: wait_ms
+          label: "等待时间"
+          type: duration
+          format: duration_ms
+        - name: waiter_count
+          label: "等待数"
+          type: number
     sql: |
       SELECT
         short_blocking_method as blocking_method,
@@ -386,7 +533,28 @@ steps:
     name: "根因分析"
     display:
       level: key
+      layer: deep
       title: "🎯 根因分析"
+      columns:
+        - name: primary_cause
+          label: "主要原因"
+          type: string
+        - name: secondary_info
+          label: "附加信息"
+          type: string
+        - name: confidence
+          label: "置信度"
+          type: string
+        - name: cause_type
+          label: "原因类型"
+          type: enum
+        - name: frame_dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+        - name: jank_type
+          label: "掉帧类型"
+          type: string
     sql: |
       -- 根因分析: 综合四象限、CPU频率、耗时操作等数据，输出明确的根因结论
       WITH
@@ -546,6 +714,7 @@ steps:
     name: "帧诊断"
     display:
       level: detail
+      layer: deep
       title: "详细诊断"
     inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data, root_cause]
     rules:

@@ -1,0 +1,260 @@
+# =============================================================================
+# GPU 指标分析 (GPU Metrics)
+# =============================================================================
+# 分析 GPU 频率、利用率和渲染性能
+#
+# 数据来源：
+# - gpu_counter_track: GPU 计数器
+# - gpu_frequency: GPU 频率
+# - GPU 相关 slice (fence, submit 等)
+# =============================================================================
+
+name: gpu_metrics
+version: "1.0"
+type: atomic
+category: hardware
+
+meta:
+  display_name: "GPU 指标分析"
+  description: "分析 GPU 频率、利用率和渲染性能"
+  icon: "gpu"
+  tags: [gpu, frequency, utilization, performance, atomic]
+
+prerequisites:
+  optional_tables:
+    - gpu_counter_track
+    - slice
+    - counter
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+  - name: package
+    type: string
+    required: false
+
+steps:
+  # Step 1: GPU 频率分析
+  - id: gpu_frequency
+    type: atomic
+    name: "GPU 频率"
+    display:
+      level: summary
+      title: "GPU 频率"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(c.ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(c.ts)) as end_ts
+        FROM counter c
+      ),
+      gpu_freq AS (
+        SELECT
+          c.ts,
+          CASE 
+            WHEN c.value > 1000000 THEN c.value / 1000000.0
+            WHEN c.value > 1000 THEN c.value / 1000.0
+            ELSE c.value 
+          END as freq_mhz,
+          t.name as counter_name
+        FROM counter c
+        JOIN gpu_counter_track t ON c.track_id = t.id
+        WHERE (t.name GLOB '*freq*' OR t.name GLOB '*Freq*' OR t.name GLOB '*clock*')
+          AND c.ts >= (SELECT start_ts FROM time_bounds)
+          AND c.ts <= (SELECT end_ts FROM time_bounds)
+      )
+      SELECT
+        ROUND(AVG(freq_mhz), 0) as avg_freq_mhz,
+        ROUND(MAX(freq_mhz), 0) as max_freq_mhz,
+        ROUND(MIN(freq_mhz), 0) as min_freq_mhz,
+        ROUND(PERCENTILE(freq_mhz, 0.5), 0) as median_freq_mhz,
+        COUNT(*) as sample_count,
+        (SELECT GROUP_CONCAT(DISTINCT counter_name) FROM gpu_freq) as freq_counters
+      FROM gpu_freq
+      WHERE freq_hz > 0
+    save_as: gpu_freq
+    optional: true
+
+  # Step 2: GPU 利用率
+  - id: gpu_utilization
+    type: atomic
+    name: "GPU 利用率"
+    display:
+      level: summary
+      title: "GPU 利用率"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(c.ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(c.ts)) as end_ts
+        FROM counter c
+      ),
+      gpu_util AS (
+        SELECT
+          c.ts,
+          c.value as utilization,
+          t.name as counter_name
+        FROM counter c
+        JOIN gpu_counter_track t ON c.track_id = t.id
+        WHERE (t.name GLOB '*util*' OR t.name GLOB '*Util*' OR t.name GLOB '*busy*' OR t.name GLOB '*Busy*')
+          AND c.ts >= (SELECT start_ts FROM time_bounds)
+          AND c.ts <= (SELECT end_ts FROM time_bounds)
+      )
+      SELECT
+        ROUND(AVG(utilization), 1) as avg_utilization_pct,
+        ROUND(MAX(utilization), 1) as max_utilization_pct,
+        ROUND(MIN(utilization), 1) as min_utilization_pct,
+        ROUND(PERCENTILE(utilization, 0.95), 1) as p95_utilization_pct,
+        COUNT(*) as sample_count,
+        (SELECT GROUP_CONCAT(DISTINCT counter_name) FROM gpu_util) as util_counters
+      FROM gpu_util
+      WHERE utilization >= 0 AND utilization <= 100
+    save_as: gpu_util
+    optional: true
+
+  # Step 3: GPU 渲染耗时
+  - id: gpu_render_time
+    type: atomic
+    name: "GPU 渲染耗时"
+    display:
+      level: detail
+      title: "GPU 渲染耗时"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts)) as end_ts
+        FROM slice
+      ),
+      gpu_slices AS (
+        SELECT
+          s.name,
+          s.dur,
+          s.ts
+        FROM slice s
+        WHERE (s.name GLOB '*GPU*'
+               OR s.name GLOB '*gpu*'
+               OR s.name GLOB '*Render*Pass*'
+               OR s.name GLOB '*Draw*Call*'
+               OR s.name GLOB '*Shader*'
+               OR s.name GLOB '*fence*signal*'
+               OR s.name GLOB '*vkQueue*'
+               OR s.name GLOB '*gl*Draw*')
+          AND s.ts >= (SELECT start_ts FROM time_bounds)
+          AND s.ts <= (SELECT end_ts FROM time_bounds)
+          AND s.dur > 0
+      )
+      SELECT
+        name as gpu_operation,
+        COUNT(*) as occurrence_count,
+        ROUND(SUM(dur) / 1e6, 2) as total_time_ms,
+        ROUND(AVG(dur) / 1e6, 2) as avg_time_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_time_ms,
+        ROUND(PERCENTILE(dur, 0.95) / 1e6, 2) as p95_time_ms
+      FROM gpu_slices
+      GROUP BY name
+      ORDER BY total_time_ms DESC
+      LIMIT 15
+    save_as: gpu_render_time
+    optional: true
+
+  # Step 4: GPU Fence 等待
+  - id: gpu_fence_waits
+    type: atomic
+    name: "GPU Fence 等待"
+    display:
+      level: detail
+      title: "GPU Fence 等待"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts)) as end_ts
+        FROM slice
+      ),
+      -- 动态检测 VSync 周期
+      vsync_config AS (
+        SELECT COALESCE(
+          (SELECT CAST(AVG(dur) AS INTEGER)
+           FROM expected_frame_timeline_slice
+           WHERE dur > 5000000 AND dur < 20000000
+           LIMIT 1000),
+          16666666
+        ) as vsync_period_ns
+      ),
+      fence_slices AS (
+        SELECT
+          s.name,
+          s.dur
+        FROM slice s
+        WHERE (s.name GLOB '*fence*'
+               OR s.name GLOB '*Fence*'
+               OR s.name GLOB '*GPU completion*'
+               OR s.name GLOB '*Waiting for GPU*'
+               OR s.name GLOB '*eglSwapBuffers*')
+          AND s.ts >= (SELECT start_ts FROM time_bounds)
+          AND s.ts <= (SELECT end_ts FROM time_bounds)
+          AND s.dur > 0
+      )
+      SELECT
+        COUNT(*) as total_fence_waits,
+        ROUND(SUM(dur) / 1e6, 2) as total_wait_ms,
+        ROUND(AVG(dur) / 1e6, 2) as avg_wait_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_wait_ms,
+        ROUND(PERCENTILE(dur, 0.95) / 1e6, 2) as p95_wait_ms,
+        ROUND((SELECT vsync_period_ns FROM vsync_config) / 1e6, 2) as vsync_period_ms,
+        -- 使用动态 VSync 周期
+        COUNT(CASE WHEN dur > (SELECT vsync_period_ns FROM vsync_config) THEN 1 END) as waits_over_vsync,
+        CASE
+          -- 平均等待超过 VSync 周期的 50%
+          WHEN AVG(dur) > (SELECT vsync_period_ns FROM vsync_config) * 0.5 THEN 'GPU_BOUND'
+          WHEN COUNT(CASE WHEN dur > (SELECT vsync_period_ns FROM vsync_config) THEN 1 END) > COUNT(*) * 0.1 THEN 'GPU_OCCASIONAL_SLOW'
+          ELSE 'NORMAL'
+        END as gpu_status
+      FROM fence_slices
+    save_as: gpu_fence
+    optional: true
+
+  # Step 5: GPU 状态汇总
+  - id: gpu_summary
+    type: atomic
+    name: "GPU 汇总"
+    display:
+      level: summary
+      title: "GPU 状态汇总"
+    sql: |
+      WITH available_metrics AS (
+        SELECT
+          (SELECT COUNT(*) FROM gpu_counter_track WHERE name GLOB '*freq*') as has_freq,
+          (SELECT COUNT(*) FROM gpu_counter_track WHERE name GLOB '*util*') as has_util,
+          (SELECT COUNT(*) FROM slice WHERE name GLOB '*GPU*' OR name GLOB '*fence*') as has_slices
+      )
+      SELECT
+        CASE WHEN has_freq > 0 THEN '可用' ELSE '不可用' END as freq_data,
+        CASE WHEN has_util > 0 THEN '可用' ELSE '不可用' END as util_data,
+        CASE WHEN has_slices > 0 THEN '可用' ELSE '不可用' END as slice_data,
+        has_freq + has_util + has_slices as total_metrics
+      FROM available_metrics
+    save_as: gpu_summary
+
+output:
+  format: structured
+  fields:
+    - name: gpu_freq
+      description: "GPU 频率统计"
+    - name: gpu_util
+      description: "GPU 利用率统计"
+    - name: gpu_render_time
+      description: "GPU 渲染耗时"
+    - name: gpu_fence
+      description: "GPU Fence 等待统计"
+    - name: gpu_summary
+      description: "GPU 数据可用性汇总"

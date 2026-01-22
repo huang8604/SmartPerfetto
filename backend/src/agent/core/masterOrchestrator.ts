@@ -35,6 +35,13 @@ import { PlannerAgent } from '../agents/plannerAgent';
 import { EvaluatorAgent } from '../agents/evaluatorAgent';
 import { AnalysisWorker } from '../agents/workers/analysisWorker';
 import {
+  IterationStrategyPlanner,
+  createIterationStrategyPlanner,
+  IterationStrategy,
+  StrategyDecision,
+  IterationContext,
+} from '../agents/iterationStrategyPlanner';
+import {
   HookRegistry,
   getHookRegistry,
   HookContext,
@@ -70,6 +77,13 @@ import {
   ExpertInput,
   ExpertOutput,
   AnalysisIntent,
+  // Cross-Domain Expert System
+  createPerformanceExpert,
+  PerformanceExpert,
+  CrossDomainEvent,
+  CrossDomainInput,
+  CrossDomainOutput,
+  moduleCatalog,
 } from '../experts';
 import {
   EnhancedSessionContext,
@@ -115,6 +129,7 @@ export class MasterOrchestrator extends EventEmitter {
   private plannerAgent: PlannerAgent;
   private evaluatorAgent: EvaluatorAgent;
   private analysisWorker: AnalysisWorker;
+  private iterationStrategyPlanner: IterationStrategyPlanner;  // Phase 1.4
   private workerAgents: Map<string, StageExecutor>;
 
   // 执行状态
@@ -125,6 +140,10 @@ export class MasterOrchestrator extends EventEmitter {
   private currentArchitecture: ArchitectureInfo | null = null;  // 当前检测到的渲染架构
   private expertModeEnabled: boolean = false;  // 是否启用专家模式（Phase 3）
   private sessionContext: EnhancedSessionContext | null = null;  // 多轮对话上下文（Phase 5）
+
+  // Cross-Domain Expert System (新增)
+  private crossDomainExpertEnabled: boolean = true;  // 是否启用跨领域专家模式
+  private performanceExpert: PerformanceExpert | null = null;  // 性能分析专家
 
   constructor(config: Partial<MasterOrchestratorConfig> = {}) {
     super();
@@ -181,6 +200,12 @@ export class MasterOrchestrator extends EventEmitter {
       this.config.evaluationCriteria
     );
     this.analysisWorker = new AnalysisWorker(this.modelRouter);
+    // Phase 1.4: Initialize Iteration Strategy Planner
+    this.iterationStrategyPlanner = createIterationStrategyPlanner(this.modelRouter, {
+      minQualityForConclusion: this.config.evaluationCriteria.minQualityScore,
+      minCompletenessForConclusion: this.config.evaluationCriteria.minCompletenessScore,
+      useAIDecisions: true,
+    });
     this.workerAgents = new Map();
 
     // 注册阶段执行器
@@ -200,9 +225,312 @@ export class MasterOrchestrator extends EventEmitter {
     try {
       initializeExperts();
       console.log(`[MasterOrchestrator] Expert system initialized, supported intents: ${expertRegistry.getSupportedIntents().join(', ')}`);
+
+      // Initialize Cross-Domain Expert System
+      if (this.crossDomainExpertEnabled) {
+        this.initializeCrossDomainExperts();
+      }
     } catch (error: any) {
       console.warn(`[MasterOrchestrator] Failed to initialize expert system: ${error.message}`);
     }
+  }
+
+  /**
+   * Initialize Cross-Domain Expert System
+   * Creates the PerformanceExpert and initializes the module catalog
+   */
+  private async initializeCrossDomainExperts(): Promise<void> {
+    try {
+      // Initialize module catalog (discovers module skills)
+      await moduleCatalog.initialize();
+      console.log(`[MasterOrchestrator] Module catalog initialized with ${moduleCatalog.getAllModules().length} modules`);
+
+      // Create PerformanceExpert (will be initialized lazily when needed)
+      console.log('[MasterOrchestrator] Cross-domain expert system ready');
+    } catch (error: any) {
+      console.warn(`[MasterOrchestrator] Failed to initialize cross-domain experts: ${error.message}`);
+      this.crossDomainExpertEnabled = false;
+    }
+  }
+
+  /**
+   * Check if the query should use cross-domain expert mode
+   */
+  private shouldUseCrossDomainExpert(intent: Intent): boolean {
+    if (!this.crossDomainExpertEnabled) return false;
+
+    // Performance-related intents should use PerformanceExpert
+    const performanceIntents = ['scroll', 'jank', 'frame', 'startup', 'launch', 'click', 'latency', 'anr', 'performance'];
+    const primaryGoal = intent.primaryGoal?.toLowerCase() || '';
+    const aspects = intent.aspects?.join(' ').toLowerCase() || '';
+
+    return performanceIntents.some(pi =>
+      primaryGoal.includes(pi) || aspects.includes(pi) ||
+      primaryGoal.includes('卡顿') || primaryGoal.includes('滑动') ||
+      primaryGoal.includes('启动') || primaryGoal.includes('响应')
+    );
+  }
+
+  /**
+   * Execute analysis using cross-domain expert
+   */
+  private async executeCrossDomainAnalysis(
+    sessionId: string,
+    traceId: string,
+    query: string,
+    intent: Intent,
+    options: { traceProcessor?: any; traceProcessorService?: any }
+  ): Promise<MasterOrchestratorResult> {
+    const startTime = Date.now();
+
+    this.emitUpdate('progress', {
+      phase: 'cross_domain_expert',
+      message: '使用跨领域专家分析',
+    });
+
+    // Create PerformanceExpert instance
+    if (!this.performanceExpert) {
+      this.performanceExpert = createPerformanceExpert();
+    }
+
+    // Set up event listeners for dialogue progress
+    this.performanceExpert.removeAllListeners();
+    this.performanceExpert.on('event', (event: CrossDomainEvent) => {
+      this.handleCrossDomainEvent(sessionId, event);
+    });
+
+    // Execute cross-domain analysis
+    const input: CrossDomainInput = {
+      sessionId,
+      traceId,
+      query,
+      intentCategory: 'performance',  // PerformanceExpert handles all performance-related intents
+      traceProcessorService: options.traceProcessorService,
+      architecture: this.currentArchitecture || undefined,
+      packageName: this.extractPackageName(intent.primaryGoal),
+    };
+
+    try {
+      const output = await this.performanceExpert.analyze(input);
+
+      // Convert cross-domain output to MasterOrchestratorResult
+      return this.convertCrossDomainOutput(sessionId, output, intent, startTime);
+    } catch (error: any) {
+      console.error('[MasterOrchestrator] Cross-domain analysis failed:', error);
+
+      // Fall back to traditional pipeline if cross-domain fails
+      console.log('[MasterOrchestrator] Falling back to traditional pipeline');
+      this.crossDomainExpertEnabled = false;
+      throw error;
+    }
+  }
+
+  /**
+   * Handle events from cross-domain expert
+   */
+  private handleCrossDomainEvent(sessionId: string, event: CrossDomainEvent): void {
+    // Map cross-domain events to SSE updates
+    switch (event.type) {
+      case 'turn_started':
+        this.emitUpdate('progress', {
+          phase: 'dialogue_turn',
+          turn: event.turnNumber,
+          message: `对话轮次 ${event.turnNumber} 开始`,
+        });
+        break;
+
+      case 'module_queried':
+        this.emitUpdate('progress', {
+          phase: 'module_query',
+          module: event.data.moduleId,
+          queryId: event.data.queryId,
+          message: `查询模块: ${event.data.moduleId}`,
+        });
+        break;
+
+      case 'module_responded':
+        this.emitUpdate('progress', {
+          phase: 'module_response',
+          module: event.data.moduleId,
+          success: event.data.success,
+          message: `模块响应: ${event.data.moduleId}`,
+        });
+
+        // Emit findings as individual events
+        if (event.data.findings) {
+          for (const finding of event.data.findings) {
+            const hash = `${finding.id}-${finding.title}`;
+            if (!this.emittedDiagnosticHashes.has(hash)) {
+              this.emittedDiagnosticHashes.add(hash);
+              this.emitUpdate('finding', {
+                id: finding.id,
+                severity: finding.severity,
+                title: finding.title,
+                description: finding.description,
+                evidence: finding.evidence,
+                module: event.data.moduleId,
+              });
+            }
+          }
+        }
+        break;
+
+      case 'hypothesis_updated':
+        this.emitUpdate('progress', {
+          phase: 'hypothesis',
+          hypothesisId: event.data.hypothesisId,
+          confidence: event.data.confidence,
+          status: event.data.status,
+          message: `假设更新: ${event.data.description}`,
+        });
+        break;
+
+      case 'decision_made':
+        this.emitUpdate('progress', {
+          phase: 'decision',
+          decision: event.data.action,
+          reason: event.data.reasoning,
+          message: `决策: ${event.data.action}`,
+        });
+        break;
+
+      case 'conclusion_reached':
+        this.emitUpdate('progress', {
+          phase: 'conclusion',
+          confidence: event.data.confidence,
+          category: event.data.category,
+          message: `分析结论: ${event.data.summary}`,
+        });
+        break;
+
+      case 'dialogue_completed':
+        this.emitUpdate('progress', {
+          phase: 'dialogue_complete',
+          totalTurns: event.data.totalTurns,
+          message: `对话完成 (${event.data.totalTurns} 轮)`,
+        });
+        break;
+
+      case 'error':
+        this.emitUpdate('error', {
+          message: event.data.error,
+          phase: 'cross_domain_expert',
+        });
+        break;
+
+      case 'skill_data':
+        // Forward skill_data events for frontend display of L1/L2/L4 layered results
+        // This is CRITICAL for showing detailed analysis results in the UI
+        this.emitUpdate('skill_data', {
+          skillId: event.data?.skillId,
+          skillName: event.data?.skillName,
+          layers: event.data?.layers,
+          diagnostics: event.data?.diagnostics,
+        });
+        break;
+
+      default:
+        // Log unhandled events for debugging
+        console.log(`[MasterOrchestrator] Unhandled cross-domain event type: ${event.type}`);
+        break;
+    }
+  }
+
+  /**
+   * Extract package name from query
+   */
+  private extractPackageName(query: string | undefined): string | undefined {
+    if (!query) return undefined;
+    // Try to extract package name patterns like "com.xxx.xxx" or "package: xxx"
+    const packagePattern = /(?:package[:\s]+)?([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)/i;
+    const match = query.match(packagePattern);
+    return match?.[1];
+  }
+
+  /**
+   * Convert cross-domain output to MasterOrchestratorResult
+   */
+  private convertCrossDomainOutput(
+    sessionId: string,
+    output: CrossDomainOutput,
+    intent: Intent,
+    startTime: number
+  ): MasterOrchestratorResult {
+    // Convert findings to standard format
+    const findings: Finding[] = output.findings.map(f => ({
+      id: f.id,
+      category: 'performance',
+      type: f.severity === 'critical' ? 'issue' : f.severity === 'warning' ? 'warning' : 'info',
+      severity: f.severity,
+      title: f.title,
+      description: f.description || '',
+      evidence: f.evidence ? [f.evidence] : undefined,  // Wrap in array
+      source: f.sourceModule,
+      confidence: f.confidence,
+    }));
+
+    // Build summary from conclusion
+    const summary = output.conclusion?.summary || '分析完成';
+
+    // Create a synthetic StageResult to hold findings from cross-domain analysis
+    // This ensures findings flow through the standard extraction pipeline
+    const crossDomainStageResult: StageResult = {
+      stageId: 'cross_domain_analysis',
+      success: output.success,
+      data: {
+        conclusion: output.conclusion,
+        dialogueStats: output.dialogueStats,
+        rawFindings: output.findings,
+      },
+      findings: findings,
+      startTime,
+      endTime: Date.now(),
+      retryCount: 0,
+    };
+
+    return {
+      sessionId,
+      intent,
+      plan: {
+        tasks: output.dialogueStats.modulesQueried.map((m, i) => ({
+          id: `task_${i}`,
+          expertAgent: m,
+          objective: `Query module ${m}`,
+          dependencies: [],
+          priority: i,
+          context: {},
+        })),
+        estimatedDuration: output.dialogueStats.totalExecutionTimeMs,
+        parallelizable: false,
+      },
+      stageResults: findings.length > 0 ? [crossDomainStageResult] : [],
+      evaluation: {
+        passed: output.success,
+        qualityScore: output.conclusion?.confidence || 0,
+        completenessScore: output.success ? 1 : 0,
+        contradictions: [],
+        feedback: {
+          strengths: output.success ? ['Cross-domain analysis completed'] : [],
+          weaknesses: [],
+          missingAspects: [],
+          improvementSuggestions: output.suggestions,
+          priorityActions: [],
+        },
+        needsImprovement: !output.success,
+        suggestedActions: output.suggestions,
+      },
+      synthesizedAnswer: summary,
+      confidence: output.conclusion?.confidence || 0,
+      totalDuration: Date.now() - startTime,
+      iterationCount: output.dialogueStats.totalTurns,
+      modelUsage: {
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCost: 0,
+        modelBreakdown: {},
+      },
+      canResume: false,
+    };
   }
 
   // ==========================================================================
@@ -226,6 +554,7 @@ export class MasterOrchestrator extends EventEmitter {
       this.emittedFindingIds.clear();  // 重置已发送的 Finding IDs
       this.emittedDiagnosticHashes.clear();  // 重置内容哈希
       this.totalIterations = 0;  // 重置迭代计数
+      this.iterationStrategyPlanner.resetProgressTracking();  // 【P1 Fix】重置进度跟踪，防止跨会话分数累积
 
       // 初始化多轮对话上下文（Phase 5）
       this.sessionContext = sessionContextManager.getOrCreate(session.sessionId, traceId);
@@ -293,10 +622,53 @@ export class MasterOrchestrator extends EventEmitter {
       // 记录对话轮次（Phase 5: Multi-turn Dialogue）
       const currentTurn = this.sessionContext?.addTurn(query, intent);
 
+      // === Cross-Domain Expert Mode (新增) ===
+      // Check if this query should be handled by the cross-domain expert system
+      if (this.shouldUseCrossDomainExpert(intent)) {
+        console.log('[MasterOrchestrator] Using cross-domain expert for performance analysis');
+        this.emitUpdate('progress', {
+          phase: 'cross_domain_expert',
+          message: '使用跨领域专家系统分析',
+        });
+
+        try {
+          const result = await this.executeCrossDomainAnalysis(
+            session.sessionId,
+            traceId,
+            query,
+            intent,
+            options
+          );
+
+          // Complete session with cross-domain result
+          this.emitUpdate('conclusion', {
+            sessionId: session.sessionId,
+            summary: result.synthesizedAnswer,
+            confidence: result.confidence,
+            iterationCount: result.iterationCount,
+          });
+
+          return result;
+        } catch (error: any) {
+          // 【P1 Fix】优雅降级：跨域专家失败时回退到传统管道，而非 throw
+          console.warn('[MasterOrchestrator] Cross-domain expert failed, falling back to traditional pipeline:', error.message);
+          // 禁用跨域专家以避免后续重复失败
+          this.crossDomainExpertEnabled = false;
+          // 通知前端回退到传统管道
+          this.emitUpdate('progress', {
+            phase: 'fallback_to_traditional',
+            message: '跨领域专家分析失败，回退到传统分析管道',
+            error: error.message,
+          });
+          // 继续执行传统管道，不 throw
+        }
+      }
+
       this.emitUpdate('progress', { phase: 'planning', message: '规划分析任务' });
 
       // 4. 创建计划
-      const plan = await this.createPlan(intent, traceId, options);
+      // Phase 1.2: Changed to 'let' to allow re-planning with evaluation feedback
+      let plan = await this.createPlan(intent, traceId, options);
       await this.sessionStore.updatePlan(session.sessionId, plan);
       this.stateMachine.transition({ type: 'PLAN_CREATED', payload: { plan } });
 
@@ -394,40 +766,111 @@ export class MasterOrchestrator extends EventEmitter {
           payload: { evaluation, passed: evaluation.passed },
         });
 
-        // First iteration optimization: Skills produce deterministic high-quality results
-        // If skills executed successfully with data, pass on first iteration
-        const hasSuccessfulSkillData = stageResults.some(r =>
-          r.success && r.data && Object.keys(r.data).length > 0
-        );
-        if (this.totalIterations === 1 && hasSuccessfulSkillData) {
-          console.log('[MasterOrchestrator] First iteration with successful skill data - auto-passing');
-          evaluation.passed = true;
-        }
+        // Phase 1.1: Auto-pass logic REMOVED
+        // Phase 1.4: Use IterationStrategyPlanner for intelligent decision-making
+        console.log(`[MasterOrchestrator] Evaluation result - passed: ${evaluation.passed}, qualityScore: ${evaluation.qualityScore.toFixed(2)}`);
 
-        // 检查是否通过
-        if (evaluation.passed) {
+        // Collect all findings for strategy planning
+        const allFindings = this.collectFindings(stageResults);
+
+        // Phase 1.4: Get iteration strategy decision
+        const iterationContext: IterationContext = {
+          evaluation,
+          previousResults: stageResults,
+          intent,
+          iterationCount: this.totalIterations,
+          maxIterations: this.config.maxTotalIterations,
+          allFindings,
+        };
+
+        const strategyDecision = await this.iterationStrategyPlanner.planNextIteration(iterationContext);
+        console.log(`[MasterOrchestrator] Strategy decision: ${strategyDecision.strategy} (confidence: ${strategyDecision.confidence.toFixed(2)})`);
+
+        // Emit strategy decision event for frontend
+        this.emitUpdate('progress', {
+          phase: 'strategy_decision',
+          strategy: strategyDecision.strategy,
+          confidence: strategyDecision.confidence,
+          reasoning: strategyDecision.reasoning,
+          focusArea: strategyDecision.focusArea,
+          newDirection: strategyDecision.newDirection,
+          message: `策略决策: ${this.translateStrategy(strategyDecision.strategy)}`,
+        });
+
+        // Handle strategy
+        if (strategyDecision.strategy === 'conclude') {
+          console.log(`[MasterOrchestrator] Strategy: conclude - breaking out of loop`);
           break;
         }
 
-        // 检查迭代次数
-        const iterationDecision = this.circuitBreaker.recordIteration('main');
-        if (iterationDecision.action === 'ask_user') {
+        // Check circuit breaker before continuing
+        const circuitDecision = this.circuitBreaker.recordIteration('main');
+        if (circuitDecision.action === 'ask_user') {
           return this.createAwaitingUserResult(
             session.sessionId,
             intent,
             plan,
             stageResults,
-            iterationDecision.reason!,
+            circuitDecision.reason!,
             startTime
           );
         }
 
-        // 继续迭代
-        this.emitUpdate('progress', {
-          phase: 'refining',
-          message: '根据反馈优化分析',
-          feedback: evaluation.feedback,
-        });
+        // Handle different strategies
+        if (strategyDecision.strategy === 'deep_dive' && strategyDecision.focusArea) {
+          // Deep dive into specific area
+          this.emitUpdate('progress', {
+            phase: 'deep_dive',
+            focusArea: strategyDecision.focusArea,
+            message: `深入分析: ${strategyDecision.focusArea}`,
+          });
+
+          // Get skills for this focus area
+          const focusSkills = this.iterationStrategyPlanner.getSkillsForFocusArea(strategyDecision.focusArea);
+          console.log(`[MasterOrchestrator] Deep dive skills: ${focusSkills.join(', ')}`);
+
+          // Update plan with focus area
+          const deepDivePlan = await this.createPlan(
+            { ...intent, aspects: [strategyDecision.focusArea, ...intent.aspects] },
+            session.traceId,
+            options,
+            evaluation
+          );
+          await this.sessionStore.updatePlan(session.sessionId, deepDivePlan);
+          plan = deepDivePlan;
+
+        } else if (strategyDecision.strategy === 'pivot' && strategyDecision.newDirection) {
+          // Pivot to new analysis direction
+          this.emitUpdate('progress', {
+            phase: 'pivot',
+            newDirection: strategyDecision.newDirection,
+            message: `转向新方向: ${strategyDecision.newDirection}`,
+          });
+
+          // Create new plan with pivoted direction
+          const pivotedIntent: Intent = {
+            ...intent,
+            primaryGoal: `${intent.primaryGoal} - 关注 ${strategyDecision.newDirection}`,
+            aspects: [strategyDecision.newDirection, ...intent.aspects],
+          };
+          const pivotedPlan = await this.createPlan(pivotedIntent, session.traceId, options, evaluation);
+          await this.sessionStore.updatePlan(session.sessionId, pivotedPlan);
+          plan = pivotedPlan;
+
+        } else {
+          // Default: continue with feedback-driven refinement
+          this.emitUpdate('progress', {
+            phase: 'refining',
+            message: '根据反馈优化分析',
+            feedback: evaluation.feedback,
+          });
+
+          // Phase 1.2: Re-create plan based on evaluation feedback
+          console.log(`[MasterOrchestrator] Re-planning with evaluation feedback for iteration ${this.totalIterations + 1}`);
+          const refinedPlan = await this.createPlan(intent, session.traceId, options, evaluation);
+          await this.sessionStore.updatePlan(session.sessionId, refinedPlan);
+          plan = refinedPlan;
+        }
       }
 
       // 6. 综合最终答案
@@ -553,15 +996,17 @@ export class MasterOrchestrator extends EventEmitter {
 
   /**
    * 理解意图
+   * Phase 1.3: Now passes sessionContext for multi-turn dialogue awareness
    */
   private async understandIntent(
     query: string,
     traceId: string,
     options: { traceProcessor?: any; traceProcessorService?: any }
   ): Promise<Intent> {
-    const context: SubAgentContext = {
+    const context: SubAgentContext & { sessionContext?: EnhancedSessionContext } = {
       sessionId: this.currentSessionId || '',
       traceId,
+      sessionContext: this.sessionContext || undefined,  // Phase 1.3: Pass session context
       ...options,
     };
 
@@ -570,11 +1015,13 @@ export class MasterOrchestrator extends EventEmitter {
 
   /**
    * 创建计划
+   * Phase 1.2: Now supports previousEvaluation for feedback-driven refinement
    */
   private async createPlan(
     intent: Intent,
     traceId: string,
-    options: { traceProcessor?: any; traceProcessorService?: any }
+    options: { traceProcessor?: any; traceProcessorService?: any },
+    previousEvaluation?: Evaluation
   ): Promise<AnalysisPlan> {
     const context: SubAgentContext = {
       sessionId: this.currentSessionId || '',
@@ -583,7 +1030,7 @@ export class MasterOrchestrator extends EventEmitter {
       ...options,
     };
 
-    return this.plannerAgent.createPlan(intent, context);
+    return this.plannerAgent.createPlan(intent, context, previousEvaluation);
   }
 
   /**
@@ -657,6 +1104,20 @@ ${contextSection ? '\n注意：请结合对话上下文，回答应与之前的�
       console.log('[MasterOrchestrator.synthesize] Generated simple synthesis, length:', simpleSynthesis?.length || 0);
       return simpleSynthesis;
     }
+  }
+
+  /**
+   * Translate iteration strategy to Chinese
+   * Phase 1.4: Helper for frontend display
+   */
+  private translateStrategy(strategy: IterationStrategy): string {
+    const translations: Record<IterationStrategy, string> = {
+      'continue': '继续分析',
+      'deep_dive': '深入分析',
+      'pivot': '转向新方向',
+      'conclude': '生成结论',
+    };
+    return translations[strategy] || strategy;
   }
 
   /**

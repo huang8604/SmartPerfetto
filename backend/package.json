@@ -22,7 +22,9 @@
     "test:scrolling:real": "tsx src/scripts/runScrollingTestRealData.ts",
     "generate-types": "tsx scripts/generate-skill-types.ts",
     "sync-types": "tsx scripts/sync-types-to-frontend.ts",
-    "types": "npm run generate-types && npm run sync-types"
+    "generate:frontend-types": "tsx scripts/generateFrontendTypes.ts",
+    "check:types": "tsx scripts/checkTypesSync.ts",
+    "types": "npm run generate-types && npm run sync-types && npm run generate:frontend-types"
   },
   "keywords": [
     "perfetto",

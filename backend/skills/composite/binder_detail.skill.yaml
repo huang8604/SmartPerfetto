@@ -7,14 +7,19 @@
 # - 阻塞原因分析
 
 name: binder_detail
-version: "2.0"
+version: "1.0"
 type: composite
+category: kernel
 
 meta:
-  display_name: "Binder 事务详细分析"
-  description: "分析单个慢 Binder 事务的线程状态、大小核、四象限等详细信息"
-  icon: "exchange"
-  tags: [binder, detail, analysis, cpu, core, quadrant]
+  display_name: "Binder 详情分析"
+  description: "深入分析单个 Binder 事务"
+  icon: "link_off"
+  tags: [binder, detail, composite]
+
+prerequisites:
+  required_tables:
+    - slices
 
 inputs:
   - name: binder_ts
@@ -58,6 +63,7 @@ steps:
     name: "Binder 基本信息"
     display:
       level: key
+      layer: deep
       title: "Binder 详情"
     sql: |
       SELECT
@@ -84,6 +90,7 @@ steps:
     name: "大小核占比分析"
     display:
       level: key
+      layer: deep
       title: "大小核占比"
     sql: |
       WITH main_thread AS (
@@ -125,6 +132,7 @@ steps:
     name: "四大象限分析"
     display:
       level: key
+      layer: deep
       title: "四大象限分析"
     sql: |
       WITH main_thread AS (
@@ -180,6 +188,7 @@ steps:
     name: "阻塞原因分析"
     display:
       level: key
+      layer: deep
       title: "阻塞原因"
     sql: |
       WITH main_thread AS (
@@ -218,6 +227,7 @@ steps:
     name: "Binder 诊断"
     display:
       level: key
+      layer: deep
       title: "问题诊断"
     inputs: [binder_basic, cpu_core, quadrant, blocking]
     rules:

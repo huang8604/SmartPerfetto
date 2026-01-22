@@ -17,14 +17,21 @@
 # - android_sync_binder_thread_state_by_txn: Binder 阻塞期间的线程状态
 
 name: binder_analysis
-version: "2.2"
+version: "1.0"
 type: composite
+category: kernel
 
 meta:
-  display_name: "Binder IPC 分析"
-  description: "分析 Binder 跨进程调用延迟和服务交互"
-  icon: "exchange"
-  tags: [binder, ipc, aidl, service, transaction, composite]
+  display_name: "Binder 分析"
+  description: "系统级 Binder 通信性能分析"
+  icon: "link"
+  tags: [binder, ipc, kernel, composite]
+
+prerequisites:
+  required_tables:
+    - slice
+  modules:
+    - android.binder
 
 triggers:
   keywords:
@@ -34,10 +41,6 @@ triggers:
     - ".*[Bb]inder.*"
     - ".*IPC.*"
     - ".*跨进程.*"
-
-prerequisites:
-  modules:
-    - android.binder
 
 inputs:
   - name: package
@@ -52,6 +55,7 @@ steps:
     name: "检查 Binder 数据"
     display:
       level: summary
+      layer: overview
       title: "数据检查"
     sql: |
       SELECT
@@ -67,9 +71,58 @@ steps:
   - id: binder_overview
     type: atomic
     name: "Binder 概览"
+    synthesize:
+      role: overview
+      fields:
+        - key: total_txns
+          label: 总事务数
+        - key: main_thread_txns
+          label: 主线程调用
+        - key: avg_dur_ms
+          label: 平均耗时
+          format: "{{value}} ms"
+        - key: rating
+          label: 评级
+      insights:
+        - condition: "main_thread_slow_count > 5"
+          template: "主线程有 {{main_thread_slow_count}} 次慢 Binder 调用 (>16ms)"
+        - condition: "max_dur_ms > 100"
+          template: "最长 Binder 调用 {{max_dur_ms}}ms，严重阻塞"
     display:
       level: key
+      layer: overview
       title: "Binder 调用概览"
+      columns:
+        - name: total_txns
+          label: "总事务数"
+          type: number
+          format: compact
+        - name: sync_txns
+          label: "同步事务"
+          type: number
+          format: compact
+        - name: async_txns
+          label: "异步事务"
+          type: number
+          format: compact
+        - name: main_thread_txns
+          label: "主线程调用"
+          type: number
+          format: compact
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: slow_calls_count
+          label: "慢调用"
+          type: number
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       SELECT
         COUNT(*) as total_txns,
@@ -99,9 +152,49 @@ steps:
   - id: outgoing_by_interface
     type: atomic
     name: "发出的调用（按接口）"
+    synthesize:
+      role: list
+      groupBy:
+        - field: server_process
+          title: 按服务进程分布
+      fields:
+        - key: aidl_interface
+          label: AIDL 接口
+        - key: call_count
+          label: 调用次数
+        - key: total_dur_ms
+          label: 总耗时
+          format: "{{value}} ms"
     display:
       level: key
+      layer: overview
       title: "发出的 Binder 调用（按接口）"
+      columns:
+        - name: aidl_interface
+          label: "AIDL 接口"
+          type: string
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: call_count
+          label: "调用次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: main_thread_count
+          label: "主线程调用"
+          type: number
     sql: |
       SELECT
         bt.aidl_interface,
@@ -127,9 +220,49 @@ steps:
   - id: main_thread_sync_binder
     type: atomic
     name: "主线程同步 Binder"
+    synthesize:
+      role: list
+      groupBy:
+        - field: server_process
+          title: 按服务进程分布
+        - field: severity
+          title: 按严重程度分布
+      fields:
+        - key: aidl_name
+          label: AIDL 方法
+        - key: dur_ms
+          label: 耗时
+          format: "{{value}} ms"
+        - key: severity
+          label: 严重程度
     display:
       level: key
+      layer: list
       title: "主线程同步 Binder 调用（可能导致掉帧）"
+      columns:
+        - name: binder_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: server_process
+          label: "服务进程"
+          type: string
+        - name: aidl_name
+          label: "AIDL 方法"
+          type: string
+        - name: aidl_interface
+          label: "AIDL 接口"
+          type: string
+        - name: process_name
+          label: "客户端"
+          type: string
+        - name: severity
+          label: "严重程度"
+          type: enum
     sql: |
       SELECT
         bt.client_ts / 1e6 as ts_ms,
@@ -165,6 +298,7 @@ steps:
     name: "Binder 阻塞分析"
     display:
       level: key
+      layer: list
       title: "Binder 阻塞期间状态分析"
     sql: |
       SELECT
@@ -198,6 +332,7 @@ steps:
     name: "服务端响应分析"
     display:
       level: detail
+      layer: list
       title: "服务端处理时间分析"
     sql: |
       SELECT
@@ -226,6 +361,7 @@ steps:
     name: "Binder 与帧关联"
     display:
       level: detail
+      layer: list
       title: "Binder 调用与帧渲染关联"
     sql: |
       SELECT
@@ -259,6 +395,7 @@ steps:
     name: "接收的调用"
     display:
       level: summary
+      layer: list
       title: "接收的 Binder 调用"
     sql: |
       SELECT
@@ -280,8 +417,12 @@ steps:
   - id: analyze_slow_binder
     type: iterator
     name: "慢 Binder 详细分析"
+    synthesize:
+      role: clusters
+      clusterBy: server_process
     display:
       level: key
+      layer: deep
       title: "慢 Binder 事务详细分析"
     source: main_thread_binder
     skill: binder_detail
@@ -301,8 +442,20 @@ steps:
   - id: binder_diagnosis
     type: diagnostic
     name: "Binder 诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "Binder 诊断：{{diagnosis}}"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
     inputs: [binder_overview, main_thread_binder, binder_blocking, server_response]
     rules:
@@ -358,6 +511,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "Binder 分析总结"
     inputs: [binder_check, binder_overview, outgoing_by_interface, main_thread_binder, analyze_slow_binder, binder_blocking, binder_diagnosis]
     prompt: |

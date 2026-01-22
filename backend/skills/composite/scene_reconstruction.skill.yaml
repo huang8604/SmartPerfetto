@@ -1,12 +1,17 @@
 name: scene_reconstruction
 version: "1.0"
 type: composite
+category: interaction
 
 meta:
   display_name: "场景还原"
-  description: "还原 Trace 期间用户的完整操作场景，智能推断用户行为"
-  icon: "movie"
-  tags: [scene, reconstruction, user-action, timeline]
+  description: "通过用户输入和屏幕状态还原用户操作场景"
+  icon: "movie_creation"
+  tags: [scene, input, screen, composite]
+
+prerequisites:
+  required_tables:
+    - android_input_events
 
 triggers:
   keywords:

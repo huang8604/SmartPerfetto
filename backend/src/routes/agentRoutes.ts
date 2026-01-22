@@ -32,13 +32,32 @@ import {
   SceneReconstructionResult,
   DetectedScene,
   TrackEvent,
+  // Agent-Driven Architecture (Phase 2-4)
+  AgentDrivenOrchestrator,
+  createAgentDrivenOrchestrator,
+  AgentDrivenAnalysisResult,
+  ModelRouter,
+  Hypothesis,
 } from '../agent';
+// DataEnvelope types for v2.0 data contract
+import {
+  DataEnvelope,
+  generateEventId,
+  isDataEvent,
+  isLegacySkillEvent,
+  validateDataEnvelope,
+} from '../types/dataContract';
 
 // Helper to extract findings from MasterOrchestratorResult
 function extractFindings(result: MasterOrchestratorResult): Finding[] {
   const findings: Finding[] = [];
+  const stageCount = (result.stageResults || []).length;
+  console.log(`[AgentRoutes.extractFindings] Processing ${stageCount} stages`);
+
   for (const stage of result.stageResults || []) {
-    findings.push(...(stage.findings || []));
+    const stageFindings = stage.findings || [];
+    console.log(`[AgentRoutes.extractFindings] Stage ${stage.stageId}: ${stageFindings.length} findings`);
+    findings.push(...stageFindings);
   }
   return findings;
 }
@@ -68,6 +87,42 @@ interface AnalysisSession {
 }
 
 const sessions = new Map<string, AnalysisSession>();
+
+// ============================================================================
+// Agent-Driven Analysis Sessions (Phase 2-4)
+// ============================================================================
+
+interface AgentDrivenSession {
+  orchestrator: AgentDrivenOrchestrator;
+  sessionId: string;
+  sseClients: express.Response[];
+  result?: AgentDrivenAnalysisResult;
+  status: 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed';
+  error?: string;
+  traceId: string;
+  query: string;
+  createdAt: number;
+  logger: SessionLogger;
+  hypotheses: Hypothesis[];
+  agentDialogue: Array<{
+    agentId: string;
+    type: 'task' | 'response' | 'question';
+    content: any;
+    timestamp: number;
+  }>;
+}
+
+const agentDrivenSessions = new Map<string, AgentDrivenSession>();
+
+// ModelRouter instance for agent-driven orchestrator
+let modelRouterInstance: ModelRouter | null = null;
+
+function getModelRouter(): ModelRouter {
+  if (!modelRouterInstance) {
+    modelRouterInstance = new ModelRouter();
+  }
+  return modelRouterInstance;
+}
 
 // Session store for persistence and recovery
 let sessionStore: SessionStore | null = null;
@@ -254,6 +309,374 @@ router.post('/analyze', async (req, res) => {
       error: error.message || 'Agent analysis failed',
     });
   }
+});
+
+// ============================================================================
+// Agent-Driven Analysis Endpoints (Phase 2-4)
+// ============================================================================
+
+/**
+ * POST /api/agent/analyze-v2
+ *
+ * Start analysis using AgentDrivenOrchestrator (AI Agents architecture)
+ *
+ * Features:
+ * - AI-driven task dispatch to domain agents
+ * - Hypothesis generation and validation
+ * - Inter-agent communication
+ * - Multi-round analysis with strategy planning
+ * - Evidence chain tracking
+ *
+ * Body:
+ * {
+ *   "traceId": "uuid-of-trace",
+ *   "query": "分析这个 trace 的滑动性能",
+ *   "options": {
+ *     "maxRounds": 5,
+ *     "confidenceThreshold": 0.7
+ *   }
+ * }
+ *
+ * SSE Events (via /v2/:sessionId/stream):
+ * - agent_task_dispatched: Task sent to domain agent
+ * - agent_response: Agent completed task
+ * - hypothesis_updated: Hypothesis confidence changed
+ * - evidence_found: New evidence added
+ * - round_complete: Analysis round finished
+ * - conclusion: Final analysis conclusion
+ */
+router.post('/analyze-v2', async (req, res) => {
+  try {
+    const { traceId, query, options = {} } = req.body;
+
+    if (!traceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'traceId is required',
+      });
+    }
+
+    if (!query) {
+      return res.status(400).json({
+        success: false,
+        error: 'query is required',
+      });
+    }
+
+    // Verify trace exists
+    const traceProcessorService = getTraceProcessorService();
+    const trace = traceProcessorService.getTrace(traceId);
+    if (!trace) {
+      return res.status(404).json({
+        success: false,
+        error: 'Trace not found in backend',
+        hint: 'Please upload the trace to the backend first',
+        code: 'TRACE_NOT_UPLOADED',
+      });
+    }
+
+    // Initialize tools
+    ensureToolsRegistered();
+
+    // Generate session ID
+    const sessionId = `agent-v2-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+
+    // Create AgentDrivenOrchestrator
+    const modelRouter = getModelRouter();
+    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+      maxRounds: options.maxRounds || 5,
+      maxConcurrentTasks: options.maxConcurrentTasks || 3,
+      confidenceThreshold: options.confidenceThreshold || 0.7,
+      enableLogging: true,
+    });
+
+    // Create logger for this session
+    const logger = createSessionLogger(sessionId);
+    logger.setMetadata({ traceId, query, version: 'v2-agent-driven' });
+    logger.info('AgentRoutes', 'Agent-driven analysis session created', { options });
+
+    // Store session
+    agentDrivenSessions.set(sessionId, {
+      orchestrator,
+      sessionId,
+      sseClients: [],
+      status: 'pending',
+      traceId,
+      query,
+      createdAt: Date.now(),
+      logger,
+      hypotheses: [],
+      agentDialogue: [],
+    });
+
+    // Start analysis in background
+    runAgentDrivenAnalysis(sessionId, query, traceId, {
+      ...options,
+      traceProcessorService,
+    }).catch((error) => {
+      const session = agentDrivenSessions.get(sessionId);
+      if (session) {
+        session.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
+        session.status = 'failed';
+        session.error = error.message;
+        broadcastToAgentDrivenClients(sessionId, {
+          type: 'error',
+          content: { message: error.message },
+          timestamp: Date.now(),
+        });
+      }
+    });
+
+    res.json({
+      success: true,
+      sessionId,
+      message: 'Agent-driven analysis started',
+      architecture: 'v2-agent-driven',
+    });
+  } catch (error: any) {
+    console.error('[AgentRoutes] Analyze-v2 error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Agent-driven analysis failed',
+    });
+  }
+});
+
+/**
+ * GET /api/agent/v2/:sessionId/stream
+ *
+ * SSE endpoint for agent-driven analysis updates
+ *
+ * Events specific to agent-driven architecture:
+ * - hypothesis_generated: Initial hypotheses created
+ * - agent_task_dispatched: Task sent to domain agent
+ * - agent_dialogue: Agent communication event
+ * - hypothesis_updated: Hypothesis confidence/status changed
+ * - evidence_chain: Evidence supporting/contradicting hypothesis
+ * - round_complete: Analysis round completed
+ * - strategy_decision: Next iteration strategy decided
+ * - conclusion: Final analysis conclusion
+ */
+router.get('/v2/:sessionId/stream', (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Agent-driven session not found',
+    });
+  }
+
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // Send initial connection message
+  res.write(`event: connected\n`);
+  res.write(`data: ${JSON.stringify({
+    sessionId,
+    status: session.status,
+    traceId: session.traceId,
+    query: session.query,
+    architecture: 'v2-agent-driven',
+    timestamp: Date.now(),
+  })}\n\n`);
+
+  // Add client to session
+  session.sseClients.push(res);
+  console.log(`[AgentRoutes] Agent-driven SSE client connected for ${sessionId}`);
+
+  // If analysis is already completed, send the result
+  if (session.status === 'completed' && session.result) {
+    sendAgentDrivenResult(res, session);
+    res.write(`event: end\n`);
+    res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // If analysis failed, send error
+  if (session.status === 'failed') {
+    res.write(`event: error\n`);
+    res.write(`data: ${JSON.stringify({ error: session.error, timestamp: Date.now() })}\n\n`);
+    res.write(`event: end\n`);
+    res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log(`[AgentRoutes] Agent-driven SSE client disconnected for ${sessionId}`);
+    const idx = session.sseClients.indexOf(res);
+    if (idx !== -1) {
+      session.sseClients.splice(idx, 1);
+    }
+  });
+
+  // Keep-alive ping
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(`: keep-alive\n\n`);
+    } catch {
+      clearInterval(keepAlive);
+    }
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+  });
+});
+
+/**
+ * GET /api/agent/v2/:sessionId/status
+ *
+ * Get agent-driven analysis status
+ */
+router.get('/v2/:sessionId/status', (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Agent-driven session not found',
+    });
+  }
+
+  const response: any = {
+    success: true,
+    sessionId,
+    status: session.status,
+    traceId: session.traceId,
+    query: session.query,
+    createdAt: session.createdAt,
+    architecture: 'v2-agent-driven',
+  };
+
+  if (session.hypotheses.length > 0) {
+    response.hypotheses = session.hypotheses.map(h => ({
+      id: h.id,
+      description: h.description,
+      status: h.status,
+      confidence: h.confidence,
+    }));
+  }
+
+  if (session.agentDialogue.length > 0) {
+    response.dialogueCount = session.agentDialogue.length;
+    response.recentDialogue = session.agentDialogue.slice(-5);
+  }
+
+  if (session.status === 'completed' && session.result) {
+    response.result = {
+      conclusion: session.result.conclusion,
+      confidence: session.result.confidence,
+      rounds: session.result.rounds,
+      totalDurationMs: session.result.totalDurationMs,
+      findingsCount: session.result.findings.length,
+    };
+  }
+
+  if (session.status === 'failed') {
+    response.error = session.error;
+  }
+
+  res.json(response);
+});
+
+/**
+ * GET /api/agent/v2/:sessionId/dialogue
+ *
+ * Get full agent dialogue history
+ */
+router.get('/v2/:sessionId/dialogue', (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Agent-driven session not found',
+    });
+  }
+
+  res.json({
+    success: true,
+    sessionId,
+    dialogue: session.agentDialogue,
+    count: session.agentDialogue.length,
+  });
+});
+
+/**
+ * GET /api/agent/v2/:sessionId/evidence
+ *
+ * Get evidence chain for hypotheses
+ */
+router.get('/v2/:sessionId/evidence', (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Agent-driven session not found',
+    });
+  }
+
+  // Build evidence chain from hypotheses
+  const evidenceChain = session.hypotheses.map(h => ({
+    hypothesis: {
+      id: h.id,
+      description: h.description,
+      status: h.status,
+      confidence: h.confidence,
+    },
+    supportingEvidence: h.supportingEvidence,
+    contradictingEvidence: h.contradictingEvidence,
+  }));
+
+  res.json({
+    success: true,
+    sessionId,
+    evidenceChain,
+    hypothesesCount: session.hypotheses.length,
+  });
+});
+
+/**
+ * DELETE /api/agent/v2/:sessionId
+ *
+ * Clean up an agent-driven session
+ */
+router.delete('/v2/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Agent-driven session not found',
+    });
+  }
+
+  // Close all SSE connections
+  session.sseClients.forEach((client) => {
+    try {
+      client.end();
+    } catch {}
+  });
+
+  // Reset orchestrator
+  session.orchestrator.reset();
+
+  agentDrivenSessions.delete(sessionId);
+
+  res.json({ success: true });
 });
 
 /**
@@ -1198,20 +1621,65 @@ async function resumeAnalysis(sessionId: string, traceId: string, traceProcessor
   }
 }
 
+/**
+ * Broadcast update to all SSE clients for a session
+ *
+ * Supports both v2.0 unified 'data' events and legacy 'skill_data' events.
+ * The frontend should handle both formats for backward compatibility.
+ */
 function broadcastToClients(sessionId: string, update: StreamingUpdate) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
   const eventType = update.type;
-  const eventData = JSON.stringify({
-    type: update.type,
-    data: update.content,
-    timestamp: update.timestamp,
-  });
 
-  // Debug logging for skill_data events
-  if (eventType === 'skill_data') {
-    console.log(`[AgentRoutes.broadcastToClients] Broadcasting skill_data event:`, {
+  // Build event data based on event type
+  let eventData: string;
+
+  if (isDataEvent(eventType)) {
+    // v2.0 unified data event format
+    // { id, envelope: DataEnvelope | DataEnvelope[], timestamp }
+
+    // Runtime validation of DataEnvelope(s)
+    const envelopes = Array.isArray(update.content) ? update.content : [update.content];
+    for (let i = 0; i < envelopes.length; i++) {
+      const envelope = envelopes[i];
+      const validationErrors = validateDataEnvelope(envelope);
+      if (validationErrors.length > 0) {
+        console.warn(`[AgentRoutes.broadcastToClients] DataEnvelope validation warning (envelope ${i}):`, {
+          sessionId,
+          errors: validationErrors.slice(0, 5),  // Limit to first 5 errors
+          totalErrors: validationErrors.length,
+          envelope: {
+            metaType: envelope?.meta?.type,
+            metaSource: envelope?.meta?.source,
+            displayLayer: envelope?.display?.layer,
+            displayFormat: envelope?.display?.format,
+          },
+        });
+      }
+    }
+
+    eventData = JSON.stringify({
+      id: update.id || generateEventId('sse', sessionId),
+      envelope: update.content,
+      timestamp: update.timestamp,
+    });
+    console.log(`[AgentRoutes.broadcastToClients] Broadcasting v2.0 data event:`, {
+      sessionId,
+      clientCount: session.sseClients.length,
+      id: update.id,
+      envelopeCount: Array.isArray(update.content) ? update.content.length : 1,
+    });
+  } else if (isLegacySkillEvent(eventType)) {
+    // Legacy skill_data event format (backward compatibility)
+    eventData = JSON.stringify({
+      type: update.type,
+      data: update.content,
+      timestamp: update.timestamp,
+    });
+    // Debug logging for skill_data events
+    console.log(`[AgentRoutes.broadcastToClients] Broadcasting legacy skill_data event:`, {
       sessionId,
       clientCount: session.sseClients.length,
       contentKeys: update.content ? Object.keys(update.content) : [],
@@ -1219,6 +1687,13 @@ function broadcastToClients(sessionId: string, update: StreamingUpdate) {
       overviewKeys: (update.content as any)?.layers?.overview ? Object.keys((update.content as any).layers.overview) : [],
       listKeys: (update.content as any)?.layers?.list ? Object.keys((update.content as any).layers.list) : [],
       deepKeys: (update.content as any)?.layers?.deep ? Object.keys((update.content as any).layers.deep) : [],
+    });
+  } else {
+    // Other event types (progress, error, finding, etc.)
+    eventData = JSON.stringify({
+      type: update.type,
+      data: update.content,
+      timestamp: update.timestamp,
     });
   }
 
@@ -1425,6 +1900,241 @@ function sendSceneReconstructionResult(res: express.Response, result: SceneRecon
 }
 
 // ============================================================================
+// Agent-Driven Analysis Helper Functions (Phase 2-4)
+// ============================================================================
+
+async function runAgentDrivenAnalysis(
+  sessionId: string,
+  query: string,
+  traceId: string,
+  options: any = {}
+) {
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) return;
+
+  const { logger } = session;
+  session.status = 'running';
+  logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', { query, traceId });
+
+  // Set up streaming via event listener on orchestrator
+  const handleUpdate = (update: StreamingUpdate) => {
+    console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
+    logger.debug('Stream', `Update: ${update.type}`, update.content);
+
+    // Track agent dialogue events
+    if (update.content?.phase === 'task_dispatched' || update.content?.phase === 'task_completed') {
+      session.agentDialogue.push({
+        agentId: update.content.agentId || 'master',
+        type: update.content.phase === 'task_dispatched' ? 'task' : 'response',
+        content: update.content,
+        timestamp: update.timestamp,
+      });
+    }
+
+    // Track hypothesis updates
+    if (update.content?.phase === 'hypotheses_generated' && update.content?.hypotheses) {
+      // Initial hypotheses
+      broadcastToAgentDrivenClients(sessionId, {
+        type: 'hypothesis_generated',
+        content: {
+          hypotheses: update.content.hypotheses,
+        },
+        timestamp: update.timestamp,
+      });
+    }
+
+    // Broadcast specialized events for frontend visualization
+    const eventType = mapToAgentDrivenEventType(update);
+    broadcastToAgentDrivenClients(sessionId, {
+      type: eventType,
+      content: update.content,
+      timestamp: update.timestamp,
+    });
+  };
+
+  // Listen to orchestrator events
+  session.orchestrator.on('update', handleUpdate);
+
+  try {
+    console.log('[AgentRoutes.AgentDriven] Starting orchestrator.analyze...');
+    const result = await logger.timed('AgentDrivenAnalysis', 'analyze', async () => {
+      return session.orchestrator.analyze(query, sessionId, traceId, {
+        traceProcessorService: options.traceProcessorService,
+        packageName: options.packageName,
+        timeRange: options.timeRange,
+      });
+    });
+    console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);
+
+    session.result = result;
+    session.hypotheses = result.hypotheses;
+    session.status = result.success ? 'completed' : 'failed';
+
+    // Log completion details
+    logger.info('AgentDrivenAnalysis', 'Agent-driven analysis completed', {
+      confidence: result.confidence,
+      rounds: result.rounds,
+      findingsCount: result.findings.length,
+      hypothesesCount: result.hypotheses.length,
+    });
+
+    // Send final result
+    const clientCount = session.sseClients.length;
+    logger.info('AgentRoutes', 'Sending agent-driven result', { clientCount });
+
+    session.sseClients.forEach((client, index) => {
+      try {
+        logger.info('AgentRoutes', `Sending agent-driven result to client ${index + 1}/${clientCount}`);
+        sendAgentDrivenResult(client, session);
+        client.write(`event: end\n`);
+        client.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+      } catch (e: any) {
+        logger.error('AgentRoutes', `Error sending agent-driven result to client ${index + 1}`, e);
+      }
+    });
+
+    logger.close();
+  } catch (error: any) {
+    session.status = 'failed';
+    session.error = error.message;
+    logger.error('AgentDrivenAnalysis', 'Agent-driven analysis failed', error);
+
+    broadcastToAgentDrivenClients(sessionId, {
+      type: 'error',
+      content: { message: error.message },
+      timestamp: Date.now(),
+    });
+
+    logger.close();
+    throw error;
+  }
+}
+
+/**
+ * Map orchestrator update types to agent-driven SSE event types
+ */
+function mapToAgentDrivenEventType(update: StreamingUpdate): StreamingUpdate['type'] {
+  const phase = update.content?.phase;
+
+  switch (phase) {
+    case 'starting':
+    case 'understanding':
+      return 'progress';
+    case 'hypotheses_generated':
+      return 'hypothesis_generated';
+    case 'round_start':
+      return 'round_start';
+    case 'tasks_dispatched':
+      return 'agent_task_dispatched';
+    case 'task_dispatched':
+      return 'agent_dialogue';
+    case 'task_completed':
+      return 'agent_response';
+    case 'synthesis_complete':
+      return 'synthesis_complete';
+    case 'strategy_decision':
+      return 'strategy_decision';
+    case 'concluding':
+      return 'progress';
+    default:
+      return update.type;
+  }
+}
+
+/**
+ * Broadcast update to all SSE clients for an agent-driven session
+ */
+function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdate) {
+  const session = agentDrivenSessions.get(sessionId);
+  if (!session) return;
+
+  const eventType = update.type;
+  const eventData = JSON.stringify({
+    type: update.type,
+    data: update.content,
+    timestamp: update.timestamp,
+  });
+
+  session.sseClients.forEach((client) => {
+    try {
+      client.write(`event: ${eventType}\n`);
+      client.write(`data: ${eventData}\n\n`);
+    } catch {}
+  });
+}
+
+/**
+ * Send agent-driven analysis result to SSE client
+ */
+function sendAgentDrivenResult(res: express.Response, session: AgentDrivenSession) {
+  const result = session.result;
+  if (!result) return;
+
+  // Generate HTML report
+  let reportUrl: string | undefined;
+  try {
+    const generator = getHTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: session.traceId,
+      query: session.query,
+      result,
+      hypotheses: session.hypotheses,
+      dialogue: session.agentDialogue,
+      timestamp: Date.now(),
+    });
+
+    // Store report
+    const reportId = `agent-v2-report-${session.sessionId}`;
+    reportStore.set(reportId, {
+      html,
+      generatedAt: Date.now(),
+      sessionId: session.sessionId,
+    });
+
+    reportUrl = `/api/reports/${reportId}`;
+    console.log(`[AgentRoutes] Generated agent-driven HTML report: ${reportId}`);
+  } catch (error) {
+    console.error('[AgentRoutes] Failed to generate agent-driven HTML report:', error);
+  }
+
+  // Send analysis_completed event with full result
+  res.write(`event: analysis_completed\n`);
+  res.write(`data: ${JSON.stringify({
+    type: 'analysis_completed',
+    architecture: 'v2-agent-driven',
+    data: {
+      conclusion: result.conclusion,
+      confidence: result.confidence,
+      rounds: result.rounds,
+      totalDurationMs: result.totalDurationMs,
+      findings: result.findings.map((f) => ({
+        id: f.id,
+        category: f.category,
+        severity: f.severity,
+        title: f.title,
+        description: f.description,
+        timestampsNs: f.timestampsNs,
+        evidence: f.evidence,
+        details: f.details,
+        recommendations: f.recommendations,
+        confidence: f.confidence,
+      })),
+      hypotheses: result.hypotheses.map((h) => ({
+        id: h.id,
+        description: h.description,
+        status: h.status,
+        confidence: h.confidence,
+        supportingEvidence: h.supportingEvidence,
+        contradictingEvidence: h.contradictingEvidence,
+      })),
+      agentDialogueCount: session.agentDialogue.length,
+      reportUrl,
+    },
+    timestamp: Date.now(),
+  })}\n\n`);
+}
+
+// ============================================================================
 // Session Logs Endpoints (for debugging)
 // ============================================================================
 
@@ -1570,6 +2280,21 @@ setInterval(() => {
         } catch {}
       });
       sessions.delete(id);
+    }
+  }
+
+  // Clean up agent-driven sessions (Phase 2-4)
+  for (const [id, session] of agentDrivenSessions.entries()) {
+    const age = now - session.createdAt;
+    if (age > maxAge && (session.status === 'completed' || session.status === 'failed')) {
+      console.log(`[AgentRoutes] Cleaning up stale agent-driven session: ${id}`);
+      session.sseClients.forEach((client) => {
+        try {
+          client.end();
+        } catch {}
+      });
+      session.orchestrator.reset();
+      agentDrivenSessions.delete(id);
     }
   }
 

@@ -6,12 +6,17 @@
 name: janky_frame_analysis
 version: "2.0"
 type: composite
+category: rendering
 
 meta:
   display_name: "卡顿帧分析"
   description: "深度分析单个卡顿帧的卡顿原因"
   icon: "bug_report"
   tags: [jank, frame, composite]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
 
 inputs:
   - name: frame_ts
@@ -34,6 +39,9 @@ steps:
   # 并行执行多个分析
   - id: parallel_analysis
     type: parallel
+    display:
+      level: detail
+      layer: deep
     steps:
       - id: cpu
         skill: cpu_slice_analysis
@@ -64,6 +72,7 @@ steps:
     type: diagnostic
     display:
       level: key
+      layer: deep
       title: "帧诊断结果"
     inputs: [cpu, scheduling, binder]
     ai_assist: true

@@ -4,14 +4,19 @@
 # 分析指定时间范围内的 CPU 使用情况
 
 name: cpu_slice_analysis
-version: "2.0"
+version: "1.0"
 type: atomic
+category: hardware
 
 meta:
-  display_name: "CPU 时间分析"
-  description: "分析指定时间范围内的 CPU 占用和分布"
-  icon: "memory"
-  tags: [cpu, performance, atomic]
+  display_name: "CPU Slice 分析"
+  description: "分析 CPU 时间片分布"
+  icon: "pie_chart"
+  tags: [cpu, slice, distribution, atomic]
+
+prerequisites:
+  required_tables:
+    - sched_slice
 
 inputs:
   - name: start_ts
@@ -28,7 +33,28 @@ inputs:
     description: "应用包名（可选）"
 
 sql: |
-  WITH target_threads AS (
+  WITH 
+  -- 动态检测 CPU 集群
+  cpu_max_freq AS (
+    SELECT cpu, MAX(value) as max_freq
+    FROM counter c
+    JOIN cpu_counter_track t ON c.track_id = t.id
+    WHERE t.name = 'cpufreq'
+    GROUP BY cpu
+  ),
+  global_max AS (
+    SELECT MAX(max_freq) as val FROM cpu_max_freq
+  ),
+  cpu_clusters AS (
+    SELECT cpu,
+      CASE
+        WHEN max_freq >= (SELECT val FROM global_max) * 0.75 THEN 'big'
+        WHEN max_freq >= (SELECT val FROM global_max) * 0.50 THEN 'mid'
+        ELSE 'little'
+      END as cluster_type
+    FROM cpu_max_freq
+  ),
+  target_threads AS (
     SELECT t.utid, t.tid, t.name as thread_name, p.name as process_name
     FROM thread t
     JOIN process p ON t.upid = p.upid
@@ -39,11 +65,9 @@ sql: |
       ss.utid,
       ss.dur,
       ss.cpu,
-      CASE
-        WHEN ss.cpu >= 4 THEN 'big'
-        ELSE 'little'
-      END as core_type
+      COALESCE(cl.cluster_type, 'little') as core_type
     FROM sched_slice ss
+    LEFT JOIN cpu_clusters cl ON ss.cpu = cl.cpu
     WHERE ss.ts >= ${start_ts}
       AND ss.ts < ${end_ts}
       AND ss.utid IN (SELECT utid FROM target_threads)
@@ -66,6 +90,33 @@ output:
   display:
     level: detail
     format: table
+    columns:
+      - name: thread_name
+        label: "线程"
+        type: string
+      - name: process_name
+        label: "进程"
+        type: string
+      - name: total_cpu_ms
+        label: "CPU时间"
+        type: duration
+        format: duration_ms
+      - name: big_core_ms
+        label: "大核时间"
+        type: duration
+        format: duration_ms
+      - name: little_core_ms
+        label: "小核时间"
+        type: duration
+        format: duration_ms
+      - name: slice_count
+        label: "切片数"
+        type: number
+        format: compact
+      - name: avg_slice_ms
+        label: "平均切片"
+        type: duration
+        format: duration_ms
   fields:
     - name: thread_name
       label: "线程"

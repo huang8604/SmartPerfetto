@@ -8,6 +8,17 @@
 name: gpu_analysis
 version: "2.1"
 type: composite
+category: hardware
+
+meta:
+  display_name: "GPU 分析"
+  description: "分析 GPU 负载、渲染性能和队列等待"
+  icon: "memory"
+  tags: [gpu, rendering, queue, composite]
+
+prerequisites:
+  required_tables:
+    - gpu_counter_track
 display:
   name: "GPU 分析"
   level: expert

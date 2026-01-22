@@ -6,8 +6,19 @@
 # Wakeup types: 'normal', 'abort_pending', 'abort_last_active', 'abort_other'
 
 name: suspend_wakeup_analysis
-version: "2.1"
+version: "1.0"
 type: composite
+category: power
+
+meta:
+  display_name: "唤醒源分析"
+  description: "分析系统挂起和唤醒原因"
+  icon: "power_settings_new"
+  tags: [power, suspend, wakeup, kernel]
+
+prerequisites:
+  required_tables:
+    - sched_slice
 display:
   name: "休眠唤醒分析"
   level: expert

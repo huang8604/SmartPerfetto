@@ -1,0 +1,271 @@
+# App Third-Party Module Expert
+#
+# Provides third-party app analysis capabilities for cross-domain experts.
+# Answers questions about app-level performance, jank, and resource usage.
+
+name: third_party_module
+version: "1.0"
+type: composite
+category: app
+
+meta:
+  display_name: "应用分析"
+  description: "分析第三方应用性能、卡顿和资源使用"
+  tags: ["app", "third_party", "jank", "performance"]
+
+# Module metadata
+module:
+  layer: app
+  component: ThirdParty
+  subsystems:
+    - main_thread
+    - render_thread
+    - background_threads
+  relatedModules:
+    - framework_surfaceflinger
+    - framework_ams
+    - kernel_scheduler
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: app_jank_analysis
+      questionTemplate: "What is causing jank in package {package}?"
+      requiredParams: [package]
+      optionalParams: [start_ts, end_ts]
+      description: "Analyze app-level jank causes"
+
+    - id: main_thread_analysis
+      questionTemplate: "What is the main thread doing for package {package}?"
+      requiredParams: [package]
+      description: "Analyze main thread work breakdown"
+
+    - id: thread_overview
+      questionTemplate: "What threads are active for package {package}?"
+      requiredParams: [package]
+      description: "Get overview of app thread activity"
+
+    - id: resource_usage
+      questionTemplate: "What resources is package {package} using?"
+      requiredParams: [package]
+      description: "Analyze CPU/memory resource usage"
+
+  findingsSchema:
+    - id: main_thread_busy
+      severity: critical
+      titleTemplate: "Main thread overloaded: {busy_pct}% busy"
+      descriptionTemplate: "Main thread spending {busy_pct}% time in running state"
+      evidenceFields: [busy_pct, total_ms, runnable_ms]
+
+    - id: long_main_thread_task
+      severity: warning
+      titleTemplate: "Long main thread task: {task_name} ({dur_ms}ms)"
+      descriptionTemplate: "Task {task_name} blocked main thread for {dur_ms}ms"
+      evidenceFields: [task_name, dur_ms, ts]
+
+    - id: excessive_background_work
+      severity: warning
+      titleTemplate: "Excessive background threads: {thread_count} active"
+      descriptionTemplate: "App running {thread_count} background threads consuming CPU"
+      evidenceFields: [thread_count, total_cpu_ms]
+
+    - id: high_cpu_usage
+      severity: warning
+      titleTemplate: "High CPU usage: {cpu_pct}% of trace duration"
+      descriptionTemplate: "Package consuming {cpu_pct}% CPU resources"
+      evidenceFields: [cpu_pct, total_cpu_ms]
+
+  suggestionsSchema:
+    - id: check_scheduler
+      condition: "runnable_pct > 10"
+      targetModule: scheduler_module
+      questionTemplate: "Why was {package} main thread waiting in runnable state?"
+      paramsMapping:
+        package: package
+      priority: 1
+
+    - id: check_binder
+      condition: "binder_during_main_thread > 0"
+      targetModule: binder_module
+      questionTemplate: "What Binder calls blocked main thread for {package}?"
+      paramsMapping:
+        package: package
+      priority: 1
+
+    - id: check_gc
+      condition: "gc_pause_ms > 10"
+      targetModule: art_module
+      questionTemplate: "Is GC causing main thread stalls for {package}?"
+      paramsMapping:
+        package: package
+      priority: 2
+
+prerequisites:
+  modules:
+    - sched
+    - android.slices
+
+inputs:
+  - name: package
+    type: string
+    required: true
+    description: "Target package name"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Analysis start timestamp"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "Analysis end timestamp"
+
+steps:
+  # Step 1: Get thread overview for package
+  - id: thread_overview
+    type: atomic
+    name: "线程概览"
+    sql: |
+      SELECT
+        thread.name AS thread_name,
+        thread.tid,
+        CAST(SUM(sched_slice.dur) / 1e6 AS INTEGER) AS cpu_time_ms,
+        COUNT(*) AS slice_count
+      FROM sched_slice
+      JOIN thread USING (utid)
+      JOIN process USING (upid)
+      WHERE process.name LIKE '%${package}%'
+      GROUP BY thread.utid
+      HAVING cpu_time_ms > 1
+      ORDER BY cpu_time_ms DESC
+      LIMIT 20
+    display:
+      level: key
+      layer: overview
+      title: "线程 CPU 使用"
+    save_as: thread_overview
+    synthesize:
+      role: overview
+      fields:
+        - key: thread_name
+          label: 线程名
+        - key: cpu_time_ms
+          label: CPU 时间
+          format: "{{value}}ms"
+
+  # Step 2: Main thread state breakdown
+  - id: main_thread_state
+    type: atomic
+    name: "主线程状态分析"
+    sql: |
+      SELECT
+        state,
+        CAST(SUM(dur) / 1e6 AS INTEGER) AS dur_ms,
+        ROUND(SUM(dur) * 100.0 / (SELECT SUM(dur) FROM thread_state ts2 JOIN thread t2 USING (utid) JOIN process p2 USING (upid) WHERE t2.name = 'main' AND p2.name LIKE '%${package}%'), 1) AS pct
+      FROM thread_state
+      JOIN thread USING (utid)
+      JOIN process USING (upid)
+      WHERE thread.name = 'main'
+        AND process.name LIKE '%${package}%'
+      GROUP BY state
+      ORDER BY dur_ms DESC
+    display:
+      level: detail
+      layer: overview
+      title: "主线程状态分布"
+    save_as: main_thread_state
+    synthesize: true
+
+  # Step 3: Long main thread slices
+  - id: long_main_thread_slices
+    type: atomic
+    name: "主线程耗时操作"
+    sql: |
+      SELECT
+        slice.ts,
+        slice.name AS task_name,
+        CAST(slice.dur / 1e6 AS REAL) AS dur_ms,
+        slice.depth
+      FROM slice
+      JOIN thread_track ON slice.track_id = thread_track.id
+      JOIN thread ON thread_track.utid = thread.utid
+      JOIN process ON thread.upid = process.upid
+      WHERE thread.name = 'main'
+        AND process.name LIKE '%${package}%'
+        AND slice.dur > 5000000
+        AND slice.depth < 3
+      ORDER BY slice.dur DESC
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "主线程耗时操作"
+    save_as: long_slices
+
+  # Step 4: RenderThread analysis
+  - id: render_thread_analysis
+    type: atomic
+    name: "RenderThread 分析"
+    sql: |
+      SELECT
+        state,
+        CAST(SUM(dur) / 1e6 AS INTEGER) AS dur_ms
+      FROM thread_state
+      JOIN thread USING (utid)
+      JOIN process USING (upid)
+      WHERE thread.name = 'RenderThread'
+        AND process.name LIKE '%${package}%'
+      GROUP BY state
+      ORDER BY dur_ms DESC
+    display:
+      level: detail
+      layer: overview
+      title: "RenderThread 状态"
+    save_as: render_thread_state
+
+  # Step 5: Diagnose app issues
+  - id: app_diagnosis
+    type: diagnostic
+    name: "应用诊断"
+    inputs: [thread_overview, main_thread_state, long_slices, render_thread_state]
+    rules:
+      - condition: "main_thread_state.data.find(s => s.state === 'Running')?.pct > 80"
+        diagnosis: "主线程 CPU 占用过高 (${main_thread_state.data.find(s => s.state === 'Running')?.pct}%)，可能导致 UI 响应慢"
+        confidence: high
+        suggestions:
+          - "将耗时操作移至后台线程"
+          - "使用协程或线程池"
+        evidence_fields:
+          - main_thread_state.data[0].pct
+          - main_thread_state.data[0].dur_ms
+
+      - condition: "main_thread_state.data.find(s => s.state === 'R')?.pct > 10"
+        diagnosis: "主线程 Runnable 等待过长 (${main_thread_state.data.find(s => s.state === 'R')?.pct}%)，存在 CPU 竞争"
+        confidence: high
+        suggestions:
+          - "减少后台线程数量"
+          - "检查是否有后台进程占用 CPU"
+        evidence_fields:
+          - main_thread_state.data.find(s => s.state === 'R')?.pct
+
+      - condition: "long_slices.data[0]?.dur_ms > 16"
+        diagnosis: "发现耗时主线程任务: ${long_slices.data[0]?.task_name} (${long_slices.data[0]?.dur_ms}ms)"
+        confidence: high
+        suggestions:
+          - "优化该任务或移至后台"
+          - "检查是否有同步 IO 或 Binder 调用"
+        evidence_fields:
+          - long_slices.data[0].task_name
+          - long_slices.data[0].dur_ms
+
+      - condition: "thread_overview.data.length > 30"
+        diagnosis: "应用线程数过多 (${thread_overview.data.length} 个活跃线程)"
+        confidence: medium
+        suggestions:
+          - "合并相似功能线程"
+          - "使用线程池管理"
+        evidence_fields:
+          - thread_overview.data.length
+    display:
+      level: key
+      layer: overview
+      title: "应用诊断结果"

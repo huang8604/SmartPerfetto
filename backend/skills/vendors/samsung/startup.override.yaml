@@ -1,0 +1,157 @@
+# =============================================================================
+# Samsung OneUI 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: 三星 Galaxy 设备 (OneUI)
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "Samsung OneUI 启动分析"
+  description: "针对三星 OneUI 优化的启动分析"
+  vendor: samsung
+  os: OneUI
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*samsung*"
+      confidence: high
+    - pattern: "*Samsung*"
+      confidence: high
+    - pattern: "*OneUI*"
+      confidence: high
+    - pattern: "*SEC*"
+      confidence: medium
+    - pattern: "*Galaxy*"
+      confidence: medium
+    - pattern: "*Exynos*"
+      confidence: high
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # 检测 OneUI 优化功能
+  - id: oneui_optimization
+    name: "OneUI 优化检测"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as optimization_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*OneUI*'
+             OR s.name GLOB '*SEC*'
+             OR s.name GLOB '*Samsung*'
+             OR s.name GLOB '*GameOptimizer*'
+             OR s.name GLOB '*GameBooster*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+    save_as: oneui_events
+    optional: true
+
+  # Game Booster 状态检测
+  - id: game_booster_status
+    name: "Game Booster 检测"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as booster_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*GameBooster*'
+             OR s.name GLOB '*game*booster*'
+             OR s.name GLOB '*GOS*'
+             OR s.name GLOB '*GameOptimizingService*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+    save_as: game_booster_events
+    optional: true
+
+  # 三星服务检测 (可能影响启动)
+  - id: samsung_services
+    name: "三星服务检测"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as service_event,
+        s.dur / 1e6 as dur_ms,
+        t.name as thread_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '${package}*'
+        AND (s.name GLOB '*SamsungPay*'
+             OR s.name GLOB '*Knox*'
+             OR s.name GLOB '*Bixby*'
+             OR s.name GLOB '*SmartManager*'
+             OR s.name GLOB '*DeviceHealth*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.dur > 1000000
+      ORDER BY s.dur DESC
+    save_as: samsung_service_events
+    optional: true
+
+  # Adaptive Refresh Rate 状态
+  - id: adaptive_refresh
+    name: "自适应刷新率"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as refresh_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*AdaptiveRefresh*'
+             OR s.name GLOB '*adaptive*refresh*'
+             OR s.name GLOB '*VRR*'
+             OR s.name GLOB '*RefreshRate*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+    optional: true
+
+# -----------------------------------------------------------------------------
+# Exynos vs Snapdragon CPU 拓扑说明
+# -----------------------------------------------------------------------------
+# Samsung 使用两种芯片平台，CPU 拓扑不同：
+#
+# Exynos 2400 (S24 部分地区):
+#   - CPU 0-3: Cortex-A520 小核
+#   - CPU 4-5: Cortex-A720 中核
+#   - CPU 6-7: Cortex-A720 大核
+#   - CPU 8: Cortex-X4 超大核
+#
+# Snapdragon 8 Gen 3 (S24 其他地区):
+#   - CPU 0-1: Cortex-A520 小核
+#   - CPU 2-4: Cortex-A720 中核
+#   - CPU 5-7: Cortex-X4 大核
+
+# -----------------------------------------------------------------------------
+# 三星特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# OneUI 系统:
+#   - OneUI.* : OneUI 框架相关
+#   - SEC.* : 三星扩展
+#   - Samsung* : 三星服务
+#
+# Game Booster:
+#   - GameBooster : 游戏模式
+#   - GOS : Game Optimizing Service
+#   - GameOptimizer : 游戏优化
+#
+# 三星服务:
+#   - SamsungPay : 三星支付
+#   - Knox : 企业安全
+#   - Bixby : 语音助手
+#   - SmartManager : 设备管理

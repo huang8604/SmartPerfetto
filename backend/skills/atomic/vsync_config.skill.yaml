@@ -15,14 +15,19 @@
 # =============================================================================
 
 name: vsync_config
-version: "1.1"
+version: "1.0"
 type: atomic
+category: rendering
 
 meta:
-  display_name: "Vsync 配置检测"
-  description: "检测当前的 Vsync 周期和刷新率设置"
-  icon: "refresh"
-  tags: [vsync, refresh_rate, environment]
+  display_name: "VSync 配置分析"
+  description: "分析 VSync 周期和刷新率配置"
+  icon: "sync"
+  tags: [vsync, config, refresh_rate, atomic]
+
+prerequisites:
+  required_tables:
+    - expected_frame_timeline_slice
 
 inputs:
   - name: start_ts
@@ -94,6 +99,9 @@ steps:
           'default_60hz'
         ) as vsync_source,
         CASE
+          -- 支持更多刷新率档位
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 6500000 THEN 165
+          WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 7500000 THEN 144
           WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 9000000 THEN 120
           WHEN COALESCE((SELECT vsync_period_ns FROM combined LIMIT 1), 16666666) < 12000000 THEN 90
           ELSE 60

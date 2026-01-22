@@ -1,0 +1,241 @@
+# =============================================================================
+# 渲染架构检测 (Rendering Architecture Detection)
+# =============================================================================
+# 自动识别应用使用的渲染架构类型
+#
+# 支持的渲染架构:
+#   - HWUI: Android 原生 View 系统 (RenderThread + Choreographer)
+#   - Flutter: Flutter 框架 (ui + raster + io 线程)
+#   - React Native: RN 框架 (mqt_js + mqt_native 线程)
+#   - Unity: Unity 游戏引擎 (UnityMain + UnityGfx)
+#   - Unreal: Unreal Engine (GameThread + RenderThread)
+#   - Vulkan: 原生 Vulkan 渲染
+#   - SurfaceView: 独立 Surface 渲染
+#   - WebView: WebView 内嵌渲染
+#
+# 检测方法:
+# - 通过进程中的线程名称模式识别
+# - 通过 slice 名称模式识别
+# =============================================================================
+
+name: rendering_arch_detection
+version: "1.0"
+type: atomic
+category: rendering
+
+meta:
+  display_name: "渲染架构检测"
+  description: "自动识别应用使用的渲染架构 (HWUI/Flutter/RN/Unity 等)"
+  icon: "brush"
+  tags: [rendering, architecture, detection, atomic]
+
+prerequisites:
+  required_tables:
+    - thread
+    - process
+  optional_tables:
+    - slice
+    - thread_track
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名"
+
+steps:
+  # Step 1: 检测线程模式
+  - id: detect_threads
+    type: atomic
+    name: "检测渲染线程"
+    display:
+      level: detail
+      title: "渲染线程检测"
+    sql: |
+      WITH app_threads AS (
+        SELECT
+          t.utid,
+          t.tid,
+          t.name as thread_name,
+          p.pid,
+          p.name as process_name
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.name IS NOT NULL
+      ),
+      thread_patterns AS (
+        SELECT
+          thread_name,
+          process_name,
+          CASE
+            -- Flutter 特征线程
+            WHEN thread_name IN ('ui', '1.ui') THEN 'Flutter'
+            WHEN thread_name GLOB '*raster*' OR thread_name = '1.raster' THEN 'Flutter'
+            WHEN thread_name GLOB '*io.flutter*' THEN 'Flutter'
+            -- React Native 特征线程
+            WHEN thread_name GLOB '*mqt_js*' THEN 'ReactNative'
+            WHEN thread_name GLOB '*mqt_native*' THEN 'ReactNative'
+            WHEN thread_name GLOB '*NativeModules*' THEN 'ReactNative'
+            WHEN thread_name = 'JS' THEN 'ReactNative'
+            -- Unity 特征线程
+            WHEN thread_name GLOB '*UnityMain*' THEN 'Unity'
+            WHEN thread_name GLOB '*UnityGfx*' THEN 'Unity'
+            WHEN thread_name GLOB '*UnityMultiRender*' THEN 'Unity'
+            WHEN thread_name GLOB '*Job.Worker*' THEN 'Unity'
+            -- Unreal Engine 特征线程
+            WHEN thread_name GLOB '*GameThread*' THEN 'Unreal'
+            WHEN thread_name GLOB '*RenderThread*' AND process_name GLOB '*unreal*' THEN 'Unreal'
+            WHEN thread_name GLOB '*RHIThread*' THEN 'Unreal'
+            -- WebView 特征线程
+            WHEN thread_name GLOB '*Chrome*' THEN 'WebView'
+            WHEN thread_name GLOB '*CrRenderer*' THEN 'WebView'
+            WHEN thread_name GLOB '*WebViewCore*' THEN 'WebView'
+            WHEN thread_name GLOB '*CompositorTileW*' THEN 'WebView'
+            -- Vulkan 特征
+            WHEN thread_name GLOB '*Vulkan*' THEN 'Vulkan'
+            WHEN thread_name GLOB '*VkQueue*' THEN 'Vulkan'
+            -- 标准 HWUI
+            WHEN thread_name = 'RenderThread' THEN 'HWUI'
+            ELSE NULL
+          END as detected_arch
+        FROM app_threads
+      )
+      SELECT
+        thread_name,
+        process_name,
+        detected_arch
+      FROM thread_patterns
+      WHERE detected_arch IS NOT NULL
+      ORDER BY detected_arch, thread_name
+    save_as: detected_threads
+
+  # Step 2: 检测 slice 模式
+  - id: detect_slices
+    type: atomic
+    name: "检测渲染 Slice"
+    display:
+      level: detail
+      title: "渲染 Slice 检测"
+    sql: |
+      WITH slice_patterns AS (
+        SELECT DISTINCT
+          s.name,
+          CASE
+            -- Flutter 特征 slice
+            WHEN s.name GLOB '*FlutterView*' THEN 'Flutter'
+            WHEN s.name GLOB '*flutter*' THEN 'Flutter'
+            WHEN s.name GLOB '*Engine::BeginFrame*' THEN 'Flutter'
+            WHEN s.name GLOB '*Rasterizer*' THEN 'Flutter'
+            -- React Native 特征 slice
+            WHEN s.name GLOB '*ReactNative*' THEN 'ReactNative'
+            WHEN s.name GLOB '*JSIExecutor*' THEN 'ReactNative'
+            WHEN s.name GLOB '*NativeToJsBridge*' THEN 'ReactNative'
+            -- Unity 特征 slice
+            WHEN s.name GLOB '*Unity*' THEN 'Unity'
+            WHEN s.name GLOB '*PlayerLoop*' THEN 'Unity'
+            WHEN s.name GLOB '*GfxDevice*' THEN 'Unity'
+            -- Unreal 特征 slice
+            WHEN s.name GLOB '*Unreal*' THEN 'Unreal'
+            WHEN s.name GLOB '*FEngineLoop*' THEN 'Unreal'
+            -- WebView 特征 slice
+            WHEN s.name GLOB '*WebView*' THEN 'WebView'
+            WHEN s.name GLOB '*Blink*' THEN 'WebView'
+            WHEN s.name GLOB '*V8*' THEN 'WebView'
+            WHEN s.name GLOB '*Chromium*' THEN 'WebView'
+            -- Vulkan 特征 slice
+            WHEN s.name GLOB '*vk*' THEN 'Vulkan'
+            WHEN s.name GLOB '*Vulkan*' THEN 'Vulkan'
+            -- SurfaceView 特征
+            WHEN s.name GLOB '*SurfaceView*' THEN 'SurfaceView'
+            WHEN s.name GLOB '*GLSurfaceView*' THEN 'SurfaceView'
+            -- 标准 HWUI
+            WHEN s.name GLOB '*DrawFrame*' THEN 'HWUI'
+            WHEN s.name GLOB '*syncFrameState*' THEN 'HWUI'
+            WHEN s.name GLOB '*Choreographer#doFrame*' THEN 'HWUI'
+            ELSE NULL
+          END as detected_arch
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+        LIMIT 5000
+      )
+      SELECT
+        name as slice_name,
+        detected_arch,
+        COUNT(*) as occurrence_count
+      FROM slice_patterns
+      WHERE detected_arch IS NOT NULL
+      GROUP BY name, detected_arch
+      ORDER BY occurrence_count DESC
+      LIMIT 20
+    save_as: detected_slices
+
+  # Step 3: 综合判断渲染架构
+  - id: determine_architecture
+    type: atomic
+    name: "确定渲染架构"
+    display:
+      level: summary
+      title: "渲染架构"
+    sql: |
+      WITH
+      thread_arch AS (
+        SELECT
+          CASE
+            WHEN thread_name IN ('ui', '1.ui') OR thread_name GLOB '*raster*' THEN 'Flutter'
+            WHEN thread_name GLOB '*mqt_js*' OR thread_name GLOB '*mqt_native*' THEN 'ReactNative'
+            WHEN thread_name GLOB '*UnityMain*' OR thread_name GLOB '*UnityGfx*' THEN 'Unity'
+            WHEN thread_name GLOB '*GameThread*' THEN 'Unreal'
+            WHEN thread_name GLOB '*Chrome*' OR thread_name GLOB '*WebViewCore*' THEN 'WebView'
+            WHEN thread_name = 'RenderThread' THEN 'HWUI'
+            ELSE NULL
+          END as arch
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+      ),
+      arch_counts AS (
+        SELECT arch, COUNT(*) as cnt
+        FROM thread_arch
+        WHERE arch IS NOT NULL
+        GROUP BY arch
+        ORDER BY cnt DESC
+      ),
+      primary_arch AS (
+        SELECT arch FROM arch_counts LIMIT 1
+      )
+      SELECT
+        COALESCE((SELECT arch FROM primary_arch), 'HWUI') as rendering_architecture,
+        (SELECT GROUP_CONCAT(arch || '(' || cnt || ')', ', ') FROM arch_counts) as all_detected,
+        CASE COALESCE((SELECT arch FROM primary_arch), 'HWUI')
+          WHEN 'Flutter' THEN 'Flutter 框架 - 关注 ui/raster 线程'
+          WHEN 'ReactNative' THEN 'React Native - 关注 JS Bridge 性能'
+          WHEN 'Unity' THEN 'Unity 游戏引擎 - 关注 PlayerLoop 和 GfxDevice'
+          WHEN 'Unreal' THEN 'Unreal Engine - 关注 GameThread 和 RHIThread'
+          WHEN 'WebView' THEN 'WebView 内嵌 - 关注 Chromium 渲染'
+          WHEN 'Vulkan' THEN 'Vulkan 原生渲染 - 关注 GPU 队列'
+          WHEN 'SurfaceView' THEN 'SurfaceView 独立渲染 - 关注 Buffer 状态'
+          ELSE 'HWUI 原生渲染 - 关注 RenderThread 和 Choreographer'
+        END as analysis_focus,
+        CASE COALESCE((SELECT arch FROM primary_arch), 'HWUI')
+          WHEN 'Flutter' THEN 'ui, 1.raster, io.flutter.*'
+          WHEN 'ReactNative' THEN 'mqt_js, mqt_native, NativeModules'
+          WHEN 'Unity' THEN 'UnityMain, UnityGfx, Job.Worker*'
+          WHEN 'Unreal' THEN 'GameThread, RenderThread, RHIThread'
+          WHEN 'WebView' THEN 'CrRenderer*, CompositorTileW*'
+          ELSE 'main, RenderThread'
+        END as key_threads
+    save_as: architecture
+
+output:
+  format: structured
+  fields:
+    - name: architecture
+      description: "检测到的渲染架构"
+    - name: detected_threads
+      description: "检测到的渲染线程"
+    - name: detected_slices
+      description: "检测到的渲染相关 slice"

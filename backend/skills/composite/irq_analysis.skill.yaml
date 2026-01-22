@@ -7,6 +7,17 @@
 name: irq_analysis
 version: "2.1"
 type: composite
+category: kernel
+
+meta:
+  display_name: "IRQ 中断分析"
+  description: "分析硬件中断和软中断对系统的影响"
+  icon: "bolt"
+  tags: [irq, interrupt, kernel, composite]
+
+prerequisites:
+  required_tables:
+    - irq
 display:
   name: "中断分析"
   level: expert

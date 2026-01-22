@@ -6,13 +6,19 @@
 # Macros: android_network_uptime_spans, android_network_uptime_cost
 
 name: network_analysis
-version: "2.1"
+version: "1.0"
 type: composite
-display:
-  name: "网络分析"
-  level: expert
-  description: "网络流量分析，包括流量统计、接口使用、传输协议和功耗影响"
+category: network
 
+meta:
+  display_name: "网络活动分析"
+  description: "分析网络包收发活动 (基于 net hook)"
+  icon: "wifi"
+  tags: [network, packet, composite]
+
+prerequisites:
+  optional_tables:
+    - trackriggers:
 triggers:
   - pattern: "(网络|network|流量|traffic)"
     confidence: 0.95

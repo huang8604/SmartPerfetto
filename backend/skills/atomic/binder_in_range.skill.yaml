@@ -4,16 +4,19 @@
 # 分析指定时间范围内的 Binder 调用
 
 name: binder_in_range
-version: "2.0"
+version: "1.0"
 type: atomic
+category: kernel
 
 meta:
-  display_name: "Binder 调用分析"
-  description: "分析指定时间范围内的 Binder 调用延迟"
-  icon: "swap_horiz"
-  tags: [binder, ipc, atomic]
+  display_name: "Binder 事务分析 (区间)"
+  description: "分析指定时间范围内的 Binder 事务"
+  icon: "link"
+  tags: [binder, transaction, kernel, atomic]
 
 prerequisites:
+  required_tables:
+    - slice
   modules:
     - android.binder
 
@@ -49,6 +52,32 @@ output:
   display:
     level: detail
     format: table
+    columns:
+      - name: client_process
+        label: "客户端"
+        type: string
+      - name: server_process
+        label: "服务端"
+        type: string
+      - name: call_count
+        label: "调用次数"
+        type: number
+        format: compact
+      - name: total_client_ms
+        label: "总耗时"
+        type: duration
+        format: duration_ms
+      - name: max_delay_ms
+        label: "最大延迟"
+        type: duration
+        format: duration_ms
+      - name: avg_delay_ms
+        label: "平均延迟"
+        type: duration
+        format: duration_ms
+      - name: slow_calls
+        label: "慢调用"
+        type: number
   fields:
     - name: client_process
       label: "客户端"

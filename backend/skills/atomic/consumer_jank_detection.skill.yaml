@@ -15,12 +15,17 @@
 name: consumer_jank_detection
 version: "1.0"
 type: atomic
+category: rendering
 
 meta:
-  display_name: "消费端掉帧检测"
-  description: "从 SurfaceFlinger 消费端角度检测真正的掉帧（基于 display_frame_token 跳跃）"
-  icon: "visibility"
-  tags: [jank, consumer, surfaceflinger, frames]
+  display_name: "Consumer Jank 检测"
+  description: "检测 Consumer (SurfaceFlinger) 侧的卡顿"
+  icon: "warning"
+  tags: [jank, consumer, surfaceflinger, atomic]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
 
 inputs:
   - name: package

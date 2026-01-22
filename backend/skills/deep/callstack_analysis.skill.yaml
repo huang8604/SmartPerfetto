@@ -16,13 +16,14 @@
 
 name: callstack_analysis
 version: "1.0"
-type: composite
+type: deep
+category: deep_analysis
 
 meta:
-  display_name: "调用栈热点分析"
-  description: "分析 CPU 采样数据，找出热点函数和调用路径"
-  icon: "flame"
-  tags: [callstack, cpu, profiling, hotspot, deep]
+  display_name: "调用栈分析 (Flamegraph)"
+  description: "生成火焰图并分析热点函数"
+  icon: "local_fire_department"
+  tags: [flamegraph, callstack, cpu, deep]
   level: 2
 
 triggers:

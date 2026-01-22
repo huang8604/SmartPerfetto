@@ -21,14 +21,15 @@
 # - android_key_events: 按键事件详情
 
 name: click_response_analysis
-version: "2.2"
+version: "1.0"
 type: composite
+category: interaction
 
 meta:
   display_name: "点击响应分析"
-  description: "分析输入事件处理延迟、点击响应速度和响应链路"
-  icon: "hand-pointer"
-  tags: [click, tap, input, response, latency, composite]
+  description: "分析点击事件的响应延迟"
+  icon: "touch_app"
+  tags: [click, latency, interaction, composite]
 
 triggers:
   keywords:
@@ -57,6 +58,7 @@ steps:
     name: "检查输入事件数据"
     display:
       level: summary
+      layer: overview
       title: "数据检查"
     sql: |
       SELECT
@@ -70,8 +72,27 @@ steps:
   - id: input_latency_overview
     type: atomic
     name: "输入延迟概览"
+    synthesize:
+      role: overview
+      fields:
+        - key: total_events
+          label: 事件总数
+        - key: avg_total_ms
+          label: 平均延迟
+          format: "{{value}} ms"
+        - key: max_total_ms
+          label: 最大延迟
+          format: "{{value}} ms"
+        - key: rating
+          label: 评级
+      insights:
+        - condition: "avg_total_ms > 100"
+          template: "平均输入延迟 {{avg_total_ms}}ms，超过 100ms 需优化"
+        - condition: "avg_handling_ms > avg_dispatch_ms"
+          template: "应用处理延迟 ({{avg_handling_ms}}ms) 高于系统分发 ({{avg_dispatch_ms}}ms)"
     display:
       level: key
+      layer: overview
       title: "输入延迟概览"
     sql: |
       SELECT
@@ -106,8 +127,22 @@ steps:
   - id: latency_by_event_type
     type: atomic
     name: "按事件类型分析"
+    synthesize:
+      role: list
+      groupBy:
+        - field: event_type
+          title: 按事件类型分布
+      fields:
+        - key: event_action
+          label: 事件动作
+        - key: avg_latency_ms
+          label: 平均延迟
+          format: "{{value}} ms"
+        - key: slow_events
+          label: 慢事件数
     display:
       level: key
+      layer: overview
       title: "各事件类型延迟"
     sql: |
       SELECT
@@ -130,8 +165,24 @@ steps:
   - id: slow_input_events
     type: atomic
     name: "慢输入事件"
+    synthesize:
+      role: list
+      groupBy:
+        - field: main_bottleneck
+          title: 按延迟来源分布
+        - field: severity
+          title: 按严重程度分布
+      fields:
+        - key: event_type
+          label: 事件类型
+        - key: total_ms
+          label: 总延迟
+          format: "{{value}} ms"
+        - key: main_bottleneck
+          label: 瓶颈
     display:
       level: key
+      layer: list
       title: "慢输入事件详情 (>100ms)"
     sql: |
       SELECT
@@ -177,6 +228,7 @@ steps:
     name: "输入期间主线程状态"
     display:
       level: detail
+      layer: list
       title: "输入处理期间主线程状态"
     sql: |
       WITH main_thread AS (
@@ -227,6 +279,7 @@ steps:
     name: "输入期间 Binder"
     display:
       level: detail
+      layer: list
       title: "输入处理期间 Binder 调用"
     sql: |
       WITH slow_inputs AS (
@@ -264,6 +317,7 @@ steps:
     name: "输入到帧关联"
     display:
       level: detail
+      layer: list
       title: "输入到帧渲染延迟"
     sql: |
       SELECT
@@ -295,8 +349,19 @@ steps:
   - id: latency_distribution
     type: atomic
     name: "延迟分布"
+    synthesize:
+      role: overview
+      fields:
+        - key: latency_bucket
+          label: 延迟区间
+        - key: count
+          label: 事件数
+        - key: percent
+          label: 占比
+          format: "{{value}}%"
     display:
       level: summary
+      layer: overview
       title: "输入延迟分布"
     sql: |
       SELECT
@@ -330,8 +395,12 @@ steps:
   - id: analyze_slow_events
     type: iterator
     name: "慢输入事件详细分析"
+    synthesize:
+      role: clusters
+      clusterBy: main_bottleneck
     display:
       level: key
+      layer: deep
       title: "慢输入事件详细分析"
     source: slow_events
     skill: click_response_detail
@@ -352,8 +421,20 @@ steps:
   - id: click_diagnosis
     type: diagnostic
     name: "点击响应诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "点击响应诊断：{{diagnosis}}"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
     inputs: [latency_overview, slow_events, input_thread_state, input_binder]
     rules:
@@ -409,6 +490,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "点击响应分析总结"
     inputs: [input_check, latency_overview, latency_by_type, slow_events, analyze_slow_events, latency_distribution, click_diagnosis]
     prompt: |

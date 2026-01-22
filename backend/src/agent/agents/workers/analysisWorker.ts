@@ -238,9 +238,23 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
    * 调用单个 Skill 并转换结果
    */
   private async invokeSkill(skillId: string, context: SubAgentContext): Promise<Finding[]> {
+    // 创建 AI 服务包装器（使用 ModelRouter 的 callWithFallback 方法）
+    const aiService = context.aiService || {
+      chat: async (prompt: string): Promise<string> => {
+        try {
+          const result = await this.modelRouter.callWithFallback(prompt, 'synthesis');
+          return result.response || '';
+        } catch (error: any) {
+          console.error('[AnalysisWorker] AI service call failed:', error.message);
+          return '';
+        }
+      },
+    };
+
     const toolContext = {
       traceProcessorService: context.traceProcessorService,
       traceId: context.traceId,
+      aiService,
     };
 
     // 检查是否已经处理过这个 skill（会话级别去重）
@@ -439,29 +453,67 @@ export class AnalysisWorker extends EventEmitter implements StageExecutor {
         continue;
       }
 
-      // 提取数据数组
-      let dataArray: any[] = [];
-      if (Array.isArray(stepResult.data)) {
-        dataArray = stepResult.data;
-      } else if (Array.isArray(stepResult)) {
-        dataArray = stepResult;
+      // 【P0 Fix】处理两种数据格式：
+      // 1. Legacy 格式: stepResult.data 是数组 [{col1: val1}, ...]
+      // 2. DataPayload 格式: stepResult.data 是对象 { columns, rows, expandableData, summary }
+      const isDataPayloadFormat = stepResult.data &&
+        typeof stepResult.data === 'object' &&
+        !Array.isArray(stepResult.data) &&
+        'columns' in stepResult.data &&
+        'rows' in stepResult.data;
+
+      if (isDataPayloadFormat) {
+        // 【DataPayload 格式】- 保持原样，前端已支持此格式
+        const payload = stepResult.data;
+        if (!payload.rows || payload.rows.length === 0) {
+          console.log(`[normalizeLayerData] Skipping ${stepId}: empty DataPayload rows`);
+          continue;
+        }
+
+        normalized[stepId] = {
+          stepId,
+          // 直接使用 DataPayload 格式，包含 columns, rows, expandableData, summary
+          data: payload,
+          display: stepResult.display || { title: stepId },
+          ...(stepResult.executionTimeMs && { executionTimeMs: stepResult.executionTimeMs }),
+        };
+
+        console.log(`[normalizeLayerData] Added ${stepId} with DataPayload format:`, {
+          columns: payload.columns?.length || 0,
+          rows: payload.rows?.length || 0,
+          hasExpandableData: !!payload.expandableData,
+          hasSummary: !!payload.summary,
+        });
+      } else {
+        // 【Legacy 格式】- 提取数据数组
+        let dataArray: any[] = [];
+        if (Array.isArray(stepResult.data)) {
+          dataArray = stepResult.data;
+        } else if (Array.isArray(stepResult)) {
+          dataArray = stepResult;
+        }
+
+        if (dataArray.length === 0) {
+          console.log(`[normalizeLayerData] Skipping ${stepId}: empty dataArray`);
+          continue;
+        }
+
+        // 保持 StepResult 结构，只做必要的规范化
+        // 【关键修复】保留 expandableData 字段，确保前端表格可展开功能正常
+        normalized[stepId] = {
+          stepId,
+          data: dataArray,
+          display: stepResult.display || { title: stepId },
+          // 【P0 Fix】保留 expandableData（用于 iterator 类型结果的行展开）
+          ...(stepResult.expandableData && { expandableData: stepResult.expandableData }),
+          // 【P0 Fix】保留 summary（用于汇总报告显示）
+          ...(stepResult.summary && { summary: stepResult.summary }),
+          // 保留原始元数据
+          ...(stepResult.executionTimeMs && { executionTimeMs: stepResult.executionTimeMs }),
+        };
+
+        console.log(`[normalizeLayerData] Added ${stepId} with ${dataArray.length} rows (legacy format)`);
       }
-
-      if (dataArray.length === 0) {
-        console.log(`[normalizeLayerData] Skipping ${stepId}: empty dataArray`);
-        continue;
-      }
-
-      // 保持 StepResult 结构，只做必要的规范化
-      normalized[stepId] = {
-        stepId,
-        data: dataArray,
-        display: stepResult.display || { title: stepId },
-        // 保留原始元数据
-        ...(stepResult.executionTimeMs && { executionTimeMs: stepResult.executionTimeMs }),
-      };
-
-      console.log(`[normalizeLayerData] Added ${stepId} with ${dataArray.length} rows`);
     }
 
     console.log(`[normalizeLayerData] Normalized ${Object.keys(normalized).length} entries`);

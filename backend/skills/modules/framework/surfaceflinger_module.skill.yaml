@@ -1,0 +1,272 @@
+# Framework SurfaceFlinger Module Expert
+#
+# Provides frame rendering analysis capabilities for cross-domain experts.
+# Answers questions about frame timing, jank causes, and GPU composition.
+
+name: surfaceflinger_module
+version: "1.0"
+type: composite
+category: framework
+
+meta:
+  display_name: "SurfaceFlinger 分析"
+  description: "分析帧渲染时序、卡顿原因和 GPU 合成"
+  tags: ["framework", "surfaceflinger", "frame", "jank", "render"]
+
+# Module metadata
+module:
+  layer: framework
+  component: SurfaceFlinger
+  subsystems:
+    - vsync
+    - composition
+    - layer
+  relatedModules:
+    - hardware_gpu
+    - framework_wms
+    - app_third_party
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: frame_jank_analysis
+      questionTemplate: "Why did frame {frame_id} jank for package {package}?"
+      requiredParams: [frame_id, package]
+      description: "Analyze the root cause of a specific janky frame"
+
+    - id: scroll_performance
+      questionTemplate: "What is the scroll performance for package {package}?"
+      requiredParams: [package]
+      optionalParams: [start_ts, end_ts]
+      description: "Analyze scrolling smoothness and frame drops"
+
+    - id: composition_time
+      questionTemplate: "How long did GPU composition take for {layer}?"
+      requiredParams: [layer]
+      description: "Analyze GPU composition timing"
+
+  findingsSchema:
+    - id: high_jank_rate
+      severity: critical
+      titleTemplate: "High jank rate: {jank_rate}% ({jank_count}/{total_frames} frames)"
+      descriptionTemplate: "Frame drop rate of {jank_rate}% exceeds acceptable threshold"
+      evidenceFields: [jank_rate, jank_count, total_frames, avg_fps]
+
+    - id: main_thread_delay
+      severity: warning
+      titleTemplate: "Main thread caused {main_thread_jank} frame drops"
+      descriptionTemplate: "Main thread work exceeded frame budget {main_thread_jank} times"
+      evidenceFields: [main_thread_jank, avg_main_ms]
+
+    - id: render_thread_delay
+      severity: warning
+      titleTemplate: "Render thread caused {render_thread_jank} frame drops"
+      descriptionTemplate: "GPU rendering exceeded budget {render_thread_jank} times"
+      evidenceFields: [render_thread_jank, avg_render_ms]
+
+  suggestionsSchema:
+    - id: check_main_thread
+      condition: "main_thread_jank > render_thread_jank"
+      targetModule: scheduler_module
+      questionTemplate: "Why was main thread slow during frames?"
+      paramsMapping:
+        tid: main_tid
+      priority: 1
+
+    - id: check_gpu
+      condition: "render_thread_jank > main_thread_jank"
+      targetModule: hardware_gpu_module
+      questionTemplate: "Why was GPU rendering slow?"
+      paramsMapping:
+        package: package
+      priority: 1
+
+    - id: check_binder_in_frame
+      condition: "binder_during_frame > 0"
+      targetModule: binder_module
+      questionTemplate: "What Binder calls happened during frame rendering?"
+      paramsMapping:
+        package: package
+      priority: 2
+
+prerequisites:
+  modules:
+    - android.frames.timeline
+    - android.frames.jank
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "Target package name"
+  - name: frame_id
+    type: number
+    required: false
+    description: "Specific frame ID to analyze"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Analysis start timestamp"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "Analysis end timestamp"
+
+steps:
+  # Step 1: Get frame statistics overview
+  - id: frame_overview
+    type: atomic
+    name: "帧统计概览"
+    sql: |
+      SELECT
+        COUNT(*) AS total_frames,
+        SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) AS jank_count,
+        ROUND(SUM(CASE WHEN jank_type != 'None' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS jank_rate,
+        ROUND(1000.0 * COUNT(*) / ((MAX(ts_end) - MIN(ts)) / 1e9), 1) AS avg_fps,
+        ROUND(AVG(dur_frame_ms), 1) AS avg_frame_ms
+      FROM android_frames_overrun_timeline_metrics
+      WHERE package_name LIKE '%${package}%'
+    display:
+      level: key
+      layer: overview
+      title: "帧统计概览"
+    save_as: frame_stats
+    synthesize:
+      role: overview
+      fields:
+        - key: total_frames
+          label: 总帧数
+        - key: jank_count
+          label: 卡顿帧数
+        - key: jank_rate
+          label: 卡顿率
+          format: "{{value}}%"
+        - key: avg_fps
+          label: 平均帧率
+          format: "{{value}} FPS"
+
+  # Step 2: Get jank type breakdown
+  - id: jank_breakdown
+    type: atomic
+    name: "卡顿类型分布"
+    sql: |
+      SELECT
+        jank_type,
+        jank_cause,
+        COUNT(*) AS count,
+        ROUND(AVG(dur_frame_ms), 1) AS avg_dur_ms,
+        ROUND(MAX(dur_frame_ms), 1) AS max_dur_ms
+      FROM android_frames_overrun_timeline_metrics
+      WHERE package_name LIKE '%${package}%'
+        AND jank_type != 'None'
+      GROUP BY jank_type, jank_cause
+      ORDER BY count DESC
+    display:
+      level: detail
+      layer: list
+      title: "卡顿类型分布"
+    save_as: jank_types
+    synthesize:
+      role: list
+      groupBy:
+        - field: jank_type
+          title: 卡顿类型
+
+  # Step 3: Get thread timing breakdown
+  - id: thread_timing
+    type: atomic
+    name: "线程耗时分布"
+    sql: |
+      SELECT
+        'MainThread' AS thread,
+        ROUND(AVG(dur_ui_thread_ms), 1) AS avg_ms,
+        SUM(CASE WHEN dur_ui_thread_ms > 8 THEN 1 ELSE 0 END) AS overrun_count
+      FROM android_frames_overrun_timeline_metrics
+      WHERE package_name LIKE '%${package}%'
+      UNION ALL
+      SELECT
+        'RenderThread' AS thread,
+        ROUND(AVG(dur_render_thread_ms), 1) AS avg_ms,
+        SUM(CASE WHEN dur_render_thread_ms > 8 THEN 1 ELSE 0 END) AS overrun_count
+      FROM android_frames_overrun_timeline_metrics
+      WHERE package_name LIKE '%${package}%'
+    display:
+      level: detail
+      layer: overview
+      title: "线程耗时分布"
+    save_as: thread_stats
+    synthesize: true
+
+  # Step 4: Get worst janky frames
+  - id: worst_frames
+    type: atomic
+    name: "最差帧列表"
+    sql: |
+      SELECT
+        frame_id,
+        ts,
+        jank_type,
+        jank_cause,
+        ROUND(dur_frame_ms, 1) AS dur_ms,
+        ROUND(dur_ui_thread_ms, 1) AS main_ms,
+        ROUND(dur_render_thread_ms, 1) AS render_ms
+      FROM android_frames_overrun_timeline_metrics
+      WHERE package_name LIKE '%${package}%'
+        AND jank_type != 'None'
+      ORDER BY dur_frame_ms DESC
+      LIMIT 20
+    display:
+      level: detail
+      layer: list
+      title: "最差帧列表"
+    save_as: worst_frames
+
+  # Step 5: Diagnose frame issues
+  - id: frame_diagnosis
+    type: diagnostic
+    name: "帧诊断"
+    inputs: [frame_stats, jank_types, thread_stats]
+    rules:
+      - condition: "frame_stats.data[0]?.jank_rate > 10"
+        diagnosis: "卡顿率过高 (${frame_stats.data[0]?.jank_rate}%)，用户体验受影响"
+        confidence: high
+        suggestions:
+          - "分析具体卡顿帧找出根因"
+          - "减少主线程工作量"
+        evidence_fields:
+          - frame_stats.data[0].jank_rate
+          - frame_stats.data[0].jank_count
+
+      - condition: "thread_stats.data.find(t => t.thread === 'MainThread')?.overrun_count > 5"
+        diagnosis: "主线程频繁超时 (${thread_stats.data.find(t => t.thread === 'MainThread')?.overrun_count} 次)，应用逻辑耗时"
+        confidence: high
+        suggestions:
+          - "检查主线程是否有耗时操作"
+          - "将耗时操作移至后台线程"
+        evidence_fields:
+          - thread_stats.data[0].avg_ms
+          - thread_stats.data[0].overrun_count
+
+      - condition: "thread_stats.data.find(t => t.thread === 'RenderThread')?.overrun_count > 5"
+        diagnosis: "渲染线程频繁超时 (${thread_stats.data.find(t => t.thread === 'RenderThread')?.overrun_count} 次)，GPU 负载高"
+        confidence: high
+        suggestions:
+          - "减少过度绘制"
+          - "优化 View 层级"
+        evidence_fields:
+          - thread_stats.data[1].avg_ms
+          - thread_stats.data[1].overrun_count
+
+      - condition: "jank_types.data[0]?.jank_cause?.includes('Binder')"
+        diagnosis: "Binder 调用导致卡顿 (${jank_types.data[0]?.count} 次)"
+        confidence: medium
+        suggestions:
+          - "检查帧渲染期间的 Binder 调用"
+          - "考虑缓存或异步处理"
+        evidence_fields:
+          - jank_types.data[0].jank_cause
+          - jank_types.data[0].count
+    display:
+      level: key
+      layer: overview
+      title: "帧诊断结果"

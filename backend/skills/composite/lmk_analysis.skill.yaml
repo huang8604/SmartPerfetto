@@ -9,6 +9,17 @@
 name: lmk_analysis
 version: "2.1"
 type: composite
+category: memory
+
+meta:
+  display_name: "LMK 事件分析"
+  description: "分析 Low Memory Killer 事件"
+  icon: "close"
+  tags: [lmk, memory, kill, composite]
+
+prerequisites:
+  required_tables:
+    - android_lmk_events
 display:
   name: "LMK 分析"
   level: expert

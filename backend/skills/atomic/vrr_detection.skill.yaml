@@ -1,0 +1,232 @@
+# =============================================================================
+# VRR/LTPO 可变刷新率检测 (Variable Refresh Rate Detection)
+# =============================================================================
+# 检测设备是否使用可变刷新率 (VRR/LTPO/Adaptive Sync)
+#
+# 背景：
+# - 现代旗舰手机广泛采用 LTPO 屏幕，支持 1-120Hz 动态刷新率
+# - VRR 场景下，VSync 间隔不固定，需要分段统计
+# - 常见设备：
+#   - iPhone Pro 系列 (ProMotion)
+#   - Samsung S/Note 系列 (Adaptive Refresh)
+#   - Google Pixel Pro 系列
+#   - 小米/一加旗舰
+#
+# 检测方法：
+# - 统计 VSync 间隔分布
+# - 如果存在多个明显的峰值，说明使用了 VRR
+# - 分段统计不同刷新率区间的帧数和时长
+# =============================================================================
+
+name: vrr_detection
+version: "1.0"
+type: atomic
+category: rendering
+
+meta:
+  display_name: "VRR/LTPO 检测"
+  description: "检测可变刷新率 (VRR/LTPO/AdaptiveSync) 模式"
+  icon: "sync"
+  tags: [vrr, ltpo, refresh_rate, adaptive, atomic]
+
+prerequisites:
+  required_tables:
+    - counter
+    - counter_track
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  # Step 1: 分析 VSync 间隔分布
+  - id: vsync_interval_distribution
+    type: atomic
+    name: "VSync 间隔分布"
+    display:
+      level: detail
+      title: "刷新率分布"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts)) as end_ts
+        FROM counter
+      ),
+      -- 从 VSYNC-sf 信号获取 VSync 间隔
+      vsync_intervals AS (
+        SELECT
+          c.ts,
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE (t.name GLOB '*VSYNC-sf*' OR t.name = 'VSYNC')
+          AND c.ts >= (SELECT start_ts FROM time_bounds)
+          AND c.ts <= (SELECT end_ts FROM time_bounds)
+      ),
+      -- 将间隔归类到刷新率档位
+      interval_buckets AS (
+        SELECT
+          interval_ns,
+          CASE
+            WHEN interval_ns < 6500000 THEN '165Hz'
+            WHEN interval_ns < 7500000 THEN '144Hz'
+            WHEN interval_ns < 9000000 THEN '120Hz'
+            WHEN interval_ns < 12000000 THEN '90Hz'
+            WHEN interval_ns < 20000000 THEN '60Hz'
+            WHEN interval_ns < 35000000 THEN '30Hz'
+            ELSE 'Other'
+          END as refresh_rate_bucket,
+          CASE
+            WHEN interval_ns < 6500000 THEN 1
+            WHEN interval_ns < 7500000 THEN 2
+            WHEN interval_ns < 9000000 THEN 3
+            WHEN interval_ns < 12000000 THEN 4
+            WHEN interval_ns < 20000000 THEN 5
+            WHEN interval_ns < 35000000 THEN 6
+            ELSE 7
+          END as bucket_order
+        FROM vsync_intervals
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 0
+          AND interval_ns < 100000000  -- 过滤异常值
+      )
+      SELECT
+        refresh_rate_bucket,
+        COUNT(*) as frame_count,
+        ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentage,
+        ROUND(SUM(interval_ns) / 1e9, 2) as total_duration_sec,
+        ROUND(AVG(interval_ns) / 1e6, 2) as avg_interval_ms,
+        bucket_order
+      FROM interval_buckets
+      GROUP BY refresh_rate_bucket, bucket_order
+      HAVING COUNT(*) >= 5  -- 至少 5 帧才统计
+      ORDER BY bucket_order
+    save_as: refresh_rate_distribution
+
+  # Step 2: VRR 模式检测
+  - id: vrr_mode_detection
+    type: atomic
+    name: "VRR 模式检测"
+    display:
+      level: summary
+      title: "VRR/LTPO 状态"
+    sql: |
+      WITH
+      vsync_intervals AS (
+        SELECT
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+      ),
+      interval_buckets AS (
+        SELECT
+          CASE
+            WHEN interval_ns < 6500000 THEN '165Hz'
+            WHEN interval_ns < 7500000 THEN '144Hz'
+            WHEN interval_ns < 9000000 THEN '120Hz'
+            WHEN interval_ns < 12000000 THEN '90Hz'
+            WHEN interval_ns < 20000000 THEN '60Hz'
+            WHEN interval_ns < 35000000 THEN '30Hz'
+            ELSE 'Other'
+          END as bucket
+        FROM vsync_intervals
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 0
+          AND interval_ns < 100000000
+      ),
+      bucket_counts AS (
+        SELECT bucket, COUNT(*) as cnt
+        FROM interval_buckets
+        GROUP BY bucket
+        HAVING COUNT(*) >= 10
+      ),
+      stats AS (
+        SELECT
+          COUNT(DISTINCT bucket) as distinct_buckets,
+          (SELECT COUNT(*) FROM vsync_intervals WHERE interval_ns IS NOT NULL) as total_intervals,
+          (SELECT ROUND(100.0 * MAX(cnt) / SUM(cnt), 1) FROM bucket_counts) as dominant_pct
+        FROM bucket_counts
+      )
+      SELECT
+        CASE
+          WHEN distinct_buckets >= 3 THEN 'VRR_ACTIVE'
+          WHEN distinct_buckets = 2 THEN 'VRR_LIMITED'
+          ELSE 'FIXED_RATE'
+        END as vrr_mode,
+        distinct_buckets as active_refresh_rates,
+        dominant_pct as dominant_rate_pct,
+        CASE
+          WHEN distinct_buckets >= 3 THEN '检测到 VRR/LTPO 模式，刷新率动态变化'
+          WHEN distinct_buckets = 2 THEN '检测到双档刷新率切换'
+          ELSE '固定刷新率模式'
+        END as mode_description,
+        total_intervals as sample_count
+      FROM stats
+    save_as: vrr_status
+
+  # Step 3: 刷新率切换事件
+  - id: refresh_rate_switches
+    type: atomic
+    name: "刷新率切换事件"
+    display:
+      level: detail
+      title: "刷新率切换"
+    sql: |
+      WITH
+      vsync_intervals AS (
+        SELECT
+          c.ts,
+          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-sf'
+      ),
+      with_buckets AS (
+        SELECT
+          ts,
+          interval_ns,
+          CASE
+            WHEN interval_ns < 9000000 THEN '120Hz'
+            WHEN interval_ns < 12000000 THEN '90Hz'
+            WHEN interval_ns < 20000000 THEN '60Hz'
+            ELSE '30Hz'
+          END as bucket,
+          LAG(CASE
+            WHEN interval_ns < 9000000 THEN '120Hz'
+            WHEN interval_ns < 12000000 THEN '90Hz'
+            WHEN interval_ns < 20000000 THEN '60Hz'
+            ELSE '30Hz'
+          END) OVER (ORDER BY ts) as prev_bucket
+        FROM vsync_intervals
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 5000000
+          AND interval_ns < 100000000
+      )
+      SELECT
+        prev_bucket || ' → ' || bucket as transition,
+        COUNT(*) as switch_count
+      FROM with_buckets
+      WHERE bucket != prev_bucket
+        AND prev_bucket IS NOT NULL
+      GROUP BY prev_bucket, bucket
+      ORDER BY switch_count DESC
+      LIMIT 10
+    save_as: rate_switches
+    optional: true
+
+output:
+  format: structured
+  fields:
+    - name: vrr_status
+      description: "VRR/LTPO 模式检测结果"
+    - name: refresh_rate_distribution
+      description: "刷新率分布统计"
+    - name: rate_switches
+      description: "刷新率切换事件"

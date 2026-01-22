@@ -7,14 +7,19 @@
 # 分别统计两个阶段的 FPS 和掉帧情况
 
 name: scroll_session_analysis
-version: "2.1"
+version: "1.0"
 type: composite
+category: interaction
 
 meta:
-  display_name: "滑动区间分析"
-  description: "分析单个滑动区间的帧性能，区分按压滑动和Fling阶段"
-  icon: "analytics"
-  tags: [scrolling, session, touch, fling, composite]
+  display_name: "滑动会话分析"
+  description: "分析滑动操作的流畅度"
+  icon: "swipe"
+  tags: [scroll, jank, interaction, composite]
+
+prerequisites:
+  required_tables:
+    - android_input_event
 
 inputs:
   - name: session_id
@@ -68,6 +73,7 @@ steps:
     name: "完整区间统计"
     display:
       level: summary
+      layer: session
       title: "区间 ${session_id} - 完整滑动统计"
     sql: |
       WITH frames AS (
@@ -76,7 +82,7 @@ steps:
           dur,
           dur / 1e6 AS dur_ms,
           CASE
-            WHEN dur > 16666666 * 2 THEN 1
+            WHEN dur > ${vsync_period_ns} * 2 THEN 1
             ELSE 0
           END AS is_janky
         FROM slice
@@ -103,6 +109,7 @@ steps:
     name: "按压滑动阶段统计"
     display:
       level: detail
+      layer: session
       title: "区间 ${session_id} - 按压滑动阶段"
     sql: |
       WITH touch_frames AS (
@@ -139,6 +146,7 @@ steps:
     name: "Fling 阶段统计"
     display:
       level: detail
+      layer: session
       title: "区间 ${session_id} - Fling 阶段"
     sql: |
       WITH fling_frames AS (
@@ -175,6 +183,7 @@ steps:
     name: "识别掉帧"
     display:
       level: detail
+      layer: list
       title: "掉帧列表 (区间 ${session_id})"
     sql: |
       WITH frames AS (
@@ -222,6 +231,7 @@ steps:
       frame_dur: dur_str
     display:
       level: key
+      layer: deep
       title: "掉帧原因分析 (区间 ${session_id})"
       format: table
       columns:
@@ -241,6 +251,7 @@ steps:
     name: "区间诊断"
     display:
       level: summary
+      layer: session
       title: "区间 ${session_id} 诊断"
     inputs: [full_stats, touch_stats, fling_stats, janky_frames]
     rules:

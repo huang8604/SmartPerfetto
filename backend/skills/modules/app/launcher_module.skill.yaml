@@ -1,0 +1,469 @@
+# =============================================================================
+# App Launcher Module Expert
+# =============================================================================
+# Provides Launcher/Home app analysis capabilities for cross-domain experts.
+# Answers questions about home screen performance, app launch from launcher,
+# widget updates, and launcher-specific rendering issues.
+#
+# Key Analysis Areas:
+# - Launcher startup and resume timing
+# - App launch from launcher (icon tap to app visible)
+# - Widget update performance
+# - Wallpaper rendering
+# - All apps drawer performance
+# - Recent apps (if handled by launcher)
+# =============================================================================
+
+name: launcher_module
+version: "1.0"
+type: composite
+category: app
+
+meta:
+  display_name: "Launcher 分析"
+  description: "分析桌面启动器性能、应用启动和小部件更新"
+  tags: ["app", "launcher", "home", "widget", "wallpaper"]
+
+# Module metadata
+module:
+  layer: app
+  component: Launcher
+  subsystems:
+    - home_screen
+    - all_apps
+    - widgets
+    - wallpaper
+    - app_launch
+  relatedModules:
+    - framework_ams
+    - framework_wms
+    - framework_surfaceflinger
+    - app_systemui
+
+# Dialogue interface
+dialogue:
+  capabilities:
+    - id: launcher_performance
+      questionTemplate: "What is the Launcher performance?"
+      requiredParams: []
+      description: "Analyze overall launcher performance"
+
+    - id: app_launch_from_launcher
+      questionTemplate: "How long did it take to launch {target_package} from launcher?"
+      requiredParams: [target_package]
+      description: "Analyze app launch timing from home screen"
+
+    - id: widget_update_analysis
+      questionTemplate: "Are widgets causing performance issues?"
+      requiredParams: []
+      description: "Analyze widget update performance"
+
+    - id: launcher_frame_analysis
+      questionTemplate: "Is launcher rendering smoothly?"
+      requiredParams: []
+      description: "Analyze launcher frame rendering"
+
+  findingsSchema:
+    - id: slow_launcher_startup
+      severity: warning
+      titleTemplate: "Slow launcher startup: {startup_ms}ms"
+      descriptionTemplate: "Launcher took {startup_ms}ms to become interactive"
+      evidenceFields: [startup_ms, cold_or_warm, blocking_component]
+
+    - id: slow_app_launch
+      severity: warning
+      titleTemplate: "Slow app launch from launcher: {launch_ms}ms"
+      descriptionTemplate: "Launching {target_package} took {launch_ms}ms"
+      evidenceFields: [target_package, launch_ms, icon_tap_ts, app_visible_ts]
+
+    - id: widget_update_slow
+      severity: warning
+      titleTemplate: "Slow widget update: {widget_name} took {update_ms}ms"
+      descriptionTemplate: "Widget update blocking main thread"
+      evidenceFields: [widget_name, update_ms, update_count]
+
+    - id: launcher_jank
+      severity: warning
+      titleTemplate: "Launcher jank: {jank_count} frames dropped"
+      descriptionTemplate: "Home screen rendering has {jank_count} janky frames"
+      evidenceFields: [jank_count, total_frames, jank_rate_pct]
+
+    - id: wallpaper_rendering_slow
+      severity: info
+      titleTemplate: "Wallpaper rendering slow: {render_ms}ms"
+      descriptionTemplate: "Live wallpaper or wallpaper transition taking too long"
+      evidenceFields: [render_ms, wallpaper_type]
+
+  suggestionsSchema:
+    - id: check_ams_for_launch
+      condition: "slow_app_launch == true"
+      targetModule: ams_module
+      questionTemplate: "What is the startup timing breakdown for {target_package}?"
+      paramsMapping:
+        package: target_package
+      priority: 1
+
+    - id: check_wms_for_transition
+      condition: "slow_app_launch == true"
+      targetModule: wms_module
+      questionTemplate: "What was the window transition timing?"
+      paramsMapping: {}
+      priority: 2
+
+    - id: check_scheduler_for_launcher
+      condition: "launcher_jank == true"
+      targetModule: scheduler_module
+      questionTemplate: "Was launcher main thread getting enough CPU time?"
+      paramsMapping: {}
+      priority: 1
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread
+    - process
+
+inputs:
+  - name: target_package
+    type: string
+    required: false
+    description: "Target app package to analyze launch timing"
+
+steps:
+  # Step 1: Find launcher process
+  - id: launcher_process
+    type: atomic
+    name: "Launcher 进程识别"
+    sql: |
+      SELECT
+        p.upid,
+        p.pid,
+        p.name AS process_name,
+        CASE
+          WHEN p.name LIKE '%launcher%' OR p.name LIKE '%Launcher%' THEN 'launcher'
+          WHEN p.name LIKE '%home%' OR p.name LIKE '%Home%' THEN 'home'
+          WHEN p.name LIKE '%trebuchet%' THEN 'aosp_launcher'
+          WHEN p.name LIKE '%nexuslauncher%' THEN 'pixel_launcher'
+          WHEN p.name LIKE '%lawnchair%' THEN 'lawnchair'
+          ELSE 'unknown'
+        END AS launcher_type
+      FROM process p
+      WHERE p.name LIKE '%launcher%'
+        OR p.name LIKE '%Launcher%'
+        OR p.name LIKE '%home%'
+        OR p.name LIKE '%trebuchet%'
+        OR p.name LIKE '%nexuslauncher%'
+      LIMIT 5
+    display:
+      level: detail
+      layer: overview
+      title: "Launcher 进程"
+    save_as: launcher_process
+
+  # Step 2: Launcher main thread activity overview
+  - id: launcher_main_thread
+    type: atomic
+    name: "Launcher 主线程概览"
+    sql: |
+      WITH launcher AS (
+        SELECT p.upid, p.pid, p.name
+        FROM process p
+        WHERE p.name LIKE '%launcher%'
+          OR p.name LIKE '%Launcher%'
+          OR p.name LIKE '%trebuchet%'
+          OR p.name LIKE '%nexuslauncher%'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS activity,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN launcher l ON t.upid = l.upid
+      WHERE t.tid = l.pid  -- Main thread
+        AND s.dur > 1000000  -- > 1ms
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 20
+    display:
+      level: key
+      layer: overview
+      title: "Launcher 主线程活动"
+    save_as: launcher_main_thread
+    synthesize:
+      role: overview
+      fields:
+        - key: activity
+          label: 活动
+        - key: count
+          label: 次数
+        - key: total_ms
+          label: 总耗时
+          format: "{{value}}ms"
+    on_empty: "未找到 Launcher 进程或主线程数据"
+
+  # Step 3: Launcher frame rendering
+  - id: launcher_frames
+    type: atomic
+    name: "Launcher 帧渲染"
+    sql: |
+      WITH launcher AS (
+        SELECT p.upid, p.pid
+        FROM process p
+        WHERE p.name LIKE '%launcher%'
+          OR p.name LIKE '%Launcher%'
+          OR p.name LIKE '%trebuchet%'
+          OR p.name LIKE '%nexuslauncher%'
+        LIMIT 1
+      )
+      SELECT
+        COUNT(*) AS total_frames,
+        SUM(CASE WHEN s.dur > 16670000 THEN 1 ELSE 0 END) AS jank_frames,
+        ROUND(SUM(CASE WHEN s.dur > 16670000 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS jank_rate_pct,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_frame_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_frame_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN launcher l ON t.upid = l.upid
+      WHERE t.tid = l.pid
+        AND (s.name GLOB '*Choreographer#doFrame*'
+             OR s.name GLOB '*doFrame*'
+             OR s.name GLOB '*DrawFrame*')
+    display:
+      level: key
+      layer: overview
+      title: "Launcher 帧统计"
+    save_as: launcher_frames
+    synthesize: true
+
+  # Step 4: Widget-related activities
+  - id: widget_activities
+    type: atomic
+    name: "Widget 活动"
+    sql: |
+      WITH launcher AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%launcher%'
+          OR p.name LIKE '%Launcher%'
+          OR p.name LIKE '%trebuchet%'
+          OR p.name LIKE '%nexuslauncher%'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS widget_activity,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN launcher l ON t.upid = l.upid
+      WHERE s.name GLOB '*widget*'
+        OR s.name GLOB '*Widget*'
+        OR s.name GLOB '*AppWidget*'
+        OR s.name GLOB '*RemoteViews*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "Widget 活动"
+    save_as: widget_activities
+
+  # Step 5: App launch events from launcher
+  - id: app_launch_events
+    type: atomic
+    name: "应用启动事件"
+    sql: |
+      SELECT
+        s.ts,
+        s.name AS launch_event,
+        CAST(s.dur / 1e6 AS REAL) AS dur_ms,
+        t.name AS thread_name,
+        p.name AS process_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name LIKE '%launcher%'
+             OR p.name LIKE '%Launcher%'
+             OR p.name LIKE '%trebuchet%'
+             OR p.name LIKE '%nexuslauncher%')
+        AND (s.name GLOB '*startActivity*'
+             OR s.name GLOB '*launchApp*'
+             OR s.name GLOB '*onClick*'
+             OR s.name GLOB '*ItemClick*'
+             OR s.name GLOB '*touch*')
+        AND s.dur > 100000  -- > 0.1ms
+      ORDER BY s.ts
+      LIMIT 30
+    display:
+      level: detail
+      layer: list
+      title: "应用启动事件"
+    save_as: app_launch_events
+
+  # Step 6: Wallpaper rendering
+  - id: wallpaper_rendering
+    type: atomic
+    name: "壁纸渲染"
+    sql: |
+      SELECT
+        s.name AS wallpaper_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE p.name GLOB '*wallpaper*'
+        OR p.name GLOB '*Wallpaper*'
+        OR s.name GLOB '*wallpaper*'
+        OR s.name GLOB '*Wallpaper*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "壁纸渲染"
+    save_as: wallpaper_rendering
+    optional: true
+
+  # Step 7: All Apps drawer performance
+  - id: all_apps_drawer
+    type: atomic
+    name: "All Apps 抽屉"
+    sql: |
+      WITH launcher AS (
+        SELECT p.upid
+        FROM process p
+        WHERE p.name LIKE '%launcher%'
+          OR p.name LIKE '%Launcher%'
+          OR p.name LIKE '%trebuchet%'
+          OR p.name LIKE '%nexuslauncher%'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS drawer_event,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN launcher l ON t.upid = l.upid
+      WHERE s.name GLOB '*AllApps*'
+        OR s.name GLOB '*allapps*'
+        OR s.name GLOB '*drawer*'
+        OR s.name GLOB '*Drawer*'
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 10
+    display:
+      level: detail
+      layer: list
+      title: "All Apps 抽屉"
+    save_as: all_apps_drawer
+
+  # Step 8: Binder calls from launcher
+  - id: launcher_binder_calls
+    type: atomic
+    name: "Launcher Binder 调用"
+    sql: |
+      WITH launcher AS (
+        SELECT p.upid, p.pid
+        FROM process p
+        WHERE p.name LIKE '%launcher%'
+          OR p.name LIKE '%Launcher%'
+          OR p.name LIKE '%trebuchet%'
+          OR p.name LIKE '%nexuslauncher%'
+        LIMIT 1
+      )
+      SELECT
+        s.name AS binder_call,
+        COUNT(*) AS count,
+        CAST(SUM(s.dur) / 1e6 AS INTEGER) AS total_ms,
+        CAST(AVG(s.dur) / 1e6 AS REAL) AS avg_ms,
+        CAST(MAX(s.dur) / 1e6 AS REAL) AS max_ms
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN launcher l ON t.upid = l.upid
+      WHERE t.tid = l.pid  -- Main thread
+        AND (s.name GLOB '*binder*'
+             OR s.name GLOB '*Binder*'
+             OR s.name GLOB '*aidl*'
+             OR s.name GLOB '*AIDL*')
+        AND s.dur > 1000000  -- > 1ms
+      GROUP BY s.name
+      ORDER BY total_ms DESC
+      LIMIT 15
+    display:
+      level: detail
+      layer: list
+      title: "Launcher Binder 调用"
+    save_as: launcher_binder_calls
+
+  # Step 9: Diagnose launcher issues
+  - id: launcher_diagnosis
+    type: diagnostic
+    name: "Launcher 诊断"
+    inputs: [launcher_frames, launcher_main_thread, widget_activities, launcher_binder_calls]
+    rules:
+      - condition: "launcher_frames.data[0]?.jank_rate_pct > 5"
+        diagnosis: "Launcher 卡顿率 ${launcher_frames.data[0]?.jank_rate_pct}%，影响桌面体验"
+        confidence: high
+        suggestions:
+          - "检查主线程耗时操作"
+          - "优化 Widget 更新频率"
+          - "减少同步 Binder 调用"
+        evidence_fields:
+          - launcher_frames.data[0]?.jank_rate_pct
+          - launcher_frames.data[0]?.jank_frames
+          - launcher_frames.data[0]?.total_frames
+
+      - condition: "launcher_main_thread.data[0]?.max_ms > 100"
+        diagnosis: "Launcher 主线程存在耗时操作: ${launcher_main_thread.data[0]?.activity} 最长 ${launcher_main_thread.data[0]?.max_ms}ms"
+        confidence: high
+        suggestions:
+          - "将耗时操作移至后台线程"
+          - "使用异步加载"
+        evidence_fields:
+          - launcher_main_thread.data[0]?.activity
+          - launcher_main_thread.data[0]?.max_ms
+
+      - condition: "widget_activities.data[0]?.total_ms > 100"
+        diagnosis: "Widget 活动耗时较高: ${widget_activities.data[0]?.widget_activity} 共 ${widget_activities.data[0]?.total_ms}ms"
+        confidence: medium
+        suggestions:
+          - "减少 Widget 更新频率"
+          - "简化 Widget 布局"
+          - "避免在 Widget 中使用复杂视图"
+        evidence_fields:
+          - widget_activities.data[0]?.widget_activity
+          - widget_activities.data[0]?.total_ms
+
+      - condition: "launcher_binder_calls.data[0]?.max_ms > 50"
+        diagnosis: "Launcher 存在耗时 Binder 调用: ${launcher_binder_calls.data[0]?.binder_call} 最长 ${launcher_binder_calls.data[0]?.max_ms}ms"
+        confidence: medium
+        suggestions:
+          - "检查是否可以异步执行"
+          - "减少主线程 Binder 调用"
+        evidence_fields:
+          - launcher_binder_calls.data[0]?.binder_call
+          - launcher_binder_calls.data[0]?.max_ms
+    display:
+      level: key
+      layer: overview
+      title: "Launcher 诊断结果"

@@ -5,12 +5,19 @@
 # Also uses block_io track slices for detailed IO operations
 
 name: block_io_analysis
-version: "2.1"
+version: "1.0"
 type: composite
-display:
-  name: "Block IO 分析"
-  level: expert
-  description: "块设备 I/O 分析，识别 I/O 瓶颈、队列深度和设备负载"
+category: io
+
+meta:
+  display_name: "Block I/O 分析"
+  description: "分析长时间的不可中断 I/O 操作 (D 状态)"
+  icon: "storage"
+  tags: [io, block, disk, composite]
+
+prerequisites:
+  required_tables:
+    - thread_state
 
 triggers:
   - pattern: "(IO|I/O|磁盘|disk|存储|storage)"

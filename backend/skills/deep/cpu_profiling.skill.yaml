@@ -19,13 +19,14 @@
 
 name: cpu_profiling
 version: "1.0"
-type: composite
+type: deep
+category: deep_analysis
 
 meta:
-  display_name: "CPU 性能剖析"
-  description: "深入分析 CPU 使用效率、调度延迟、核心分布"
-  icon: "cpu"
-  tags: [cpu, profiling, scheduling, performance, deep]
+  display_name: "CPU 深度调优"
+  description: "综合分析 Scheduling, Frequency, Idle 状态"
+  icon: "settings_suggest"
+  tags: [cpu, profiling, deep]
   level: 2
 
 triggers:

@@ -38,6 +38,22 @@ steps:
       level: summary
       layer: overview
       title: "显示配置"
+      columns:
+        - name: refresh_rate_hz
+          label: "刷新率"
+          type: number
+          format: compact
+        - name: vsync_period_ms
+          label: "VSync 周期"
+          type: duration
+          format: duration_ms
+        - name: vsync_source
+          label: "来源"
+          type: string
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
     sql: |
       WITH
       -- 方法1: 从 SurfaceFlinger 的 VSYNC slice 推算周期 (最可靠)
@@ -128,6 +144,44 @@ steps:
       level: summary
       layer: overview
       title: "滑动性能概览"
+      columns:
+        - name: total_frames
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: janky_frames
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: app_janky_frames
+          label: "App 侧掉帧"
+          type: number
+          format: compact
+        - name: sf_jank_count
+          label: "SF 侧掉帧"
+          type: number
+          format: compact
+        - name: actual_fps
+          label: "实际 FPS"
+          type: number
+        - name: refresh_rate
+          label: "刷新率"
+          type: number
+        - name: avg_frame_dur_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+        - name: p95_frame_dur_ms
+          label: "P95 帧耗时"
+          type: duration
+          format: duration_ms
+        - name: rating
+          label: "评级"
+          type: string
     sql: |
       WITH
       -- 获取 VSync 周期（从 VSYNC-sf 信号计算）
@@ -277,6 +331,32 @@ steps:
       level: summary
       layer: overview
       title: "掉帧类型分布"
+      columns:
+        - name: jank_type
+          label: "掉帧类型"
+          type: string
+        - name: count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: real_jank_count
+          label: "实际掉帧"
+          type: number
+          format: compact
+        - name: false_positive
+          label: "假阳性"
+          type: number
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: responsibility
+          label: "责任归属"
+          type: string
     sql: |
       WITH
       app_frames AS (
@@ -337,6 +417,41 @@ steps:
       level: detail
       layer: list
       title: "滑动区间"
+      columns:
+        - name: session_id
+          label: "区间"
+          type: number
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: start_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: end_ts
+          label: "结束时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: start_ts
+        - name: frame_count
+          label: "帧数"
+          type: number
+          format: compact
+        - name: duration_ms
+          label: "持续时间"
+          type: duration
+          format: duration_ms
+        - name: avg_frame_ms
+          label: "平均帧耗时"
+          type: duration
+          format: duration_ms
+        - name: max_frame_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+        - name: session_fps
+          label: "FPS"
+          type: number
     sql: |
       WITH frame_gaps AS (
         SELECT
@@ -392,6 +507,33 @@ steps:
       level: detail
       layer: list
       title: "区间掉帧"
+      columns:
+        - name: session_id
+          label: "区间"
+          type: number
+        - name: frame_count
+          label: "总帧数"
+          type: number
+          format: compact
+        - name: janky_count
+          label: "掉帧数"
+          type: number
+          format: compact
+        - name: jank_rate
+          label: "掉帧率"
+          type: percentage
+          format: percentage
+        - name: app_janky_count
+          label: "App 掉帧"
+          type: number
+          format: compact
+        - name: max_vsync_missed
+          label: "最大跳帧"
+          type: number
+        - name: jank_types
+          label: "掉帧类型"
+          type: string
+          format: truncate
     sql: |
       WITH frame_gaps AS (
         SELECT
@@ -480,6 +622,90 @@ steps:
       layer: list
       title: "掉帧列表"
       expandable: true  # 支持展开查看详细分析
+      # 提取固定值到元数据（这些列在列表中值相同，移至标题显示）
+      metadataFields:
+        - layer_name
+        - process_name
+      columns:
+        - name: frame_id
+          label: "帧 ID"
+          type: number
+        - name: start_ts
+          label: "开始时间"
+          type: timestamp
+          clickAction: navigate_timeline
+        - name: end_ts
+          label: "结束时间"
+          type: timestamp
+          clickAction: navigate_range
+          durationColumn: start_ts
+        - name: dur_ms
+          label: "帧耗时"
+          type: duration
+          format: duration_ms
+        - name: jank_type
+          label: "掉帧类型"
+          type: string
+        - name: vsync_missed
+          label: "跳帧数"
+          type: number
+        - name: jank_responsibility
+          label: "责任归属"
+          type: enum
+        - name: main_start_ts
+          label: "主线程开始"
+          type: timestamp
+          hidden: true
+        - name: main_end_ts
+          label: "主线程结束"
+          type: timestamp
+          hidden: true
+        - name: main_dur_ms
+          label: "主线程耗时"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: render_start_ts
+          label: "渲染开始"
+          type: timestamp
+          hidden: true
+        - name: render_end_ts
+          label: "渲染结束"
+          type: timestamp
+          hidden: true
+        - name: render_dur_ms
+          label: "渲染耗时"
+          type: duration
+          format: duration_ms
+          hidden: true
+        - name: jank_severity_type
+          label: "严重程度"
+          type: string
+          hidden: true
+        - name: layer_name
+          label: "图层名"
+          type: string
+          hidden: true
+        - name: process_name
+          label: "进程名"
+          type: string
+          hidden: true
+        - name: pid
+          label: "PID"
+          type: number
+          hidden: true
+        - name: session_id
+          label: "会话"
+          type: number
+          hidden: true
+        - name: token_gap
+          label: "Token 跳跃"
+          type: number
+          hidden: true
+        - name: frame_index
+          label: "帧索引"
+          type: number
+          hidden: true
     sql: |
       WITH
       -- VSync 周期
@@ -702,6 +928,20 @@ steps:
       level: key
       layer: deep
       title: "帧详细分析"
+      columns:
+        - name: frame_id
+          label: "帧 ID"
+          type: number
+        - name: cause_type
+          label: "原因类型"
+          type: string
+        - name: diagnosis
+          label: "诊断结论"
+          type: string
+        - name: confidence
+          label: "置信度"
+          type: percentage
+          format: percentage
     source: app_jank_frames
     max_items: 50
     item_skill: jank_frame_detail
@@ -750,6 +990,23 @@ steps:
       level: summary
       layer: overview
       title: "🎯 分析结论"
+      columns:
+        - name: problem_category
+          label: "问题类别"
+          type: enum
+        - name: problem_component
+          label: "问题组件"
+          type: string
+        - name: confidence
+          label: "置信度"
+          type: percentage
+          format: percentage
+        - name: root_cause_summary
+          label: "根因总结"
+          type: string
+        - name: suggestion
+          label: "优化建议"
+          type: string
     sql: |
       WITH
       -- 从 performance_summary 获取掉帧统计
@@ -768,17 +1025,27 @@ steps:
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
           AND a.surface_frame_token IS NOT NULL
       ),
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
       -- 主线程四象限分析
       main_thread_analysis AS (
         SELECT
-          SUM(CASE WHEN ts.state = 'Running' AND ts.cpu >= 4 THEN ts.dur ELSE 0 END) as q1_big_core_ns,
-          SUM(CASE WHEN ts.state = 'Running' AND ts.cpu < 4 THEN ts.dur ELSE 0 END) as q2_small_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND c.core_type = 'big' THEN ts.dur ELSE 0 END) as q1_big_core_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND c.core_type = 'little' THEN ts.dur ELSE 0 END) as q2_small_core_ns,
           SUM(CASE WHEN ts.state = 'R' THEN ts.dur ELSE 0 END) as q3_runnable_ns,
           SUM(CASE WHEN ts.state IN ('S', 'D', 'I') THEN ts.dur ELSE 0 END) as q4_sleep_ns,
           SUM(ts.dur) as total_dur_ns
         FROM thread_state ts
         JOIN thread t ON ts.utid = t.utid
         JOIN process p ON t.upid = p.upid
+        LEFT JOIN cpu_info c ON ts.cpu = c.cpu
         WHERE (p.name GLOB '${package}*' OR '${package}' = '')
           AND t.tid = p.pid
       ),

@@ -50,6 +50,10 @@ export interface ToolContext {
   traceProcessor?: any;
   traceProcessorService?: any;
   package?: string;
+  /** AI 服务，用于 ai_summary 和 ai_decision 步骤 */
+  aiService?: {
+    chat: (prompt: string) => Promise<string>;
+  };
 }
 
 // =============================================================================
@@ -260,9 +264,41 @@ export interface OrchestratorOptions {
 }
 
 export interface StreamingUpdate {
-  type: 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_data' | 'worker_thought' | 'architecture_detected';
+  /**
+   * Event type for streaming updates
+   *
+   * v2.0 Events:
+   * - 'data': Unified data event carrying DataEnvelope(s)
+   *
+   * Legacy Events (backward compatibility):
+   * - 'skill_data': Skill execution results (LayeredSkillResult)
+   *
+   * Common Events:
+   * - 'thought', 'worker_thought': Agent reasoning
+   * - 'tool_call': Tool invocation
+   * - 'finding': Diagnostic finding
+   * - 'progress': Progress update
+   * - 'conclusion': Analysis conclusion
+   * - 'error': Error message
+   *
+   * Agent-Driven Events (Phase 2-4):
+   * - 'hypothesis_generated': Initial hypotheses created
+   * - 'agent_task_dispatched': Task sent to domain agent
+   * - 'agent_dialogue': Agent communication event
+   * - 'agent_response': Agent completed task
+   * - 'round_start': Analysis round started
+   * - 'synthesis_complete': Feedback synthesis complete
+   * - 'strategy_decision': Next iteration strategy decided
+   */
+  type: 'data' | 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_data' | 'worker_thought' | 'architecture_detected'
+    | 'hypothesis_generated' | 'agent_task_dispatched' | 'agent_dialogue' | 'agent_response' | 'round_start' | 'synthesis_complete' | 'strategy_decision';
   content: any;
   timestamp: number;
+  /**
+   * Optional unique event ID for deduplication (v2.0)
+   * Used with 'data' events to prevent duplicate rendering on frontend
+   */
+  id?: string;
 }
 
 // =============================================================================
@@ -543,6 +579,10 @@ export interface SubAgentContext {
   package?: string;
   /** 分析时间范围 */
   timeRange?: { start: number; end: number };
+  /** AI 服务，用于 Skill 的 ai_summary 和 ai_decision 步骤 */
+  aiService?: {
+    chat: (prompt: string) => Promise<string>;
+  };
 }
 
 export interface SubAgentResult {

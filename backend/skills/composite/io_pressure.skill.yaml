@@ -19,12 +19,13 @@
 name: io_pressure
 version: "1.0"
 type: composite
+category: io
 
 meta:
   display_name: "IO 压力分析"
-  description: "分析系统 IO 等待、存储压力、阻塞操作"
-  icon: "hard-drive"
-  tags: [io, storage, blocking, system, pressure]
+  description: "从系统层面分析 IO 压力和瓶颈"
+  icon: "storage"
+  tags: [io, pressure, disk, system]
 
 triggers:
   keywords:

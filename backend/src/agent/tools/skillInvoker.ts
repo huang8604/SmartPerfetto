@@ -177,6 +177,14 @@ export const skillInvokerTool: Tool<SkillInvokerParams, SkillInvokerResult> = {
       // 创建 adapter 实例
       const adapter = new SkillAnalysisAdapter(context.traceProcessorService);
 
+      // 注入 AI 服务（用于 ai_summary 和 ai_decision 步骤）
+      if (context.aiService) {
+        adapter.setAIService(context.aiService);
+        console.log('[SkillInvoker] AI service injected');
+      } else {
+        console.warn('[SkillInvoker] No AI service available - ai_summary steps will be skipped');
+      }
+
       // 构建请求
       const request = {
         traceId: context.traceId,

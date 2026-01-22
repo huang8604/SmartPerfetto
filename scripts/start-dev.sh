@@ -8,6 +8,7 @@
 #   ./start-dev.sh --clean   # Clean old logs before starting
 
 set -e
+set -o pipefail  # 【S1 Fix】确保管道中的命令失败能被正确检测
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOGS_DIR="$PROJECT_ROOT/logs"
@@ -69,6 +70,24 @@ echo "Checking environment..."
 command -v node >/dev/null 2>&1 || { echo "ERROR: node is required but not installed."; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "ERROR: npm is required but not installed."; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required but not installed."; exit 1; }
+
+# 【S2 Fix】Check and install dependencies if needed
+if [ ! -d "$PROJECT_ROOT/backend/node_modules" ]; then
+  echo "Backend dependencies not found. Installing..."
+  cd "$PROJECT_ROOT/backend" && npm install
+fi
+
+# 【S3 Fix】Check for .env file
+if [ ! -f "$PROJECT_ROOT/backend/.env" ]; then
+  echo "=============================================="
+  echo "WARNING: backend/.env not found!"
+  echo "AI features may not work without API keys."
+  echo "Please copy .env.example to .env and configure."
+  echo "=============================================="
+fi
+
+# 【S4 Fix】Ensure data directories exist
+mkdir -p "$PROJECT_ROOT/backend/data/sessions"
 
 # Cleanup function for graceful exit
 cleanup() {
@@ -150,7 +169,12 @@ if [ "$SKIP_BUILD" = false ]; then
   # Generate skill types (YAML -> TypeScript)
   echo "Generating skill types..."
   cd "$PROJECT_ROOT/backend"
-  npm run types 2>&1 | tee -a "$BACKEND_LOG" || echo "Warning: Type generation failed, continuing..."
+  npm run generate-types 2>&1 | tee -a "$BACKEND_LOG" || echo "Warning: Skill type generation failed, continuing..."
+  npm run sync-types 2>&1 | tee -a "$BACKEND_LOG" || echo "Warning: Type sync failed, continuing..."
+
+  # Generate frontend types from data contract
+  echo "Generating frontend types from data contract..."
+  npm run generate:frontend-types 2>&1 | tee -a "$BACKEND_LOG" || echo "Warning: Frontend type generation failed, continuing..."
 
   # Build backend
   echo "Building backend..."

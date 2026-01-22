@@ -40,6 +40,18 @@ export class CircuitBreaker extends EventEmitter {
   private config: CircuitBreakerConfig;
   private state: CircuitBreakerState;
 
+  // 【P1 Fix】用户响应超时机制
+  private userResponseTimeout: NodeJS.Timeout | null = null;
+  private readonly USER_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟
+
+  // 【P1 Fix】forceClose 冷却期跟踪
+  private lastForceCloseTime: number = 0;
+  private readonly FORCE_CLOSE_COOLDOWN_MS = 30 * 1000; // 30 秒冷却期
+
+  // 【P1 Fix】半开状态成功计数（用于渐进式恢复）
+  private halfOpenSuccessCount: number = 0;
+  private readonly HALF_OPEN_SUCCESS_THRESHOLD = 3; // 需要 3 次成功才完全关闭
+
   constructor(config: Partial<CircuitBreakerConfig> = {}) {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -165,11 +177,42 @@ export class CircuitBreaker extends EventEmitter {
     // 启动冷却计时器
     this.scheduleCooldown();
 
+    // 【P1 Fix】启动用户响应超时计时器
+    this.startUserResponseTimeout();
+
     return {
       action: 'ask_user',
       reason,
       context: this.getAllDiagnostics(),
     };
+  }
+
+  /**
+   * 【P1 Fix】启动用户响应超时计时器
+   * 如果用户在超时时间内未响应，自动执行 abort
+   */
+  private startUserResponseTimeout(): void {
+    // 清理之前的超时计时器
+    this.clearUserResponseTimeout();
+
+    this.userResponseTimeout = setTimeout(() => {
+      console.warn(`[CircuitBreaker] User response timeout after ${this.USER_RESPONSE_TIMEOUT_MS}ms, auto-aborting`);
+      this.emit('userResponseTimeout', {
+        timeoutMs: this.USER_RESPONSE_TIMEOUT_MS,
+        reason: '用户响应超时，自动中止分析',
+      });
+      // 不自动调用 handleUserResponse，而是发出事件让上层处理
+    }, this.USER_RESPONSE_TIMEOUT_MS);
+  }
+
+  /**
+   * 【P1 Fix】清理用户响应超时计时器
+   */
+  private clearUserResponseTimeout(): void {
+    if (this.userResponseTimeout) {
+      clearTimeout(this.userResponseTimeout);
+      this.userResponseTimeout = null;
+    }
   }
 
   /**
@@ -193,10 +236,18 @@ export class CircuitBreaker extends EventEmitter {
 
   /**
    * 检查半开状态是否可以恢复
+   * 【P1 Fix】实现渐进式恢复：需要多次成功才完全关闭
    */
   private checkHalfOpenRecovery(): void {
-    // 简化实现：第一次成功就关闭
-    this.close();
+    this.halfOpenSuccessCount++;
+
+    if (this.halfOpenSuccessCount >= this.HALF_OPEN_SUCCESS_THRESHOLD) {
+      console.log(`[CircuitBreaker] Half-open recovery complete after ${this.halfOpenSuccessCount} successes`);
+      this.halfOpenSuccessCount = 0;
+      this.close();
+    } else {
+      console.log(`[CircuitBreaker] Half-open progress: ${this.halfOpenSuccessCount}/${this.HALF_OPEN_SUCCESS_THRESHOLD} successes`);
+    }
   }
 
   /**
@@ -350,16 +401,39 @@ export class CircuitBreaker extends EventEmitter {
    * 重置所有状态
    */
   reset(): void {
+    // 【P1 Fix】清理所有计时器和状态
+    this.clearUserResponseTimeout();
+    this.lastForceCloseTime = 0;
+    this.halfOpenSuccessCount = 0;
     this.state = this.createInitialState();
     this.emit('reset');
   }
 
   /**
    * 手动关闭断路器（用户干预后）
+   * 【P1 Fix】添加冷却期检查，防止用户快速连续选择 'continue'
    */
-  forceClose(): void {
+  forceClose(): boolean {
+    // 检查是否在冷却期内
+    const timeSinceLastForceClose = Date.now() - this.lastForceCloseTime;
+    if (this.lastForceCloseTime > 0 && timeSinceLastForceClose < this.FORCE_CLOSE_COOLDOWN_MS) {
+      const remainingCooldown = this.FORCE_CLOSE_COOLDOWN_MS - timeSinceLastForceClose;
+      console.warn(`[CircuitBreaker] forceClose in cooldown, ${remainingCooldown}ms remaining`);
+      this.emit('forceCloseCooldown', {
+        remainingMs: remainingCooldown,
+        reason: '冷却期内，请稍后再试',
+      });
+      return false;
+    }
+
+    // 清理用户响应超时计时器
+    this.clearUserResponseTimeout();
+
+    this.lastForceCloseTime = Date.now();
+    this.halfOpenSuccessCount = 0; // 重置半开成功计数
     this.close();
     this.emit('forceClosed');
+    return true;
   }
 
   /**
@@ -375,11 +449,22 @@ export class CircuitBreaker extends EventEmitter {
 
   /**
    * 处理用户响应
+   * 【P1 Fix】清理超时计时器，处理冷却期
    */
   handleUserResponse(decision: 'continue' | 'abort' | 'skip'): CircuitDecision {
+    // 清理用户响应超时计时器
+    this.clearUserResponseTimeout();
+
     switch (decision) {
       case 'continue':
-        this.forceClose();
+        const forceCloseSuccess = this.forceClose();
+        if (!forceCloseSuccess) {
+          // 在冷却期内，返回特殊响应
+          return {
+            action: 'ask_user',
+            reason: '操作过于频繁，请稍后再试继续',
+          };
+        }
         return { action: 'continue', reason: '用户选择继续' };
 
       case 'abort':

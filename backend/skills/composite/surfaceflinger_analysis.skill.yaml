@@ -14,7 +14,7 @@
 
 name: surfaceflinger_analysis
 version: "1.0.0"
-type: performance
+type: composite
 category: rendering
 priority: high
 

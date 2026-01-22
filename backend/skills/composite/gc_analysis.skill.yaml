@@ -9,6 +9,17 @@
 name: gc_analysis
 version: "2.1"
 type: composite
+category: memory
+
+meta:
+  display_name: "GC 行为分析"
+  description: "深入分析垃圾回收行为和影响"
+  icon: "delete_sweep"
+  tags: [gc, memory, composite]
+
+prerequisites:
+  required_tables:
+    - slice
 display:
   name: "GC 分析"
   level: expert

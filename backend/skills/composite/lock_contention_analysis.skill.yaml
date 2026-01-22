@@ -7,12 +7,19 @@
 # Related tables: android_monitor_contention_chain_thread_state, android_monitor_contention_chain_thread_state_by_txn
 
 name: lock_contention_analysis
-version: "2.1"
+version: "1.0"
 type: composite
-display:
-  name: "锁竞争分析"
-  level: expert
-  description: "Java Monitor 锁竞争分析，包含锁链路追踪、持锁线程状态分析和死锁检测"
+category: performance
+
+meta:
+  display_name: "锁竞争分析"
+  description: "分析应用中的线程锁竞争情况"
+  icon: "lock"
+  tags: [lock, contention, performance, composite]
+
+prerequisites:
+  required_tables:
+    - thread_state
 
 triggers:
   - pattern: "(锁|lock|contention|竞争|monitor|同步)"

@@ -20,14 +20,15 @@
 # - sched_slice + cpu_frequency_counters: 关联频率信息
 
 name: cpu_analysis
-version: "2.1"
+version: "1.0"
 type: composite
+category: hardware
 
 meta:
-  display_name: "CPU 性能分析"
-  description: "分析应用 CPU 使用率、线程调度、大小核分布"
-  icon: "cpu"
-  tags: [cpu, thread, scheduling, core, composite]
+  display_name: "CPU 分析"
+  description: "全方位的 CPU 性能分析"
+  icon: "memory"
+  tags: [cpu, usage, frequency, composite]
 
 triggers:
   keywords:
@@ -64,6 +65,7 @@ steps:
     name: "获取目标进程"
     display:
       level: summary
+      layer: overview
       title: "目标进程"
     sql: |
       SELECT
@@ -83,8 +85,22 @@ steps:
   - id: core_type_stats
     type: atomic
     name: "核心类型统计"
+    synthesize:
+      role: overview
+      fields:
+        - key: core_type
+          label: 核心类型
+        - key: total_time_ms
+          label: 运行时间
+          format: "{{value}} ms ({{percent}}%)"
+        - key: core_count
+          label: 核心数
+      insights:
+        - condition: "core_type.includes('big') && percent < 30"
+          template: "大核使用率仅 {{percent}}%，建议优化调度策略"
     display:
       level: key
+      layer: overview
       title: "大小核分布（基于 capacity）"
     sql: |
       WITH cpu_classification AS (
@@ -126,8 +142,23 @@ steps:
   - id: thread_cpu_usage
     type: atomic
     name: "线程 CPU 使用"
+    synthesize:
+      role: list
+      groupBy:
+        - field: thread_type
+          title: 按线程类型分布
+      fields:
+        - key: thread_name
+          label: 线程名
+        - key: cpu_time_ms
+          label: CPU 时间
+          format: "{{value}} ms"
+        - key: big_core_percent
+          label: 大核占比
+          format: "{{value}}%"
     display:
       level: key
+      layer: overview
       title: "线程 CPU 使用 Top10"
     sql: |
       WITH cpu_classification AS (
@@ -164,8 +195,22 @@ steps:
   - id: main_thread_states
     type: atomic
     name: "主线程状态分布"
+    synthesize:
+      role: overview
+      fields:
+        - key: state_desc
+          label: 状态
+        - key: total_dur_ms
+          label: 持续时间
+          format: "{{value}} ms ({{percent}}%)"
+      insights:
+        - condition: "state === 'Running' && percent < 50"
+          template: "主线程 Running 仅 {{percent}}%，存在等待或阻塞"
+        - condition: "state === 'R' && percent > 20"
+          template: "调度等待占比 {{percent}}%，CPU 资源争抢"
     display:
       level: key
+      layer: overview
       title: "主线程状态"
     sql: |
       WITH main_thread AS (
@@ -204,8 +249,24 @@ steps:
   - id: runnable_latency
     type: atomic
     name: "调度延迟分析"
+    synthesize:
+      role: list
+      groupBy:
+        - field: severity
+          title: 按严重程度分布
+        - field: waker_process
+          title: 按唤醒进程分布
+      fields:
+        - key: wait_ms
+          label: 等待时间
+          format: "{{value}} ms"
+        - key: waker_thread
+          label: 唤醒线程
+        - key: severity
+          label: 严重程度
     display:
       level: key
+      layer: list
       title: "调度延迟分析（Runnable 等待）"
     sql: |
       WITH main_thread AS (
@@ -246,6 +307,7 @@ steps:
     name: "主线程核心分布"
     display:
       level: detail
+      layer: list
       title: "主线程运行核心分布"
     sql: |
       WITH main_thread AS (
@@ -283,6 +345,7 @@ steps:
     name: "阻塞函数分析"
     display:
       level: detail
+      layer: list
       title: "主线程阻塞函数"
     sql: |
       WITH main_thread AS (
@@ -315,6 +378,7 @@ steps:
     name: "CPU 频率分布"
     display:
       level: detail
+      layer: list
       title: "CPU 频率使用分布"
     sql: |
       SELECT
@@ -345,6 +409,7 @@ steps:
     name: "唤醒链分析"
     display:
       level: detail
+      layer: list
       title: "主线程唤醒者分析"
     sql: |
       WITH main_thread AS (
@@ -377,8 +442,20 @@ steps:
   - id: cpu_diagnosis
     type: diagnostic
     name: "CPU 诊断"
+    synthesize:
+      role: conclusion
+      fields:
+        - key: diagnosis
+          label: 诊断结论
+        - key: severity
+          label: 严重程度
+        - key: confidence
+          label: 置信度
+      insights:
+        - template: "CPU 诊断：{{diagnosis}}"
     display:
       level: key
+      layer: overview
       title: "问题诊断"
     inputs: [core_stats, main_thread_states, runnable_delays, blocked_functions]
     rules:
@@ -414,7 +491,7 @@ steps:
           - "检查是否有高优先级任务抢占"
 
       # 频繁调度延迟
-      - condition: "runnable_delays.data.length} > 10"
+      - condition: "runnable_delays.data.length > 10"
         severity: warning
         diagnosis: "调度延迟频繁发生 (${runnable_delays.data.length} 次 >1ms)"
         confidence: medium
@@ -437,6 +514,7 @@ steps:
     name: "分析总结"
     display:
       level: key
+      layer: overview
       title: "CPU 分析总结"
     inputs: [target_process, core_stats, thread_usage, main_thread_states, runnable_delays, blocked_functions, cpu_diagnosis]
     prompt: |

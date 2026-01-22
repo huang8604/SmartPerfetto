@@ -1,0 +1,263 @@
+# =============================================================================
+# 游戏帧率分析 (Game FPS Analysis)
+# =============================================================================
+# 针对游戏场景的帧率分析，支持固定帧率模式 (30fps/45fps/60fps)
+#
+# 与普通应用不同，游戏通常：
+# - 使用固定帧率而非跟随系统刷新率
+# - 使用 SurfaceView/GLSurfaceView/Vulkan 独立渲染
+# - 渲染循环在非主线程
+#
+# 分析内容：
+# - 检测目标帧率 (30/45/60fps)
+# - 计算帧间隔稳定性
+# - 识别帧率波动和掉帧
+# =============================================================================
+
+name: game_fps_analysis
+version: "1.0"
+type: atomic
+category: rendering
+priority: high
+
+meta:
+  display_name: "游戏帧率分析"
+  description: "针对游戏的帧率分析，支持 30/45/60fps 固定帧率模式"
+  icon: "gamepad"
+  tags: [game, fps, frame, performance, atomic]
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
+    - process
+  optional_tables:
+    - expected_frame_timeline_slice
+
+thresholds:
+  jank_rate:
+    unit: "%"
+    description: "掉帧率"
+    levels:
+      excellent: { max: 1 }
+      good: { min: 1, max: 5 }
+      warning: { min: 5, max: 10 }
+      critical: { min: 10 }
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名"
+  - name: target_fps
+    type: integer
+    required: false
+    description: "目标帧率 (30/45/60)，不填则自动检测"
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  # Step 1: 检测目标帧率
+  - id: detect_target_fps
+    type: atomic
+    name: "检测目标帧率"
+    display:
+      level: summary
+      title: "目标帧率检测"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts + dur)) as end_ts
+        FROM actual_frame_timeline_slice
+      ),
+      frame_intervals AS (
+        SELECT
+          a.ts - LAG(a.ts) OVER (ORDER BY a.ts) as interval_ns
+        FROM actual_frame_timeline_slice a
+        LEFT JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND a.surface_frame_token IS NOT NULL
+          AND a.ts >= (SELECT start_ts FROM time_bounds)
+          AND a.ts <= (SELECT end_ts FROM time_bounds)
+      ),
+      interval_buckets AS (
+        SELECT
+          interval_ns,
+          CASE
+            WHEN interval_ns >= 30000000 AND interval_ns < 36000000 THEN '30fps'
+            WHEN interval_ns >= 20000000 AND interval_ns < 24000000 THEN '45fps'
+            WHEN interval_ns >= 14500000 AND interval_ns < 18500000 THEN '60fps'
+            WHEN interval_ns >= 10500000 AND interval_ns < 13500000 THEN '90fps'
+            WHEN interval_ns >= 7000000 AND interval_ns < 10000000 THEN '120fps'
+            WHEN interval_ns >= 6600000 AND interval_ns < 7400000 THEN '144fps'
+            WHEN interval_ns >= 5800000 AND interval_ns < 6400000 THEN '165fps'
+            ELSE 'variable'
+          END as fps_bucket
+        FROM frame_intervals
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 5000000
+          AND interval_ns < 100000000
+      ),
+      bucket_counts AS (
+        SELECT fps_bucket, COUNT(*) as cnt
+        FROM interval_buckets
+        GROUP BY fps_bucket
+        ORDER BY cnt DESC
+      )
+      SELECT
+        COALESCE(
+          (SELECT fps_bucket FROM bucket_counts LIMIT 1),
+          'variable'
+        ) as detected_fps_mode,
+        CASE (SELECT fps_bucket FROM bucket_counts LIMIT 1)
+          WHEN '30fps' THEN 33333333
+          WHEN '45fps' THEN 22222222
+          WHEN '60fps' THEN 16666666
+          WHEN '120fps' THEN 8333333
+          ELSE 16666666
+        END as target_interval_ns,
+        CASE (SELECT fps_bucket FROM bucket_counts LIMIT 1)
+          WHEN '30fps' THEN 30
+          WHEN '45fps' THEN 45
+          WHEN '60fps' THEN 60
+          WHEN '120fps' THEN 120
+          ELSE 60
+        END as target_fps,
+        (SELECT cnt FROM bucket_counts LIMIT 1) as frames_at_target,
+        (SELECT SUM(cnt) FROM bucket_counts) as total_frames,
+        ROUND(100.0 * (SELECT cnt FROM bucket_counts LIMIT 1) / NULLIF((SELECT SUM(cnt) FROM bucket_counts), 0), 1) as target_hit_rate
+    save_as: fps_detection
+
+  # Step 2: 帧间隔统计
+  - id: frame_interval_stats
+    type: atomic
+    name: "帧间隔统计"
+    display:
+      level: detail
+      title: "帧间隔分析"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts + dur)) as end_ts
+        FROM actual_frame_timeline_slice
+      ),
+      frame_intervals AS (
+        SELECT
+          a.ts,
+          a.ts - LAG(a.ts) OVER (ORDER BY a.ts) as interval_ns,
+          a.dur
+        FROM actual_frame_timeline_slice a
+        LEFT JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND a.surface_frame_token IS NOT NULL
+          AND a.ts >= (SELECT start_ts FROM time_bounds)
+          AND a.ts <= (SELECT end_ts FROM time_bounds)
+      )
+      SELECT
+        COUNT(*) as total_frames,
+        ROUND((SELECT end_ts - start_ts FROM time_bounds) / 1e9, 2) as duration_sec,
+        ROUND(1e9 * COUNT(*) / NULLIF((SELECT end_ts - start_ts FROM time_bounds), 0), 1) as actual_fps,
+        ROUND(AVG(interval_ns) / 1e6, 2) as avg_interval_ms,
+        ROUND(MIN(interval_ns) / 1e6, 2) as min_interval_ms,
+        ROUND(MAX(interval_ns) / 1e6, 2) as max_interval_ms,
+        ROUND(PERCENTILE(interval_ns, 0.5) / 1e6, 2) as p50_interval_ms,
+        ROUND(PERCENTILE(interval_ns, 0.95) / 1e6, 2) as p95_interval_ms,
+        ROUND(PERCENTILE(interval_ns, 0.99) / 1e6, 2) as p99_interval_ms,
+        -- 帧间隔标准差 (稳定性指标)
+        ROUND(SQRT(AVG(interval_ns * interval_ns) - AVG(interval_ns) * AVG(interval_ns)) / 1e6, 2) as interval_stddev_ms
+      FROM frame_intervals
+      WHERE interval_ns IS NOT NULL
+        AND interval_ns > 5000000
+        AND interval_ns < 100000000
+    save_as: interval_stats
+
+  # Step 3: 掉帧检测 (相对于目标帧率)
+  - id: jank_detection
+    type: atomic
+    name: "掉帧检测"
+    display:
+      level: detail
+      title: "掉帧分析"
+    sql: |
+      WITH
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, MIN(ts)) as start_ts,
+          COALESCE(${end_ts}, MAX(ts + dur)) as end_ts
+        FROM actual_frame_timeline_slice
+      ),
+      -- 自动检测目标帧间隔
+      target_config AS (
+        SELECT
+          CASE 
+            WHEN ${target_fps} IS NOT NULL THEN 1e9 / ${target_fps}
+            ELSE (
+              SELECT CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER)
+              FROM (
+                SELECT a.ts - LAG(a.ts) OVER (ORDER BY a.ts) as interval_ns
+                FROM actual_frame_timeline_slice a
+                LEFT JOIN process p ON a.upid = p.upid
+                WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+              )
+              WHERE interval_ns > 5000000 AND interval_ns < 100000000
+            )
+          END as target_interval_ns
+      ),
+      frame_intervals AS (
+        SELECT
+          a.ts,
+          a.ts - LAG(a.ts) OVER (ORDER BY a.ts) as interval_ns
+        FROM actual_frame_timeline_slice a
+        LEFT JOIN process p ON a.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND a.surface_frame_token IS NOT NULL
+          AND a.ts >= (SELECT start_ts FROM time_bounds)
+          AND a.ts <= (SELECT end_ts FROM time_bounds)
+      ),
+      jank_stats AS (
+        SELECT
+          COUNT(*) as total_frames,
+          -- 帧间隔超过目标 1.5 倍视为掉帧
+          SUM(CASE WHEN interval_ns > (SELECT target_interval_ns FROM target_config) * 1.5 THEN 1 ELSE 0 END) as jank_count,
+          -- 帧间隔超过目标 2 倍视为严重掉帧
+          SUM(CASE WHEN interval_ns > (SELECT target_interval_ns FROM target_config) * 2 THEN 1 ELSE 0 END) as severe_jank_count,
+          -- 帧间隔超过目标 3 倍视为卡顿
+          SUM(CASE WHEN interval_ns > (SELECT target_interval_ns FROM target_config) * 3 THEN 1 ELSE 0 END) as freeze_count
+        FROM frame_intervals
+        WHERE interval_ns IS NOT NULL
+          AND interval_ns > 5000000
+      )
+      SELECT
+        total_frames,
+        jank_count,
+        severe_jank_count,
+        freeze_count,
+        ROUND(100.0 * jank_count / NULLIF(total_frames, 0), 2) as jank_rate,
+        ROUND(100.0 * severe_jank_count / NULLIF(total_frames, 0), 2) as severe_jank_rate,
+        ROUND((SELECT target_interval_ns FROM target_config) / 1e6, 2) as target_interval_ms,
+        ROUND(1e9 / (SELECT target_interval_ns FROM target_config), 0) as target_fps,
+        CASE
+          WHEN 100.0 * jank_count / NULLIF(total_frames, 0) < 1 THEN '优秀'
+          WHEN 100.0 * jank_count / NULLIF(total_frames, 0) < 5 THEN '良好'
+          WHEN 100.0 * jank_count / NULLIF(total_frames, 0) < 10 THEN '一般'
+          ELSE '较差'
+        END as quality_rating
+      FROM jank_stats
+    save_as: jank_stats
+
+output:
+  format: structured
+  fields:
+    - name: fps_detection
+      description: "目标帧率检测结果"
+    - name: interval_stats
+      description: "帧间隔统计"
+    - name: jank_stats
+      description: "掉帧统计"

@@ -9,10 +9,18 @@
  * - Architecture-aware decision trees
  * - Intent-based routing
  * - Root cause classification
+ *
+ * Cross-Domain Expert System (New):
+ * - Module Experts (YAML Skills) provide specialized data analysis
+ * - Cross-Domain Experts (TypeScript) orchestrate multi-turn dialogues
+ * - Hypothesis management for root cause verification
  */
 
 // Base types and class
 export * from './base';
+
+// Cross-Domain Expert System
+export * from './crossDomain';
 
 // Domain experts
 export { InteractionExpert, createInteractionExpert } from './interactionExpert';

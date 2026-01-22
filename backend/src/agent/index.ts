@@ -75,3 +75,67 @@ export {
 
 // Master Orchestrator (新的主编排者)
 export { MasterOrchestrator, createMasterOrchestrator } from './core/masterOrchestrator';
+
+// =============================================================================
+// Agent-Driven Architecture (Phase 2-4 新架构)
+// =============================================================================
+
+// Agent-Driven Orchestrator (假设驱动分析)
+export {
+  AgentDrivenOrchestrator,
+  createAgentDrivenOrchestrator,
+  AnalysisResult as AgentDrivenAnalysisResult,
+  AgentDrivenOrchestratorConfig,
+} from './core/agentDrivenOrchestrator';
+
+// Domain Agents (领域 Agent)
+export {
+  BaseAgent,
+  FrameAgent,
+  createFrameAgent,
+  CPUAgent,
+  createCPUAgent,
+  BinderAgent,
+  createBinderAgent,
+  MemoryAgent,
+  createMemoryAgent,
+  StartupAgent,
+  InteractionAgent,
+  ANRAgent,
+  SystemAgent,
+  createStartupAgent,
+  createInteractionAgent,
+  createANRAgent,
+  createSystemAgent,
+  DomainAgentRegistry,
+  createDomainAgentRegistry,
+} from './agents/domain';
+
+// Agent Communication (Agent 通信)
+export {
+  AgentMessageBus,
+  createAgentMessageBus,
+} from './communication';
+
+// Agent Protocol Types (Agent 协议类型)
+export {
+  AgentTask,
+  AgentResponse,
+  AgentTool,
+  AgentToolContext,
+  AgentToolResult,
+  Hypothesis,
+  Evidence,
+  SharedAgentContext,
+  createTaskId,
+  createHypothesisId,
+  createMessageId,
+} from './types/agentProtocol';
+
+// Iteration Strategy Planner (迭代策略规划器)
+export {
+  IterationStrategyPlanner,
+  createIterationStrategyPlanner,
+  IterationStrategy,
+  StrategyDecision,
+} from './agents/iterationStrategyPlanner';

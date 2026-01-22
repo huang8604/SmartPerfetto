@@ -19,16 +19,19 @@
 # - 2+2+4 配置：CPU 0-3 小核，CPU 4-5 中核，CPU 6-7 大核
 
 name: startup_detail
-version: "2.0"
+version: "1.0"
 type: composite
+category: app_lifecycle
 
 meta:
-  display_name: "启动事件详细分析"
-  description: "分析单个启动事件的 CPU、Binder、大小核、四象限等详细信息"
-  icon: "rocket"
-  tags: [startup, detail, analysis, cpu, core, quadrant]
+  display_name: "启动详情分析"
+  description: "深入分析单个启动过程的性能瓶颈"
+  icon: "search"
+  tags: [startup, detail, composite]
 
 prerequisites:
+  required_tables:
+    - android_startups
   modules:
     - android.startup.startups
     - android.binder
@@ -83,6 +86,7 @@ steps:
     name: "启动基本信息"
     display:
       level: key
+      layer: deep
       title: "启动 #${startup_id} 详情"
     sql: |
       SELECT
@@ -123,6 +127,7 @@ steps:
     name: "大小核占比分析"
     display:
       level: key
+      layer: deep
       title: "大小核占比"
     sql: |
       WITH main_thread AS (
@@ -132,6 +137,15 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid  -- 主线程
       ),
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
       cpu_time AS (
         SELECT
           ss.utid,
@@ -139,12 +153,10 @@ steps:
           SUM(
             MIN(ss.ts + ss.dur, ${end_ts}) - MAX(ss.ts, ${start_ts})
           ) / 1e6 as dur_ms,
-          CASE
-            WHEN ss.cpu >= 4 THEN 'big'
-            ELSE 'little'
-          END as core_type
+          COALESCE(c.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
+        LEFT JOIN cpu_info c ON ss.cpu = c.cpu
         WHERE ss.ts < ${end_ts}
           AND ss.ts + ss.dur > ${start_ts}
         GROUP BY ss.utid, ss.cpu
@@ -169,6 +181,7 @@ steps:
     name: "CPU 频率分析"
     display:
       level: detail
+      layer: deep
       title: "CPU 频率"
     sql: |
       WITH main_thread AS (
@@ -178,14 +191,24 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid
       ),
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
       running_samples AS (
         SELECT
           ss.cpu,
           ss.ts,
           ss.dur,
-          CASE WHEN ss.cpu >= 4 THEN 'big' ELSE 'little' END as core_type
+          COALESCE(c.core_type, 'little') as core_type
         FROM sched_slice ss
         JOIN main_thread mt ON ss.utid = mt.utid
+        LEFT JOIN cpu_info c ON ss.cpu = c.cpu
         WHERE ss.ts < ${end_ts}
           AND ss.ts + ss.dur > ${start_ts}
       ),
@@ -220,6 +243,7 @@ steps:
     name: "四大象限分析"
     display:
       level: key
+      layer: deep
       title: "四大象限分析"
     sql: |
       WITH main_thread AS (
@@ -229,16 +253,27 @@ steps:
         WHERE p.name GLOB '${package}*'
           AND t.tid = p.pid
       ),
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1000 THEN 'big'
+            ELSE 'little'
+          END as core_type
+        FROM cpu
+      ),
       thread_states AS (
         SELECT
           ts.utid,
           ts.state,
           ts.cpu,
+          COALESCE(c.core_type, 'little') as core_type,
           SUM(
             MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
           ) / 1e6 as dur_ms
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
+        LEFT JOIN cpu_info c ON ts.cpu = c.cpu
         WHERE ts.ts < ${end_ts}
           AND ts.ts + ts.dur > ${start_ts}
         GROUP BY ts.utid, ts.state, ts.cpu
@@ -246,8 +281,8 @@ steps:
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND cpu >= 4 THEN 'Q1_big_running'
-            WHEN state = 'Running' AND cpu < 4 THEN 'Q2_little_running'
+            WHEN state = 'Running' AND core_type = 'big' THEN 'Q1_big_running'
+            WHEN state = 'Running' AND core_type = 'little' THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
@@ -281,6 +316,7 @@ steps:
     name: "主线程耗时操作"
     display:
       level: key
+      layer: deep
       title: "主线程耗时操作 Top10"
     sql: |
       WITH main_thread AS (
@@ -314,6 +350,7 @@ steps:
     name: "Binder 调用分析"
     display:
       level: key
+      layer: deep
       title: "Binder 调用"
     sql: |
       SELECT
@@ -340,6 +377,7 @@ steps:
     name: "调度延迟分析"
     display:
       level: detail
+      layer: deep
       title: "调度延迟"
     sql: |
       WITH main_thread AS (
@@ -371,6 +409,7 @@ steps:
     name: "启动诊断"
     display:
       level: key
+      layer: deep
       title: "问题诊断"
     inputs: [startup_basic, cpu_core, quadrant, main_slices, binder_calls, sched_delay]
     rules:

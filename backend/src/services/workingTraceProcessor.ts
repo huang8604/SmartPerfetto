@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { encodeQueryArgs, decodeQueryResult } from './traceProcessorProtobuf';
 import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
+import logger from '../utils/logger';
 
 // Path to the trace_processor_shell binary
 // Use the locally built version from perfetto/out/ui which has the viz stdlib modules
@@ -264,7 +265,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     }
 
     const startTime = Date.now();
-    console.log(`[TraceProcessor] Executing HTTP query: ${sql.substring(0, 200)}${sql.length > 200 ? '...' : ''}`);
+    logger.debug('TraceProcessor', `Executing HTTP query: ${sql.substring(0, 100)}...`);
 
     return this.executeHttpQuery(sql);
   }
@@ -305,7 +306,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
             const parsed = decodeQueryResult(responseBuffer);
 
             if (parsed.error) {
-              console.log(`[TraceProcessor] Query error: ${parsed.error}`);
+              logger.warn('TraceProcessor', `Query error: ${parsed.error}`);
               resolve({
                 columns: parsed.columnNames,
                 rows: parsed.rows,
@@ -313,7 +314,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
                 error: parsed.error,
               });
             } else {
-              console.log(`[TraceProcessor] Query returned ${parsed.rows.length} rows, ${parsed.columnNames.length} columns in ${durationMs}ms`);
+              logger.debug('TraceProcessor', `Query returned ${parsed.rows.length} rows in ${durationMs}ms`);
               resolve({
                 columns: parsed.columnNames,
                 rows: parsed.rows,

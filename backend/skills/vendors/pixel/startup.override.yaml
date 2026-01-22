@@ -1,0 +1,159 @@
+# =============================================================================
+# Google Pixel 启动分析覆盖配置
+# =============================================================================
+# 版本: 1.0.0
+# 基于: base/startup
+# 适用: Google Pixel 设备
+# =============================================================================
+
+extends: base/startup
+version: "1.0.0"
+
+meta:
+  display_name: "Google Pixel 启动分析"
+  description: "针对 Google Pixel 优化的启动分析"
+  vendor: google
+  platform: Pixel
+
+# -----------------------------------------------------------------------------
+# 厂商检测规则
+# -----------------------------------------------------------------------------
+vendor_detection:
+  signatures:
+    - pattern: "*google*"
+      confidence: medium
+    - pattern: "*Pixel*"
+      confidence: high
+    - pattern: "*Tensor*"
+      confidence: high
+    - pattern: "*Android*"
+      confidence: low
+
+# -----------------------------------------------------------------------------
+# 额外分析步骤
+# -----------------------------------------------------------------------------
+additional_steps:
+  # Tensor 芯片特性检测
+  - id: tensor_features
+    name: "Tensor 芯片特性"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as tensor_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*Tensor*'
+             OR s.name GLOB '*tensor*'
+             OR s.name GLOB '*TPU*'
+             OR s.name GLOB '*EdgeTPU*'
+             OR s.name GLOB '*ML*Accelerator*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.ts ASC
+    save_as: tensor_events
+    optional: true
+
+  # Performance Profile 检测
+  - id: performance_profile
+    name: "性能配置文件"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as profile_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*PerformanceProfile*'
+             OR s.name GLOB '*performance*profile*'
+             OR s.name GLOB '*PowerHint*'
+             OR s.name GLOB '*Boost*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+    optional: true
+
+  # Adaptive Battery 状态
+  - id: adaptive_battery
+    name: "自适应电池"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as battery_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*AdaptiveBattery*'
+             OR s.name GLOB '*adaptive*battery*'
+             OR s.name GLOB '*AppStandby*'
+             OR s.name GLOB '*BatteryStats*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+    optional: true
+
+  # Mali GPU 分析 (Tensor 使用 Mali GPU)
+  - id: mali_gpu_analysis
+    name: "Mali GPU 分析"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as gpu_event,
+        s.dur / 1e6 as dur_ms,
+        (s.ts - (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})) / 1e6 as relative_ts_ms
+      FROM slice s
+      WHERE (s.name GLOB '*Mali*'
+             OR s.name GLOB '*mali*'
+             OR s.name GLOB '*GPU*fence*'
+             OR s.name GLOB '*gpu*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+      LIMIT 20
+
+  # Now Playing / 环境音识别 (Pixel 特性)
+  - id: ambient_services
+    name: "环境服务检测"
+    for_each: startups
+    sql: |
+      SELECT
+        s.name as ambient_event,
+        s.dur / 1e6 as dur_ms
+      FROM slice s
+      WHERE (s.name GLOB '*NowPlaying*'
+             OR s.name GLOB '*Ambient*'
+             OR s.name GLOB '*Hotword*'
+             OR s.name GLOB '*VoiceInteraction*')
+        AND s.ts >= (SELECT ts FROM android_startups WHERE startup_id = ${item.startup_id})
+        AND s.ts <= (SELECT ts + dur FROM android_startups WHERE startup_id = ${item.startup_id})
+      ORDER BY s.dur DESC
+    optional: true
+
+# -----------------------------------------------------------------------------
+# Google Tensor CPU 拓扑说明
+# -----------------------------------------------------------------------------
+# Tensor G3 (Pixel 8 系列):
+#   - CPU 0-3: Cortex-A510 小核
+#   - CPU 4-6: Cortex-A715 中核
+#   - CPU 7: Cortex-X3 超大核
+#
+# Tensor G2 (Pixel 7 系列):
+#   - CPU 0-3: Cortex-A55 小核
+#   - CPU 4-5: Cortex-A78 中核
+#   - CPU 6-7: Cortex-X1 大核
+
+# -----------------------------------------------------------------------------
+# Pixel 特有的 Trace Tag 参考
+# -----------------------------------------------------------------------------
+# Tensor 芯片:
+#   - Tensor.* : Tensor 芯片相关
+#   - EdgeTPU : 边缘 TPU 加速
+#   - TPU : 张量处理单元
+#
+# GPU 相关:
+#   - Mali* : Mali GPU
+#   - gpu* : GPU 相关
+#
+# Pixel 服务:
+#   - NowPlaying : 环境音识别
+#   - Ambient : 环境服务
+#   - AdaptiveBattery : 自适应电池
+#   - PerformanceProfile : 性能配置

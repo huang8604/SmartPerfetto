@@ -18,12 +18,19 @@
 name: thermal_throttling
 version: "1.0"
 type: composite
+category: hardware
 
 meta:
   display_name: "热节流分析"
   description: "分析系统温度、热节流对性能的影响"
   icon: "thermometer"
   tags: [thermal, throttling, temperature, cpu, frequency, system]
+
+prerequisites:
+  required_tables:
+    - counter
+  modules:
+    - counters
 
 triggers:
   keywords:
@@ -35,10 +42,6 @@ triggers:
     - ".*thermal.*"
     - ".*throttl.*"
     - ".*降频.*"
-
-prerequisites:
-  modules:
-    - counters
 
 inputs:
   - name: package

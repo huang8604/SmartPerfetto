@@ -5,12 +5,19 @@
 # Note: Requires ftrace event "dmabuf_allocs" enabled
 
 name: dmabuf_analysis
-version: "2.1"
+version: "1.0"
 type: composite
-display:
-  name: "DMA Buffer 分析"
-  level: expert
-  description: "DMA Buffer 分配分析，追踪图形内存使用、分配来源和内存泄漏"
+category: memory
+
+meta:
+  display_name: "DMA-BUF 内存分析"
+  description: "分析图形内存 (DMA-BUF) 使用情况"
+  icon: "image"
+  tags: [memory, dmabuf, graphics, composite]
+
+prerequisites:
+  optional_tables:
+    - ion_heap_graph
 
 triggers:
   - pattern: "(DMA|dmabuf|dma buffer|图形内存)"

@@ -26,18 +26,20 @@
 #    - 活动率分析
 
 name: anr_detail
-version: "3.0"
+version: "1.0"
 type: composite
+category: app_lifecycle
 
 meta:
-  display_name: "ANR 事件详细分析"
-  description: "深度分析单个 ANR：四象限/RenderThread/Binder/死锁/Freeze 检测"
-  icon: "error"
-  tags: [anr, detail, quadrant, render, binder, deadlock, freeze]
+  display_name: "ANR 详情分析"
+  description: "深入分析单个 ANR 事件的原因"
+  icon: "find_in_page"
+  tags: [anr, detail, composite]
 
 prerequisites:
-  modules:
-    - android.binder
+  required_tables:
+    - slice
+    - process
 
 inputs:
   - name: anr_ts
@@ -82,6 +84,7 @@ steps:
     name: "ANR 基本信息"
     display:
       level: key
+      layer: deep
       title: "ANR 详情"
     sql: |
       SELECT
@@ -111,9 +114,22 @@ steps:
     name: "主线程四象限分析"
     display:
       level: key
+      layer: deep
       title: "主线程状态分布"
     sql: |
-      WITH main_thread AS (
+      WITH 
+      -- 1. 动态检测 CPU 集群
+      cpu_info AS (
+        SELECT
+          id as cpu,
+          CASE
+            WHEN capacity >= 1024 THEN 'big'  -- Covers Prime and Big
+            WHEN capacity >= 500 THEN 'mid'
+            ELSE 'little'
+          END as cluster
+        FROM cpu
+      ),
+      main_thread AS (
         SELECT t.utid, t.tid
         FROM thread t
         JOIN process p ON t.upid = p.upid
@@ -131,6 +147,7 @@ steps:
         SELECT
           ts.state,
           ts.cpu,
+          COALESCE(ci.cluster, 'little') as cluster,
           ts.blocked_function,
           SUM(
             MIN(ts.ts + ts.dur, aw.end_ts) - MAX(ts.ts, aw.start_ts)
@@ -138,15 +155,16 @@ steps:
         FROM thread_state ts
         JOIN main_thread mt ON ts.utid = mt.utid
         CROSS JOIN anr_window aw
+        LEFT JOIN cpu_info ci ON ts.cpu = ci.cpu
         WHERE ts.ts < aw.end_ts
           AND ts.ts + ts.dur > aw.start_ts
-        GROUP BY ts.state, ts.cpu, ts.blocked_function
+        GROUP BY ts.state, ts.cpu, ci.cluster, ts.blocked_function
       ),
       quadrant_data AS (
         SELECT
           CASE
-            WHEN state = 'Running' AND cpu >= 4 THEN 'Q1_big_running'
-            WHEN state = 'Running' AND cpu < 4 THEN 'Q2_little_running'
+            WHEN state = 'Running' AND cluster = 'big' THEN 'Q1_big_running'
+            WHEN state = 'Running' AND cluster != 'big' THEN 'Q2_little_running'
             WHEN state IN ('R', 'R+') THEN 'Q3_runnable'
             WHEN state IN ('S', 'D', 'I') THEN 'Q4_sleeping'
             ELSE 'other'
@@ -189,6 +207,7 @@ steps:
     name: "阻塞原因分析"
     display:
       level: key
+      layer: deep
       title: "阻塞原因 Top10"
     sql: |
       WITH main_thread AS (
@@ -241,6 +260,7 @@ steps:
     name: "RenderThread 分析"
     display:
       level: key
+      layer: deep
       title: "RenderThread 状态"
     sql: |
       WITH render_thread AS (
@@ -313,6 +333,7 @@ steps:
     name: "Binder 调用分析"
     display:
       level: key
+      layer: deep
       title: "Binder 调用"
     sql: |
       WITH anr_window AS (
@@ -354,6 +375,7 @@ steps:
     name: "锁竞争检测"
     display:
       level: key
+      layer: deep
       title: "锁竞争"
     sql: |
       WITH anr_window AS (
@@ -394,6 +416,7 @@ steps:
     name: "应用冻结检测"
     display:
       level: detail
+      layer: deep
       title: "应用活动状态"
     sql: |
       WITH target_threads AS (
@@ -458,6 +481,7 @@ steps:
     name: "唤醒链分析"
     display:
       level: detail
+      layer: deep
       title: "唤醒链"
     sql: |
       WITH main_thread AS (
@@ -504,6 +528,7 @@ steps:
     name: "主线程耗时操作"
     display:
       level: detail
+      layer: deep
       title: "主线程操作"
     sql: |
       WITH main_thread AS (
@@ -547,6 +572,7 @@ steps:
     name: "ANR 事件诊断"
     display:
       level: key
+      layer: deep
       title: "诊断结果"
     inputs: [anr_basic, quadrant, blocking, render_thread, binder_calls, lock_contention, freeze_check, wakeup]
     rules:

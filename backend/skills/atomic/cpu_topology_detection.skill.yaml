@@ -1,0 +1,228 @@
+# =============================================================================
+# CPU 拓扑动态检测 (CPU Topology Detection)
+# =============================================================================
+# 从 cpufreq 最大值动态推断 CPU 集群类型
+#
+# 背景：
+# - 现代 SoC 使用异构多核设计 (big.LITTLE, DynamIQ)
+# - 不同芯片的 CPU 拓扑差异很大：
+#   - Snapdragon 8 Gen 3: 2 小核 + 3 中核 + 1 Prime + 2 超大核
+#   - Dimensity 9300: 4 大核 + 4 超大核 (全大核设计)
+#   - Tensor G3: 4 小核 + 3 中核 + 1 大核
+#
+# 检测方法：
+# - 通过每个 CPU 核心的最大频率推断其类型
+# - 最高频率的 90%+ 归为 prime/big
+# - 60%-90% 归为 mid
+# - 60% 以下归为 little
+# =============================================================================
+
+name: cpu_topology_detection
+version: "1.0"
+type: atomic
+category: hardware
+
+meta:
+  display_name: "CPU 拓扑检测"
+  description: "从 cpufreq 动态检测 CPU 大小核拓扑"
+  icon: "memory"
+  tags: [cpu, topology, cluster, atomic]
+
+prerequisites:
+  required_tables:
+    - counter
+    - cpu_counter_track
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间（可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间（可选）"
+
+steps:
+  # Step 1: 检测每个 CPU 的最大频率
+  - id: detect_cpu_clusters
+    type: atomic
+    name: "检测 CPU 集群"
+    display:
+      level: summary
+      title: "CPU 拓扑检测结果"
+    sql: |
+      WITH
+      -- 获取时间范围
+      time_bounds AS (
+        SELECT
+          COALESCE(${start_ts}, (SELECT MIN(ts) FROM counter)) as start_ts,
+          COALESCE(${end_ts}, (SELECT MAX(ts) FROM counter)) as end_ts
+      ),
+      -- 获取每个 CPU 的最大频率
+      cpu_max_freq AS (
+        SELECT 
+          t.cpu,
+          MAX(c.value) as max_freq_khz,
+          MIN(c.value) as min_freq_khz,
+          AVG(c.value) as avg_freq_khz,
+          COUNT(*) as sample_count
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+          AND c.ts >= (SELECT start_ts FROM time_bounds)
+          AND c.ts <= (SELECT end_ts FROM time_bounds)
+        GROUP BY t.cpu
+      ),
+      -- 获取全局最大频率用于计算比例
+      global_max AS (
+        SELECT MAX(max_freq_khz) as global_max_freq FROM cpu_max_freq
+      ),
+      -- 根据最大频率比例推断集群类型
+      cpu_clusters AS (
+        SELECT 
+          cpu,
+          max_freq_khz,
+          min_freq_khz,
+          ROUND(max_freq_khz / 1000.0, 0) as max_freq_mhz,
+          ROUND(100.0 * max_freq_khz / (SELECT global_max_freq FROM global_max), 1) as freq_ratio_pct,
+          CASE
+            -- 最高频率的 90%+ 归为 prime (超大核)
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.95 THEN 'prime'
+            -- 75%-95% 归为 big (大核)
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.75 THEN 'big'
+            -- 50%-75% 归为 mid (中核)
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.50 THEN 'mid'
+            -- 50% 以下归为 little (小核)
+            ELSE 'little'
+          END as cluster_type,
+          sample_count
+        FROM cpu_max_freq
+      )
+      SELECT
+        cpu,
+        cluster_type,
+        max_freq_mhz,
+        freq_ratio_pct,
+        CASE cluster_type
+          WHEN 'prime' THEN '超大核'
+          WHEN 'big' THEN '大核'
+          WHEN 'mid' THEN '中核'
+          ELSE '小核'
+        END as cluster_type_cn
+      FROM cpu_clusters
+      ORDER BY max_freq_khz DESC, cpu
+    save_as: cpu_clusters
+
+  # Step 2: 集群汇总
+  - id: cluster_summary
+    type: atomic
+    name: "集群汇总"
+    display:
+      level: summary
+      title: "CPU 集群汇总"
+    sql: |
+      WITH
+      cpu_max_freq AS (
+        SELECT 
+          t.cpu,
+          MAX(c.value) as max_freq_khz
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY t.cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq_khz) as global_max_freq FROM cpu_max_freq
+      ),
+      cpu_clusters AS (
+        SELECT 
+          cpu,
+          max_freq_khz,
+          CASE
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.95 THEN 'prime'
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.75 THEN 'big'
+            WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.50 THEN 'mid'
+            ELSE 'little'
+          END as cluster_type
+        FROM cpu_max_freq
+      )
+      SELECT
+        cluster_type,
+        COUNT(*) as cpu_count,
+        GROUP_CONCAT(cpu, ', ') as cpus,
+        ROUND(MAX(max_freq_khz) / 1000.0, 0) as max_freq_mhz,
+        ROUND(MIN(max_freq_khz) / 1000.0, 0) as min_freq_mhz,
+        CASE cluster_type
+          WHEN 'prime' THEN 1
+          WHEN 'big' THEN 2
+          WHEN 'mid' THEN 3
+          ELSE 4
+        END as cluster_order
+      FROM cpu_clusters
+      GROUP BY cluster_type
+      ORDER BY cluster_order
+    save_as: cluster_summary
+
+  # Step 3: 导出供其他 skill 使用的集群映射
+  - id: cluster_mapping
+    type: atomic
+    name: "集群映射"
+    sql: |
+      WITH
+      cpu_max_freq AS (
+        SELECT 
+          t.cpu,
+          MAX(c.value) as max_freq_khz
+        FROM counter c
+        JOIN cpu_counter_track t ON c.track_id = t.id
+        WHERE t.name = 'cpufreq'
+        GROUP BY t.cpu
+      ),
+      global_max AS (
+        SELECT MAX(max_freq_khz) as global_max_freq FROM cpu_max_freq
+      )
+      SELECT
+        cpu,
+        max_freq_khz,
+        CASE
+          WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.95 THEN 'prime'
+          WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.75 THEN 'big'
+          WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.50 THEN 'mid'
+          ELSE 'little'
+        END as cluster_type,
+        -- 简化的 big/little 分类 (兼容旧逻辑)
+        CASE
+          WHEN max_freq_khz >= (SELECT global_max_freq FROM global_max) * 0.60 THEN 'big'
+          ELSE 'little'
+        END as simple_cluster_type
+      FROM cpu_max_freq
+      ORDER BY cpu
+    save_as: cluster_mapping
+
+output:
+  format: structured
+  fields:
+    - name: cpu_clusters
+      description: "每个 CPU 核心的集群类型"
+    - name: cluster_summary
+      description: "集群汇总（每种类型的核心数）"
+    - name: cluster_mapping
+      description: "集群映射表（供其他 skill 使用）"
+
+# =============================================================================
+# 使用示例
+# =============================================================================
+# 其他 skill 可以通过以下 CTE 使用动态检测的集群：
+#
+# WITH cpu_clusters AS (
+#   -- 复制 cluster_mapping 的 SQL
+# )
+# SELECT
+#   CASE 
+#     WHEN cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'prime') THEN 'prime'
+#     WHEN cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'big') THEN 'big'
+#     WHEN cpu IN (SELECT cpu FROM cpu_clusters WHERE cluster_type = 'mid') THEN 'mid'
+#     ELSE 'little'
+#   END as core_type
+# FROM ...

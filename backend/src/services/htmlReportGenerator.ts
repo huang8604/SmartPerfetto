@@ -17,6 +17,12 @@ import {
   AnalysisCompletedEvent,
 } from '../types/analysis';
 import { OrchestratorResult, Finding, Diagnostic, ExpertResult, MasterOrchestratorResult, StageResult } from '../agent/types';
+import {
+  DataEnvelope,
+  ColumnDefinition,
+  buildColumnDefinitions,
+  inferColumnDefinition,
+} from '../types/dataContract';
 
 export interface ReportData {
   sessionId: string;
@@ -57,7 +63,64 @@ export interface MasterAgentReportData {
   timestamp: number;
 }
 
+export interface AgentDrivenReportData {
+  traceId: string;
+  query: string;
+  result: {
+    sessionId: string;
+    success: boolean;
+    findings: Finding[];
+    hypotheses: Array<{
+      id: string;
+      description: string;
+      confidence: number;
+      status: string;
+      supportingEvidence: any[];
+      contradictingEvidence: any[];
+    }>;
+    conclusion: string;
+    confidence: number;
+    rounds: number;
+    totalDurationMs: number;
+  };
+  hypotheses: Array<{
+    id: string;
+    description: string;
+    confidence: number;
+    status: string;
+    supportingEvidence: any[];
+    contradictingEvidence: any[];
+  }>;
+  dialogue: Array<{
+    agentId: string;
+    type: 'task' | 'response' | 'question';
+    content: any;
+    timestamp: number;
+  }>;
+  timestamp: number;
+}
+
 export class HTMLReportGenerator {
+  /**
+   * 【P2 Fix】可配置的元数据列名
+   * 这些列的值在同一表格中通常是恒定的，会被提取到表头显示
+   */
+  private static readonly METADATA_COLUMN_PATTERNS: readonly string[] = [
+    'process_name', 'Process Name',
+    'layer_name', 'Layer Name',
+    'package_name', 'Package Name',
+    'app_name', 'App Name',
+    'trace_id', 'Trace ID',
+    'session_id', 'Session ID',
+  ];
+
+  /**
+   * 【P2 Fix】检查列名是否为元数据列
+   */
+  private isMetadataColumn(colName: string): boolean {
+    return HTMLReportGenerator.METADATA_COLUMN_PATTERNS.includes(colName);
+  }
+
   /**
    * Generate HTML report from analysis data
    */
@@ -69,571 +132,394 @@ export class HTMLReportGenerator {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SmartPerfetto 分析报告 - ${new Date(data.timestamp).toLocaleString('zh-CN')}</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
+    :root {
+      --primary-color: #2563eb;
+      --primary-bg: #eff6ff;
+      --success-color: #10b981;
+      --success-bg: #ecfdf5;
+      --warning-color: #f59e0b;
+      --warning-bg: #fffbeb;
+      --danger-color: #ef4444;
+      --danger-bg: #fef2f2;
+      --text-main: #1f2937;
+      --text-secondary: #4b5563;
+      --text-light: #6b7280;
+      --border-color: #e5e7eb;
+      --bg-body: #f3f4f6;
+      --bg-card: #ffffff;
+      --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      font-family: var(--font-family);
       line-height: 1.5;
-      color: #333;
-      background: #f5f7fa;
-      padding: 15px;
-    }
-
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.1);
-      overflow: hidden;
-    }
-
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 20px;
-    }
-
-    .header h1 {
-      font-size: 28px;
-      margin-bottom: 10px;
-    }
-
-    .header .meta {
-      opacity: 0.9;
+      color: var(--text-main);
+      background: var(--bg-body);
+      padding: 24px;
       font-size: 14px;
     }
 
-    .header .meta span {
-      margin-right: 20px;
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      background: transparent; /* Container itself is transparent now, sections will be cards */
+    }
+
+    /* Card Style for Sections */
+    .report-card {
+      background: var(--bg-card);
+      border-radius: 12px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      margin-bottom: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(0,0,0,0.05);
+    }
+
+    .header {
+      background: var(--bg-card);
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0; /* Header is part of the first card usually, or standalone */
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header .meta {
+      font-size: 13px;
+      color: var(--text-secondary);
+      display: flex;
+      gap: 20px;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--primary-bg);
+      color: var(--primary-color);
     }
 
     .section {
-      padding: 20px;
-      border-bottom: 1px solid #eaeaea;
+      padding: 24px;
+      border-bottom: 1px solid var(--border-color);
     }
 
     .section:last-child {
       border-bottom: none;
     }
 
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
     .section-title {
-      font-size: 20px;
-      font-weight: 600;
-      margin-bottom: 20px;
-      color: #2c3e50;
+      font-size: 15px;
+      font-weight: 700;
+      color: #111827;
       display: flex;
       align-items: center;
+      gap: 10px;
+      border-left: 4px solid var(--primary-color);
+      padding-left: 12px;
+      margin-bottom: 12px; /* Reduced from default/inline usually */
     }
 
-    .section-title::before {
-      content: '';
-      width: 4px;
-      height: 20px;
-      background: #667eea;
-      margin-right: 12px;
-      border-radius: 2px;
-    }
-
-    .question-box {
-      background: #f8f9fa;
-      padding: 15px;
-      border-radius: 8px;
-      border-left: 4px solid #667eea;
-      margin-bottom: 15px;
-    }
-
-    .question-box .label {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 8px;
-    }
-
-    .question-box .content {
-      font-size: 18px;
-      font-weight: 500;
-    }
-
-    .answer-box {
-      background: #f0f9ff;
-      padding: 15px;
-      border-radius: 8px;
-      border-left: 4px solid #3b82f6;
-      line-height: 1.6;
-    }
-
-    .metrics {
+    /* Metric Cards */
+    .metrics-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 20px;
-      margin-bottom: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); /* Squeezed min-width */
+      gap: 12px; /* Reduced gap */
     }
 
     .metric-card {
-      background: #f8f9fa;
-      padding: 15px;
+      background: #fafafa;
+      padding: 12px; /* Reduced from 16px */
       border-radius: 8px;
-      text-align: center;
+      border: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.1s ease-in-out;
     }
-
-    .metric-card .value {
-      font-size: 28px;
-      font-weight: 700;
-      color: #667eea;
+    
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        border-color: #d1d5db;
+        background: #fff;
     }
 
     .metric-card .label {
-      font-size: 14px;
-      color: #666;
-      margin-top: 5px;
+      font-size: 11px; /* Reduced from 12px */
+      color: var(--text-secondary);
+      margin-bottom: 2px; /* Reduced from 6px */
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
     }
 
-    .sql-block {
-      background: #1e1e1e;
-      color: #d4d4d4;
+    .metric-card .value {
+      font-size: 20px; /* Reduced from 24px */
+      font-weight: 700;
+      color: var(--text-main);
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+    }
+
+    /* Chat/Answer Box */
+    .chat-box {
+      background: #f8fafc;
+      border-radius: 8px;
       padding: 20px;
-      border-radius: 8px;
-      overflow-x: auto;
-      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      font-size: 13px;
-      line-height: 1.5;
-      margin-bottom: 15px;
-    }
-
-    .sql-block.collapsed .sql-content {
-      display: none;
-    }
-
-    .sql-block .sql-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 10px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid #333;
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .sql-block .sql-header .toggle-icon {
-      margin-right: 8px;
-      transition: transform 0.2s ease;
-      font-size: 12px;
-      color: #888;
-    }
-
-    .sql-block.collapsed .sql-header .toggle-icon {
-      transform: rotate(-90deg);
-    }
-
-    .sql-block .sql-header .title {
-      color: #4ec9b0;
-      font-weight: 600;
-      flex: 1;
-    }
-
-    .sql-block .sql-header .copy-btn {
-      background: #0e639c;
-      color: white;
-      border: none;
-      padding: 5px 12px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-    }
-
-    .sql-block .sql-header .copy-btn:hover {
-      background: #1177bb;
-    }
-
-    .sql-content {
-      margin-top: 10px;
-    }
-
-    .query-result {
-      margin-top: 15px;
-      border: 1px solid #eaeaea;
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    .query-result.collapsed .query-body {
-      display: none;
-    }
-
-    .query-result-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 15px 20px;
-      background: #f8f9fa;
-      border-bottom: 1px solid #eaeaea;
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .query-result-header:hover {
-      background: #f0f1f3;
-    }
-
-    .query-result-header .toggle-icon {
-      margin-right: 8px;
-      transition: transform 0.2s ease;
       font-size: 14px;
-      color: #666;
+      border: 1px solid var(--border-color);
     }
 
-    .query-result.collapsed .query-result-header .toggle-icon {
-      transform: rotate(-90deg);
+    .chat-message.user {
+      font-weight: 700;
+      color: #1e3a8a;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
     }
 
-    .query-result-header h3 {
-      flex: 1;
-      font-size: 16px;
-      font-weight: 600;
-      color: #2c3e50;
-      margin: 0;
+    .chat-message.system {
+      color: #374151;
+      white-space: pre-wrap;
+      line-height: 1.6;
     }
 
-    .query-result-header .meta {
-      font-size: 14px;
-      color: #666;
-      font-weight: normal;
-    }
-
-    .query-body {
-      padding: 15px;
-      background: #fafafa;
-    }
-
+    /* Tables */
     .table-container {
+      overflow-x: auto;
+      border: 1px solid var(--border-color);
       border-radius: 8px;
-      border: 1px solid #eaeaea;
-      overflow-x: auto;
-      overflow-y: hidden;
-      position: relative;
-    }
-
-    /* 水平滚动条样式 */
-    .table-container::-webkit-scrollbar {
-      height: 8px;
-    }
-
-    .table-container::-webkit-scrollbar-track {
-      background: #f1f1f1;
-      border-radius: 4px;
-    }
-
-    .table-container::-webkit-scrollbar-thumb {
-      background: #c1c1c1;
-      border-radius: 4px;
-    }
-
-    .table-container::-webkit-scrollbar-thumb:hover {
-      background: #a1a1a1;
-    }
-
-    /* 表格右侧渐变提示（表示可滚动） */
-    .table-container.scrollable::after {
-      content: '';
-      position: absolute;
-      right: 0;
-      top: 0;
-      bottom: 8px;
-      width: 30px;
-      background: linear-gradient(to right, transparent, rgba(255,255,255,0.9));
-      pointer-events: none;
-      opacity: 1;
-      transition: opacity 0.3s;
-    }
-
-    .table-container.scrolled-right::after {
-      opacity: 0;
-    }
-
-    .table-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 15px;
-      background: #f0f1f3;
-      border-bottom: 1px solid #eaeaea;
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .table-header:hover {
-      background: #e9ecef;
-    }
-
-    .table-header .toggle-icon {
-      margin-right: 6px;
-      transition: transform 0.2s ease;
-      font-size: 12px;
-      color: #666;
-    }
-
-    .table-header .table-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #495057;
-    }
-
-    .table-header .row-count {
-      font-size: 13px;
-      color: #666;
-    }
-
-    .table-wrapper {
-      max-height: 300px;
-      overflow-y: auto;
-      overflow-x: auto;
-      transition: max-height 0.3s ease;
-    }
-
-    .table-wrapper.collapsed {
-      max-height: 0;
-      overflow: hidden;
-    }
-
-    .table-wrapper::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-
-    .table-wrapper::-webkit-scrollbar-thumb {
-      background: #d1d5db;
-      border-radius: 3px;
-    }
-
-    .table-rows-more {
-      padding: 12px 15px;
-      background: #fffbeb;
-      border-top: 1px solid #eaeaea;
-      text-align: center;
-      cursor: pointer;
-      user-select: none;
-      font-size: 13px;
-      color: #f59e0b;
-      font-weight: 500;
-    }
-
-    .table-rows-more:hover {
-      background: #fef3c7;
-    }
-
-    .table-rows-more .toggle-text {
-      margin-left: 4px;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
     }
 
     table {
-      width: auto;
-      min-width: 100%;
+      width: 100%;
       border-collapse: collapse;
-      font-size: 14px;
-      table-layout: auto;
+      font-size: 13px;
     }
 
-    table thead {
-      background: #2d2d2d;
-      color: #9cdcfe;
-    }
-
-    table th,
-    table td {
-      padding: 8px 12px;
+    th {
+      background: #f9fafb;
       text-align: left;
-      border-bottom: 1px solid #eaeaea;
-      white-space: nowrap;
-    }
-
-    table th {
+      padding: 10px 16px;
       font-weight: 600;
+      color: #4b5563;
+      border-bottom: 1px solid var(--border-color);
       white-space: nowrap;
-      position: sticky;
-      top: 0;
-      z-index: 1;
-      background: #2d2d2d;
     }
 
-    table td {
-      word-break: break-word;
+    td {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-color);
+      color: #374151;
+    }
+    
+    tr:nth-child(even) {
+        background-color: #f9fafb;
     }
 
-    /* Row number column */
-    table th:first-child,
-    table td:first-child {
-      min-width: 40px;
-      max-width: 50px;
-      width: 40px;
-      text-align: center;
+    tr:hover td {
+      background-color: var(--primary-bg);
     }
 
-    /* Text columns need more width */
-    table td.col-text {
-      min-width: 120px;
-      max-width: 400px;
-      white-space: normal;
+    /* Deep Analysis / Properties Grid */
+    .deep-analysis-card {
+        background: white;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+    
+    .deep-analysis-header {
+        background: #f8fafc;
+        padding: 12px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border-color);
+        cursor: pointer;
+    }
+    
+    .deep-analysis-header:hover {
+        background: #f1f5f9;
     }
 
-    /* Number columns should be compact */
-    table td.col-number {
-      text-align: right;
-      font-variant-numeric: tabular-nums;
+    .properties-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+      padding: 16px;
     }
 
-    table tbody tr:hover {
-      background: #f8f9fa;
+    .property-item {
+      display: flex;
+      flex-direction: column;
+      border-bottom: 1px solid #f3f4f6;
+      padding-bottom: 8px;
+    }
+    
+    .property-item:last-child {
+        border-bottom: none;
     }
 
-    table tbody tr:last-child td {
-      border-bottom: none;
+    .property-label {
+      color: var(--text-light);
+      font-size: 12px;
+      margin-bottom: 4px;
+      font-weight: 500;
     }
 
-    .diagnostic {
-      padding: 10px 15px;
+    .property-value {
+      color: var(--text-main);
+      font-weight: 600;
+      font-size: 14px;
+      word-break: break-all;
+    }
+
+    /* Expandable Details */
+    details {
+      background: #f8fafc;
+      border-radius: 6px;
+      padding: 4px;
+    }
+
+    details summary {
+      padding: 8px;
+      cursor: pointer;
+      color: var(--primary-color);
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    details summary:hover {
+      background: #eff6ff;
+      border-radius: 4px;
+    }
+
+    .details-content {
+      padding: 12px;
+      background: white;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      margin-top: 4px;
+    }
+
+    /* SQL Code Block */
+    .code-block {
+      background: #1f2937;
+      color: #e5e7eb;
+      padding: 16px;
       border-radius: 8px;
-      margin-bottom: 10px;
+      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-x: auto;
+      margin: 12px 0;
+      box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+    }
+
+    .copy-btn {
+      background: var(--primary-color);
+      color: white;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: #1d4ed8;
+    }
+
+    /* Diagnostics */
+    .diagnostic {
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin-bottom: 12px;
       border-left: 4px solid;
     }
 
     .diagnostic.critical {
-      background: #fef2f2;
-      border-color: #ef4444;
+      background: var(--danger-bg);
+      border-color: var(--danger-color);
     }
 
     .diagnostic.warning {
-      background: #fffbeb;
-      border-color: #f59e0b;
+      background: var(--warning-bg);
+      border-color: var(--warning-color);
     }
 
     .diagnostic.info {
-      background: #eff6ff;
-      border-color: #3b82f6;
+      background: var(--primary-bg);
+      border-color: var(--primary-color);
     }
 
     .diagnostic .severity {
       font-size: 12px;
-      font-weight: 600;
+      font-weight: 700;
       text-transform: uppercase;
-      margin-bottom: 5px;
+      margin-bottom: 4px;
     }
 
-    .diagnostic.critical .severity { color: #ef4444; }
-    .diagnostic.warning .severity { color: #f59e0b; }
-    .diagnostic.info .severity { color: #3b82f6; }
+    .diagnostic.critical .severity { color: var(--danger-color); }
+    .diagnostic.warning .severity { color: var(--warning-color); }
+    .diagnostic.info .severity { color: var(--primary-color); }
 
     .suggestions {
-      margin-top: 10px;
+      margin-top: 8px;
       padding-left: 20px;
+      font-size: 13px;
     }
 
     .suggestions li {
-      margin-bottom: 5px;
-      color: #666;
+      margin-bottom: 4px;
+      color: var(--text-secondary);
     }
 
-    .skill-section {
-      background: #fafafa;
-      border-radius: 8px;
-      padding: 15px;
-      margin-bottom: 15px;
+    /* Scrollbar Styling for Table Container */
+    .table-container::-webkit-scrollbar {
+      height: 8px;
+    }
+    .table-container::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 4px;
+    }
+    .table-container::-webkit-scrollbar-thumb {
+      background: #c1c1c1;
+      border-radius: 4px;
+    }
+    .table-container::-webkit-scrollbar-thumb:hover {
+      background: #a1a1a1;
     }
 
-    .skill-section .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 15px;
-    }
-
-    .skill-section .section-header h3 {
-      font-size: 16px;
-      font-weight: 600;
-      color: #2c3e50;
-    }
-
-    .skill-section .section-header .count {
-      background: #667eea;
-      color: white;
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    .timeline {
-      position: relative;
-      padding-left: 30px;
-    }
-
-    .timeline-item {
-      position: relative;
-      padding-bottom: 25px;
-    }
-
-    .timeline-item::before {
-      content: '';
-      position: absolute;
-      left: -30px;
-      top: 5px;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #667eea;
-      border: 2px solid white;
-      box-shadow: 0 0 0 2px #667eea;
-    }
-
-    .timeline-item::after {
-      content: '';
-      position: absolute;
-      left: -26px;
-      top: 20px;
-      width: 2px;
-      height: calc(100% - 10px);
-      background: #eaeaea;
-    }
-
-    .timeline-item:last-child::after {
-      display: none;
-    }
-
-    .timeline-item .step-number {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 5px;
-    }
-
-    .timeline-item .content {
-      background: #f8f9fa;
-      padding: 15px;
-      border-radius: 8px;
-    }
-
-    .footer {
-      text-align: center;
-      padding: 20px;
-      color: #666;
-      font-size: 14px;
-      background: #f8f9fa;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 40px;
-      color: #666;
-    }
-
-    .empty-state .icon {
-      font-size: 48px;
-      margin-bottom: 15px;
-    }
-
+    /* Print Styles */
     @media print {
       body {
         background: white;
@@ -642,9 +528,9 @@ export class HTMLReportGenerator {
       .container {
         box-shadow: none;
       }
-      .sql-block {
-        background: #f5f5f5;
-        color: #333;
+      .report-card {
+        box-shadow: none;
+        border: 1px solid #ccc;
       }
     }
   </style>
@@ -652,85 +538,89 @@ export class HTMLReportGenerator {
 <body>
   <div class="container">
     <!-- Header -->
-    <div class="header">
-      <h1>📊 SmartPerfetto 性能分析报告</h1>
-      <div class="meta">
-        <span>📅 生成时间: ${new Date(data.timestamp).toLocaleString('zh-CN')}</span>
-        <span>🆔 会话ID: ${data.sessionId}</span>
-        <span>📁 Trace ID: ${data.traceId}</span>
-      </div>
+    <div class="report-card">
+        <div class="header">
+        <h1>📊 SmartPerfetto 性能分析报告</h1>
+        <div class="meta">
+            <span>📅 生成时间: ${new Date(data.timestamp).toLocaleString('zh-CN')}</span>
+            <span>🆔 会话ID: ${data.sessionId}</span>
+            <span>📁 Trace ID: ${data.traceId}</span>
+        </div>
+        </div>
+        
+        <!-- Metrics (merged into header card for dashboard look) -->
+        <div class="section" style="border-top: 1px solid var(--border-color);">
+        <h2 class="section-title">分析概览</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+            <div class="label">总耗时</div>
+            <div class="value" style="color: var(--primary-color);">${(data.metrics.totalDuration / 1000).toFixed(3)}s</div>
+            </div>
+            <div class="metric-card">
+            <div class="label">分析轮次</div>
+            <div class="value">${data.metrics.iterationsCount}</div>
+            </div>
+            <div class="metric-card">
+            <div class="label">SQL 查询数</div>
+            <div class="value">${data.metrics.sqlQueriesCount}</div>
+            </div>
+        </div>
+        </div>
     </div>
 
-    <!-- Metrics -->
-    <div class="section">
-      <h2 class="section-title">分析概览</h2>
-      <div class="metrics">
-        <div class="metric-card">
-          <div class="value">${data.metrics.totalDuration / 1000}s</div>
-          <div class="label">总耗时</div>
+    <!-- Question & Answer -->
+    <div class="report-card">
+      <div class="section">
+        <h2 class="section-title">分析结论</h2>
+        <div style="margin-bottom: 20px;">
+           <div style="font-size: 13px; color: var(--text-light); margin-bottom: 4px;">用户问题</div>
+           <div style="font-weight: 500; font-size: 15px; color: var(--text-main); margin-bottom: 16px;">${this.escapeHtml(data.question)}</div>
+           
+           <div class="chat-box">
+             ${this.formatAnswer(data.answer)}
+           </div>
         </div>
-        <div class="metric-card">
-          <div class="value">${data.metrics.iterationsCount}</div>
-          <div class="label">分析轮次</div>
-        </div>
-        <div class="metric-card">
-          <div class="value">${data.metrics.sqlQueriesCount}</div>
-          <div class="label">SQL 查询数</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Question -->
-    <div class="section">
-      <h2 class="section-title">用户问题</h2>
-      <div class="question-box">
-        <div class="label">问题</div>
-        <div class="content">${this.escapeHtml(data.question)}</div>
-      </div>
-    </div>
-
-    <!-- Answer -->
-    <div class="section">
-      <h2 class="section-title">分析结论</h2>
-      <div class="answer-box">
-        ${this.formatAnswer(data.answer)}
       </div>
     </div>
 
     ${data.skillEngineResult ? this.generateSkillEngineSection(data.skillEngineResult) : ''}
 
     <!-- SQL Queries and Results -->
-    <div class="section">
-      <h2 class="section-title">查询详情</h2>
-      ${data.collectedResults.length > 0
+    <div class="report-card">
+        <div class="section">
+        <h2 class="section-title" style="margin-bottom: 20px;">查询详情</h2>
+        ${data.collectedResults.length > 0
         ? data.collectedResults.map((result, index) =>
-            this.generateQueryResultSection(result, index + 1)
-          ).join('')
-        : '<div class="empty-state"><div class="icon">📭</div><div>无查询结果</div></div>'
+          this.generateQueryResultSection(result, index + 1)
+        ).join('')
+        : '<div class="empty-state" style="text-align: center; padding: 40px; color: var(--text-light);">📭 无查询结果</div>'
       }
+        </div>
     </div>
 
     <!-- Timeline -->
-    <div class="section">
-      <h2 class="section-title">执行时间线</h2>
-      <div class="timeline">
-        ${data.collectedResults.map((result, index) => `
-          <div class="timeline-item">
-            <div class="step-number">步骤 ${index + 1} · ${new Date(result.timestamp).toLocaleTimeString('zh-CN')}</div>
-            <div class="content">
-              <strong>查询:</strong> ${result.sql.substring(0, 100)}${result.sql.length > 100 ? '...' : ''}
-              <br>
-              <strong>结果:</strong> ${result.result.rowCount} 行 · ${result.result.durationMs}ms
+    <div class="report-card">
+        <div class="section">
+        <h2 class="section-title" style="margin-bottom: 20px;">执行时间线</h2>
+        <div class="timeline" style="position: relative; padding-left: 24px;">
+            ${data.collectedResults.map((result, index) => `
+            <div class="timeline-item" style="position: relative; padding-bottom: 24px; border-left: 2px solid #e5e7eb; padding-left: 24px;">
+                <div style="position: absolute; left: -7px; top: 0; width: 12px; height: 12px; border-radius: 50%; background: var(--primary-color); border: 2px solid white;"></div>
+                <div style="font-size: 12px; color: var(--text-light); margin-bottom: 4px;">步骤 ${index + 1} · ${new Date(result.timestamp).toLocaleTimeString('zh-CN')}</div>
+                <div style="background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid var(--border-color);">
+                <div style="margin-bottom: 4px;"><strong>Query:</strong> <code style="font-size: 12px; color: var(--text-secondary);">${result.sql.substring(0, 100)}${result.sql.length > 100 ? '...' : ''}</code></div>
+                <div style="font-size: 12px; color: var(--text-light);">Result: ${result.result.rowCount} rows · ${result.result.durationMs}ms</div>
+                </div>
             </div>
-          </div>
-        `).join('')}
-      </div>
+            `).join('')}
+        </div>
+        </div>
     </div>
 
     <!-- Footer -->
-    <div class="footer">
+    <div class="footer" style="text-align: center; padding: 24px; color: var(--text-light);">
       <p>由 SmartPerfetto AI 分析引擎生成</p>
-      <p style="margin-top: 5px; font-size: 12px;">Powered by Perfetto + DeepSeek</p>
+      <p style="margin-top: 4px; font-size: 12px;">Powered by Perfetto + DeepSeek</p>
     </div>
   </div>
 
@@ -950,19 +840,19 @@ export class HTMLReportGenerator {
     <!-- Skill Engine Results -->
     <div class="section">
       <h2 class="section-title">Skill Engine 分析结果</h2>
-      <div class="metrics">
+      <div class="metrics-grid">
         <div class="metric-card">
-          <div class="value">${skillResult.skillName}</div>
           <div class="label">分析类型</div>
+          <div class="value">${skillResult.skillName}</div>
         </div>
         <div class="metric-card">
-          <div class="value">${skillResult.executionTimeMs}ms</div>
           <div class="label">执行耗时</div>
+          <div class="value">${skillResult.executionTimeMs}ms</div>
         </div>
         ${skillResult.diagnostics?.length ? `
         <div class="metric-card">
-          <div class="value">${skillResult.diagnostics.length}</div>
           <div class="label">诊断问题</div>
+          <div class="value">${skillResult.diagnostics.length}</div>
         </div>
         ` : ''}
       </div>
@@ -1092,10 +982,12 @@ export class HTMLReportGenerator {
     const sectionUniqueId = `expandable_${sectionId}_${Date.now()}`;
 
     let html = `
-      <div class="skill-section expandable-section" id="${sectionUniqueId}">
-        <div class="section-header">
-          <h3>${title}</h3>
-          <span class="count">${expandableData.length} 条记录</span>
+      <div class="report-card expandable-section" id="${sectionUniqueId}">
+        <div class="header" style="background: #f8fafc; padding: 16px; border-bottom: 1px solid var(--border-color);">
+           <h3 style="margin: 0; font-size: 16px; font-weight: 600; color: var(--text-main); display: flex; align-items: center;">
+             ${title}
+             <span class="badge" style="margin-left: 12px; font-weight: normal; font-size: 12px; background: #e0e7ff; color: #4338ca;">${expandableData.length} 条记录</span>
+           </h3>
         </div>
     `;
 
@@ -1140,8 +1032,9 @@ export class HTMLReportGenerator {
       }
 
       // Build the constant column info for the table header
+      // 【P2 Fix】使用可配置的元数据列名代替硬编码
       const constantColumnLabels = Object.entries(constantColumns)
-        .filter(([col]) => col === 'process_name' || col === 'layer_name' || col === 'Process Name' || col === 'Layer Name')
+        .filter(([col]) => this.isMetadataColumn(col))
         .map(([col, value]) => `<span style="color: #666; font-size: 12px; margin-left: 8px;">${this.escapeHtml(col)}: <strong>${this.escapeHtml(String(value))}</strong></span>`)
         .join('');
 
@@ -1165,15 +1058,15 @@ export class HTMLReportGenerator {
 
       data.data.forEach((row: any, idx: number) => {
         const hasDetails = expandableData[idx]?.result?.sections &&
-                          Object.keys(expandableData[idx].result.sections || {}).length > 0;
+          Object.keys(expandableData[idx].result.sections || {}).length > 0;
         const rowId = `${sectionUniqueId}_row_${idx}`;
 
         html += `
               <tr class="expandable-row" data-row-id="${rowId}" ${hasDetails ? 'style="cursor: pointer;"' : ''}>
                 ${variableColumns.map((col: string) => {
-                  const value = Array.isArray(row) ? row[data.columns.indexOf(col)] : row[col];
-                  return `<td>${this.formatCellValue(value)}</td>`;
-                }).join('')}
+          const value = Array.isArray(row) ? row[data.columns.indexOf(col)] : row[col];
+          return `<td>${this.formatCellValue(value)}</td>`;
+        }).join('')}
                 <td>
                   ${hasDetails ? `
                     <button class="expand-btn" onclick="toggleExpandableRow('${rowId}')" style="background: #667eea; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">
@@ -1293,42 +1186,41 @@ export class HTMLReportGenerator {
       : `查询 #${stepNumber}`;
 
     return `
-      <div class="query-result">
-        <div class="query-result-header" onclick="toggleQueryResult(this)">
-          <span class="toggle-icon">▼</span>
-          <h3>${this.escapeHtml(displayTitle)}</h3>
-          <span class="meta">${result.result.rowCount} 行 · ${result.result.durationMs}ms</span>
+      <div class="report-card">
+        <div class="header" onclick="toggleQueryResult(this)" style="cursor: pointer; padding: 16px 24px; border-bottom: 1px solid var(--border-color); background: #f8fafc;">
+          <h3 style="font-size: 15px; font-weight: 600; color: var(--text-main); display: flex; align-items: center; margin: 0;">
+            <span class="toggle-icon" style="margin-right: 8px; font-size: 12px; color: var(--text-secondary);">▼</span>
+            ${this.escapeHtml(displayTitle)}
+          </h3>
+          <span class="meta" style="font-size: 12px; color: var(--text-secondary);">${result.result.rowCount} 行 · ${result.result.durationMs}ms</span>
         </div>
 
-        <div class="query-body">
-          <!-- SQL Block (默认折叠) -->
-          <div class="sql-block collapsed" onclick="toggleSqlBlock(event, this)">
-            <div class="sql-header">
-              <span class="toggle-icon">▼</span>
-              <span class="title">SQL 查询</span>
-              <button class="copy-btn" data-sql="${this.escapeHtml(result.sql)}" onclick="event.stopPropagation(); copySql(this)">复制 SQL</button>
+        <div class="query-body" style="padding: 16px;">
+          <!-- SQL Block -->
+          <div class="code-block" style="margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+               <span style="font-size: 12px; color: #9ca3af;">SQL Query</span>
+               <button class="copy-btn" data-sql="${this.escapeHtml(result.sql)}" onclick="copySql(this)">Copy</button>
             </div>
-            <div class="sql-content">
-              <pre>${this.escapeHtml(result.sql)}</pre>
-            </div>
+            <pre style="margin: 0;">${this.escapeHtml(result.sql)}</pre>
           </div>
 
           ${result.result.error ? `
-            <div class="diagnostic critical">
-              <div class="severity">ERROR</div>
-              <div>${this.escapeHtml(result.result.error)}</div>
+            <div style="padding: 12px; background: #fef2f2; border-left: 4px solid #ef4444; border-radius: 4px; margin-bottom: 12px;">
+              <div style="color: #ef4444; font-weight: 600; margin-bottom: 4px;">ERROR</div>
+              <div style="font-family: monospace;">${this.escapeHtml(result.result.error)}</div>
             </div>
           ` : result.result.rowCount > 0 ? `
             ${this.generateTable(result.result.columns, this.rowsToObjects(result.result.columns, result.result.rows))}
           ` : `
-            <div class="empty-state" style="padding: 20px; background: #f8f9fa; border-radius: 8px;">
+            <div style="padding: 20px; text-align: center; color: var(--text-secondary); background: var(--bg-body); border-radius: 6px;">
               查询返回空结果
             </div>
           `}
 
           ${result.insight ? `
-            <div style="margin-top: 15px; padding: 15px; background: #f0f9ff; border-radius: 8px; border-left: 4px solid #3b82f6;">
-              <strong>AI 分析:</strong><br>
+            <div style="margin-top: 16px; padding: 12px; background: var(--primary-bg); border-radius: 6px; border-left: 4px solid var(--primary-color);">
+              <strong style="color: var(--primary-color); display: block; margin-bottom: 4px;">AI 分析:</strong>
               ${this.formatAnswer(result.insight)}
             </div>
           ` : ''}
@@ -1394,36 +1286,136 @@ export class HTMLReportGenerator {
     const hiddenRows = hasMore ? rows.slice(defaultVisibleRows) : [];
 
     // Build the constant column info for the table header
+    // 【P2 Fix】使用可配置的元数据列名代替硬编码
     const constantColumnLabels = Object.entries(constantColumns)
-      .filter(([col]) => col === 'process_name' || col === 'layer_name' || col === 'Process Name' || col === 'Layer Name')
+      .filter(([col]) => this.isMetadataColumn(col))
       .map(([col, value]) => `<span style="color: #666; font-size: 12px; margin-left: 8px;">${this.escapeHtml(col)}: <strong>${this.escapeHtml(String(value))}</strong></span>`)
       .join('');
 
     return `
-      <div class="table-container">
-        ${constantColumnLabels ? `
-          <div class="table-header-info" style="padding: 8px 12px; background: #f8f9fa; border-bottom: 1px solid #eaeaea; font-size: 13px;">
-            ${constantColumnLabels}
+      < div class="table-container ${totalRows > defaultVisibleRows ? 'scrollable' : ''}" >
+        <table>
+        <thead>
+        <tr>
+        <th># </th>
+              ${variableColumns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('')}
+    </tr>
+      </thead>
+      <tbody>
+            ${visibleRows.map((row, idx) => `
+              <tr>
+                <td style="color: #666; font-weight: 500;">${idx + 1}</td>
+                ${variableColumns.map(col => `<td class="${this.getCellClass(row[col])}">${this.formatCellValue(row[col])}</td>`).join('')}
+              </tr>
+            `).join('')
+      }
+            ${hiddenRows.map((row, idx) => `
+              <tr class="hidden-row" style="display: none;">
+                <td style="color: #666; font-weight: 500;">${defaultVisibleRows + idx + 1}</td>
+                ${variableColumns.map(col => `<td class="${this.getCellClass(row[col])}">${this.formatCellValue(row[col])}</td>`).join('')}
+              </tr>
+            `).join('')
+      }
+    </tbody>
+      </table>
+        ${hasMore ? `
+          <div class="table-rows-more" onclick="toggleTableRows(this, ${totalRows - defaultVisibleRows})">
+            <span>▼ 显示更多 ${totalRows - defaultVisibleRows} 条记录</span>
           </div>
-        ` : ''}
+        ` : ''
+      }
+    </div>
+      `;
+  }
+
+  /**
+   * Generate HTML table from DataEnvelope (v2.0 schema-driven rendering)
+   *
+   * This method uses the column definitions from the envelope's display config
+   * to render the table with proper formatting and styling.
+   */
+  private generateTableFromEnvelope(envelope: DataEnvelope): string {
+    const { data, display } = envelope;
+
+    // Ensure we have table data
+    if (!data.columns || !data.rows || data.rows.length === 0) {
+      return '<div class="empty-state">无数据</div>';
+    }
+
+    // Build column definitions (use explicit ones from display, or infer from column names)
+    const columnDefs = display.columns || buildColumnDefinitions(data.columns);
+
+    const totalRows = data.rows.length;
+    const defaultVisibleRows = 10;
+    const hasMore = totalRows > defaultVisibleRows;
+
+    // Identify metadata columns (to show in header, not in table)
+    const metadataFields = new Set(display.metadataFields || []);
+    const metadataValues: Record<string, any> = {};
+    const displayColumnDefs: ColumnDefinition[] = [];
+
+    for (let i = 0; i < columnDefs.length; i++) {
+      const colDef = columnDefs[i];
+      const colName = colDef.name;
+
+      if (metadataFields.has(colName)) {
+        // Extract metadata value from first row
+        if (data.rows.length > 0) {
+          metadataValues[colName] = data.rows[0][i];
+        }
+      } else if (!colDef.hidden) {
+        displayColumnDefs.push(colDef);
+      }
+    }
+
+    // Build the constant column info for the table header
+    const metadataLabels = Object.entries(metadataValues)
+      .map(([col, value]) => {
+        const label = columnDefs.find(d => d.name === col)?.label || col;
+        return `<span style="color: #666; font-size: 12px; margin-left: 8px;">${this.escapeHtml(label)}: <strong>${this.escapeHtml(String(value))}</strong></span>`;
+      })
+      .join('');
+
+    // Map column names to their indices in the original data
+    const columnIndices = new Map<string, number>();
+    data.columns.forEach((col, idx) => columnIndices.set(col, idx));
+
+    const visibleRows = data.rows.slice(0, defaultVisibleRows);
+    const hiddenRows = hasMore ? data.rows.slice(defaultVisibleRows) : [];
+
+    return `
+      <div class="table-container ${totalRows > defaultVisibleRows ? 'scrollable' : ''}">
+        ${metadataLabels ? `<div class="table-metadata">${metadataLabels}</div>` : ''}
         <table>
           <thead>
             <tr>
               <th>#</th>
-              ${variableColumns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('')}
+              ${displayColumnDefs.map(colDef => {
+                const label = colDef.label || colDef.name;
+                const tooltip = colDef.tooltip ? ` title="${this.escapeHtml(colDef.tooltip)}"` : '';
+                return `<th${tooltip}>${this.escapeHtml(label)}</th>`;
+              }).join('')}
             </tr>
           </thead>
           <tbody>
             ${visibleRows.map((row, idx) => `
               <tr>
                 <td style="color: #666; font-weight: 500;">${idx + 1}</td>
-                ${variableColumns.map(col => `<td class="${this.getCellClass(row[col])}">${this.formatCellValue(row[col])}</td>`).join('')}
+                ${displayColumnDefs.map(colDef => {
+                  const colIdx = columnIndices.get(colDef.name);
+                  const value = colIdx !== undefined ? row[colIdx] : undefined;
+                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef)}</td>`;
+                }).join('')}
               </tr>
             `).join('')}
             ${hiddenRows.map((row, idx) => `
               <tr class="hidden-row" style="display: none;">
                 <td style="color: #666; font-weight: 500;">${defaultVisibleRows + idx + 1}</td>
-                ${variableColumns.map(col => `<td class="${this.getCellClass(row[col])}">${this.formatCellValue(row[col])}</td>`).join('')}
+                ${displayColumnDefs.map(colDef => {
+                  const colIdx = columnIndices.get(colDef.name);
+                  const value = colIdx !== undefined ? row[colIdx] : undefined;
+                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef)}</td>`;
+                }).join('')}
               </tr>
             `).join('')}
           </tbody>
@@ -1435,6 +1427,139 @@ export class HTMLReportGenerator {
         ` : ''}
       </div>
     `;
+  }
+
+  /**
+   * Get CSS class for a cell based on column definition
+   */
+  private getCellClassFromDefinition(value: any, colDef: ColumnDefinition): string {
+    const classes: string[] = [];
+
+    // Type-based classes
+    if (colDef.type === 'number' || colDef.type === 'duration' || colDef.type === 'bytes') {
+      classes.push('numeric');
+    }
+    if (colDef.type === 'timestamp') {
+      classes.push('timestamp');
+    }
+    if (colDef.type === 'percentage') {
+      classes.push('percentage');
+    }
+
+    // Format-based classes
+    if (colDef.format === 'code') {
+      classes.push('code');
+    }
+
+    // Value-based styling
+    if (colDef.type === 'number' && typeof value === 'number' && value < 0) {
+      classes.push('negative');
+    }
+
+    return classes.join(' ');
+  }
+
+  /**
+   * Format a cell value based on column definition
+   */
+  private formatCellValueFromDefinition(value: any, colDef: ColumnDefinition): string {
+    if (value === null || value === undefined) {
+      return '<span style="color: #999;">-</span>';
+    }
+
+    const format = colDef.format || 'default';
+
+    switch (format) {
+      case 'compact':
+        if (typeof value === 'number') {
+          return this.formatCompactNumber(value);
+        }
+        break;
+
+      case 'percentage':
+        if (typeof value === 'number') {
+          const pct = value > 1 ? value : value * 100;
+          return `${pct.toFixed(1)}%`;
+        }
+        break;
+
+      case 'duration_ms':
+        if (typeof value === 'number') {
+          const unit = colDef.unit || 'ns';
+          const ns = value * (unit === 'ns' ? 1 : unit === 'us' ? 1e3 : unit === 'ms' ? 1e6 : 1e9);
+          return `${(ns / 1e6).toFixed(2)} ms`;
+        }
+        break;
+
+      case 'duration_us':
+        if (typeof value === 'number') {
+          const unit = colDef.unit || 'ns';
+          const ns = value * (unit === 'ns' ? 1 : unit === 'us' ? 1e3 : unit === 'ms' ? 1e6 : 1e9);
+          return `${(ns / 1e3).toFixed(1)} μs`;
+        }
+        break;
+
+      case 'bytes_human':
+        if (typeof value === 'number') {
+          return this.formatBytes(value);
+        }
+        break;
+
+      case 'code':
+        return `<code>${this.escapeHtml(String(value))}</code>`;
+
+      case 'truncate':
+        if (typeof value === 'string' && value.length > 50) {
+          return `<span title="${this.escapeHtml(value)}">${this.escapeHtml(value.substring(0, 47))}...</span>`;
+        }
+        break;
+    }
+
+    // Default formatting based on type
+    if (typeof value === 'number') {
+      return value.toLocaleString('zh-CN');
+    }
+    if (typeof value === 'boolean') {
+      return value ? '<span style="color: #10b981;">✓</span>' : '<span style="color: #ef4444;">✗</span>';
+    }
+
+    const str = String(value);
+    if (str.length > 200) {
+      return `<span title="${this.escapeHtml(str)}">${this.escapeHtml(str.substring(0, 200))}...</span>`;
+    }
+    return this.escapeHtml(str);
+  }
+
+  /**
+   * Format a number in compact notation
+   */
+  private formatCompactNumber(value: number): string {
+    if (Math.abs(value) >= 1e9) {
+      return (value / 1e9).toFixed(1) + 'B';
+    }
+    if (Math.abs(value) >= 1e6) {
+      return (value / 1e6).toFixed(1) + 'M';
+    }
+    if (Math.abs(value) >= 1e3) {
+      return (value / 1e3).toFixed(1) + 'K';
+    }
+    return value.toFixed(0);
+  }
+
+  /**
+   * Format bytes in human-readable form
+   */
+  private formatBytes(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unitIndex = 0;
+    let size = bytes;
+
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+
+    return size.toFixed(unitIndex === 0 ? 0 : 1) + ' ' + units[unitIndex];
   }
 
   /**
@@ -1454,16 +1579,16 @@ export class HTMLReportGenerator {
     }
     if (typeof value === 'number') {
       const formatted = value.toLocaleString('zh-CN');
-      console.log(`[formatCellValue] Number: ${value} -> ${formatted}`);
+      console.log(`[formatCellValue] Number: ${value} -> ${formatted} `);
       return formatted;
     }
     if (typeof value === 'boolean') {
       return value ? '<span style="color: #10b981;">✓</span>' : '<span style="color: #ef4444;">✗</span>';
     }
     const str = String(value);
-    console.log(`[formatCellValue] String: "${str}" (length=${str.length})`);
+    console.log(`[formatCellValue] String: "${str}"(length = ${str.length})`);
     if (str.length > 200) {
-      return `<span title="${this.escapeHtml(str)}">${this.escapeHtml(str.substring(0, 200))}...</span>`;
+      return `< span title = "${this.escapeHtml(str)}" > ${this.escapeHtml(str.substring(0, 200))}...</span>`;
     }
     return this.escapeHtml(str);
   }
@@ -1721,13 +1846,17 @@ export class HTMLReportGenerator {
     }
 
     return `
-      <div class="skill-section" style="margin-bottom: 15px;">
-        <div class="section-header">
-          <h3>${this.escapeHtml(stepResult.display?.title || stepId)}</h3>
-          ${Array.isArray(stepResult.data) ? `<span class="count">${stepResult.data.length} 条记录</span>` : ''}
-          ${stepResult.success === false ? `<span class="error-badge" style="margin-left: 10px; padding: 2px 8px; background: #ef4444; color: white; border-radius: 4px; font-size: 12px;">失败</span>` : ''}
+      <div class="report-card">
+        <div class="div-section" style="padding: 16px; border-bottom: 1px solid var(--border-color);">
+          <div class="section-title" style="font-size: 15px;">
+            ${this.escapeHtml(stepResult.display?.title || stepId)}
+            ${Array.isArray(stepResult.data) ? `<span style="font-weight: normal; color: var(--text-secondary); font-size: 12px; margin-left: 8px;">(${stepResult.data.length} 条记录)</span>` : ''}
+            ${stepResult.success === false ? `<span class="badge" style="background: var(--danger-bg); color: var(--danger-color); margin-left: 8px;">失败</span>` : ''}
+          </div>
         </div>
-        ${contentHtml}
+        <div style="padding: 16px;">
+          ${contentHtml}
+        </div>
       </div>
     `;
   }
@@ -1775,16 +1904,21 @@ export class HTMLReportGenerator {
     }
 
     return `
-      <div style="margin: 10px 0; padding: 12px; background: #fafbfc; border-radius: 6px; border-left: 3px solid #3498db;">
-        <h5 style="margin: 0 0 8px 0; font-size: 14px; color: #2c3e50;">
-          ${this.escapeHtml(displayResult.title || displayResult.stepId || '详情')}
-        </h5>
-        ${contentHtml}
+      <div style="margin: 12px 0; background: #f8fafc; border-radius: 6px; border: 1px solid var(--border-color);">
+        <div style="padding: 10px 16px; border-bottom: 1px solid var(--border-color); background: #f1f5f9; border-radius: 6px 6px 0 0;">
+          <h5 style="margin: 0; font-size: 14px; font-weight: 600; color: #334155;">
+            ${this.escapeHtml(displayResult.title || displayResult.stepId || '详情')}
+          </h5>
+        </div>
+        <div style="padding: 12px;">
+          ${contentHtml}
+        </div>
       </div>
     `;
   }
 
   private renderDeepFrameAnalysis(data: { diagnosis_summary?: string; full_analysis?: any }): string {
+    if (!data) return '';
     const diagnosis = data.diagnosis_summary || '暂无诊断';
     const analysis = data.full_analysis || {};
     const quadrants = analysis.quadrants || {};
@@ -1806,7 +1940,7 @@ export class HTMLReportGenerator {
 
     if (quadrants.main_thread || quadrants.render_thread) {
       html += `<div style="margin-bottom: 16px;">`;
-      
+
       if (quadrants.main_thread) {
         const mt = quadrants.main_thread;
         const runningPct = ((mt.q1 || 0) + (mt.q2 || 0)).toFixed(1);
@@ -1890,7 +2024,7 @@ export class HTMLReportGenerator {
           </div>
         `;
       }
-      
+
       html += `</div>`;
     }
 
@@ -2003,10 +2137,10 @@ export class HTMLReportGenerator {
           </div>
           <div style="font-size: 12px; line-height: 1.6; background: #f8fafc; padding: 10px; border-radius: 6px; max-height: 150px; overflow-y: auto;">
             ${freqTimeline.slice(0, 20).map((f: any) => {
-              const changeIcon = f.change_direction === 'up' ? '↑' : (f.change_direction === 'down' ? '↓' : '→');
-              const changeColor = f.change_direction === 'up' ? '#16a34a' : (f.change_direction === 'down' ? '#dc2626' : '#64748b');
-              const coreColor = f.core_type === 'big' ? '#991b1b' : '#3730a3';
-              return `
+        const changeIcon = f.change_direction === 'up' ? '↑' : (f.change_direction === 'down' ? '↓' : '→');
+        const changeColor = f.change_direction === 'up' ? '#16a34a' : (f.change_direction === 'down' ? '#dc2626' : '#64748b');
+        const coreColor = f.core_type === 'big' ? '#991b1b' : '#3730a3';
+        return `
                 <div style="margin-bottom: 4px;">
                   <span style="color: #64748b;">+${(f.relative_ms || 0).toFixed(1)}ms</span>
                   <span style="margin-left: 8px; color: ${coreColor}; font-weight: 500;">C${f.cpu}</span>
@@ -2014,7 +2148,7 @@ export class HTMLReportGenerator {
                   <span style="margin-left: 4px;">${f.prev_freq_mhz || f.freq_mhz}→${f.freq_mhz} MHz</span>
                 </div>
               `;
-            }).join('')}
+      }).join('')}
             ${freqTimeline.length > 20 ? `<div style="color: #64748b; font-style: italic;">... 还有 ${freqTimeline.length - 20} 次变化</div>` : ''}
           </div>
         </div>
@@ -2052,7 +2186,19 @@ export class HTMLReportGenerator {
     return html;
   }
 
-  private escapeHtml(text: string): string {
+  /**
+   * HTML 转义
+   * 【P2 Fix】添加 null/undefined 类型检查，避免 TypeError
+   */
+  private escapeHtml(text: string | null | undefined): string {
+    // 处理 null/undefined
+    if (text === null || text === undefined) {
+      return '';
+    }
+
+    // 确保是字符串类型
+    const str = String(text);
+
     const map: Record<string, string> = {
       '&': '&amp;',
       '<': '&lt;',
@@ -2060,7 +2206,7 @@ export class HTMLReportGenerator {
       '"': '&quot;',
       "'": '&#039;',
     };
-    return text.replace(/[&<>"']/g, m => map[m]);
+    return str.replace(/[&<>"']/g, m => map[m]);
   }
 
   /**
@@ -2680,10 +2826,10 @@ export class HTMLReportGenerator {
     const aspects = intent?.aspects || [];
     const complexity = plan?.complexity || intent?.complexity || 'medium';
     const complexityLabel = complexity === 'simple' ? '简单' :
-                           complexity === 'medium' ? '中等' :
-                           complexity === 'complex' ? '复杂' : '复杂';
+      complexity === 'medium' ? '中等' :
+        complexity === 'complex' ? '复杂' : '复杂';
     const complexityColor = complexity === 'simple' ? '#10b981' :
-                           complexity === 'medium' ? '#f59e0b' : '#ef4444';
+      complexity === 'medium' ? '#f59e0b' : '#ef4444';
 
     return `
     <div class="section">
@@ -2763,18 +2909,18 @@ export class HTMLReportGenerator {
         <div style="position: absolute; left: 12px; top: 0; bottom: 0; width: 2px; background: linear-gradient(180deg, #10b981 0%, #3b82f6 100%);"></div>
 
         ${stageResults.map((stage, idx) => {
-          const duration = stage.endTime - stage.startTime;
-          const findingsCount = stage.findings?.length || 0;
-          const stageIcon = stage.stageId.includes('planner') ? '📋' :
-                           stage.stageId.includes('worker') ? '⚙️' :
-                           stage.stageId.includes('evaluator') ? '✅' :
-                           stage.stageId.includes('synthesis') ? '📝' : '🔍';
-          const stageExplanation = stage.stageId.includes('planner') ? '制定分析计划' :
-                                  stage.stageId.includes('worker') ? '执行数据分析' :
-                                  stage.stageId.includes('evaluator') ? '评估结果质量' :
-                                  stage.stageId.includes('synthesis') ? '综合生成报告' : '分析处理';
+      const duration = stage.endTime - stage.startTime;
+      const findingsCount = stage.findings?.length || 0;
+      const stageIcon = stage.stageId.includes('planner') ? '📋' :
+        stage.stageId.includes('worker') ? '⚙️' :
+          stage.stageId.includes('evaluator') ? '✅' :
+            stage.stageId.includes('synthesis') ? '📝' : '🔍';
+      const stageExplanation = stage.stageId.includes('planner') ? '制定分析计划' :
+        stage.stageId.includes('worker') ? '执行数据分析' :
+          stage.stageId.includes('evaluator') ? '评估结果质量' :
+            stage.stageId.includes('synthesis') ? '综合生成报告' : '分析处理';
 
-          return `
+      return `
           <div style="position: relative; margin-bottom: 20px;">
             <!-- Timeline dot -->
             <div style="position: absolute; left: -26px; top: 4px; width: 16px; height: 16px; border-radius: 50%; background: ${stage.success ? '#10b981' : '#ef4444'}; border: 3px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.2);"></div>
@@ -2807,7 +2953,7 @@ export class HTMLReportGenerator {
             </div>
           </div>
           `;
-        }).join('')}
+    }).join('')}
       </div>
 
       <div style="margin-top: 16px; padding: 12px 16px; background: #f8fafc; border-radius: 8px; font-size: 12px; color: #64748b; text-align: center;">
@@ -2826,8 +2972,8 @@ export class HTMLReportGenerator {
     const listData = data.list || {};
     const deepData = data.deep || {};
     const hasLayeredData = Object.keys(overviewData).length > 0 ||
-                          Object.keys(listData).length > 0 ||
-                          Object.keys(deepData).length > 0;
+      Object.keys(listData).length > 0 ||
+      Object.keys(deepData).length > 0;
 
     return `
       <div class="stage-section">
@@ -2887,16 +3033,32 @@ export class HTMLReportGenerator {
    */
   private renderOverviewData(overview: any): string {
     let html = '';
-    const metrics: Array<{label: string; value: string; color: string}> = [];
+    const metrics: Array<{ label: string; value: string; color: string }> = [];
 
     for (const [key, value] of Object.entries(overview)) {
       if (value === null || value === undefined) continue;
 
       // Check if this is a StepResult format (from AnalysisWorker)
-      if (typeof value === 'object' && !Array.isArray(value) && 'data' in value && Array.isArray((value as any).data)) {
+      if (typeof value === 'object' && !Array.isArray(value) && 'data' in value) {
         const stepResult = value as any;
-        const items = stepResult.data;
         const displayTitle = stepResult.display?.title || this.formatMetricLabel(key);
+
+        // 【兼容性修复】处理两种数据格式
+        let items: any[] = [];
+        const dataField = stepResult.data;
+        if (Array.isArray(dataField)) {
+          // Legacy 格式
+          items = dataField;
+        } else if (dataField && typeof dataField === 'object' && 'columns' in dataField && 'rows' in dataField) {
+          // DataPayload 格式 - 将 rows 转换为对象数组
+          const columns: string[] = dataField.columns || [];
+          const rows: any[][] = dataField.rows || [];
+          items = rows.map((row: any[]) => {
+            const obj: Record<string, any> = {};
+            columns.forEach((col, i) => { obj[col] = row[i]; });
+            return obj;
+          });
+        }
 
         if (items.length > 0) {
           // Render StepResult as a table
@@ -2943,22 +3105,22 @@ export class HTMLReportGenerator {
     // Render simple metrics as cards
     if (metrics.length > 0) {
       html += `
-        <div style="margin-bottom: 20px;">
-          <div style="font-weight: 600; color: #374151; margin-bottom: 12px; display: flex; align-items: center;">
-            📊 概览指标
-            <span style="margin-left: 8px; font-size: 12px; color: #9ca3af; font-weight: normal;">
-              (${metrics.length} 项)
-            </span>
-          </div>
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
-            ${metrics.map(m => `
-              <div style="background: #f9fafb; padding: 12px; border-radius: 8px; text-align: center; border: 1px solid #e5e7eb;">
-                <div style="font-size: 22px; font-weight: 700; color: ${m.color};">${m.value}</div>
-                <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">${m.label}</div>
-              </div>
-            `).join('')}
-          </div>
+      <div style="margin-bottom: 20px;">
+        <div style="font-weight: 600; color: var(--text-main); margin-bottom: 12px; display: flex; align-items: center;">
+          📊 概览指标
+          <span style="margin-left: 8px; font-size: 11px; color: var(--text-light); font-weight: normal;">
+            (${metrics.length} 项)
+          </span>
         </div>
+        <div class="metrics-grid">
+          ${metrics.map(m => `
+            <div class="metric-card">
+              <div class="label">${m.label}</div>
+              <div class="value" style="color: ${m.color};">${m.value}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
       `;
     }
 
@@ -2980,12 +3142,32 @@ export class HTMLReportGenerator {
 
       let items: any[] = [];
       let displayName = this.formatMetricLabel(key);
+      let expandableData: any[] | undefined;
 
       // Check if this is a StepResult format (from AnalysisWorker)
-      if (typeof value === 'object' && !Array.isArray(value) && 'data' in value && Array.isArray((value as any).data)) {
+      if (typeof value === 'object' && !Array.isArray(value) && 'data' in value) {
         const stepResult = value as any;
-        items = stepResult.data;
         displayName = stepResult.display?.title || displayName;
+
+        // 【兼容性修复】处理两种数据格式：
+        // 1. Legacy 格式: stepResult.data 是数组 [{col1: val1}, ...]
+        // 2. DataPayload 格式: stepResult.data 是对象 { columns, rows, expandableData, summary }
+        const dataField = stepResult.data;
+        if (Array.isArray(dataField)) {
+          // Legacy 格式
+          items = dataField;
+        } else if (dataField && typeof dataField === 'object' && 'columns' in dataField && 'rows' in dataField) {
+          // DataPayload 格式 - 将 rows (数组的数组) 转换为对象数组
+          const columns: string[] = dataField.columns || [];
+          const rows: any[][] = dataField.rows || [];
+          items = rows.map((row: any[]) => {
+            const obj: Record<string, any> = {};
+            columns.forEach((col, i) => { obj[col] = row[i]; });
+            return obj;
+          });
+          // 保留 expandableData 用于可展开行
+          expandableData = dataField.expandableData;
+        }
       } else if (Array.isArray(value)) {
         items = value;
       } else {
@@ -2993,6 +3175,15 @@ export class HTMLReportGenerator {
       }
 
       if (items.length === 0) continue;
+
+      // 【兼容性修复】如果有 expandableData，使用可展开行渲染
+      if (expandableData && expandableData.length > 0) {
+        tableContents.push(this.generateExpandableSection(key, {
+          title: displayName,
+          expandableData,
+        }));
+        continue;
+      }
 
       const tableId = `table-${stageId}-${key}`.replace(/[^a-zA-Z0-9-]/g, '-');
       const previewCount = Math.min(5, items.length);
@@ -3022,11 +3213,13 @@ export class HTMLReportGenerator {
     }
 
     return `
-      <div style="margin-bottom: 20px;">
-        <div style="font-weight: 600; color: #374151; margin-bottom: 12px; display: flex; align-items: center;">
+      <div style="margin-bottom: 24px;">
+        <div style="font-weight: 600; color: var(--text-main); margin-bottom: 12px; display: flex; align-items: center; font-size: 16px;">
           📋 数据列表
         </div>
-        ${tableContents.join('')}
+        <div class="report-card" style="padding: 0;">
+          ${tableContents.join('')}
+        </div>
       </div>
     `;
   }
@@ -3050,34 +3243,34 @@ export class HTMLReportGenerator {
     if (columnList.length === 0) {
       // Simple list rendering for non-object items
       return `
-        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-          <tbody>
-            ${allItems.map((item, idx) => `
-              <tr style="${idx >= visibleItems.length ? 'display: none;' : ''} ${idx % 2 === 0 ? 'background: #f9fafb;' : ''}" class="hidden-row">
-                <td style="padding: 8px 16px; border-bottom: 1px solid #e5e7eb;">${this.escapeHtml(String(item))}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+        <div class="table-container">
+          <table>
+            <tbody>
+              ${allItems.map((item, idx) => `
+                <tr style="${idx >= visibleItems.length ? 'display: none;' : ''}" class="${hiddenItems.length > 0 && idx >= visibleItems.length ? 'hidden-row' : ''}">
+                  <td>${this.escapeHtml(String(item))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
       `;
     }
 
     return `
-      <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-        <thead>
-          <tr style="background: #f9fafb;">
-            ${columnList.map(col => `
-              <th style="padding: 8px; text-align: left; border-bottom: 2px solid #e5e7eb; font-weight: 600; color: #374151; white-space: nowrap;">
-                ${this.formatMetricLabel(col)}
-              </th>
-            `).join('')}
-          </tr>
-        </thead>
-        <tbody>
-          ${visibleItems.map((item, idx) => this.renderTableRow(item, columnList, idx, false)).join('')}
-          ${hiddenItems.map((item, idx) => this.renderTableRow(item, columnList, visibleItems.length + idx, true)).join('')}
-        </tbody>
-      </table>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              ${columnList.map(col => `<th>${this.formatMetricLabel(col)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${visibleItems.map((item, idx) => this.renderTableRow(item, columnList, idx, false)).join('')}
+            ${hiddenItems.map((item, idx) => this.renderTableRow(item, columnList, visibleItems.length + idx, true)).join('')}
+          </tbody>
+        </table>
+      </div>
     `;
   }
 
@@ -3085,16 +3278,15 @@ export class HTMLReportGenerator {
    * Render a single table row
    */
   private renderTableRow(item: any, columns: string[], idx: number, hidden: boolean): string {
-    const style = `${hidden ? 'display: none;' : ''} ${idx % 2 === 0 ? 'background: #f9fafb;' : ''}`;
-
     return `
-      <tr style="${style}" class="${hidden ? 'hidden-row' : ''}">
+      <tr style="${hidden ? 'display: none;' : ''}" class="${hidden ? 'hidden-row' : ''}">
         ${columns.map(col => {
-          const value = item[col];
-          const formatted = this.formatLayeredCellValue(value, col);
-          return `<td style="padding: 8px; border-bottom: 1px solid #e5e7eb; max-width: 200px; overflow: hidden; text-overflow: ellipsis;" title="${this.escapeHtml(String(value ?? ''))}">${formatted}</td>`;
-        }).join('')}
+      const value = item[col];
+      const formatted = this.formatLayeredCellValue(value, col);
+      return `<td title="${this.escapeHtml(String(value ?? ''))}">${formatted}</td>`;
+    }).join('')}
       </tr>
+
     `;
   }
 
@@ -3215,13 +3407,17 @@ export class HTMLReportGenerator {
         `);
       } else if (typeof value === 'object') {
         // Check if this is a nested session -> frame structure (deep analysis)
+        // Data structure from normalizeDeepData: { sessionId: { frameId: { stepId, item, data: { diagnosis_summary, full_analysis }, display } } }
         const valueEntries = Object.entries(value);
         const isNestedFrameStructure = valueEntries.length > 0 &&
           valueEntries.every(([k, v]) =>
             typeof v === 'object' && v !== null &&
-            (k.startsWith('frame_') || k.includes('frame') ||
-             (v as any).diagnosis_summary !== undefined ||
-             (v as any).full_analysis !== undefined)
+            (k.startsWith('frame_') || k.includes('frame') || /^\d+$/.test(k) ||
+              // Check at both levels: v.diagnosis_summary (old format) or v.data.diagnosis_summary (new format)
+              (v as any).diagnosis_summary !== undefined ||
+              (v as any).full_analysis !== undefined ||
+              ((v as any).data?.diagnosis_summary !== undefined) ||
+              ((v as any).data?.full_analysis !== undefined))
           );
 
         if (isNestedFrameStructure) {
@@ -3254,7 +3450,7 @@ export class HTMLReportGenerator {
                   <span class="frame-hint" style="font-size: 12px; color: #94a3b8;">点击展开详情</span>
                 </div>
                 <div style="display: none; padding: 12px; background: white;">
-                  ${this.renderDeepFrameAnalysis(fData)}
+                  ${this.renderDeepFrameAnalysis(fData.data || fData)}
                 </div>
               </div>
             `;
@@ -3311,43 +3507,45 @@ export class HTMLReportGenerator {
     const title = item.title || item.name || item.id || item.frame_id || `项目 ${idx + 1}`;
     const severity = item.severity || item.jank_type || item.type;
     const severityColor = severity === 'critical' ? '#ef4444' :
-                         severity === 'high' || severity === 'severe' ? '#f97316' :
-                         severity === 'medium' ? '#f59e0b' :
-                         severity === 'low' ? '#10b981' : '#6b7280';
+      severity === 'high' || severity === 'severe' ? '#f97316' :
+        severity === 'medium' ? '#f59e0b' :
+          severity === 'low' ? '#10b981' : '#6b7280';
 
     return `
-      <div style="${hidden ? 'display: none;' : ''} background: white; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;" class="${hidden ? 'hidden-card' : ''}">
-        <div style="background: #f9fafb; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;">
-          <span style="font-weight: 600; color: #374151;">${this.escapeHtml(String(title))}</span>
-          ${severity ? `<span style="background: ${severityColor}20; color: ${severityColor}; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">${this.escapeHtml(String(severity))}</span>` : ''}
+      <div style="${hidden ? 'display: none;' : ''}" class="deep-analysis-card ${hidden ? 'hidden-card' : ''}">
+        <div class="deep-analysis-header">
+          <span style="font-weight: 600; color: var(--text-main); font-size: 14px;">${this.escapeHtml(String(title))}</span>
+          ${severity ? `<span style="background: ${severityColor}20; color: ${severityColor}; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600;">${this.escapeHtml(String(severity))}</span>` : ''}
         </div>
-        <div style="padding: 12px 16px; font-size: 13px;">
-          ${Object.entries(item).filter(([k]) => !['title', 'name', 'id', 'severity', 'jank_type', 'type'].includes(k)).map(([k, v]) => {
-            if (typeof v === 'object' && v !== null) {
-              // Handle nested objects (like root_cause_synthesis)
-              return `
-                <details style="margin-bottom: 8px;">
-                  <summary style="cursor: pointer; color: #6b7280; font-weight: 500;">${this.formatMetricLabel(k)}</summary>
-                  <div style="margin-top: 8px; padding: 12px; background: #f9fafb; border-radius: 6px; font-size: 12px;">
-                    ${Array.isArray(v) ? v.map(i => `<div style="margin-bottom: 4px;">${this.escapeHtml(String(i))}</div>`).join('') :
-                      Object.entries(v).map(([nk, nv]) => `
-                        <div style="margin-bottom: 4px;">
-                          <span style="color: #6b7280;">${this.formatMetricLabel(nk)}:</span>
-                          <span style="color: #374151; margin-left: 4px;">${typeof nv === 'object' ? JSON.stringify(nv) : this.escapeHtml(String(nv))}</span>
-                        </div>
-                      `).join('')
-                    }
+        <div class="properties-grid">
+            ${Object.entries(item).filter(([k]) => !['title', 'name', 'id', 'severity', 'jank_type', 'type'].includes(k)).map(([k, v]) => {
+      if (typeof v === 'object' && v !== null) {
+        // Handle nested objects
+        return `
+                  <div style="grid-column: 1 / -1; margin-top: 8px;">
+                    <details>
+                      <summary>${this.formatMetricLabel(k)}</summary>
+                      <div class="details-content">
+                        ${Array.isArray(v) ? v.map(i => `<div style="margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #f3f4f6;">${this.escapeHtml(String(i))}</div>`).join('') :
+            Object.entries(v).map(([nk, nv]) => `
+                            <div class="property-item">
+                              <span class="property-label">${this.formatMetricLabel(nk)}</span>
+                              <span class="property-value">${typeof nv === 'object' ? JSON.stringify(nv) : this.escapeHtml(String(nv))}</span>
+                            </div>
+                          `).join('')
+          }
+                      </div>
+                    </details>
                   </div>
-                </details>
+                `;
+      }
+      return `
+                <div class="property-item">
+                  <span class="property-label">${this.formatMetricLabel(k)}</span>
+                  <span class="property-value">${this.formatLayeredCellValue(v, k)}</span>
+                </div>
               `;
-            }
-            return `
-              <div style="display: flex; gap: 8px; margin-bottom: 4px;">
-                <span style="color: #6b7280; min-width: 120px;">${this.formatMetricLabel(k)}:</span>
-                <span style="color: #374151;">${this.formatLayeredCellValue(v, k)}</span>
-              </div>
-            `;
-          }).join('')}
+    }).join('')}
         </div>
       </div>
     `;
@@ -3364,6 +3562,210 @@ export class HTMLReportGenerator {
       .replace(/^./, str => str.toUpperCase())
       .replace(/\b(id|ms|fps|ui|gpu|cpu|sql)\b/gi, match => match.toUpperCase())
       .trim();
+  }
+
+  /**
+   * Generate HTML report from AgentDrivenOrchestrator result (Phase 2-4 architecture)
+   */
+  generateAgentDrivenHTML(data: AgentDrivenReportData): string {
+    const { traceId, query, result, hypotheses, dialogue, timestamp } = data;
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartPerfetto Agent-Driven 分析报告 - ${new Date(timestamp).toLocaleString('zh-CN')}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.5; color: #333; background: #f5f7fa; padding: 15px;
+    }
+    .container {
+      max-width: 1200px; margin: 0 auto; background: white;
+      border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+      color: white; padding: 20px;
+    }
+    .header h1 { font-size: 28px; margin-bottom: 10px; }
+    .header .meta { opacity: 0.9; font-size: 14px; }
+    .header .meta span { margin-right: 20px; }
+    .badge {
+      display: inline-block; padding: 4px 12px; border-radius: 12px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-agent { background: rgba(255,255,255,0.2); }
+    .section { padding: 20px; border-bottom: 1px solid #eaeaea; }
+    .section:last-child { border-bottom: none; }
+    .section-title {
+      font-size: 20px; font-weight: 600; margin-bottom: 20px; color: #2c3e50;
+      display: flex; align-items: center;
+    }
+    .section-title::before {
+      content: ''; width: 4px; height: 20px; background: #8b5cf6;
+      margin-right: 12px; border-radius: 2px;
+    }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
+    .metric-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+    .metric-card .value { font-size: 28px; font-weight: 700; color: #8b5cf6; }
+    .metric-card .label { font-size: 14px; color: #666; margin-top: 5px; }
+    .hypothesis-card {
+      background: #faf5ff; padding: 15px; border-radius: 8px; margin-bottom: 12px;
+      border-left: 4px solid #8b5cf6;
+    }
+    .hypothesis-card.confirmed { border-color: #10b981; background: #f0fdf4; }
+    .hypothesis-card.rejected { border-color: #ef4444; background: #fef2f2; }
+    .hypothesis-title { font-weight: 600; color: #6d28d9; margin-bottom: 8px; }
+    .hypothesis-meta { display: flex; gap: 15px; font-size: 13px; color: #666; }
+    .confidence-bar {
+      height: 8px; background: #e5e7eb; border-radius: 4px; margin-top: 8px; overflow: hidden;
+    }
+    .confidence-fill { height: 100%; background: #8b5cf6; border-radius: 4px; }
+    .dialogue-item {
+      display: flex; gap: 12px; padding: 12px; margin-bottom: 8px;
+      background: #f8f9fa; border-radius: 8px;
+    }
+    .dialogue-item.task { background: #eff6ff; border-left: 3px solid #3b82f6; }
+    .dialogue-item.response { background: #f0fdf4; border-left: 3px solid #10b981; }
+    .dialogue-agent { font-weight: 600; color: #6d28d9; min-width: 120px; }
+    .dialogue-content { flex: 1; font-size: 13px; }
+    .finding { margin-bottom: 10px; padding: 10px; border-radius: 6px; border-left: 3px solid; }
+    .finding.critical { background: #fef2f2; border-color: #dc2626; }
+    .finding.warning { background: #fff7ed; border-color: #ea580c; }
+    .finding.info { background: #eff6ff; border-color: #2563eb; }
+    .finding .title { font-weight: 600; margin-bottom: 5px; }
+    .evidence-section { margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; }
+    .evidence-item { font-size: 12px; color: #666; margin-bottom: 4px; }
+    .evidence-support { color: #10b981; }
+    .evidence-contradict { color: #ef4444; }
+    .answer-box {
+      background: #f8f9fa; padding: 20px; border-radius: 8px;
+      white-space: pre-wrap; font-size: 15px; line-height: 1.8;
+    }
+    .footer { padding: 20px; text-align: center; color: #999; font-size: 13px; background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🤖 SmartPerfetto Agent-Driven 分析报告</h1>
+      <div class="meta">
+        <span>📁 Trace ID: ${this.escapeHtml(traceId)}</span>
+        <span>⏱️ ${new Date(timestamp).toLocaleString('zh-CN')}</span>
+        <span class="badge badge-agent">Agent-Driven Architecture</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">执行概览</h2>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="value">${(result.totalDurationMs / 1000).toFixed(1)}s</div>
+          <div class="label">总耗时</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${(result.confidence * 100).toFixed(0)}%</div>
+          <div class="label">置信度</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${result.rounds}</div>
+          <div class="label">分析轮次</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${result.findings.length}</div>
+          <div class="label">发现问题</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${hypotheses.length}</div>
+          <div class="label">假设数</div>
+        </div>
+        <div class="metric-card">
+          <div class="value">${dialogue.length}</div>
+          <div class="label">Agent 对话</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">用户问题</h2>
+      <div class="hypothesis-card">
+        <div class="hypothesis-title" style="color: #166534;">${this.escapeHtml(query)}</div>
+      </div>
+    </div>
+
+    ${hypotheses.length > 0 ? `
+    <div class="section">
+      <h2 class="section-title">假设与验证</h2>
+      ${hypotheses.map((h) => `
+        <div class="hypothesis-card ${h.status === 'confirmed' ? 'confirmed' : h.status === 'rejected' ? 'rejected' : ''}">
+          <div class="hypothesis-title">${this.escapeHtml(h.description)}</div>
+          <div class="hypothesis-meta">
+            <span>状态: ${this.escapeHtml(h.status)}</span>
+            <span>置信度: ${(h.confidence * 100).toFixed(0)}%</span>
+          </div>
+          <div class="confidence-bar">
+            <div class="confidence-fill" style="width: ${h.confidence * 100}%"></div>
+          </div>
+          ${h.supportingEvidence.length > 0 || h.contradictingEvidence.length > 0 ? `
+            <div class="evidence-section">
+              ${h.supportingEvidence.map((e: any) => `
+                <div class="evidence-item evidence-support">✓ ${this.escapeHtml(e.description || String(e))}</div>
+              `).join('')}
+              ${h.contradictingEvidence.map((e: any) => `
+                <div class="evidence-item evidence-contradict">✗ ${this.escapeHtml(e.description || String(e))}</div>
+              `).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+
+    ${dialogue.length > 0 ? `
+    <div class="section">
+      <h2 class="section-title">Agent 对话历史</h2>
+      ${dialogue.slice(0, 20).map((d) => `
+        <div class="dialogue-item ${d.type}">
+          <div class="dialogue-agent">[${this.escapeHtml(d.agentId)}]</div>
+          <div class="dialogue-content">
+            <strong>${d.type === 'task' ? '任务派发' : d.type === 'response' ? '任务完成' : '问询'}:</strong>
+            ${d.content?.message || d.content?.phase || JSON.stringify(d.content).substring(0, 200)}
+          </div>
+        </div>
+      `).join('')}
+      ${dialogue.length > 20 ? `<div style="text-align: center; color: #666; padding: 10px;">... 还有 ${dialogue.length - 20} 条对话记录</div>` : ''}
+    </div>
+    ` : ''}
+
+    ${result.findings.length > 0 ? `
+    <div class="section">
+      <h2 class="section-title">发现的问题</h2>
+      ${result.findings.map((f) => `
+        <div class="finding ${f.severity}">
+          <div class="title">[${this.escapeHtml(f.severity)}] ${this.escapeHtml(f.title)}</div>
+          <div style="font-size: 13px; color: #666;">${this.escapeHtml(f.description || '')}</div>
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+
+    <div class="section">
+      <h2 class="section-title">分析结论</h2>
+      <div class="answer-box">
+        ${this.formatAnswer(result.conclusion)}
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>由 SmartPerfetto Agent-Driven Orchestrator 生成</p>
+      <p style="margin-top: 5px; font-size: 12px;">Powered by AI Agents + Hypothesis-Driven Architecture</p>
+    </div>
+  </div>
+</body>
+</html>`;
   }
 
   generateFromSession(session: AnalysisSession, answer: string): string {
