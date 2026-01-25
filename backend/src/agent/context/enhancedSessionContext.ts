@@ -17,6 +17,11 @@ import {
   FindingReference,
   ReferencedEntity,
 } from '../types';
+import {
+  EntityStore,
+  createEntityStore,
+  EntityStoreSnapshot,
+} from './entityStore';
 
 /**
  * Enhanced session context for multi-turn dialogue
@@ -31,10 +36,20 @@ export class EnhancedSessionContext {
   private references: FindingReference[] = [];
   private topicsDiscussed: Set<string> = new Set();
   private openQuestions: string[] = [];
+  private entityStore: EntityStore;
 
   constructor(sessionId: string, traceId: string) {
     this.sessionId = sessionId;
     this.traceId = traceId;
+    this.entityStore = createEntityStore();
+  }
+
+  /**
+   * Get the entity store for frame/session caching.
+   * Used by follow-up resolution and drill-down executor.
+   */
+  getEntityStore(): EntityStore {
+    return this.entityStore;
   }
 
   /**
@@ -321,11 +336,64 @@ export class EnhancedSessionContext {
    * Returns entities (frames, sessions, etc.) that can be referenced
    * in follow-up queries. Used by LLM to understand what drill-down
    * targets are available.
+   *
+   * Priority: EntityStore (richer + stable) -> findings scan (fallback)
    */
   extractReferenceableEntities(): ReferencedEntity[] {
     const entities: ReferencedEntity[] = [];
     const seen = new Set<string>();
 
+    // 1. First, extract from EntityStore (preferred source - richer data)
+    for (const frame of this.entityStore.getAllFrames()) {
+      const key = `frame:${frame.frame_id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        entities.push({
+          type: 'frame',
+          id: frame.frame_id,
+          value: {
+            start_ts: frame.start_ts,
+            end_ts: frame.end_ts,
+            process_name: frame.process_name,
+            session_id: frame.session_id,
+            jank_type: frame.jank_type,
+            dur_ms: frame.dur_ms,
+            main_start_ts: frame.main_start_ts,
+            main_end_ts: frame.main_end_ts,
+            render_start_ts: frame.render_start_ts,
+            render_end_ts: frame.render_end_ts,
+            pid: frame.pid,
+            layer_name: frame.layer_name,
+            vsync_missed: frame.vsync_missed,
+          },
+          // EntityStore doesn't track turn, use -1 to indicate store source
+          fromTurn: -1,
+        });
+      }
+    }
+
+    for (const session of this.entityStore.getAllSessions()) {
+      const key = `session:${session.session_id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        entities.push({
+          type: 'session',
+          id: session.session_id,
+          value: {
+            start_ts: session.start_ts,
+            end_ts: session.end_ts,
+            process_name: session.process_name,
+            frame_count: session.frame_count,
+            jank_count: session.jank_count,
+            max_vsync_missed: session.max_vsync_missed,
+            jank_types: session.jank_types,
+          },
+          fromTurn: -1,
+        });
+      }
+    }
+
+    // 2. Then, scan findings for any entities not in store (fallback)
     for (const turn of this.turns) {
       for (const finding of turn.findings) {
         // Extract frame_id entities
@@ -432,7 +500,8 @@ export class EnhancedSessionContext {
       findingTurnMap: Array.from(this.findingTurnMap.entries()),
       references: this.references,
       topicsDiscussed: Array.from(this.topicsDiscussed),
-      openQuestions: this.openQuestions
+      openQuestions: this.openQuestions,
+      entityStore: this.entityStore.serialize(),
     });
   }
 
@@ -448,6 +517,12 @@ export class EnhancedSessionContext {
     ctx.references = data.references;
     ctx.topicsDiscussed = new Set(data.topicsDiscussed);
     ctx.openQuestions = data.openQuestions;
+
+    // Restore EntityStore if present
+    if (data.entityStore) {
+      ctx.entityStore = EntityStore.deserialize(data.entityStore);
+    }
+
     return ctx;
   }
 }

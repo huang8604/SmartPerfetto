@@ -152,11 +152,53 @@ export interface Diagnostic {
 // Orchestrator Types
 // =============================================================================
 
+/**
+ * Follow-up type classification for multi-turn dialogue
+ */
+export type FollowUpType = 'initial' | 'drill_down' | 'clarify' | 'extend' | 'compare';
+
+/**
+ * Referenced entity extracted from user query
+ * Used to link follow-up queries to previous findings
+ */
+export interface ReferencedEntity {
+  /** Entity type being referenced */
+  type: 'frame' | 'session' | 'process' | 'binder_call' | 'time_range';
+  /** Entity identifier (e.g., frame_id, session_id) */
+  id?: number | string;
+  /** Additional value data */
+  value?: any;
+  /** Which turn this entity was discovered in (0-based) */
+  fromTurn?: number;
+}
+
 export interface Intent {
   primaryGoal: string;
   aspects: string[];
   expectedOutputType: 'diagnosis' | 'comparison' | 'timeline' | 'summary';
   complexity: 'simple' | 'moderate' | 'complex';
+
+  /**
+   * Follow-up type for multi-turn conversations
+   * - initial: First query, no prior context
+   * - drill_down: Deep dive into specific finding (e.g., "详细分析帧456")
+   * - clarify: Request explanation of previous finding
+   * - extend: Expand analysis scope
+   * - compare: Compare multiple findings
+   */
+  followUpType?: FollowUpType;
+
+  /**
+   * Entities referenced in the user query that link to previous findings
+   * Populated by LLM during intent understanding
+   */
+  referencedEntities?: ReferencedEntity[];
+
+  /**
+   * Parameters extracted from query that can be passed directly to skills
+   * e.g., { frame_id: 456, session_id: 2 }
+   */
+  extractedParams?: Record<string, any>;
 }
 
 export interface AnalysisPlan {

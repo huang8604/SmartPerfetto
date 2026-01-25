@@ -139,7 +139,6 @@ export class SkillExecutorAdapter implements SkillExecutorInterface {
       case 'startup_analysis':
         return this.transformStartupResult(result);
 
-      case 'janky_frame_analysis':
       case 'jank_frame_detail':
         return this.transformJankResult(result);
 

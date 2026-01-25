@@ -1,0 +1,79 @@
+# =============================================================================
+# GPU 频率分析 (Atomic Skill)
+# =============================================================================
+# 分析指定时间范围内 GPU 频率变化
+# 检测 GPU 频率是否跟上渲染需求
+
+name: gpu_freq_in_range
+version: "1.0"
+type: atomic
+category: gpu
+
+meta:
+  display_name: "GPU 频率分析"
+  description: "分析 GPU 频率变化情况"
+  icon: "speed"
+  tags: [gpu, frequency, atomic]
+
+prerequisites:
+  modules:
+    - android.gpu.frequency
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+
+display:
+  level: detail
+  layer: deep
+  title: "GPU 频率"
+  columns:
+    - name: gpu_id
+      label: "GPU"
+      type: number
+    - name: avg_freq_mhz
+      label: "平均频率"
+      type: number
+    - name: max_freq_mhz
+      label: "最大频率"
+      type: number
+    - name: min_freq_mhz
+      label: "最小频率"
+      type: number
+    - name: freq_changes
+      label: "变频次数"
+      type: number
+    - name: low_freq_pct
+      label: "低频占比"
+      type: percentage
+      format: percentage
+
+sql: |
+  INCLUDE PERFETTO MODULE android.gpu.frequency;
+  WITH gpu_samples AS (
+    SELECT
+      gpu_id,
+      gpu_freq,
+      dur,
+      CASE WHEN gpu_freq < 400000000 THEN dur ELSE 0 END as low_freq_dur  -- < 400MHz
+    FROM android_gpu_frequency
+    WHERE ts >= ${start_ts} AND ts < ${end_ts}
+  )
+  SELECT
+    gpu_id,
+    ROUND(SUM(gpu_freq * dur) / NULLIF(SUM(dur), 0) / 1e6, 0) as avg_freq_mhz,
+    ROUND(MAX(gpu_freq) / 1e6, 0) as max_freq_mhz,
+    ROUND(MIN(gpu_freq) / 1e6, 0) as min_freq_mhz,
+    COUNT(DISTINCT gpu_freq) as freq_changes,
+    ROUND(100.0 * SUM(low_freq_dur) / NULLIF(SUM(dur), 0), 1) as low_freq_pct
+  FROM gpu_samples
+  GROUP BY gpu_id
+
+output:
+  format: structured

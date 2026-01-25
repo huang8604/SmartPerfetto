@@ -1,0 +1,93 @@
+# =============================================================================
+# Binder 阻塞分析 (Atomic Skill)
+# =============================================================================
+# 分析指定时间范围内同步 Binder 调用的阻塞情况
+# 检测对端进程响应延迟导致的主线程卡顿
+
+name: binder_blocking_in_range
+version: "1.0"
+type: atomic
+category: ipc
+
+meta:
+  display_name: "Binder 阻塞分析"
+  description: "分析同步 Binder 调用中对端进程的响应延迟"
+  icon: "call_made"
+  tags: [binder, ipc, blocking, atomic]
+
+prerequisites:
+  modules:
+    - android.binder
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB 匹配）"
+
+display:
+  level: detail
+  layer: deep
+  title: "Binder 同步阻塞"
+  columns:
+    - name: server_process
+      label: "对端进程"
+      type: string
+    - name: interface
+      label: "接口"
+      type: string
+    - name: call_count
+      label: "调用次数"
+      type: number
+    - name: total_block_ms
+      label: "总阻塞时间"
+      type: duration
+      format: duration_ms
+    - name: server_exec_ms
+      label: "服务端执行"
+      type: duration
+      format: duration_ms
+    - name: max_block_ms
+      label: "最大阻塞"
+      type: duration
+      format: duration_ms
+    - name: is_main_blocked
+      label: "主线程被阻"
+      type: boolean
+
+sql: |
+  WITH target_main_thread AS (
+    SELECT t.tid
+    FROM thread t
+    JOIN process p ON t.upid = p.upid
+    WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+      AND t.tid = p.pid  -- 主线程
+  )
+  SELECT
+    bt.server_process,
+    COALESCE(bt.aidl_name, bt.server_thread, 'unknown') as interface,
+    COUNT(*) as call_count,
+    ROUND(SUM(bt.client_dur) / 1e6, 2) as total_block_ms,
+    ROUND(SUM(bt.server_dur) / 1e6, 2) as server_exec_ms,
+    ROUND(MAX(bt.client_dur) / 1e6, 2) as max_block_ms,
+    MAX(CASE WHEN bt.client_tid IN (SELECT tid FROM target_main_thread) THEN 1 ELSE 0 END) as is_main_blocked
+  FROM android_binder_txns bt
+  WHERE bt.client_ts >= ${start_ts} AND bt.client_ts < ${end_ts}
+    AND bt.is_sync = 1  -- 只关注同步调用
+    AND (bt.client_process GLOB '${package}*' OR '${package}' = '')
+    AND bt.client_dur > 500000  -- > 0.5ms
+  GROUP BY bt.server_process, interface
+  HAVING total_block_ms > 0.5
+  ORDER BY total_block_ms DESC
+  LIMIT 10
+
+output:
+  format: structured

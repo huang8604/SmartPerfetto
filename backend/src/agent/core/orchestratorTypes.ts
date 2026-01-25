@@ -239,6 +239,8 @@ export interface ExecutionContext {
 // Executor Result (accumulated output from any executor)
 // =============================================================================
 
+import type { CapturedEntities } from './entityCapture';
+
 export interface ExecutorResult {
   findings: Finding[];
   lastStrategy: StrategyDecision | null;
@@ -246,6 +248,21 @@ export interface ExecutorResult {
   informationGaps: string[];
   rounds: number;
   stopReason: string | null;
+
+  /**
+   * Captured entities from this execution (frames, sessions).
+   * Applied to EntityStore by orchestrator after execution.
+   */
+  capturedEntities?: CapturedEntities;
+
+  /**
+   * Entity IDs that were analyzed in this execution.
+   * Used to mark entities as analyzed in EntityStore for extend support.
+   */
+  analyzedEntityIds?: {
+    frames?: string[];
+    sessions?: string[];
+  };
 }
 
 // =============================================================================

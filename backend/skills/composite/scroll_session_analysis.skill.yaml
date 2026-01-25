@@ -205,6 +205,7 @@ steps:
         frame_number,
         phase,
         printf('%d', ts) as ts_str,
+        printf('%d', ts + dur) as end_ts_str,
         printf('%d', dur) as dur_str,
         ROUND(dur_ms, 2) AS dur_ms,
         CASE
@@ -225,10 +226,11 @@ steps:
     type: iterator
     name: "掉帧原因分析"
     source: janky_frames
-    item_skill: janky_frame_analysis
+    item_skill: jank_frame_detail
     item_params:
-      frame_ts: ts_str
-      frame_dur: dur_str
+      start_ts: ts_str
+      end_ts: end_ts_str
+      dur_ms: dur_ms
     display:
       level: key
       layer: deep

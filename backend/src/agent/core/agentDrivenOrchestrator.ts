@@ -38,6 +38,8 @@ import {
 } from '../context/enhancedSessionContext';
 import { resolveFollowUp, FollowUpResolution } from './followUpHandler';
 import { CircuitBreaker } from './circuitBreaker';
+import { resolveDrillDown, DrillDownResolved } from './drillDownResolver';
+import { applyCapturedEntities } from './entityCapture';
 
 import {
   AgentDrivenOrchestratorConfig,
@@ -48,12 +50,16 @@ import {
   ProgressEmitter,
   ExecutionContext,
 } from './orchestratorTypes';
+import type { Hypothesis } from '../types/agentProtocol';
 import { understandIntent } from './intentUnderstanding';
 import { generateInitialHypotheses, translateFollowUpType } from './hypothesisGenerator';
 import { generateConclusion } from './conclusionGenerator';
 import { StrategyExecutor } from './executors/strategyExecutor';
 import { HypothesisExecutor } from './executors/hypothesisExecutor';
 import { DirectDrillDownExecutor } from './executors/directDrillDownExecutor';
+import { ClarifyExecutor } from './executors/clarifyExecutor';
+import { ComparisonExecutor } from './executors/comparisonExecutor';
+import { ExtendExecutor } from './executors/extendExecutor';
 import type { AnalysisExecutor } from './executors/analysisExecutor';
 
 // =============================================================================
@@ -144,20 +150,96 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         }
       }
 
-      // 4. Generate hypotheses WITH session context
-      const initialHypotheses = await generateInitialHypotheses(
-        query, intent, sessionContext, this.modelRouter, this.agentRegistry, emitter
-      );
+      // 4. Generate hypotheses - with smart skip for drill-down on cached entities
+      // Fix: 对于 drill-down follow-up，如果目标实体已在 EntityStore 中有完整分析，
+      // 跳过假设生成，避免重复工作
+      let initialHypotheses: Hypothesis[] = [];
+      const entityStore = sessionContext?.getEntityStore();
+      const targetFrameId = intent.extractedParams?.frame_id;
+      const targetSessionId = intent.extractedParams?.session_id;
+
+      // Check if this is a drill-down with cached entity data
+      // Use wasFrameAnalyzed/wasSessionAnalyzed to check if entity was already analyzed
+      const isDrillDownWithCachedFrame =
+        intent.followUpType === 'drill_down' &&
+        targetFrameId &&
+        entityStore?.wasFrameAnalyzed(String(targetFrameId));
+
+      const isDrillDownWithCachedSession =
+        intent.followUpType === 'drill_down' &&
+        targetSessionId &&
+        entityStore?.wasSessionAnalyzed(String(targetSessionId));
+
+      const shouldSkipHypothesisGeneration = isDrillDownWithCachedFrame || isDrillDownWithCachedSession;
+
+      if (shouldSkipHypothesisGeneration) {
+        // Skip hypothesis generation for drill-down on already-analyzed entities
+        const entityType = isDrillDownWithCachedFrame ? 'frame' : 'session';
+        const entityId = isDrillDownWithCachedFrame ? targetFrameId : targetSessionId;
+        emitter.log(`[DrillDown] Skipping hypothesis generation - ${entityType} ${entityId} already cached in EntityStore`);
+
+        // Generate minimal targeted hypothesis for drill-down context
+        initialHypotheses = [{
+          id: `drill_down_${entityType}_${entityId}`,
+          description: `深入分析 ${entityType === 'frame' ? '帧' : '会话'} ${entityId} 的详细数据`,
+          status: 'investigating',
+          confidence: 0.8,
+          relevantAgents: ['frame_agent'],
+          supportingEvidence: [],
+          contradictingEvidence: [],
+          proposedBy: 'drill_down_resolver',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }];
+      } else {
+        // Normal hypothesis generation for initial queries or new entities
+        initialHypotheses = await generateInitialHypotheses(
+          query, intent, sessionContext, this.modelRouter, this.agentRegistry, emitter
+        );
+      }
+
       for (const hypothesis of initialHypotheses) {
         this.messageBus.updateHypothesis(hypothesis);
       }
       emitter.emitUpdate('progress', {
         phase: 'hypotheses_generated',
-        message: `生成 ${initialHypotheses.length} 个假设`,
+        message: shouldSkipHypothesisGeneration
+          ? `使用缓存数据，跳过假设生成`
+          : `生成 ${initialHypotheses.length} 个假设`,
         hypotheses: initialHypotheses.map(h => h.description),
       });
 
-      // 5. Build execution context with follow-up resolution
+      // 5. Enhanced drill-down resolution using EntityStore cache
+      let drillDownResolved: DrillDownResolved | null = null;
+      let effectiveIntervals = followUpResolution.focusIntervals;
+
+      if (intent.followUpType === 'drill_down') {
+        // Try cache-first resolution via drillDownResolver
+        drillDownResolved = await resolveDrillDown(
+          intent,
+          followUpResolution,
+          sessionContext,
+          options.traceProcessorService,
+          traceId
+        );
+
+        if (drillDownResolved && drillDownResolved.intervals.length > 0) {
+          effectiveIntervals = drillDownResolved.intervals;
+
+          // Log resolution traces for observability
+          for (const trace of drillDownResolved.traces) {
+            emitter.log(`[DrillDownResolver] ${trace.entityType}:${trace.entityId} resolved via [${trace.used.join(' → ')}]${trace.enriched ? ' (enriched)' : ''}`);
+          }
+
+          emitter.emitUpdate('progress', {
+            phase: 'follow_up_resolved',
+            message: `已解析 ${drillDownResolved.intervals.length} 个目标区间`,
+            resolutionTraces: drillDownResolved.traces,
+          });
+        }
+      }
+
+      // 6. Build execution context with follow-up resolution
       const executionCtx: ExecutionContext = {
         query,
         sessionId,
@@ -171,15 +253,15 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           ...(followUpResolution.resolvedParams && {
             resolvedFollowUpParams: followUpResolution.resolvedParams,
           }),
-          // Pass pre-built focus intervals for drill-down
-          ...(followUpResolution.focusIntervals && {
-            prebuiltIntervals: followUpResolution.focusIntervals,
+          // Pass pre-built focus intervals for drill-down (may be from drillDownResolver)
+          ...(effectiveIntervals && {
+            prebuiltIntervals: effectiveIntervals,
           }),
         },
         config: this.config,
       };
 
-      // 6. Select and run executor
+      // 7. Select and run executor
       const services: AnalysisServices = {
         modelRouter: this.modelRouter,
         messageBus: this.messageBus,
@@ -187,35 +269,86 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       };
 
       // Executor selection priority:
-      // 1. Direct drill-down executor for explicit drill-down follow-ups with focus intervals
-      // 2. Strategy executor if a strategy matches the query
-      // 3. Hypothesis executor as fallback for adaptive analysis
+      // 1. Clarify executor for clarification follow-ups (read-only, no SQL)
+      // 2. Comparison executor for compare follow-ups (multiple entities)
+      // 3. Extend executor for extend follow-ups (analyze more entities)
+      // 4. Direct drill-down executor for explicit drill-down follow-ups with focus intervals
+      // 5. Strategy executor if a strategy matches the query
+      // 6. Hypothesis executor as fallback for adaptive analysis
       let executor: AnalysisExecutor;
 
-      const isDrillDown = followUpResolution.isFollowUp &&
-        intent.followUpType === 'drill_down' &&
-        followUpResolution.focusIntervals &&
-        followUpResolution.focusIntervals.length > 0;
+      const followUpType = intent.followUpType;
 
-      if (isDrillDown) {
-        // Direct drill-down: bypasses strategy pipeline, runs target skill directly
-        emitter.log(`[Routing] Using DirectDrillDownExecutor for ${followUpResolution.focusIntervals!.length} interval(s)`);
-        executor = new DirectDrillDownExecutor(followUpResolution, services);
+      if (followUpType === 'clarify') {
+        // Clarify: read-only explanation, no SQL queries
+        emitter.log('[Routing] Using ClarifyExecutor for clarification request');
+        executor = new ClarifyExecutor(sessionContext, services);
+      } else if (followUpType === 'compare') {
+        // Compare: resolve multiple entities and produce comparison
+        emitter.log('[Routing] Using ComparisonExecutor for comparison request');
+        executor = new ComparisonExecutor(
+          sessionContext,
+          services,
+          options.traceProcessorService,
+          traceId
+        );
+      } else if (followUpType === 'extend') {
+        // Extend: analyze unanalyzed candidate entities
+        emitter.log('[Routing] Using ExtendExecutor for extend request');
+        executor = new ExtendExecutor(
+          sessionContext,
+          services,
+          options.traceProcessorService,
+          traceId
+        );
       } else {
-        // Normal path: strategy matching or hypothesis-driven
-        const matchedStrategy = this.strategyRegistry.match(query);
-        if (matchedStrategy) {
-          emitter.log(`[Routing] Using StrategyExecutor: ${matchedStrategy.name}`);
-          executor = new StrategyExecutor(matchedStrategy, services);
+        const isDrillDown = followUpResolution.isFollowUp &&
+          followUpType === 'drill_down' &&
+          effectiveIntervals &&
+          effectiveIntervals.length > 0;
+
+        if (isDrillDown) {
+          // Direct drill-down: bypasses strategy pipeline, runs target skill directly
+          // Update followUpResolution with resolved intervals
+          const enhancedFollowUp: FollowUpResolution = {
+            ...followUpResolution,
+            focusIntervals: effectiveIntervals,
+          };
+          emitter.log(`[Routing] Using DirectDrillDownExecutor for ${effectiveIntervals!.length} interval(s)`);
+          executor = new DirectDrillDownExecutor(enhancedFollowUp, services);
         } else {
-          emitter.log('[Routing] Using HypothesisExecutor (no strategy match)');
-          executor = new HypothesisExecutor(services, this.agentRegistry, this.strategyPlanner);
+          // Normal path: strategy matching or hypothesis-driven
+          const matchedStrategy = this.strategyRegistry.match(query);
+          if (matchedStrategy) {
+            emitter.log(`[Routing] Using StrategyExecutor: ${matchedStrategy.name}`);
+            executor = new StrategyExecutor(matchedStrategy, services);
+          } else {
+            emitter.log('[Routing] Using HypothesisExecutor (no strategy match)');
+            executor = new HypothesisExecutor(services, this.agentRegistry, this.strategyPlanner);
+          }
         }
       }
 
       const executorResult = await executor.execute(executionCtx, emitter);
 
-      // 7. Generate conclusion
+      // 8. Apply captured entities to EntityStore (single write-back point)
+      if (executorResult.capturedEntities) {
+        applyCapturedEntities(sessionContext.getEntityStore(), executorResult.capturedEntities);
+        emitter.log(`[EntityStore] Applied ${executorResult.capturedEntities.frames.length} frames, ${executorResult.capturedEntities.sessions.length} sessions`);
+      }
+
+      // Mark analyzed entity IDs
+      if (executorResult.analyzedEntityIds) {
+        const store = sessionContext.getEntityStore();
+        for (const frameId of executorResult.analyzedEntityIds.frames || []) {
+          store.markFrameAnalyzed(frameId);
+        }
+        for (const sessionId of executorResult.analyzedEntityIds.sessions || []) {
+          store.markSessionAnalyzed(sessionId);
+        }
+      }
+
+      // 9. Generate conclusion
       emitter.emitUpdate('progress', { phase: 'concluding', message: '生成分析结论' });
       const conclusion = await generateConclusion(
         sharedContext, executorResult.findings, intent,
@@ -229,7 +362,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         rounds: executorResult.rounds,
       });
 
-      // 8. Build result
+      // 10. Build result
       const result: AnalysisResult = {
         sessionId,
         success: true,
@@ -241,7 +374,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         totalDurationMs: Date.now() - startTime,
       };
 
-      // 9. Record this turn in session context for future follow-ups
+      // 11. Record this turn in session context for future follow-ups
       sessionContext.addTurn(query, intent, {
         success: result.success,
         findings: result.findings,

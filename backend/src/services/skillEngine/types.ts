@@ -413,6 +413,22 @@ export interface DisplayResult {
   metadataFields?: string[];
   /** 隐藏的列（保留数据但不显示） */
   hidden_columns?: string[];
+  /** 完整的列定义（包含 type, format, hidden, clickAction 等） */
+  columnDefinitions?: Array<{
+    name: string;
+    label?: string;
+    type?: string;
+    format?: string;
+    hidden?: boolean;
+    clickAction?: string;
+    durationColumn?: string;
+    unit?: string;
+    width?: string | number;
+    tooltip?: string;
+    enumValues?: string[];
+    sortable?: boolean;
+    defaultSort?: 'asc' | 'desc';
+  }>;
 }
 
 export interface DiagnosticResult {

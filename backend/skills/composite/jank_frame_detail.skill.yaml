@@ -14,14 +14,29 @@ prerequisites:
     - android.binder
     - android.slices
     - android.monitor_contention
+    - android.garbage_collection
+    - android.gpu.frequency
 
 inputs:
+  # Primary timing inputs (at least one pair required)
   - name: start_ts
     type: timestamp
-    required: true
+    required: false
+    description: "帧开始时间戳(ns)，优先使用"
   - name: end_ts
     type: timestamp
-    required: true
+    required: false
+    description: "帧结束时间戳(ns)"
+  # Legacy compatibility (from janky_frame_analysis)
+  - name: frame_ts
+    type: timestamp
+    required: false
+    description: "帧开始时间戳(ns)，兼容旧接口，等同于 start_ts"
+  - name: frame_dur
+    type: duration
+    required: false
+    description: "帧持续时间(ns)，兼容旧接口，用于计算 end_ts"
+  # Thread-specific timing
   - name: main_start_ts
     type: timestamp
     required: false
@@ -40,6 +55,7 @@ inputs:
   - name: render_dur_ms
     type: number
     required: false
+  # Process/frame identity
   - name: package
     type: string
     required: false
@@ -48,16 +64,19 @@ inputs:
     required: false
   - name: frame_id
     type: integer
-    required: true
+    required: false
+    description: "帧 ID，可选"
   - name: frame_index
     type: integer
     required: false
   - name: jank_type
     type: string
-    required: true
+    required: false
+    description: "掉帧类型，可选，默认 'Unknown'"
   - name: dur_ms
     type: number
-    required: true
+    required: false
+    description: "帧耗时(ms)，可选，可从 start_ts/end_ts 计算"
   - name: session_id
     type: integer
     required: false
@@ -93,6 +112,68 @@ steps:
           ELSE 0
         END as has_monitor_contention
     save_as: monitor_contention
+
+  # ===== 数据源检测：GC 表是否可用 =====
+  - id: gc_table_check
+    type: atomic
+    name: "GC 数据源检测"
+    display: false
+    sql: |
+      SELECT
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'android_garbage_collection_events'
+          ) THEN 1
+          ELSE 0
+        END as has_gc_table
+    save_as: gc_availability
+    optional: true
+
+  # ===== 数据源检测：GPU 数据是否可用 =====
+  - id: gpu_table_check
+    type: atomic
+    name: "GPU 数据源检测"
+    display: false
+    sql: |
+      SELECT
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM slice s
+            JOIN thread_track tt ON s.track_id = tt.id
+            JOIN thread t ON tt.utid = t.utid
+            WHERE t.name = 'RenderThread'
+              AND (s.name GLOB '*Draw*' OR s.name GLOB '*eglSwap*' OR s.name GLOB '*Fence*')
+            LIMIT 1
+          ) THEN 1
+          ELSE 0
+        END as has_gpu_slices,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'android_gpu_frequency'
+          ) THEN 1
+          ELSE 0
+        END as has_gpu_freq
+    save_as: gpu_availability
+    optional: true
+
+  # ===== 数据源检测：Binder 详细数据 =====
+  - id: binder_table_check
+    type: atomic
+    name: "Binder 数据源检测"
+    display: false
+    sql: |
+      SELECT
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = 'android_binder_txns'
+          ) THEN 1
+          ELSE 0
+        END as has_binder_table
+    save_as: binder_availability
+    optional: true
 
   # 四象限分析：输出格式直接匹配前端展示需求
   # 前端期望: [{ quadrant, name, dur_ms, percentage }]
@@ -351,6 +432,7 @@ steps:
       ORDER BY dur_ms DESC
       LIMIT 10
     save_as: main_slices
+    optional: true
     output_schema:
       type: array
       items:
@@ -543,6 +625,240 @@ steps:
     optional: true
     condition: "monitor_contention.data[0]?.has_monitor_contention === 1"
 
+  # ===== GC 与帧重叠分析 =====
+  - id: gc_in_frame
+    type: atomic
+    name: "GC 影响分析"
+    display:
+      level: detail
+      layer: deep
+      title: "GC 与帧重叠"
+      columns:
+        - name: gc_type
+          label: "GC 类型"
+          type: string
+        - name: gc_count
+          label: "GC 次数"
+          type: number
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: overlap_ms
+          label: "与帧重叠"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大单次"
+          type: duration
+          format: duration_ms
+    sql: |
+      INCLUDE PERFETTO MODULE android.garbage_collection;
+      WITH gc_events AS (
+        SELECT
+          gc.tid,
+          gc.gc_type,
+          gc.ts as gc_ts,
+          gc.dur as gc_dur,
+          -- Calculate overlap with frame window
+          MAX(gc.ts, ${start_ts}) as overlap_start,
+          MIN(gc.ts + gc.dur, ${end_ts}) as overlap_end
+        FROM android_garbage_collection_events gc
+        JOIN thread t ON gc.tid = t.tid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND gc.ts < ${end_ts}
+          AND gc.ts + gc.dur > ${start_ts}
+      )
+      SELECT
+        gc_type,
+        COUNT(*) as gc_count,
+        ROUND(SUM(gc_dur) / 1e6, 2) as total_dur_ms,
+        ROUND(SUM(CASE WHEN overlap_end > overlap_start THEN overlap_end - overlap_start ELSE 0 END) / 1e6, 2) as overlap_ms,
+        ROUND(MAX(gc_dur) / 1e6, 2) as max_dur_ms
+      FROM gc_events
+      GROUP BY gc_type
+      HAVING overlap_ms > 0
+      ORDER BY overlap_ms DESC
+    save_as: gc_data
+    optional: true
+    condition: "gc_availability?.data?.[0]?.has_gc_table === 1"
+
+  # ===== IO 阻塞分析（D/DK 状态）=====
+  - id: io_blocking
+    type: atomic
+    name: "IO 阻塞分析"
+    display:
+      level: detail
+      layer: deep
+      title: "IO 阻塞"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: blocked_count
+          label: "阻塞次数"
+          type: number
+        - name: total_ms
+          label: "总阻塞时间"
+          type: duration
+          format: duration_ms
+        - name: max_ms
+          label: "最大单次"
+          type: duration
+          format: duration_ms
+        - name: io_cause
+          label: "等待原因"
+          type: string
+    sql: |
+      WITH target_threads AS (
+        SELECT t.utid, t.tid, t.name as thread_name, p.pid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND (t.tid = p.pid OR t.name = 'RenderThread')
+      ),
+      io_states AS (
+        SELECT
+          tt.thread_name,
+          ts.dur,
+          ts.state,
+          ts.io_wait,
+          ts.blocked_function
+        FROM thread_state ts
+        JOIN target_threads tt ON ts.utid = tt.utid
+        WHERE ts.ts >= ${start_ts}
+          AND ts.ts < ${end_ts}
+          AND ts.state IN ('D', 'DK')
+          AND ts.dur > 100000
+      )
+      SELECT
+        thread_name,
+        COUNT(*) as blocked_count,
+        ROUND(SUM(dur) / 1e6, 2) as total_ms,
+        ROUND(MAX(dur) / 1e6, 2) as max_ms,
+        COALESCE(
+          MAX(blocked_function),
+          CASE WHEN MAX(io_wait) = 1 THEN 'IO wait' ELSE 'kernel wait' END
+        ) as io_cause
+      FROM io_states
+      GROUP BY thread_name
+      HAVING total_ms > 0.1
+      ORDER BY total_ms DESC
+    save_as: io_data
+    optional: true
+
+  # ===== P0: 调度延迟分析 (引用 atomic skill) =====
+  - id: sched_latency
+    skill: sched_latency_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      package: "${package}"
+    save_as: sched_data
+    optional: true
+
+  # ===== P0: 大小核迁移分析 (引用 atomic skill) =====
+  - id: task_migration
+    skill: task_migration_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      package: "${package}"
+    save_as: migration_data
+    optional: true
+
+  # ===== P0: GPU 渲染操作分析 (引用 atomic skill) =====
+  - id: gpu_render
+    skill: gpu_render_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      package: "${package}"
+    save_as: gpu_data
+    optional: true
+    condition: "gpu_availability?.data?.[0]?.has_gpu_slices === 1"
+
+  # ===== P0: Binder 阻塞分析 (引用 atomic skill) =====
+  - id: binder_blocking
+    skill: binder_blocking_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      package: "${package}"
+    save_as: binder_blocking_data
+    optional: true
+    condition: "binder_availability?.data?.[0]?.has_binder_table === 1"
+
+  # ===== P0: CPU 限频检测 (引用 atomic skill) =====
+  - id: cpu_throttling
+    skill: cpu_throttling_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: throttling_data
+    optional: true
+
+  # ===== P0: CPU 簇负载分析 (引用 atomic skill) =====
+  - id: cpu_cluster_load
+    skill: cpu_cluster_load_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: cluster_load_data
+    optional: true
+
+  # ===== P0: 内存页面错误分析 (引用 atomic skill) =====
+  - id: page_fault
+    skill: page_fault_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      package: "${package}"
+    save_as: page_fault_data
+    optional: true
+
+  # ===== P1: SurfaceFlinger 合成分析 (引用 atomic skill) =====
+  - id: sf_composition
+    skill: sf_composition_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: sf_data
+    optional: true
+
+  # ===== P1: GPU 频率分析 (引用 atomic skill) =====
+  - id: gpu_freq
+    skill: gpu_freq_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: gpu_freq_data
+    optional: true
+    condition: "gpu_availability?.data?.[0]?.has_gpu_freq === 1"
+
+  # ===== P1: VSync 对齐分析 (引用 atomic skill) =====
+  - id: vsync_alignment
+    skill: vsync_alignment_in_range
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    save_as: vsync_data
+    optional: true
+
+  # ===== P1: 渲染流水线分解 (引用 atomic skill) =====
+  - id: render_pipeline
+    skill: render_pipeline_latency
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+      main_start_ts: "${main_start_ts}"
+      main_end_ts: "${main_end_ts}"
+      render_start_ts: "${render_start_ts}"
+      render_end_ts: "${render_end_ts}"
+    save_as: pipeline_data
+    optional: true
+
   # ===== 根因分析总结：综合所有数据给出明确结论 =====
   - id: root_cause_summary
     type: atomic
@@ -657,7 +973,54 @@ steps:
         WHERE t.name = 'cpufreq'
           AND c.ts >= ${start_ts} AND c.ts < ${end_ts}
       ),
-      -- 6. 综合根因判断
+      -- 6. IO 阻塞检测（主线程 D/DK 状态）
+      io_block AS (
+        SELECT COALESCE(ROUND(SUM(ts2.dur) / 1e6, 2), 0) as io_block_ms
+        FROM thread_state ts2
+        JOIN target_threads tt2 ON ts2.utid = tt2.utid
+        WHERE tt2.thread_type = 'MainThread'
+          AND ts2.ts >= ${start_ts} AND ts2.ts < ${end_ts}
+          AND ts2.state IN ('D', 'DK')
+      ),
+      -- 7. 调度延迟检测（Runnable 等待）
+      sched_latency AS (
+        SELECT
+          COALESCE(ROUND(MAX(ts3.dur) / 1e6, 2), 0) as max_sched_ms,
+          COALESCE(ROUND(SUM(ts3.dur) / 1e6, 2), 0) as total_sched_ms
+        FROM thread_state ts3
+        JOIN target_threads tt3 ON ts3.utid = tt3.utid
+        WHERE tt3.thread_type = 'MainThread'
+          AND ts3.ts >= ${start_ts} AND ts3.ts < ${end_ts}
+          AND ts3.state = 'R'
+      ),
+      -- 8. GPU Fence 检测
+      gpu_fence AS (
+        SELECT COALESCE(ROUND(SUM(s.dur) / 1e6, 2), 0) as fence_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND t.name = 'RenderThread'
+          AND s.ts >= ${start_ts} AND s.ts < ${end_ts}
+          AND (s.name GLOB '*Fence*' OR s.name GLOB '*fence*')
+      ),
+      -- 9. CPU 簇负载检测
+      cluster_load AS (
+        SELECT
+          ROUND(100.0 * SUM(CASE WHEN ts.cpu >= 4 THEN
+            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
+          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as big_load_pct,
+          ROUND(100.0 * SUM(CASE WHEN ts.cpu < 4 THEN
+            MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts})
+          ELSE 0 END) / NULLIF((${end_ts} - ${start_ts}) * 4, 0), 1) as little_load_pct
+        FROM thread_state ts
+        WHERE ts.ts < ${end_ts}
+          AND ts.ts + ts.dur > ${start_ts}
+          AND ts.state = 'Running'
+          AND ts.cpu IS NOT NULL
+      ),
+      -- 10. 综合根因判断
       analysis AS (
         SELECT
           (SELECT dur_ms FROM top_slice) as slice_dur,
@@ -671,59 +1034,104 @@ steps:
           (SELECT q3 FROM render_summary) as render_q3,
           (SELECT q4 FROM render_summary) as render_q4,
           (SELECT big_freq FROM freq_info) as big_freq,
-          (SELECT little_freq FROM freq_info) as little_freq
+          (SELECT little_freq FROM freq_info) as little_freq,
+          (SELECT io_block_ms FROM io_block) as io_block_ms,
+          (SELECT max_sched_ms FROM sched_latency) as max_sched_ms,
+          (SELECT total_sched_ms FROM sched_latency) as total_sched_ms,
+          (SELECT fence_ms FROM gpu_fence) as fence_ms,
+          (SELECT big_load_pct FROM cluster_load) as big_load_pct,
+          (SELECT little_load_pct FROM cluster_load) as little_load_pct
       )
       SELECT
         CASE
           -- 优先级1: 主线程有明确耗时操作 (>8ms)
           WHEN slice_dur > 8 THEN
             '主线程耗时操作 "' || slice_name || '" 占用 ' || slice_dur || 'ms'
-          -- 优先级2: 主线程大量等待调度 (Q3 > 20%)
+          -- 优先级2: GPU Fence 等待 (>3ms)
+          WHEN fence_ms > 3 THEN
+            'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms，GPU 繁忙无法及时完成渲染'
+          -- 优先级3: 严重调度延迟 (单次 >5ms)
+          WHEN max_sched_ms > 5 THEN
+            '主线程调度延迟严重: 最大等待 ' || ROUND(max_sched_ms, 1) || 'ms'
+          -- 优先级4: 主线程大量等待调度 (Q3 > 20%)
           WHEN main_q3 > 20 THEN
             '主线程 CPU 争抢严重 (' || main_q3 || '% 时间在等待调度)'
-          -- 优先级3: 主线程被阻塞 (Q4 > 30%)
+          -- 优先级5: 主线程 IO 阻塞 (D/DK 状态 > 2ms)
+          WHEN io_block_ms > 2 THEN
+            '主线程 IO 阻塞 ' || ROUND(io_block_ms, 1) || 'ms (D 状态)'
+          -- 优先级6: 总调度延迟 (累计 >3ms)
+          WHEN total_sched_ms > 3 THEN
+            '主线程 Runnable 累计等待 ' || ROUND(total_sched_ms, 1) || 'ms'
+          -- 优先级7: 主线程被阻塞 (Q4 > 30%)
           WHEN main_q4 > 30 THEN
             '主线程阻塞等待 (Binder/IO/锁)，休眠占比 ' || main_q4 || '%'
-          -- 优先级4: RenderThread 休眠 (Q4 > 50%)
+          -- 优先级8: RenderThread 休眠 (Q4 > 50%)
           WHEN render_q4 > 50 THEN
             'RenderThread 长时间休眠 (' || render_q4 || '%)，等待主线程或 GPU'
-          -- 优先级5: 主线程在小核运行 (Q2 > 50%)
+          -- 优先级9: 主线程在小核运行 (Q2 > 50%)
           WHEN main_q2 > 50 THEN
             '主线程被调度到小核 (' || main_q2 || '%)，CPU 能力不足'
-          -- 优先级6: CPU 频率问题
+          -- 优先级10: CPU 频率问题
           WHEN big_freq < 1200 AND big_freq > 0 THEN
             '大核频率过低 (' || big_freq || 'MHz)，可能触发温控限频'
-          -- 优先级7: 有小额耗时操作
+          -- 优先级11: 大核簇负载过高 (>90%)
+          WHEN big_load_pct > 90 THEN
+            '大核簇负载 ' || ROUND(big_load_pct, 0) || '%，CPU 资源严重不足'
+          -- 优先级12: GPU Fence 中等延迟 (1-3ms)
+          WHEN fence_ms > 1 THEN
+            'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
+          -- 优先级13: CPU 整体负载高
+          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN
+            'CPU 整体负载高 (大核 ' || ROUND(big_load_pct, 0) || '%, 小核 ' || ROUND(little_load_pct, 0) || '%)'
+          -- 优先级14: 有小额耗时操作
           WHEN slice_dur > 3 THEN
             '主线程操作 "' || slice_name || '" 耗时 ' || slice_dur || 'ms'
           -- 默认
           ELSE '帧耗时 ${dur_ms}ms 超过 VSync 周期'
         END as primary_cause,
         CASE
+          WHEN fence_ms > 1 THEN 'GPU Fence 等待 ' || ROUND(fence_ms, 1) || 'ms'
+          WHEN total_sched_ms > 1 THEN '调度等待累计 ' || ROUND(total_sched_ms, 1) || 'ms'
+          WHEN big_load_pct > 70 THEN '大核负载 ' || ROUND(big_load_pct, 0) || '%'
           WHEN big_freq > 0 AND big_freq < 1500 THEN '大核频率 ' || big_freq || 'MHz'
           WHEN main_q2 > 30 THEN '小核运行占比 ' || main_q2 || '%'
           ELSE NULL
         END as secondary_info,
         CASE
           WHEN slice_dur > 8 THEN '高'
+          WHEN fence_ms > 3 THEN '高'
+          WHEN max_sched_ms > 5 THEN '高'
           WHEN main_q3 > 20 THEN '高'
+          WHEN io_block_ms > 2 THEN '高'
+          WHEN total_sched_ms > 3 THEN '高'
+          WHEN big_load_pct > 90 THEN '高'
           WHEN main_q4 > 30 THEN '中'
+          WHEN fence_ms > 1 THEN '中'
+          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN '中'
           WHEN slice_dur > 3 THEN '中'
           ELSE '低'
         END as confidence,
         CASE
           WHEN slice_dur > 8 THEN 'slice'
+          WHEN fence_ms > 3 THEN 'gpu_fence'
+          WHEN max_sched_ms > 5 THEN 'sched_latency'
           WHEN main_q3 > 20 THEN 'cpu_contention'
+          WHEN io_block_ms > 2 THEN 'io_blocking'
+          WHEN total_sched_ms > 3 THEN 'sched_latency'
           WHEN main_q4 > 30 THEN 'blocking'
           WHEN render_q4 > 50 THEN 'render_wait'
           WHEN main_q2 > 50 THEN 'small_core'
           WHEN big_freq < 1200 AND big_freq > 0 THEN 'freq_limit'
+          WHEN big_load_pct > 90 THEN 'cpu_overload'
+          WHEN fence_ms > 1 THEN 'gpu_fence'
+          WHEN big_load_pct > 70 AND little_load_pct > 70 THEN 'cpu_overload'
           ELSE 'unknown'
         END as cause_type,
         ${dur_ms} as frame_dur_ms,
         '${jank_type}' as jank_type
       FROM analysis
     save_as: root_cause
+    optional: true
 
   - id: frame_diagnosis
     type: diagnostic
@@ -732,7 +1140,7 @@ steps:
       level: detail
       layer: deep
       title: "详细诊断"
-    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data, root_cause]
+    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data, gc_data, io_data, root_cause, sched_data, migration_data, gpu_data, binder_blocking_data, throttling_data, cluster_load_data, page_fault_data, sf_data, gpu_freq_data, vsync_data, pipeline_data]
     rules:
       # ===== 最高优先级：根因分析总结 =====
       - condition: "root_cause?.data?.[0]?.primary_cause"
@@ -758,6 +1166,226 @@ steps:
         suggestions:
           - "避免在持锁时做 Binder/IO 操作"
           - "考虑使用异步锁或拆分锁"
+
+      # ===== 高优先级：IO 阻塞 =====
+      - condition: "io_data?.data?.length > 0 && io_data.data[0]?.total_ms > 3"
+        severity: critical
+        diagnosis: "IO 阻塞 ${io_data.data[0].total_ms}ms (${io_data.data[0].thread_name}, ${io_data.data[0].io_cause})"
+        confidence: high
+        suggestions:
+          - "将文件/数据库 IO 移到后台线程"
+          - "检查是否有不必要的同步 IO 操作"
+
+      - condition: "io_data?.data?.length > 0 && io_data.data[0]?.total_ms > 1"
+        severity: warning
+        diagnosis: "${io_data.data[0].thread_name} IO 等待 ${io_data.data[0].total_ms}ms"
+        confidence: high
+        suggestions:
+          - "检查帧期间是否有磁盘读写操作"
+          - "考虑使用内存映射或预加载"
+
+      # ===== 高优先级：GC 影响 =====
+      - condition: "gc_data?.data?.length > 0 && gc_data.data.reduce((s, g) => s + (g.overlap_ms || 0), 0) > 3"
+        severity: critical
+        diagnosis: "GC 严重影响帧渲染：总重叠 ${gc_data.data.reduce((s, g) => s + (g.overlap_ms || 0), 0).toFixed(1)}ms"
+        confidence: high
+        suggestions:
+          - "减少帧期间的对象分配"
+          - "检查是否有大对象频繁创建"
+          - "考虑对象池化或预分配"
+
+      - condition: "gc_data?.data?.length > 0 && gc_data.data[0]?.overlap_ms > 1"
+        severity: warning
+        diagnosis: "GC (${gc_data.data[0].gc_type}) 与帧重叠 ${gc_data.data[0].overlap_ms}ms"
+        confidence: high
+        suggestions:
+          - "减少短生命周期对象的分配"
+          - "避免在 onDraw/onLayout 中创建对象"
+
+      # ===== 高优先级：调度延迟 =====
+      - condition: "sched_data?.data?.length > 0 && sched_data.data[0]?.max_latency_ms > 5"
+        severity: critical
+        diagnosis: "${sched_data.data[0].thread_name} 调度延迟严重: 最大 ${sched_data.data[0].max_latency_ms}ms"
+        confidence: high
+        suggestions:
+          - "检查系统是否有高优先级进程抢占 CPU"
+          - "考虑提高 UI 线程优先级"
+          - "检查后台任务是否过于密集"
+
+      - condition: "sched_data?.data?.length > 0 && sched_data.data[0]?.total_runnable_ms > 3"
+        severity: warning
+        diagnosis: "${sched_data.data[0].thread_name} Runnable 等待 ${sched_data.data[0].total_runnable_ms}ms (${sched_data.data[0].runnable_count}次)"
+        confidence: high
+        suggestions:
+          - "系统 CPU 资源紧张"
+          - "检查是否有密集计算任务"
+
+      # ===== 高优先级：大小核迁移 =====
+      - condition: "migration_data?.data?.length > 0 && migration_data.data[0]?.big_to_little > 2"
+        severity: warning
+        diagnosis: "${migration_data.data[0].thread_name} 从大核迁移到小核 ${migration_data.data[0].big_to_little}次"
+        confidence: high
+        suggestions:
+          - "检查系统温控策略是否过于激进"
+          - "考虑绑定 UI 线程到大核"
+
+      - condition: "migration_data?.data?.length > 0 && migration_data.data[0]?.big_core_pct < 30"
+        severity: warning
+        diagnosis: "${migration_data.data[0].thread_name} 大核运行占比仅 ${migration_data.data[0].big_core_pct}%"
+        confidence: high
+        suggestions:
+          - "UI 线程未能获得足够大核资源"
+          - "检查调度器配置"
+
+      # ===== 高优先级：GPU 操作 =====
+      - condition: "gpu_data?.data?.find(g => g.operation === 'GPU Fence Wait')?.total_ms > 3"
+        severity: critical
+        diagnosis: "GPU Fence 等待 ${gpu_data.data.find(g => g.operation === 'GPU Fence Wait')?.total_ms}ms"
+        confidence: high
+        suggestions:
+          - "GPU 繁忙，无法及时完成上一帧"
+          - "检查是否有复杂的 GPU 着色器"
+          - "减少过度绘制"
+
+      - condition: "gpu_data?.data?.find(g => g.operation === 'EGL SwapBuffers')?.max_ms > 5"
+        severity: warning
+        diagnosis: "EGL SwapBuffers 耗时 ${gpu_data.data.find(g => g.operation === 'EGL SwapBuffers')?.max_ms}ms"
+        confidence: high
+        suggestions:
+          - "帧缓冲交换延迟，可能是 GPU/SF 瓶颈"
+          - "检查三缓冲是否正常"
+
+      # ===== 高优先级：Binder 阻塞 =====
+      - condition: "binder_blocking_data?.data?.length > 0 && binder_blocking_data.data[0]?.max_block_ms > 5"
+        severity: critical
+        diagnosis: "Binder 同步调用阻塞 ${binder_blocking_data.data[0].max_block_ms}ms (${binder_blocking_data.data[0].server_process})"
+        confidence: high
+        suggestions:
+          - "将 Binder 调用移到后台线程"
+          - "使用 oneway Binder 调用"
+          - "检查服务端是否有性能问题"
+
+      - condition: "binder_blocking_data?.data?.length > 0 && binder_blocking_data.data[0]?.total_block_ms > 2"
+        severity: warning
+        diagnosis: "Binder 调用总阻塞 ${binder_blocking_data.data[0].total_block_ms}ms (${binder_blocking_data.data[0].call_count}次)"
+        confidence: high
+        suggestions:
+          - "减少帧期间的 Binder 调用次数"
+          - "考虑批量处理或缓存"
+
+      # ===== 高优先级：CPU 限频 =====
+      - condition: "throttling_data?.data?.find(t => t.throttle_detected === 1)"
+        severity: critical
+        diagnosis: "检测到 CPU 限频: 大核从 ${throttling_data.data.find(t => t.throttle_detected === 1)?.start_freq_mhz}MHz 降至 ${throttling_data.data.find(t => t.throttle_detected === 1)?.end_freq_mhz}MHz"
+        confidence: high
+        suggestions:
+          - "设备温度过高触发限频"
+          - "减少持续高负载任务"
+          - "检查散热状况"
+
+      - condition: "throttling_data?.data?.length > 0 && throttling_data.data[0]?.freq_drop_pct > 20"
+        severity: warning
+        diagnosis: "帧期间大核降频 ${throttling_data.data[0].freq_drop_pct}%"
+        confidence: high
+        suggestions:
+          - "CPU 频率不稳定影响性能"
+          - "检查功耗管理策略"
+
+      # ===== 高优先级：CPU 簇负载 =====
+      - condition: "cluster_load_data?.data?.find(c => c.cluster === '大核簇')?.load_pct > 90"
+        severity: critical
+        diagnosis: "大核簇负载 ${cluster_load_data.data.find(c => c.cluster === '大核簇')?.load_pct}%，接近跑满"
+        confidence: high
+        suggestions:
+          - "大核资源严重不足"
+          - "检查是否有后台密集计算任务"
+          - "考虑优化或推迟非关键任务"
+
+      - condition: "cluster_load_data?.data?.find(c => c.cluster === '小核簇')?.load_pct > 95"
+        severity: warning
+        diagnosis: "小核簇负载 ${cluster_load_data.data.find(c => c.cluster === '小核簇')?.load_pct}%，几乎跑满"
+        confidence: high
+        suggestions:
+          - "系统整体负载很高"
+          - "后台任务可能挤占资源"
+
+      - condition: "cluster_load_data?.data?.find(c => c.cluster === '大核簇')?.load_pct > 70 && cluster_load_data?.data?.find(c => c.cluster === '小核簇')?.load_pct > 70"
+        severity: warning
+        diagnosis: "CPU 整体负载高: 大核 ${cluster_load_data.data.find(c => c.cluster === '大核簇')?.load_pct}%, 小核 ${cluster_load_data.data.find(c => c.cluster === '小核簇')?.load_pct}%"
+        confidence: high
+        suggestions:
+          - "系统 CPU 资源紧张"
+          - "多任务竞争导致调度延迟"
+
+      - condition: "cluster_load_data?.data?.find(c => c.cluster === '大核簇')?.max_single_core_pct > 95"
+        severity: info
+        diagnosis: "大核簇中有核心接近 100% (${cluster_load_data.data.find(c => c.cluster === '大核簇')?.max_single_core_pct}%)"
+        confidence: medium
+        suggestions:
+          - "可能有单线程密集任务"
+          - "检查是否有热点线程"
+
+      # ===== 高优先级：页面错误 =====
+      - condition: "page_fault_data?.data?.length > 0 && page_fault_data.data[0]?.total_ms > 2"
+        severity: critical
+        diagnosis: "${page_fault_data.data[0].thread_name} 内存操作阻塞 ${page_fault_data.data[0].total_ms}ms (${page_fault_data.data[0].fault_type})"
+        confidence: high
+        suggestions:
+          - "触发页面错误或内存回收"
+          - "预加载可能需要的数据"
+          - "检查内存压力"
+
+      - condition: "page_fault_data?.data?.find(p => p.fault_type === 'memory_reclaim')?.total_ms > 1"
+        severity: warning
+        diagnosis: "系统内存回收导致阻塞 ${page_fault_data.data.find(p => p.fault_type === 'memory_reclaim')?.total_ms}ms"
+        confidence: high
+        suggestions:
+          - "系统内存紧张"
+          - "检查应用内存使用"
+
+      # ===== 中优先级：SurfaceFlinger =====
+      - condition: "sf_data?.data?.find(s => s.composition_type === 'Composite')?.total_ms > 3"
+        severity: warning
+        diagnosis: "SurfaceFlinger 合成耗时 ${sf_data.data.find(s => s.composition_type === 'Composite')?.total_ms}ms"
+        confidence: medium
+        suggestions:
+          - "系统合成层可能是瓶颈"
+          - "检查图层数量和复杂度"
+
+      # ===== 中优先级：GPU 频率 =====
+      - condition: "gpu_freq_data?.data?.length > 0 && gpu_freq_data.data[0]?.low_freq_pct > 50"
+        severity: warning
+        diagnosis: "GPU 低频运行占比 ${gpu_freq_data.data[0].low_freq_pct}%"
+        confidence: medium
+        suggestions:
+          - "GPU 未能提升频率"
+          - "检查 GPU 功耗策略"
+
+      # ===== 中优先级：VSync 对齐 =====
+      - condition: "vsync_data?.data?.find(v => v.metric === '截止时间')?.value?.includes('超时')"
+        severity: warning
+        diagnosis: "帧未能在 VSync 前完成: ${vsync_data.data.find(v => v.metric === '截止时间')?.value}"
+        confidence: high
+        suggestions:
+          - "帧渲染超过 VSync 周期"
+          - "需要优化帧渲染时间"
+
+      # ===== 信息级：渲染流水线分解 =====
+      - condition: "pipeline_data?.data?.find(p => p.stage?.includes('主线程'))?.pct > 70"
+        severity: info
+        diagnosis: "主线程占用帧时间 ${pipeline_data.data.find(p => p.stage?.includes('主线程'))?.pct}%"
+        confidence: high
+        suggestions:
+          - "主线程是主要瓶颈"
+          - "检查主线程耗时操作"
+
+      - condition: "pipeline_data?.data?.find(p => p.stage?.includes('RenderThread'))?.pct > 60"
+        severity: info
+        diagnosis: "RenderThread 占用帧时间 ${pipeline_data.data.find(p => p.stage?.includes('RenderThread'))?.pct}%"
+        confidence: high
+        suggestions:
+          - "渲染是主要瓶颈"
+          - "检查 GPU 操作和绘制复杂度"
 
       # ===== 高优先级：Binder 调用 =====
       - condition: "binder_data?.data?.length > 0 && binder_data.data[0]?.dur_ms > 2"

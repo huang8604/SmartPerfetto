@@ -10,8 +10,7 @@
  * - Present fence analysis
  *
  * Skills wrapped as tools:
- * - janky_frame_analysis
- * - jank_frame_detail
+ * - jank_frame_detail (comprehensive per-frame analysis)
  * - scrolling_analysis
  * - consumer_jank_detection
  * - sf_frame_consumption

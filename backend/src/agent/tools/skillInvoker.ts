@@ -118,7 +118,7 @@ export const skillInvokerTool: Tool<SkillInvokerParams, SkillInvokerResult> = {
     }
 
     // 验证已知的 skill IDs
-    // NOTE: janky_frame_analysis removed - functionality merged into scrolling_analysis
+    // NOTE: janky_frame_analysis removed - functionality merged into jank_frame_detail
     const knownSkills = [
       'startup_analysis',
       'scrolling_analysis',
@@ -275,7 +275,7 @@ export const skillInvokerTool: Tool<SkillInvokerParams, SkillInvokerResult> = {
  * 获取所有可用的 Skill IDs
  */
 export function getAvailableSkillIds(): string[] {
-  // NOTE: janky_frame_analysis removed - functionality merged into scrolling_analysis
+  // NOTE: janky_frame_analysis removed - functionality merged into jank_frame_detail
   return [
     'startup_analysis',
     'scrolling_analysis',

@@ -34,6 +34,19 @@ export interface SessionMetadata {
   sqlQueriesCount?: number;
   totalDuration?: number;
   traceSize?: number;
+
+  /**
+   * Serialized EntityStore snapshot for cross-restart persistence.
+   * Contains cached frames, sessions, and other entities discovered during analysis.
+   * @see EntityStoreSnapshot in backend/src/agent/context/entityStore.ts
+   */
+  entityStoreSnapshot?: import('../agent/context/entityStore').EntityStoreSnapshot;
+
+  /**
+   * Serialized EnhancedSessionContext for full multi-turn state restoration.
+   * Includes conversation history, findings, and entity references.
+   */
+  sessionContextSnapshot?: string;
 }
 
 export interface SessionFilter {

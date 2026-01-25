@@ -64,7 +64,7 @@ const STATIC_MODULE_MAPPINGS: Record<string, {
   'framework_surfaceflinger': {
     layer: 'framework',
     component: 'SurfaceFlinger',
-    skills: ['surfaceflinger_module', 'scrolling_analysis', 'janky_frame_analysis', 'jank_frame_detail'],
+    skills: ['surfaceflinger_module', 'scrolling_analysis', 'jank_frame_detail'],
     relatedModules: ['hardware_gpu', 'framework_wms', 'framework_choreographer', 'app_third_party'],
   },
   'framework_ams': {

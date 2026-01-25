@@ -1832,12 +1832,17 @@ export class SkillExecutor {
         // 收集 evidence 数据
         const evidence = this.collectDiagnosticEvidence(rule, context, inputs);
 
+        // Evaluate suggestions templates (e.g., "${root_cause.data[0].secondary_info}")
+        const evaluatedSuggestions = rule.suggestions?.map((s: string) =>
+          typeof s === 'string' ? ExpressionEvaluator.evaluate(s, context) : s
+        );
+
         diagnostics.push({
           id: `${step.id}_${diagnostics.length}`,
           diagnosis,
           confidence,
           severity: confidence >= 0.8 ? 'critical' : confidence >= 0.6 ? 'warning' : 'info',
-          suggestions: rule.suggestions,
+          suggestions: evaluatedSuggestions,
           evidence,
           source: 'rule',
         });
@@ -2240,6 +2245,12 @@ export class SkillExecutor {
       displayData = { text: String(data) };
     }
 
+    // Extract column definitions from config (runtime data may be ColumnDefinition[] even though type says string[])
+    // This happens because skill YAML is loaded dynamically and contains full column definitions
+    const columnDefinitions = Array.isArray((config as any).columns)
+      ? (config as any).columns.filter((c: any) => typeof c === 'object' && c.name)
+      : undefined;
+
     return {
       stepId,
       title: config.title || title,
@@ -2252,6 +2263,7 @@ export class SkillExecutor {
       expandable: config.expandable,           // 是否支持展开查看详细分析
       metadataFields: config.metadataFields,   // 提取到元数据的字段
       hidden_columns: config.hidden_columns,   // 隐藏的列
+      columnDefinitions,                       // 完整的列定义（包含 hidden 等属性）
     };
   }
 
@@ -2293,8 +2305,16 @@ export class SkillExecutor {
     columnDefinitions?: Record<string, Partial<ColumnDefinition>[]>
   ): DataEnvelope[] {
     return result.displayResults.map(dr => {
-      const explicitColumns = columnDefinitions?.[dr.stepId];
-      return displayResultToEnvelope(dr, result.skillId, explicitColumns);
+      // Prefer external columnDefinitions, fallback to embedded columnDefinitions in DisplayResult
+      const explicitColumns = columnDefinitions?.[dr.stepId] ?? dr.columnDefinitions as any;
+      // Bridge skillEngine DisplayResult -> dataContract DisplayResult:
+      // dataContract expects metadataConfig.fields, while skillEngine uses metadataFields.
+      const drAny = dr as any;
+      const drForEnvelope = {
+        ...drAny,
+        metadataConfig: drAny.metadataConfig || (Array.isArray(drAny.metadataFields) ? { fields: drAny.metadataFields } : undefined),
+      };
+      return displayResultToEnvelope(drForEnvelope as any, result.skillId, explicitColumns);
     });
   }
 

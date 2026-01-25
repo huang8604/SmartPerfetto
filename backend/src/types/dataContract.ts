@@ -955,7 +955,8 @@ export function layeredResultToEnvelopes(
     if (!layer) continue;
 
     for (const [stepId, displayResult] of Object.entries(layer)) {
-      const explicitColumns = columnDefinitions?.[stepId];
+      // Prefer external columnDefinitions, fallback to embedded columnDefinitions in DisplayResult
+      const explicitColumns = columnDefinitions?.[stepId] ?? (displayResult as any).columnDefinitions;
       const envelope = displayResultToEnvelope(displayResult, result.skillId, explicitColumns);
       envelopes.push(envelope);
     }

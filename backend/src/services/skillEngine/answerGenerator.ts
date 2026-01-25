@@ -88,7 +88,7 @@ const PROBLEM_SUBJECTS: ProblemSubject[] = [
   {
     pattern: /帧|frame|fps|刷新率|渲染/i,
     subject: '帧率问题',
-    relatedSkills: ['frame_analysis', 'janky_frame_analysis'],
+    relatedSkills: ['frame_analysis', 'jank_frame_detail'],
   },
   {
     pattern: /卡顿|jank|掉帧|丢帧|stutter/i,

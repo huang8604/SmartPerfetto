@@ -11,7 +11,13 @@ import {
   StoredMessage,
   SessionFilter,
   SessionListResponse,
+  SessionMetadata,
 } from '../models/sessionSchema';
+import {
+  EntityStore,
+  EntityStoreSnapshot,
+} from '../agent/context/entityStore';
+import { EnhancedSessionContext } from '../agent/context/enhancedSessionContext';
 
 const DB_DIR = path.join(process.cwd(), 'data', 'sessions');
 const DB_PATH = path.join(DB_DIR, 'sessions.db');
@@ -253,6 +259,173 @@ export class SessionPersistenceService {
     const cutoffDate = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
     const result = this.db.prepare('DELETE FROM sessions WHERE created_at < ?').run(cutoffDate);
     return result.changes;
+  }
+
+  // ==========================================================================
+  // EntityStore Persistence (Phase 3)
+  // ==========================================================================
+
+  /**
+   * Save EntityStore snapshot for a session.
+   * This enables entity cache restoration across process restarts.
+   *
+   * @param sessionId - The session ID
+   * @param entityStore - The EntityStore to save
+   * @returns true if save succeeded
+   */
+  saveEntityStore(sessionId: string, entityStore: EntityStore): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) {
+        console.warn(`[SessionPersistence] Cannot save EntityStore: session ${sessionId} not found`);
+        return false;
+      }
+
+      const metadata: SessionMetadata = session.metadata || {};
+      metadata.entityStoreSnapshot = entityStore.serialize();
+
+      const metadataJson = JSON.stringify(metadata);
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(metadataJson, Date.now(), sessionId);
+
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to save EntityStore:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Load EntityStore for a session.
+   * Returns null if session doesn't exist or has no EntityStore.
+   *
+   * @param sessionId - The session ID
+   * @returns Deserialized EntityStore or null
+   */
+  loadEntityStore(sessionId: string): EntityStore | null {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session?.metadata?.entityStoreSnapshot) {
+        return null;
+      }
+
+      return EntityStore.deserialize(session.metadata.entityStoreSnapshot);
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to load EntityStore:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Save full EnhancedSessionContext for a session.
+   * This enables complete multi-turn state restoration.
+   *
+   * @param sessionId - The session ID
+   * @param sessionContext - The EnhancedSessionContext to save
+   * @returns true if save succeeded
+   */
+  saveSessionContext(sessionId: string, sessionContext: EnhancedSessionContext): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) {
+        console.warn(`[SessionPersistence] Cannot save SessionContext: session ${sessionId} not found`);
+        return false;
+      }
+
+      const metadata: SessionMetadata = session.metadata || {};
+      metadata.sessionContextSnapshot = sessionContext.serialize();
+      // Also save EntityStore separately for quick access
+      metadata.entityStoreSnapshot = sessionContext.getEntityStore().serialize();
+
+      const metadataJson = JSON.stringify(metadata);
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(metadataJson, Date.now(), sessionId);
+
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to save SessionContext:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Load EnhancedSessionContext for a session.
+   * Returns null if session doesn't exist or has no context snapshot.
+   *
+   * @param sessionId - The session ID
+   * @returns Deserialized EnhancedSessionContext or null
+   */
+  loadSessionContext(sessionId: string): EnhancedSessionContext | null {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session?.metadata?.sessionContextSnapshot) {
+        return null;
+      }
+
+      return EnhancedSessionContext.deserialize(session.metadata.sessionContextSnapshot);
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to load SessionContext:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Check if a session has persisted EntityStore data.
+   *
+   * @param sessionId - The session ID
+   * @returns true if EntityStore exists for this session
+   */
+  hasEntityStore(sessionId: string): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      return !!(session?.metadata?.entityStoreSnapshot);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a session has persisted SessionContext data.
+   *
+   * @param sessionId - The session ID
+   * @returns true if SessionContext exists for this session
+   */
+  hasSessionContext(sessionId: string): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      return !!(session?.metadata?.sessionContextSnapshot);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get EntityStore statistics for a session without full deserialization.
+   * Useful for dashboard displays.
+   *
+   * @param sessionId - The session ID
+   * @returns Stats object or null
+   */
+  getEntityStoreStats(sessionId: string): {
+    frameCount: number;
+    sessionCount: number;
+    analyzedFrameCount: number;
+    analyzedSessionCount: number;
+  } | null {
+    try {
+      const session = this.getSession(sessionId);
+      const snapshot = session?.metadata?.entityStoreSnapshot;
+      if (!snapshot) return null;
+
+      return {
+        frameCount: snapshot.framesById?.length || 0,
+        sessionCount: snapshot.sessionsById?.length || 0,
+        analyzedFrameCount: snapshot.analyzedFrameIds?.length || 0,
+        analyzedSessionCount: snapshot.analyzedSessionIds?.length || 0,
+      };
+    } catch {
+      return null;
+    }
   }
 }
 

@@ -497,7 +497,7 @@ ${JSON.stringify(findingsSummary, null, 2)}
   ): string | null {
     const moduleSkillMap: Record<string, Record<PerformanceIntent, string>> = {
       'framework_surfaceflinger': {
-        jank: 'janky_frame_analysis',
+        jank: 'jank_frame_detail',
         scroll: 'scrolling_analysis',
         startup: 'scrolling_analysis',
         click: 'scrolling_analysis',
@@ -539,7 +539,7 @@ ${JSON.stringify(findingsSummary, null, 2)}
         general: 'binder_analysis',
       },
       'app_third_party': {
-        jank: 'janky_frame_analysis',
+        jank: 'jank_frame_detail',
         scroll: 'scrolling_analysis',
         startup: 'startup_analysis',
         click: 'click_response_analysis',

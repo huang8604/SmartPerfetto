@@ -147,6 +147,12 @@ export class DirectSkillExecutor {
   /**
    * Build skill params from template and interval.
    * Uses paramMapping if defined, otherwise falls back to standard mapping.
+   *
+   * Hardened to handle key naming mismatches (snake_case vs camelCase):
+   * - Tries source key as-is
+   * - Tries snake_case conversion
+   * - Tries camelCase conversion
+   * - Tries interval top-level fields
    */
   private buildParams(
     template: StageTaskTemplate,
@@ -157,29 +163,9 @@ export class DirectSkillExecutor {
     if (template.paramMapping) {
       // Use explicit mapping: { skillParamName: intervalFieldOrSpecial }
       for (const [paramName, source] of Object.entries(template.paramMapping)) {
-        switch (source) {
-          case 'startTs':
-            params[paramName] = interval.startTs;
-            break;
-          case 'endTs':
-            params[paramName] = interval.endTs;
-            break;
-          case 'processName':
-            params[paramName] = interval.processName;
-            break;
-          case 'duration':
-            try {
-              params[paramName] = String(BigInt(interval.endTs) - BigInt(interval.startTs));
-            } catch {
-              params[paramName] = '0';
-            }
-            break;
-          default:
-            // Try to read from interval.metadata
-            if (interval.metadata && source in interval.metadata) {
-              params[paramName] = interval.metadata[source];
-            }
-            break;
+        const value = this.resolveParamValue(source, interval);
+        if (value !== undefined) {
+          params[paramName] = value;
         }
       }
     } else {
@@ -192,6 +178,67 @@ export class DirectSkillExecutor {
     }
 
     return params;
+  }
+
+  /**
+   * Resolve a parameter value from interval using multiple key variations.
+   * Handles special values and key naming mismatches.
+   */
+  private resolveParamValue(source: string, interval: FocusInterval): any {
+    // Handle special/reserved source names
+    switch (source) {
+      case 'startTs':
+      case 'start_ts':
+        return interval.startTs;
+      case 'endTs':
+      case 'end_ts':
+        return interval.endTs;
+      case 'processName':
+      case 'process_name':
+        return interval.processName;
+      case 'duration':
+        try {
+          return String(BigInt(interval.endTs) - BigInt(interval.startTs));
+        } catch {
+          return '0';
+        }
+      case 'id':
+        return interval.id;
+      case 'label':
+        return interval.label;
+      case 'priority':
+        return interval.priority;
+    }
+
+    // Try to read from interval.metadata with key variations
+    if (interval.metadata) {
+      const meta = interval.metadata;
+
+      // 1. Try source as-is
+      if (meta[source] !== undefined) {
+        return meta[source];
+      }
+
+      // 2. Try snake_case conversion (frameId -> frame_id)
+      const snakeCase = toSnakeCase(source);
+      if (snakeCase !== source && meta[snakeCase] !== undefined) {
+        return meta[snakeCase];
+      }
+
+      // 3. Try camelCase conversion (frame_id -> frameId)
+      const camelCase = toCamelCase(source);
+      if (camelCase !== source && meta[camelCase] !== undefined) {
+        return meta[camelCase];
+      }
+    }
+
+    // 4. Try interval top-level fields (for common ones)
+    const intervalAny = interval as any;
+    if (intervalAny[source] !== undefined) {
+      return intervalAny[source];
+    }
+
+    return undefined;
   }
 
   /**
@@ -212,7 +259,15 @@ export class DirectSkillExecutor {
     const dataEnvelopes = result.displayResults
       .map(dr => {
         try {
-          const env = displayResultToEnvelope(dr, result.skillId);
+          // Pass column definitions from DisplayResult to preserve hidden/type/format etc.
+          const explicitColumns = dr.columnDefinitions as any;
+          // Bridge metadataFields -> metadataConfig.fields for v2 DataEnvelope
+          const drAny = dr as any;
+          const drForEnvelope = {
+            ...drAny,
+            metadataConfig: drAny.metadataConfig || (Array.isArray(drAny.metadataFields) ? { fields: drAny.metadataFields } : undefined),
+          };
+          const env = displayResultToEnvelope(drForEnvelope as any, result.skillId, explicitColumns);
           // Ensure uniqueness per execution so the frontend doesn't dedupe away repeated
           // per-interval/per-frame executions of the same (skillId, stepId).
           env.meta.source = `${env.meta.source}#${taskId}`;
@@ -337,4 +392,24 @@ export class DirectSkillExecutor {
     }
     return chunks;
   }
+}
+
+// =============================================================================
+// Utilities
+// =============================================================================
+
+/**
+ * Convert camelCase to snake_case.
+ * frameId -> frame_id
+ */
+function toSnakeCase(str: string): string {
+  return str.replace(/([A-Z])/g, '_$1').toLowerCase();
+}
+
+/**
+ * Convert snake_case to camelCase.
+ * frame_id -> frameId
+ */
+function toCamelCase(str: string): string {
+  return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }

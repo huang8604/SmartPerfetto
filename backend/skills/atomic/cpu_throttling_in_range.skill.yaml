@@ -1,0 +1,96 @@
+# =============================================================================
+# CPU 热控限频分析 (Atomic Skill)
+# =============================================================================
+# 分析指定时间范围内是否发生 CPU 热控限频
+# 检测因温度过高导致的 CPU 降频
+
+name: cpu_throttling_in_range
+version: "1.0"
+type: atomic
+category: thermal
+
+meta:
+  display_name: "CPU 限频检测"
+  description: "检测 CPU 热控限频情况"
+  icon: "thermostat"
+  tags: [cpu, thermal, throttling, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: big_core_start
+    type: integer
+    required: false
+    description: "大核起始编号，默认 4"
+
+display:
+  level: detail
+  layer: deep
+  title: "热控限频"
+  columns:
+    - name: core_type
+      label: "核心类型"
+      type: string
+    - name: start_freq_mhz
+      label: "起始频率"
+      type: number
+    - name: end_freq_mhz
+      label: "结束频率"
+      type: number
+    - name: min_freq_mhz
+      label: "最低频率"
+      type: number
+    - name: max_freq_mhz
+      label: "最高频率"
+      type: number
+    - name: freq_drop_pct
+      label: "降幅"
+      type: percentage
+      format: percentage
+    - name: throttle_detected
+      label: "检测到限频"
+      type: boolean
+
+sql: |
+  WITH freq_samples AS (
+    SELECT
+      t.cpu,
+      CASE WHEN t.cpu >= COALESCE(${big_core_start}, 4) THEN 'big' ELSE 'little' END as core_type,
+      c.ts,
+      c.value / 1000.0 as freq_mhz
+    FROM counter c
+    JOIN cpu_counter_track t ON c.track_id = t.id
+    WHERE t.name = 'cpufreq'
+      AND c.ts >= ${start_ts} AND c.ts < ${end_ts}
+  ),
+  freq_stats AS (
+    SELECT
+      core_type,
+      cpu,
+      MIN(freq_mhz) as min_freq,
+      MAX(freq_mhz) as max_freq,
+      FIRST_VALUE(freq_mhz) OVER (PARTITION BY cpu ORDER BY ts) as start_freq,
+      LAST_VALUE(freq_mhz) OVER (PARTITION BY cpu ORDER BY ts
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as end_freq
+    FROM freq_samples
+  )
+  SELECT
+    core_type,
+    ROUND(MAX(start_freq), 0) as start_freq_mhz,
+    ROUND(MAX(end_freq), 0) as end_freq_mhz,
+    ROUND(MIN(min_freq), 0) as min_freq_mhz,
+    ROUND(MAX(max_freq), 0) as max_freq_mhz,
+    ROUND(100.0 * (MAX(max_freq) - MIN(min_freq)) / NULLIF(MAX(max_freq), 0), 1) as freq_drop_pct,
+    CASE WHEN MIN(min_freq) < MAX(max_freq) * 0.7 THEN 1 ELSE 0 END as throttle_detected
+  FROM freq_stats
+  GROUP BY core_type
+  ORDER BY core_type DESC
+
+output:
+  format: structured

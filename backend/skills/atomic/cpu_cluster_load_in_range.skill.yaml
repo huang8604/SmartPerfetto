@@ -1,0 +1,145 @@
+# =============================================================================
+# CPU 簇负载分析 (Atomic Skill)
+# =============================================================================
+# 计算指定时间范围内各 CPU 簇（大核/小核）的整体负载
+# 负载 = Running 时间 / (时间范围 × 簇内核心数)
+# 100% 表示该簇所有核心完全跑满
+
+name: cpu_cluster_load_in_range
+version: "1.0"
+type: atomic
+category: cpu
+
+meta:
+  display_name: "CPU 簇负载分析"
+  description: "计算大核簇和小核簇的整体 CPU 负载百分比"
+  icon: "memory"
+  tags: [cpu, cluster, load, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: big_core_start
+    type: integer
+    required: false
+    description: "大核起始 CPU ID，默认 4"
+  - name: little_core_count
+    type: integer
+    required: false
+    description: "小核数量，默认 4"
+  - name: big_core_count
+    type: integer
+    required: false
+    description: "大核数量，默认 4"
+
+display:
+  level: detail
+  layer: deep
+  title: "CPU 簇负载"
+  columns:
+    - name: cluster
+      label: "CPU 簇"
+      type: string
+    - name: core_count
+      label: "核心数"
+      type: number
+    - name: running_ms
+      label: "Running 时间"
+      type: duration
+      format: duration_ms
+    - name: total_capacity_ms
+      label: "总容量"
+      type: duration
+      format: duration_ms
+    - name: load_pct
+      label: "负载"
+      type: percentage
+      format: percentage
+    - name: idle_pct
+      label: "空闲"
+      type: percentage
+      format: percentage
+    - name: max_single_core_pct
+      label: "最忙核心"
+      type: percentage
+      format: percentage
+
+sql: |
+  WITH params AS (
+    SELECT
+      ${end_ts} - ${start_ts} as duration_ns,
+      COALESCE(${big_core_start}, 4) as big_core_start,
+      COALESCE(${little_core_count}, 4) as little_core_count,
+      COALESCE(${big_core_count}, 4) as big_core_count
+  ),
+  -- 获取每个 CPU 上的 Running 状态时间
+  cpu_running AS (
+    SELECT
+      ts.cpu,
+      CASE
+        WHEN ts.cpu >= (SELECT big_core_start FROM params) THEN 'big'
+        ELSE 'little'
+      END as cluster_type,
+      -- 裁剪 slice 到时间范围内
+      MIN(ts.ts + ts.dur, ${end_ts}) - MAX(ts.ts, ${start_ts}) as clipped_dur
+    FROM thread_state ts
+    WHERE ts.ts < ${end_ts}
+      AND ts.ts + ts.dur > ${start_ts}
+      AND ts.state = 'Running'
+      AND ts.cpu IS NOT NULL
+  ),
+  -- 按 CPU 聚合
+  per_cpu_stats AS (
+    SELECT
+      cpu,
+      cluster_type,
+      SUM(CASE WHEN clipped_dur > 0 THEN clipped_dur ELSE 0 END) as running_ns
+    FROM cpu_running
+    GROUP BY cpu, cluster_type
+  ),
+  -- 按簇聚合
+  cluster_stats AS (
+    SELECT
+      cluster_type,
+      COUNT(DISTINCT cpu) as actual_cores,
+      SUM(running_ns) as total_running_ns,
+      MAX(running_ns) as max_core_running_ns
+    FROM per_cpu_stats
+    GROUP BY cluster_type
+  ),
+  -- 计算负载
+  final_stats AS (
+    SELECT
+      cs.cluster_type,
+      CASE
+        WHEN cs.cluster_type = 'big' THEN (SELECT big_core_count FROM params)
+        ELSE (SELECT little_core_count FROM params)
+      END as expected_cores,
+      cs.actual_cores,
+      cs.total_running_ns,
+      cs.max_core_running_ns,
+      (SELECT duration_ns FROM params) as duration_ns
+    FROM cluster_stats cs
+  )
+  SELECT
+    CASE
+      WHEN cluster_type = 'big' THEN '大核簇'
+      ELSE '小核簇'
+    END as cluster,
+    expected_cores as core_count,
+    ROUND(total_running_ns / 1e6, 2) as running_ms,
+    ROUND(duration_ns * expected_cores / 1e6, 2) as total_capacity_ms,
+    ROUND(100.0 * total_running_ns / NULLIF(duration_ns * expected_cores, 0), 1) as load_pct,
+    ROUND(100.0 - 100.0 * total_running_ns / NULLIF(duration_ns * expected_cores, 0), 1) as idle_pct,
+    ROUND(100.0 * max_core_running_ns / NULLIF(duration_ns, 0), 1) as max_single_core_pct
+  FROM final_stats
+  ORDER BY cluster_type DESC
+
+output:
+  format: structured

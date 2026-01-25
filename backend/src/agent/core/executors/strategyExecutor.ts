@@ -37,6 +37,12 @@ import {
 import { executeTaskGraph, emitDataEnvelopes } from '../taskGraphExecutor';
 import { synthesizeFeedback } from '../feedbackSynthesizer';
 import type { DataEnvelope } from '../../../types/dataContract';
+import {
+  captureEntitiesFromResponses,
+  captureEntitiesFromIntervals,
+  mergeCapturedEntities,
+  CapturedEntities,
+} from '../entityCapture';
 
 export class StrategyExecutor implements AnalysisExecutor {
   constructor(
@@ -50,6 +56,11 @@ export class StrategyExecutor implements AnalysisExecutor {
     let informationGaps: string[] = [];
     let stopReason: string | null = null;
     let rounds = 0;
+
+    // Accumulate captured entities across all stages
+    const allCapturedEntities: CapturedEntities[] = [];
+    const analyzedFrameIds: string[] = [];
+    const analyzedSessionIds: string[] = [];
 
     // Phase 1 Fix: Use prebuilt intervals from follow-up resolution if available
     // This allows drill-down queries to skip discovery stages
@@ -161,6 +172,24 @@ export class StrategyExecutor implements AnalysisExecutor {
       ]);
       const responses = [...agentResponses, ...directResponses];
 
+      // Capture entities from responses for EntityStore
+      const capturedFromResponses = captureEntitiesFromResponses(responses);
+      allCapturedEntities.push(capturedFromResponses);
+
+      // Track analyzed entities from per_interval stages (for extend support)
+      if (directSkillTasks.length > 0) {
+        for (const task of directSkillTasks) {
+          const meta = task.interval.metadata || {};
+          const frameId = meta.frameId || meta.frame_id || meta.sourceEntityId;
+          const sessionId = meta.sessionId || meta.session_id;
+          if (meta.sourceEntityType === 'frame' && frameId) {
+            analyzedFrameIds.push(String(frameId));
+          } else if (meta.sourceEntityType === 'session' && sessionId) {
+            analyzedSessionIds.push(String(sessionId));
+          }
+        }
+      }
+
       // Defer frame tables that need expandableData until after per-frame analysis completes.
       // This avoids rendering a non-expandable table first (which cannot be "patched" later due to frontend dedupe).
       const { responsesForEmit, deferred } = this.deferExpandableFrameTables(stage, responses);
@@ -238,6 +267,10 @@ export class StrategyExecutor implements AnalysisExecutor {
               phase: 'progress',
               message: `已定位 ${state.focusIntervals.length} 个分析区间`,
             });
+
+            // Capture entities from extracted intervals (richer metadata)
+            const capturedFromIntervals = captureEntitiesFromIntervals(state.focusIntervals);
+            allCapturedEntities.push(capturedFromIntervals);
           }
         } catch (error: any) {
           emitter.log(`extractIntervals failed: ${error.message}, continuing with empty intervals`);
@@ -281,6 +314,11 @@ export class StrategyExecutor implements AnalysisExecutor {
       emitter.emitUpdate('data', deferredExpandableTables);
     }
 
+    // Merge all captured entities from all stages
+    const mergedCapturedEntities = allCapturedEntities.length > 0
+      ? mergeCapturedEntities(...allCapturedEntities)
+      : undefined;
+
     return {
       findings: allFindings,
       lastStrategy: concludeDecision(stagedConfidence, stopReason),
@@ -288,6 +326,11 @@ export class StrategyExecutor implements AnalysisExecutor {
       informationGaps,
       rounds,
       stopReason,
+      capturedEntities: mergedCapturedEntities,
+      analyzedEntityIds: {
+        frames: [...new Set(analyzedFrameIds)],
+        sessions: [...new Set(analyzedSessionIds)],
+      },
     };
   }
 

@@ -1,0 +1,94 @@
+# =============================================================================
+# 任务迁移分析 (Atomic Skill)
+# =============================================================================
+# 分析指定时间范围内线程在大小核之间的迁移情况
+# 频繁迁移会导致 Cache Miss 增加，影响性能
+
+name: task_migration_in_range
+version: "1.0"
+type: atomic
+category: kernel
+
+meta:
+  display_name: "任务迁移分析"
+  description: "分析线程在大小核之间的迁移频率"
+  icon: "swap_horiz"
+  tags: [sched, migration, kernel, atomic]
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: true
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: true
+    description: "分析结束时间戳(ns)"
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB 匹配）"
+  - name: big_core_start
+    type: integer
+    required: false
+    description: "大核起始编号，默认 4（即 CPU 4-7 为大核）"
+
+display:
+  level: detail
+  layer: deep
+  title: "大小核迁移"
+  columns:
+    - name: thread_name
+      label: "线程"
+      type: string
+    - name: migration_count
+      label: "迁移次数"
+      type: number
+    - name: big_to_little
+      label: "大→小"
+      type: number
+    - name: little_to_big
+      label: "小→大"
+      type: number
+    - name: big_core_pct
+      label: "大核占比"
+      type: percentage
+      format: percentage
+    - name: unique_cpus
+      label: "使用核心数"
+      type: number
+
+sql: |
+  WITH target_threads AS (
+    SELECT t.utid, t.name as thread_name
+    FROM thread t
+    JOIN process p ON t.upid = p.upid
+    WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+      AND (t.tid = p.pid OR t.name = 'RenderThread')
+  ),
+  cpu_switches AS (
+    SELECT
+      tt.thread_name,
+      ts.cpu,
+      CASE WHEN ts.cpu >= COALESCE(${big_core_start}, 4) THEN 'big' ELSE 'little' END as core_type,
+      LAG(ts.cpu) OVER (PARTITION BY tt.utid ORDER BY ts.ts) as prev_cpu,
+      ts.dur
+    FROM thread_state ts
+    JOIN target_threads tt ON ts.utid = tt.utid
+    WHERE ts.ts >= ${start_ts} AND ts.ts < ${end_ts}
+      AND ts.state = 'Running'
+  )
+  SELECT
+    thread_name,
+    SUM(CASE WHEN cpu != prev_cpu AND prev_cpu IS NOT NULL THEN 1 ELSE 0 END) as migration_count,
+    SUM(CASE WHEN cpu < COALESCE(${big_core_start}, 4) AND prev_cpu >= COALESCE(${big_core_start}, 4) THEN 1 ELSE 0 END) as big_to_little,
+    SUM(CASE WHEN cpu >= COALESCE(${big_core_start}, 4) AND prev_cpu < COALESCE(${big_core_start}, 4) THEN 1 ELSE 0 END) as little_to_big,
+    ROUND(100.0 * SUM(CASE WHEN cpu >= COALESCE(${big_core_start}, 4) THEN dur ELSE 0 END) / NULLIF(SUM(dur), 0), 1) as big_core_pct,
+    COUNT(DISTINCT cpu) as unique_cpus
+  FROM cpu_switches
+  GROUP BY thread_name
+  HAVING migration_count > 0
+  ORDER BY migration_count DESC
+
+output:
+  format: structured

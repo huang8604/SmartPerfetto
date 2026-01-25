@@ -395,12 +395,12 @@ export class IterationStrategyPlanner {
    */
   getSkillsForFocusArea(focusArea: string): string[] {
     const skillMapping: Record<string, string[]> = {
-      'scrolling': ['scrolling_analysis', 'janky_frame_analysis', 'jank_frame_detail'],
+      'scrolling': ['scrolling_analysis', 'jank_frame_detail'],
       'startup': ['startup_analysis', 'startup_detail'],
       'memory': ['memory_analysis', 'gc_analysis', 'lmk_analysis'],
       'cpu': ['cpu_analysis', 'scheduling_analysis', 'cpu_profiling'],
       'binder': ['binder_analysis', 'binder_detail', 'lock_contention_analysis'],
-      'frame': ['janky_frame_analysis', 'jank_frame_detail', 'app_frame_production'],
+      'frame': ['jank_frame_detail', 'app_frame_production'],
       'interaction': ['click_response_analysis', 'click_response_detail'],
       'anr': ['anr_analysis', 'anr_detail'],
       'system': ['thermal_throttling', 'io_pressure', 'suspend_wakeup_analysis'],

@@ -824,10 +824,11 @@ steps:
       layer: list
       title: "掉帧列表"
       expandable: true  # 支持展开查看详细分析
-      # 提取固定值到元数据（这些列在列表中值相同，移至标题显示）
+      # 提取固定值到元数据（这些列在列表中值相同，移至标题/副标题显示）
       metadataFields:
         - layer_name
         - process_name
+        - pid
       columns:
         - name: frame_id
           label: "帧 ID"
@@ -1152,17 +1153,31 @@ steps:
     condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && typeof environment !== 'undefined' && environment.data[0]?.has_data === 1 && perf_summary.data[0]?.janky_frames > 0 && start_ts != null"
 
   # ==========================================================================
-  # L3: 逐帧诊断 (所有掉帧帧 → janky_frame_analysis)
+  # L3: 逐帧诊断 (所有掉帧帧 → jank_frame_detail)
   # ==========================================================================
   - id: diagnose_jank_frames
     type: iterator
     name: "逐帧诊断分析"
     source: app_jank_frames
-    item_skill: janky_frame_analysis
+    item_skill: jank_frame_detail
     item_params:
-      frame_ts: start_ts
-      frame_dur: dur_ns
+      start_ts: start_ts
+      end_ts: end_ts
+      main_start_ts: main_start_ts
+      main_end_ts: main_end_ts
+      render_start_ts: render_start_ts
+      render_end_ts: render_end_ts
+      dur_ms: dur_ms
+      frame_id: frame_id
+      jank_type: jank_type
       package: process_name
+      pid: pid
+      session_id: session_id
+      layer_name: layer_name
+      token_gap: token_gap
+      vsync_missed: vsync_missed
+      jank_responsibility: jank_responsibility
+      frame_index: frame_index
     display:
       level: key
       layer: overview

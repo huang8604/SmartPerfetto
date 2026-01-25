@@ -13,6 +13,8 @@ import {
 } from '../services/sessionLogger';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import { reportStore } from './reportRoutes';
+import { SessionPersistenceService } from '../services/sessionPersistenceService';
+import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import {
   registerCoreTools,
   StreamingUpdate,
@@ -468,11 +470,26 @@ router.post('/:sessionId/respond', async (req, res) => {
  * GET /api/agent/sessions
  *
  * List all active and recoverable sessions
+ *
+ * Query params:
+ * - traceId: Filter by trace ID
+ * - limit: Max number of recoverable sessions (default: 20)
+ * - includeRecoverable: Include recoverable sessions from persistence (default: true)
  */
 router.get('/sessions', async (req, res) => {
   try {
+    const { traceId, limit, includeRecoverable } = req.query;
+    const parsedLimit = limit ? parseInt(limit as string, 10) : 20;
+    const shouldIncludeRecoverable = includeRecoverable !== 'false';
+
+    // Get active sessions from memory
     const activeSessions: any[] = [];
+    const activeIds = new Set<string>();
+
     for (const [sessionId, session] of sessions.entries()) {
+      if (traceId && session.traceId !== traceId) continue;
+
+      activeIds.add(sessionId);
       activeSessions.push({
         sessionId,
         status: session.status,
@@ -480,15 +497,56 @@ router.get('/sessions', async (req, res) => {
         query: session.query,
         createdAt: session.createdAt,
         isActive: true,
+        entityStoreStats: null, // Active sessions have live context
       });
+    }
+
+    // Get recoverable sessions from persistence (excluding active ones)
+    const recoverableSessions: any[] = [];
+
+    if (shouldIncludeRecoverable) {
+      try {
+        const persistenceService = SessionPersistenceService.getInstance();
+        const persistedResult = persistenceService.listSessions({
+          traceId: traceId as string | undefined,
+          limit: parsedLimit,
+        });
+
+        for (const persistedSession of persistedResult.sessions) {
+          // Skip if session is already active
+          if (activeIds.has(persistedSession.id)) continue;
+
+          // Check if session has recoverable context
+          const hasContext = persistenceService.hasSessionContext(persistedSession.id);
+          if (!hasContext) continue;
+
+          // Get EntityStore stats for quick preview
+          const storeStats = persistenceService.getEntityStoreStats(persistedSession.id);
+
+          recoverableSessions.push({
+            sessionId: persistedSession.id,
+            status: 'recoverable',
+            traceId: persistedSession.traceId,
+            traceName: persistedSession.traceName,
+            query: persistedSession.question,
+            createdAt: persistedSession.createdAt,
+            updatedAt: persistedSession.updatedAt,
+            isActive: false,
+            entityStoreStats: storeStats,
+          });
+        }
+      } catch (persistError: any) {
+        // Don't fail the request if persistence lookup fails
+        console.warn('[AgentRoutes] Failed to list recoverable sessions:', persistError.message);
+      }
     }
 
     res.json({
       success: true,
       activeSessions,
       totalActive: activeSessions.length,
-      recoverableSessions: [],
-      totalRecoverable: 0,
+      recoverableSessions,
+      totalRecoverable: recoverableSessions.length,
     });
   } catch (error: any) {
     res.status(500).json({
@@ -501,13 +559,22 @@ router.get('/sessions', async (req, res) => {
 /**
  * POST /api/agent/resume
  *
- * Resume a recoverable session.
+ * Resume a recoverable session from persistence.
  *
- * Note: Agent-driven sessions are currently in-memory only; this endpoint
- * returns structured errors for compatibility and can be extended later.
+ * This endpoint enables cross-restart session recovery by:
+ * 1. Loading the persisted session from SQLite
+ * 2. Restoring the EnhancedSessionContext (including EntityStore)
+ * 3. Re-creating the orchestrator with the restored context
+ *
+ * Body:
+ * {
+ *   "sessionId": "agent-xxx",
+ *   "traceId": "trace-xxx"  // Required for context restoration
+ * }
  */
 router.post('/resume', async (req, res) => {
-  const sessionId = req.body?.sessionId;
+  const { sessionId, traceId } = req.body || {};
+
   if (!sessionId || typeof sessionId !== 'string') {
     return res.status(400).json({
       success: false,
@@ -515,20 +582,169 @@ router.post('/resume', async (req, res) => {
     });
   }
 
-  const session = sessions.get(sessionId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Session not found',
+  // Check if session is already active in memory
+  const existingSession = sessions.get(sessionId);
+  if (existingSession) {
+    return res.json({
+      success: true,
+      sessionId,
+      status: existingSession.status,
+      message: 'Session already active',
+      restored: false,
     });
   }
 
-  return res.json({
-    success: true,
-    sessionId,
-    status: session.status,
-    message: 'Session resume acknowledged',
-  });
+  // Try to restore from persistence
+  try {
+    const persistenceService = SessionPersistenceService.getInstance();
+
+    // Check if session exists in persistence
+    if (!persistenceService.hasSessionContext(sessionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found in persistence',
+        hint: 'Session may have expired or was never persisted',
+      });
+    }
+
+    // Load persisted session metadata
+    const persistedSession = persistenceService.getSession(sessionId);
+    if (!persistedSession) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session metadata not found',
+      });
+    }
+
+    // Use provided traceId or fall back to persisted one
+    const effectiveTraceId = traceId || persistedSession.traceId;
+
+    // Verify trace exists
+    const traceProcessorService = getTraceProcessorService();
+    const trace = traceProcessorService.getTrace(effectiveTraceId);
+    if (!trace) {
+      return res.status(404).json({
+        success: false,
+        error: 'Trace not found in backend',
+        hint: 'Please upload the trace before resuming the session',
+        code: 'TRACE_NOT_UPLOADED',
+      });
+    }
+
+    // Restore the EnhancedSessionContext (includes EntityStore)
+    const restoredContext = persistenceService.loadSessionContext(sessionId);
+    if (!restoredContext) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to deserialize session context',
+      });
+    }
+
+    // Register the restored context in the session context manager
+    // This replaces any stale in-memory context
+    const contextManager = sessionContextManager;
+    // We need to directly inject the restored context
+    // First, get or create will create a new one, so we need to manually set it
+    // Let's add the context to the manager by using the internal get method
+    // Actually, we need to use the deserialized context directly
+
+    // Create a new orchestrator for this session
+    const modelRouter = getModelRouter();
+    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+      enableLogging: true,
+    });
+
+    // Create logger
+    const logger = createSessionLogger(sessionId);
+    logger.setMetadata({
+      traceId: effectiveTraceId,
+      query: persistedSession.question,
+      architecture: 'agent-driven',
+      resumed: true,
+    });
+    logger.info('AgentRoutes', 'Session restored from persistence', {
+      entityStoreStats: restoredContext.getEntityStore().getStats(),
+      turnCount: restoredContext.getAllTurns().length,
+    });
+
+    // Create the session record
+    sessions.set(sessionId, {
+      orchestrator,
+      sessionId,
+      sseClients: [],
+      status: 'completed', // Previous analysis was completed
+      traceId: effectiveTraceId,
+      query: persistedSession.question,
+      createdAt: persistedSession.createdAt,
+      logger,
+      hypotheses: [],
+      agentDialogue: [],
+      dataEnvelopes: [],
+      agentResponses: [],
+    });
+
+    // Inject the restored context into the session context manager
+    // Note: We need to handle this carefully since EnhancedSessionContext
+    // uses sessionContextManager internally
+    // The cleanest approach is to use getOrCreate and then manually
+    // update the internal state
+    const freshContext = sessionContextManager.getOrCreate(sessionId, effectiveTraceId);
+
+    // Manually restore EntityStore data from persisted context
+    const restoredStore = restoredContext.getEntityStore();
+    const freshStore = freshContext.getEntityStore();
+
+    // Transfer all entities from restored store to fresh store
+    for (const frame of restoredStore.getAllFrames()) {
+      freshStore.upsertFrame(frame);
+    }
+    for (const session of restoredStore.getAllSessions()) {
+      freshStore.upsertSession(session);
+    }
+
+    // Transfer candidate and analyzed tracking
+    const restoredSnapshot = restoredStore.serialize();
+    if (restoredSnapshot.lastCandidateFrameIds) {
+      freshStore.setLastCandidateFrames(restoredSnapshot.lastCandidateFrameIds);
+    }
+    if (restoredSnapshot.lastCandidateSessionIds) {
+      freshStore.setLastCandidateSessions(restoredSnapshot.lastCandidateSessionIds);
+    }
+    if (restoredSnapshot.analyzedFrameIds) {
+      for (const id of restoredSnapshot.analyzedFrameIds) {
+        freshStore.markFrameAnalyzed(id);
+      }
+    }
+    if (restoredSnapshot.analyzedSessionIds) {
+      for (const id of restoredSnapshot.analyzedSessionIds) {
+        freshStore.markSessionAnalyzed(id);
+      }
+    }
+
+    // Restore turns from persisted context
+    for (const turn of restoredContext.getAllTurns()) {
+      freshContext.addTurn(turn.query, turn.intent, turn.result, turn.findings);
+    }
+
+    return res.json({
+      success: true,
+      sessionId,
+      traceId: effectiveTraceId,
+      status: 'completed',
+      message: 'Session restored from persistence',
+      restored: true,
+      restoredStats: {
+        turnCount: restoredContext.getAllTurns().length,
+        entityStore: restoredStore.getStats(),
+      },
+    });
+  } catch (error: any) {
+    console.error('[AgentRoutes] Session restore failed:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to restore session',
+    });
+  }
 });
 
 // ============================================================================
@@ -1051,6 +1267,43 @@ async function runAgentDrivenAnalysis(
       hypothesesCount: result.hypotheses.length,
     });
 
+    // Persist session context (including EntityStore) for cross-restart recovery
+    try {
+      const persistenceService = SessionPersistenceService.getInstance();
+      const sessionContext = sessionContextManager.get(sessionId, traceId);
+      if (sessionContext) {
+        // First, ensure the session exists in persistence
+        const existingSession = persistenceService.getSession(sessionId);
+        if (!existingSession) {
+          // Create a new persisted session record
+          persistenceService.saveSession({
+            id: sessionId,
+            traceId,
+            traceName: traceId, // Can be enhanced later
+            question: query,
+            messages: [],
+            createdAt: session.createdAt,
+            updatedAt: Date.now(),
+          });
+        }
+
+        // Save the full session context (includes EntityStore)
+        const saved = persistenceService.saveSessionContext(sessionId, sessionContext);
+        if (saved) {
+          const storeStats = sessionContext.getEntityStore().getStats();
+          logger.info('AgentDrivenAnalysis', 'Session context persisted to DB', {
+            sessionId,
+            entityStoreStats: storeStats,
+          });
+        }
+      }
+    } catch (persistError: any) {
+      // Don't fail the analysis if persistence fails - just log the error
+      logger.warn('AgentDrivenAnalysis', 'Failed to persist session context', {
+        error: persistError.message,
+      });
+    }
+
     // Send final result
     const clientCount = session.sseClients.length;
     logger.info('AgentRoutes', 'Sending agent-driven result', { clientCount });
@@ -1192,10 +1445,14 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   let reportUrl: string | undefined;
   let reportError: string | undefined;
   try {
+    const traceInfo = getTraceProcessorService().getTrace(session.traceId);
+    const traceStartNs = traceInfo?.metadata?.startTime;
+
     const generator = getHTMLReportGenerator();
     const reportData = {
       traceId: session.traceId,
       query: session.query,
+      traceStartNs: traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
       result,
       hypotheses: session.hypotheses,
       dialogue: session.agentDialogue,

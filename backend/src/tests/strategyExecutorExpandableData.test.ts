@@ -25,7 +25,7 @@ describe('StrategyExecutor expandableData synthesis', () => {
     const responses = [
       {
         success: true,
-        findings: [{ severity: 'warning', title: 'CPU 密集', description: '主线程占用高', source: 'direct_skill:janky_frame_analysis' }],
+        findings: [{ severity: 'warning', title: 'CPU 密集', description: '主线程占用高', source: 'direct_skill:jank_frame_detail' }],
         toolResults: [{
           success: true,
           executionTimeMs: 1,

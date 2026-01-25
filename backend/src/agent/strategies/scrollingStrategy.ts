@@ -42,6 +42,18 @@ interface RawFrame {
   startTs: string;
   endTs: string;
   vsyncMissed: number;
+  // Extended fields for jank_frame_detail skill
+  mainStartTs: string;
+  mainEndTs: string;
+  renderStartTs: string;
+  renderEndTs: string;
+  durMs: number;
+  jankType: string;
+  layerName: string;
+  pid: number;
+  tokenGap: number;
+  jankResponsibility: string;
+  frameIndex: number;
 }
 
 function toFiniteNumber(value: any): number {
@@ -219,6 +231,19 @@ function extractFrameIntervals(
           const sessionId = toFiniteNumber(f.session_id);
           const vsyncMissed = toFiniteNumber(f.vsync_missed);
 
+          // Extended fields for jank_frame_detail
+          const mainStartTs = String(f.main_start_ts ?? '');
+          const mainEndTs = String(f.main_end_ts ?? '');
+          const renderStartTs = String(f.render_start_ts ?? '');
+          const renderEndTs = String(f.render_end_ts ?? '');
+          const durMs = toFiniteNumber(f.dur_ms);
+          const jankType = String(f.jank_type ?? '');
+          const layerName = String(f.layer_name ?? '');
+          const pid = toFiniteNumber(f.pid);
+          const tokenGap = toFiniteNumber(f.token_gap);
+          const jankResponsibility = String(f.jank_responsibility ?? '');
+          const frameIndex = toFiniteNumber(f.frame_index);
+
           if (!startTs || startTs === '0') continue;
 
           // If end_ts is not available, estimate from dur_ms or use start_ts + 2*vsync_period
@@ -257,6 +282,17 @@ function extractFrameIntervals(
             startTs,
             endTs: resolvedEndTs,
             vsyncMissed,
+            mainStartTs,
+            mainEndTs,
+            renderStartTs,
+            renderEndTs,
+            durMs,
+            jankType,
+            layerName,
+            pid,
+            tokenGap,
+            jankResponsibility,
+            frameIndex,
           });
         }
       }
@@ -265,8 +301,26 @@ function extractFrameIntervals(
 
   if (rawFrames.length === 0) return [];
 
-  // Sort by severity: vsyncMissed descending
-  rawFrames.sort((a, b) => b.vsyncMissed - a.vsyncMissed);
+  // Sort by: sessionId ascending (区间1 before 区间2), then by startTs ascending (time order within session)
+  // This ensures frames are displayed in logical order: all frames from session 1, then session 2, etc.
+  rawFrames.sort((a, b) => {
+    // Primary: sessionId ascending
+    if (a.sessionId !== b.sessionId) {
+      return a.sessionId - b.sessionId;
+    }
+    // Secondary: startTs ascending (chronological within session)
+    try {
+      const tsA = BigInt(a.startTs);
+      const tsB = BigInt(b.startTs);
+      if (tsA < tsB) return -1;
+      if (tsA > tsB) return 1;
+    } catch { /* fallback to frameIndex */ }
+    // Tertiary: frameIndex ascending
+    if (a.frameIndex !== undefined && b.frameIndex !== undefined) {
+      return a.frameIndex - b.frameIndex;
+    }
+    return 0;
+  });
 
   // Compute reference time (earliest frame start) for relative labels
   let frameReferenceNs: string | undefined;
@@ -291,6 +345,18 @@ function extractFrameIntervals(
         sessionId: frame.sessionId,
         frameId: frame.frameId,
         vsyncMissed: frame.vsyncMissed,
+        // Extended fields for jank_frame_detail paramMapping
+        mainStartTs: frame.mainStartTs || undefined,
+        mainEndTs: frame.mainEndTs || undefined,
+        renderStartTs: frame.renderStartTs || undefined,
+        renderEndTs: frame.renderEndTs || undefined,
+        durMs: frame.durMs || undefined,
+        jankType: frame.jankType || undefined,
+        layerName: frame.layerName || undefined,
+        pid: frame.pid || undefined,
+        tokenGap: frame.tokenGap || undefined,
+        jankResponsibility: frame.jankResponsibility || undefined,
+        frameIndex: frame.frameIndex || undefined,
       },
     };
   });
@@ -363,18 +429,17 @@ const sessionOverviewStage: StageDefinition = {
 /**
  * Stage 2: Per-Frame Analysis (Direct Skill Execution)
  *
- * Detailed analysis on each individual jank frame using the janky_frame_analysis
- * composite skill. This skill internally parallelizes CPU + scheduling + binder
- * analysis, then applies rule-based diagnostics (ai_assist disabled to avoid N×LLM overhead).
+ * Comprehensive per-frame analysis using the jank_frame_detail composite skill.
+ * Covers: 四象限分析, Binder, CPU频率, 主线程/RenderThread耗时操作, 锁竞争, GC, IO阻塞, 根因分析.
+ * All steps use optional: true for graceful degradation when tables are missing.
  *
- * Performance: Was 3 agents × N frames = 3N agent tasks (each with full LLM cycle).
- * Now: 1 direct skill call × N frames = N deterministic SQL executions (0 LLM calls).
- * For 63 frames: ~12-30 seconds total (pure SQL + rule evaluation).
+ * Performance: N deterministic SQL executions per frame (0 LLM calls).
+ * For 63 frames: ~15-30 seconds total (pure SQL + rule evaluation).
  */
 const frameAnalysisStage: StageDefinition = {
   name: 'frame_analysis',
-  description: 'Per-jank-frame deep dive via direct skill execution (CPU/Binder/scheduling)',
-  progressMessageTemplate: '阶段 {{stageIndex}}/{{totalStages}}：逐帧分析 CPU/Binder/调度（直接 Skill 执行）',
+  description: 'Per-jank-frame deep dive via direct skill execution (quadrant/Binder/CPU/slices/GC/IO)',
+  progressMessageTemplate: '阶段 {{stageIndex}}/{{totalStages}}：逐帧分析（四象限/Binder/CPU/锁/GC/IO）',
   tasks: [
     {
       agentId: 'frame_agent',   // Attribution only — no actual agent dispatch
@@ -382,11 +447,27 @@ const frameAnalysisStage: StageDefinition = {
       scope: 'per_interval',
       priority: 1,
       executionMode: 'direct_skill',
-      directSkillId: 'janky_frame_analysis',
+      directSkillId: 'jank_frame_detail',
       paramMapping: {
-        frame_ts: 'startTs',
-        frame_dur: 'duration',
+        // Known sources (resolved via switch-case in DirectSkillExecutor)
+        start_ts: 'startTs',
+        end_ts: 'endTs',
         package: 'processName',
+        // Metadata sources (resolved via interval.metadata[key] fallback)
+        frame_id: 'frameId',
+        jank_type: 'jankType',
+        dur_ms: 'durMs',
+        main_start_ts: 'mainStartTs',
+        main_end_ts: 'mainEndTs',
+        render_start_ts: 'renderStartTs',
+        render_end_ts: 'renderEndTs',
+        pid: 'pid',
+        session_id: 'sessionId',
+        layer_name: 'layerName',
+        token_gap: 'tokenGap',
+        vsync_missed: 'vsyncMissed',
+        jank_responsibility: 'jankResponsibility',
+        frame_index: 'frameIndex',
       },
       descriptionTemplate: '逐帧综合分析：{{scopeLabel}}',
     },

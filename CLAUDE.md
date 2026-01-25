@@ -14,8 +14,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 
 **Core Concepts:**
 - Frontend/backend share `trace_processor_shell` via HTTP RPC
-- Agent-Driven hypothesis analysis (假设驱动分析)
-- Strategy-based staged analysis (策略驱动分阶段分析)
+- **Dual-Executor Architecture:** Strategy-Driven (deterministic) + Hypothesis-Driven (adaptive)
 - Domain Agents collect evidence via SQL queries
 - Analysis logic in YAML Skills (`backend/skills/`)
 - Results layered: L1 (overview) → L2 (list) → L3 (diagnosis) → L4 (deep)
@@ -25,22 +24,38 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 
 ## Backend Structure
 
-### Agent System (v5.0 - Strategy + Agent-Driven)
+### Agent System (v5.0 - Dual-Executor Architecture)
 
 **Core:** `backend/src/agent/core/`
 | Component | Purpose |
 |-----------|---------|
-| agentDrivenOrchestrator.ts | 主协调器 (策略匹配 + 假设驱动多轮分析) |
+| agentDrivenOrchestrator.ts | 主协调器 (策略匹配 → 执行器路由) |
+| strategyRegistry.ts | 策略注册与 trigger 匹配 |
 | circuitBreaker.ts | 熔断器，触发用户介入 |
 | modelRouter.ts | 多模型路由 (DeepSeek/OpenAI/Anthropic/GLM) |
 | stateMachine.ts | 状态机 (IDLE→PLANNING→HYPOTHESIS→ROUNDS→CONCLUSION) |
+| pipelineExecutor.ts | 任务执行流水线 |
+| taskGraphPlanner.ts | 任务图生成 |
+| taskGraphExecutor.ts | 依赖有序执行 |
+| hypothesisGenerator.ts | 初始假设生成 |
+| intentUnderstanding.ts | 意图理解 |
+| conclusionGenerator.ts | 结论综合 |
+| feedbackSynthesizer.ts | LLM 综合发现 |
 
-**Strategies (NEW):** `backend/src/agent/strategies/`
+**Executors:** `backend/src/agent/core/executors/`
+| Executor | Mode | Trigger | Description |
+|----------|------|---------|-------------|
+| strategyExecutor.ts | Deterministic | Strategy matched | 确定性多阶段流水线 |
+| hypothesisExecutor.ts | Adaptive LLM | No strategy match | 假设驱动多轮分析 |
+| directSkillExecutor.ts | Direct bypass | Stage template | 直接执行 Skill (零 LLM 开销) |
+| analysisExecutor.ts | Interface | - | 执行器基类接口 |
+
+**Strategies:** `backend/src/agent/strategies/`
 | Component | Purpose |
 |-----------|---------|
 | types.ts | StagedAnalysisStrategy, FocusInterval, StageDefinition, StageTaskTemplate |
 | registry.ts | StrategyRegistry - trigger 匹配策略选择 |
-| scrollingStrategy.ts | 滑动分析策略 (overview → per_interval 多阶段) |
+| scrollingStrategy.ts | 滑动分析策略 (3 阶段流水线) |
 | helpers.ts | 区间提取和格式化工具函数 |
 
 **Decision Trees:** `backend/src/agent/decision/`
@@ -49,14 +64,14 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 | decisionTreeExecutor.ts | 决策树执行引擎 |
 | decisionTreeStageExecutor.ts | 决策树与 Pipeline 集成 |
 | skillExecutorAdapter.ts | Skill 调用适配器 |
-| types.ts | 决策节点/分支/树类型 |
+| types.ts | 决策节点/分支/树类型 (CHECK/ACTION/BRANCH/CONCLUDE) |
 | trees/scrollingDecisionTree.ts | 滑动场景决策树 |
 | trees/launchDecisionTree.ts | 启动场景决策树 |
 
 **Domain Agents:** `backend/src/agent/agents/domain/`
 | Agent | Purpose |
 |-------|---------|
-| frameAgent.ts | 帧渲染分析 |
+| frameAgent.ts | 帧渲染分析 (jank_frame_detail, scrolling_analysis, consumer_jank_detection) |
 | cpuAgent.ts | CPU 调度与负载 |
 | memoryAgent.ts | 内存分配与 GC |
 | binderAgent.ts | IPC/Binder 事务 |
@@ -65,9 +80,9 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 **Planning & Evaluation:** `backend/src/agent/agents/`
 - plannerAgent.ts - 意图理解、任务分解
 - evaluatorAgent.ts - 结果质量评估
-- iterationStrategyPlanner.ts - 迭代策略决策（是否继续下一轮）
+- iterationStrategyPlanner.ts - 迭代策略决策（置信度评估，是否继续下一轮）
 - sceneReconstructionAgent.ts - 场景重建
-- scrollingExpertAgent.ts - 滑动专家
+- scrollingExpertAgent.ts - 滑动专家 (legacy)
 
 **Agent Bases:** `backend/src/agent/agents/base/`
 - baseAgent.ts - Agent 基类
@@ -79,6 +94,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 **Context & State:**
 - `context/enhancedSessionContext.ts` - 多轮对话上下文
 - `context/contextBuilder.ts` - 按角色过滤上下文
+- `context/contextTypes.ts` - 上下文类型定义
 - `context/policies/` - Planner/Evaluator/Worker Policy
 - `compaction/contextCompactor.ts` - Token 溢出防护
 - `compaction/tokenEstimator.ts` - Token 用量估算
@@ -105,14 +121,14 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
   - baseCrossDomainExpert.ts - 跨域基类
   - hypothesisManager.ts - 假设生命周期管理
   - dialogueProtocol.ts - Agent 通信协议
-  - moduleCatalog.ts - 模块目录
+  - moduleCatalog.ts - 模块目录 (framework/vendor capabilities)
   - moduleExpertInvoker.ts - 模块专家调用
   - experts/performanceExpert.ts - 性能综合分析
 
 **Tools:** `backend/src/agent/tools/`
 - sqlExecutor.ts - SQL 查询执行
 - frameAnalyzer.ts - 帧分析
-- skillInvoker.ts - Skill 调用
+- skillInvoker.ts - Skill 调用 (参数映射)
 - dataStats.ts - 数据统计
 
 **Detectors:** `backend/src/agent/detectors/`
@@ -140,6 +156,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 | SkillAnalysisAdapter | services/skillEngine/skillAnalysisAdapter.ts | Skill 分析适配 |
 | AnswerGenerator | services/skillEngine/answerGenerator.ts | 答案生成器 |
 | SmartSummaryGenerator | services/skillEngine/smartSummaryGenerator.ts | 智能摘要 |
+| EventCollector | services/skillEngine/eventCollector.ts | 事件收集 |
 | HTMLReportGenerator | services/htmlReportGenerator.ts | HTML 报告生成 |
 | SessionLogger | services/sessionLogger.ts | JSONL 会话日志 |
 | AutoAnalysisService | services/autoAnalysisService.ts | 自动分析服务 |
@@ -153,18 +170,21 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 ```
 User Query → POST /api/agent/analyze → AgentDrivenOrchestrator
     │
-    ├─ Phase 1: Strategy Matching
+    ├─ Phase 1: Intent Understanding + Hypothesis Generation
+    │   └─ intentUnderstanding → generateInitialHypotheses (LLM)
+    │
+    ├─ Phase 2: Strategy Matching
     │   └─ StrategyRegistry.match(query) → scrollingStrategy / null
     │
-    ├─ [Strategy Match] Multi-Stage Pipeline:
-    │   ├─ Stage 0 (overview): Global tasks → Domain Agents
-    │   ├─ extractIntervals() → FocusInterval[]
-    │   ├─ Stage 1 (per_interval): Per-interval tasks
-    │   └─ Synthesize findings → analysis_completed
+    ├─ [Strategy Match] StrategyExecutor (Deterministic Pipeline):
+    │   ├─ Stage 0 (overview): scroll_session_analysis → 识别卡顿会话
+    │   ├─ extractIntervals() → FocusInterval[] (卡顿区间)
+    │   ├─ Stage 1 (session_overview): 每会话 FPS/掉帧统计
+    │   ├─ Stage 2 (per_interval): jank_frame_detail → 逐帧分析
+    │   └─ generateConclusion → analysis_completed
     │
-    ├─ [No Strategy] Hypothesis-Driven Rounds:
+    ├─ [No Strategy] HypothesisExecutor (Adaptive LLM Loop):
     │   ├─ Round 1:
-    │   │   ├─ LLM 理解意图 → 生成假设 (Hypotheses)
     │   │   ├─ 分派任务 → Domain Agents (Frame/CPU/Memory/Binder)
     │   │   ├─ Agents 执行 SQL → 收集 Evidence
     │   │   ├─ 综合 Findings (severity: critical/warning/info)
@@ -173,39 +193,84 @@ User Query → POST /api/agent/analyze → AgentDrivenOrchestrator
     │   ├─ Round N (if confidence < threshold):
     │   │   └─ 深入分析，补充证据
     │   │
-    │   └─ Conclusion → analysis_completed SSE event
+    │   └─ generateConclusion → analysis_completed
     │
     └─ Circuit Breaker: 置信度过低时触发用户介入
 ```
 
 ---
 
-## Strategy System (NEW)
+## Dual-Executor Pattern
 
-**Purpose:** 将常见分析场景（滑动、启动等）编码为确定性多阶段流水线，避免 LLM 不确定性。
+**Purpose:** 根据场景选择最优执行路径，平衡确定性与灵活性。
+
+### StrategyExecutor (Deterministic)
 
 ```
-Query → StrategyRegistry.match()
-           ├─ scrollingStrategy.trigger("分析滑动卡顿") → ✅
-           └─ (future) launchStrategy.trigger("启动慢") → ✅
+Query → Strategy.trigger() match → Multi-stage pipeline → Fixed output
+```
 
-Strategy Execution:
-  Stage 0 (overview):
-    - tasks: [{ agentId: 'frame_agent', scope: 'global', skillParams: {...} }]
-    - extractIntervals: responses → FocusInterval[]
-    - shouldStop: intervals.length === 0 → early exit
+**特点:**
+- 预定义分析流水线
+- 确定性阶段转换
+- 保证输出格式
+- 支持 `direct_skill` 模式 (零 LLM 开销)
+- 适用: 滑动、启动、导航等常见场景
 
-  Stage 1 (per_interval):
-    - tasks: [{ agentId: 'frame_agent', scope: 'per_interval' }]
-    - Each FocusInterval gets its own task with start_ts/end_ts
+### HypothesisExecutor (Adaptive)
+
+```
+Query → LLM 假设生成 → Multi-round refinement → Variable output
+```
+
+**特点:**
+- LLM 驱动假设生成
+- 多轮迭代优化
+- 输出随发现变化
+- Circuit Breaker 用户介入
+- 适用: 通用分析、边缘场景
+
+### Execution Modes
+
+| Mode | LLM Overhead | Use Case |
+|------|--------------|----------|
+| `agent` | Full reasoning | 需要 LLM 决策的任务 |
+| `direct_skill` | Zero | 确定性 SQL 查询 (`*_in_range` skills) |
+
+---
+
+## Strategy System
+
+**Purpose:** 将常见分析场景编码为确定性多阶段流水线，避免 LLM 不确定性。
+
+### Scrolling Strategy (3 Stages)
+
+```
+Stage 0 (overview):
+  - Skill: scroll_session_analysis
+  - Scope: global
+  - Output: scroll_sessions, session_jank data
+  - extractIntervals() → FocusInterval[] (janky sessions)
+
+Stage 1 (session_overview):
+  - Skill: scrolling_analysis
+  - Scope: global (with session context)
+  - Output: FPS, frame drop stats per session
+
+Stage 2 (per_interval):
+  - Skill: jank_frame_detail
+  - Scope: per_interval
+  - For each FocusInterval:
+    - Run with start_ts/end_ts parameters
+    - Collect CPU/Binder/Rendering metrics per frame
 ```
 
 **Key Concepts:**
 - `StagedAnalysisStrategy` — 策略定义 (trigger + stages)
 - `StageDefinition` — 阶段定义 (tasks + extractIntervals + shouldStop)
-- `StageTaskTemplate` — 任务模板 (agentId + scope + skillParams)
+- `StageTaskTemplate` — 任务模板 (agentId + scope + executionMode + skillParams)
 - `FocusInterval` — 焦点区间 (startTs/endTs/processName/priority)
-- `skillParams` — 泛型参数传递，Strategy → Agent → Skill (e.g., `max_frames_per_session`)
+- `skillParams` — 泛型参数传递，Strategy → Agent → Skill
 
 ---
 
@@ -250,11 +315,56 @@ steps:
 ```
 
 **Location:** `backend/skills/`
-- `atomic/` - 单步检测 (17 skills)
-- `composite/` - 组合分析 (28 skills)
+- `atomic/` - 单步检测 (29 skills)
+- `composite/` - 组合分析 (27 skills)
 - `deep/` - 深度分析 (2 skills)
 - `modules/` - 模块配置 (app/framework/hardware/kernel)
 - `vendors/` - 厂商适配 (pixel/samsung/xiaomi/honor/oppo/vivo/qualcomm/mtk)
+
+### Atomic Skills (29)
+
+**Frame Analysis:**
+- app_frame_production, consumer_jank_detection, render_thread_slices
+- rendering_arch_detection, present_fence_timing, vrr_detection, vsync_config
+
+**CPU Analysis:**
+- cpu_freq_timeline, cpu_load_in_range, cpu_slice_analysis
+- cpu_topology_detection, scheduling_analysis, lock_contention_in_range
+
+**Range-Based Skills (NEW - 12 skills):**
+- binder_blocking_in_range, cpu_cluster_load_in_range, cpu_throttling_in_range
+- gpu_freq_in_range, gpu_render_in_range, page_fault_in_range
+- render_pipeline_latency, sched_latency_in_range, sf_composition_in_range
+- system_load_in_range, task_migration_in_range, vsync_alignment_in_range
+
+**Other:**
+- binder_in_range, gpu_metrics, game_fps_analysis, sf_frame_consumption
+
+### Composite Skills (27)
+
+**Scrolling/Jank:**
+- scroll_session_analysis, scrolling_analysis, jank_frame_detail
+
+**Startup:**
+- startup_analysis, startup_detail
+
+**ANR:**
+- anr_analysis, anr_detail
+
+**Interaction:**
+- click_response_analysis, click_response_detail, navigation_analysis
+
+**System Analysis:**
+- cpu_analysis, memory_analysis, gc_analysis, lmk_analysis
+- binder_analysis, binder_detail, gpu_analysis, surfaceflinger_analysis
+
+**Issues:**
+- lock_contention_analysis, render_pipeline_latency
+- block_io_analysis, io_pressure, dmabuf_analysis
+- suspend_wakeup_analysis, thermal_throttling, irq_analysis, network_analysis
+
+**Meta:**
+- scene_reconstruction
 
 ---
 
@@ -293,7 +403,7 @@ interface ColumnDefinition {
 ## API Endpoints
 
 **Agent (唯一主链路):**
-- `POST /api/agent/analyze` - 启动分析 (Strategy 匹配 → AgentDrivenOrchestrator)
+- `POST /api/agent/analyze` - 启动分析 (Strategy 匹配 → Executor 路由)
 - `GET /api/agent/:sessionId/stream` - SSE 实时流
 - `GET /api/agent/:sessionId/status` - 轮询状态
 - `POST /api/agent/:sessionId/respond` - 响应断路器
@@ -306,6 +416,15 @@ interface ColumnDefinition {
 **Trace:**
 - `POST /api/traces/register-rpc` - 注册 RPC
 
+**Skills:**
+- `GET /api/skills/*` - Skill 管理
+
+**Export:**
+- `POST /api/export/*` - 结果导出
+
+**Sessions:**
+- `GET /api/sessions/*` - 会话管理
+
 ---
 
 ## SSE Events (Agent-Driven)
@@ -315,6 +434,7 @@ interface ColumnDefinition {
 | progress | starting, understanding, concluding | 阶段进度 |
 | hypothesis_generated | hypotheses_generated | 假设生成 |
 | round_start | round_start | 新一轮开始 |
+| stage_start | stage_start | 策略阶段开始 |
 | agent_task_dispatched | tasks_dispatched | 任务批量分派 |
 | agent_dialogue | task_dispatched | 单任务分派 |
 | agent_response | task_completed | Agent 完成任务 |
@@ -362,3 +482,14 @@ PORT=3000
 AI_SERVICE=deepseek
 DEEPSEEK_API_KEY=sk-xxx
 ```
+
+---
+
+## File Count Summary
+
+| Category | Count |
+|----------|-------|
+| Agent System | ~82 source files |
+| Services | ~30 service files |
+| Skills | 56 definitions (29 atomic + 27 composite) |
+| Routes | 16 API handlers |

@@ -2513,7 +2513,7 @@ This state machine describes how skill execution errors are collected and displa
 
 | Agent | Domain | 集成的 Skills | AI 能力 |
 |-------|--------|---------------|---------|
-| FrameAgent | frame | janky_frame_analysis, jank_frame_detail, scrolling_analysis | 识别卡顿模式、定位问题帧 |
+| FrameAgent | frame | jank_frame_detail, scrolling_analysis | 识别卡顿模式、定位问题帧 |
 | CPUAgent | cpu | cpu_analysis, scheduling_analysis, cpu_profiling | 分析调度、定位热点 |
 | BinderAgent | binder | binder_analysis, binder_detail, lock_contention_analysis | 分析 IPC、检测超时 |
 | MemoryAgent | memory | memory_analysis, gc_analysis, lmk_analysis | 检测泄漏、追踪分配 |

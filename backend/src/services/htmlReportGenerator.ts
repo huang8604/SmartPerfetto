@@ -29,6 +29,8 @@ export interface ReportData {
   traceId: string;
   question: string;
   answer: string;
+  /** Trace start timestamp in ns (string to preserve precision) */
+  traceStartNs?: string;
   metrics: {
     totalDuration: number;
     iterationsCount: number;
@@ -66,6 +68,8 @@ export interface MasterAgentReportData {
 export interface AgentDrivenReportData {
   traceId: string;
   query: string;
+  /** Trace start timestamp in ns (string to preserve precision) */
+  traceStartNs?: string;
   result: {
     sessionId: string;
     success: boolean;
@@ -108,6 +112,10 @@ export interface AgentDrivenReportData {
 }
 
 export class HTMLReportGenerator {
+  // Monotonic counter to ensure DOM ids are unique within a generated report.
+  // Using Date.now() is not reliable because multiple sections can be rendered within the same millisecond.
+  private domIdSeq = 0;
+
   /**
    * 【P2 Fix】可配置的元数据列名
    * 这些列的值在同一表格中通常是恒定的，会被提取到表头显示
@@ -126,6 +134,41 @@ export class HTMLReportGenerator {
    */
   private isMetadataColumn(colName: string): boolean {
     return HTMLReportGenerator.METADATA_COLUMN_PATTERNS.includes(colName);
+  }
+
+  private sanitizeDomIdPart(value: string): string {
+    return (value || 'section').replace(/[^a-zA-Z0-9_-]/g, '-');
+  }
+
+  private nextDomId(prefix: string): string {
+    this.domIdSeq += 1;
+    return `${this.sanitizeDomIdPart(prefix)}_${this.domIdSeq}`;
+  }
+
+  private parseNs(value: any): bigint | null {
+    try {
+      if (typeof value === 'bigint') return value;
+      if (typeof value === 'number') {
+        if (!Number.isFinite(value)) return null;
+        return BigInt(Math.trunc(value));
+      }
+      if (typeof value === 'string') {
+        if (!value.trim()) return null;
+        const normalized = value.replace(/,/g, '').trim();
+        if (!/^-?\d+$/.test(normalized)) return null;
+        return BigInt(normalized);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private formatRelativeSeconds(ns: bigint): string {
+    const sign = ns < 0n ? '-' : '';
+    const absNs = ns < 0n ? -ns : ns;
+    const seconds = Number(absNs) / 1e9;
+    return `${sign}${seconds.toFixed(3)}s`;
   }
 
   /**
@@ -679,19 +722,28 @@ export class HTMLReportGenerator {
     }
 
     // Toggle expandable row details (for iterator results)
-    function toggleExpandableRow(rowId) {
-      const detailsRow = document.getElementById(rowId + '_details');
-      const btn = document.querySelector('[onclick="toggleExpandableRow(\\'' + rowId + '\\')"]');
+    function toggleExpandableRow(arg) {
+      // Support both toggleExpandableRow(rowId: string) and toggleExpandableRow(buttonEl: HTMLElement)
+      let detailsRow = null;
+      let btn = null;
+
+      if (typeof arg === 'string') {
+        const rowId = arg;
+        detailsRow = document.getElementById(rowId + '_details');
+        // Find the owning row (avoid accidental matches if other elements reuse the same data attribute)
+        const expandableRow = document.querySelector('.expandable-row[data-row-id=\"' + rowId + '\"]');
+        btn = expandableRow ? expandableRow.querySelector('.expand-btn') : null;
+      } else if (arg && arg.closest) {
+        btn = arg;
+        const tr = btn.closest('tr');
+        detailsRow = tr ? tr.nextElementSibling : null;
+      }
 
       if (detailsRow) {
         const isHidden = detailsRow.style.display === 'none';
         detailsRow.style.display = isHidden ? 'table-row' : 'none';
 
         if (btn) {
-          const icon = btn.querySelector('.expand-icon');
-          if (icon) {
-            icon.textContent = isHidden ? '▲' : '▼';
-          }
           btn.innerHTML = isHidden
             ? '<span class="expand-icon">▲</span> 收起'
             : '<span class="expand-icon">▼</span> 展开';
@@ -986,7 +1038,9 @@ export class HTMLReportGenerator {
     }>;
 
     // 生成唯一的 section ID 用于 JavaScript 操作
-    const sectionUniqueId = `expandable_${sectionId}_${Date.now()}`;
+    // 注意：不能使用 Date.now()，同一毫秒内渲染多个同 stepId 的表会导致 id 冲突，
+    // 从而使“展开”按钮总是命中第一个表格，表现为“点了没反应”。
+    const sectionUniqueId = this.nextDomId(`expandable_${sectionId}`);
 
     let html = `
       <div class="report-card expandable-section" id="${sectionUniqueId}">
@@ -1045,7 +1099,8 @@ export class HTMLReportGenerator {
         .map(([col, value]) => `<span style="color: #666; font-size: 12px; margin-left: 8px;">${this.escapeHtml(col)}: <strong>${this.escapeHtml(String(value))}</strong></span>`)
         .join('');
 
-      // 主表格但行可点击展开
+      // 主表格 + 展开行（colspan 横跨所有列）
+      const totalColumns = variableColumns.length + 1; // +1 for 详情列
       html += `
         <div class="table-container expandable-table">
           ${constantColumnLabels ? `
@@ -1064,32 +1119,35 @@ export class HTMLReportGenerator {
       `;
 
       data.data.forEach((row: any, idx: number) => {
-        const hasDetails = expandableData[idx]?.result?.sections &&
-          Object.keys(expandableData[idx].result.sections || {}).length > 0;
+        const expandableItem = expandableData[idx];
+        const hasExpandable = !!expandableItem;
+        const hasDetails = expandableItem?.result?.sections &&
+          Object.keys(expandableItem.result.sections || {}).length > 0;
         const rowId = `${sectionUniqueId}_row_${idx}`;
 
+        // 主数据行
         html += `
-              <tr class="expandable-row" data-row-id="${rowId}" ${hasDetails ? 'style="cursor: pointer;"' : ''}>
+              <tr class="expandable-row" data-row-id="${rowId}">
                 ${variableColumns.map((col: string) => {
           const value = Array.isArray(row) ? row[data.columns.indexOf(col)] : row[col];
           return `<td>${this.formatCellValue(value)}</td>`;
         }).join('')}
                 <td>
-                  ${hasDetails ? `
-                    <button class="expand-btn" onclick="toggleExpandableRow('${rowId}')" style="background: #667eea; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">
-                      <span class="expand-icon">▼</span> 展开
+                  ${hasExpandable ? `
+                    <button class="expand-btn" onclick="toggleExpandableRow('${rowId}')" style="background: none; border: none; cursor: pointer; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 8px;">
+                      <span class="expand-icon">▼</span> ${hasDetails ? '展开' : '详情'}
                     </button>
                   ` : '<span style="color: #999;">-</span>'}
                 </td>
               </tr>
         `;
 
-        // 添加隐藏的详情行
-        if (hasDetails) {
+        // 展开详情行（默认隐藏，横跨所有列）
+        if (hasExpandable) {
           html += `
-              <tr class="detail-row" id="${rowId}_details" style="display: none;">
-                <td colspan="${variableColumns.length + 1}" style="padding: 0; background: #fafafa;">
-                  ${this.generateDetailContent(expandableData[idx])}
+              <tr id="${rowId}_details" class="details-row" style="display: none;">
+                <td colspan="${totalColumns}" style="padding: 0; background: #fafbfc;">
+                  ${this.generateDetailContent(expandableItem)}
                 </td>
               </tr>
           `;
@@ -1120,16 +1178,11 @@ export class HTMLReportGenerator {
     };
   }): string {
     const { item, result } = itemData;
+    const uniqueId = this.domIdSeq++;
 
     let html = `<div class="detail-content" style="padding: 15px; border-left: 4px solid #667eea;">`;
 
-    // 显示原始项信息
-    html += `
-      <div style="margin-bottom: 10px; padding: 8px; background: #f8f9fa; border-radius: 6px;">
-        <strong style="color: #666;">原始数据：</strong>
-        <code style="font-size: 12px; color: #333;">${this.escapeHtml(JSON.stringify(item, null, 2).substring(0, 500))}</code>
-      </div>
-    `;
+    // 不再显示原始 JSON 数据，与前端保持一致
 
     if (!result.success) {
       html += `
@@ -1139,48 +1192,168 @@ export class HTMLReportGenerator {
         </div>
       `;
     } else if (result.sections) {
+      const sectionsEntries = Object.entries(result.sections);
+      const emptySections: string[] = [];
+
       // 遍历所有 sections 生成表格
-      for (const [subSectionId, subSectionData] of Object.entries(result.sections)) {
+      for (const [subSectionId, subSectionData] of sectionsEntries) {
         const subData = subSectionData as any;
         const subTitle = subData.title || subSectionId;
 
         if (subData.data && Array.isArray(subData.data) && subData.data.length > 0) {
           const columns = subData.columns || Object.keys(subData.data[0]);
-          html += `
-            <div style="margin-bottom: 10px;">
-              <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #2c3e50;">
-                ${this.escapeHtml(subTitle)}
-                <span style="font-weight: normal; color: #666; margin-left: 8px;">(${subData.data.length} 条)</span>
-              </h4>
-              ${this.generateTable(columns, subData.data)}
-            </div>
-          `;
-        } else if (subData.diagnostics && Array.isArray(subData.diagnostics)) {
-          // 显示诊断结果
-          html += `
-            <div style="margin-bottom: 10px;">
-              <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #2c3e50;">
-                ${this.escapeHtml(subTitle)}
-              </h4>
-              ${subData.diagnostics.map((diag: any) => `
-                <div class="diagnostic ${diag.severity || 'info'}" style="margin-bottom: 6px;">
-                  <div class="severity">${this.getSeverityLabel(diag.severity || 'info')}</div>
-                  <div>${this.escapeHtml(diag.message || diag.diagnosis || '')}</div>
-                  ${diag.suggestions ? `
-                    <ul class="suggestions">
-                      ${diag.suggestions.map((s: string) => `<li>${this.escapeHtml(s)}</li>`).join('')}
-                    </ul>
-                  ` : ''}
-                </div>
-              `).join('')}
-            </div>
-          `;
+          const dataCount = subData.data.length;
+          const collapsedId = `detail-section-${uniqueId}-${subSectionId.replace(/[^a-zA-Z0-9]/g, '-')}`;
+
+          // 诊断要点使用更紧凑的表格格式
+          if (subSectionId === 'frame_diagnosis' || subTitle.includes('诊断') || subTitle.includes('diagnosis')) {
+            html += this.generateDiagnosisTable(subData.data, subTitle, collapsedId);
+          } else {
+            // 其他 section: 默认展开显示数据表格
+            html += `
+              <div style="margin-bottom: 16px;">
+                <h4 style="font-size: 14px; font-weight: 600; color: #2c3e50; margin: 0 0 8px 0;">
+                  ${this.escapeHtml(subTitle)}
+                  <span style="font-weight: normal; color: #666; font-size: 12px; margin-left: 8px;">(${dataCount} 条)</span>
+                </h4>
+                ${this.generateTable(columns, subData.data.slice(0, 20))}
+                ${dataCount > 20 ? `<div style="text-align: center; padding: 8px; color: #666; font-size: 12px;">... 还有 ${dataCount - 20} 条</div>` : ''}
+              </div>
+            `;
+          }
+        } else if (subData.diagnostics && Array.isArray(subData.diagnostics) && subData.diagnostics.length > 0) {
+          // 显示诊断结果（以表格形式）
+          const collapsedId = `detail-diag-${uniqueId}-${subSectionId.replace(/[^a-zA-Z0-9]/g, '-')}`;
+          html += this.generateDiagnosticsAsTable(subData.diagnostics, subTitle, collapsedId);
+        } else {
+          // 空 section，记录名称
+          emptySections.push(subTitle);
         }
+      }
+
+      // 所有 section 都为空时显示简洁提示
+      if (sectionsEntries.length > 0 && emptySections.length === sectionsEntries.length) {
+        html += `<div style="padding: 12px; color: #666; font-size: 13px;">无详细数据 (${emptySections.join(', ')})</div>`;
       }
     }
 
     html += `</div>`;
     return html;
+  }
+
+  /**
+   * 生成诊断要点表格（与前端一致的格式）
+   */
+  private generateDiagnosisTable(data: any[], title: string, collapsedId: string): string {
+    // 构建诊断表格数据
+    const diagRows: Array<{severity: string; title: string; description: string; source?: string}> = [];
+
+    for (const item of data) {
+      if (item.diagnosis || item.message) {
+        diagRows.push({
+          severity: item.severity || 'info',
+          title: item.diagnosis || item.message || '',
+          description: Array.isArray(item.suggestions) ? item.suggestions.join('; ') : (item.suggestions || ''),
+          source: item.source || '',
+        });
+      }
+    }
+
+    if (diagRows.length === 0) {
+      return '';
+    }
+
+    return `
+      <div style="margin-bottom: 16px;">
+        <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #2c3e50;">
+          ${this.escapeHtml(title)}
+        </h4>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0;">
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b; width: 80px;">severity</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b;">title</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b;">description</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b; width: 150px;">source</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${diagRows.map(row => `
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 10px 12px; color: ${row.severity === 'critical' ? '#dc2626' : row.severity === 'warning' ? '#d97706' : '#059669'}; font-weight: 500;">
+                  ${this.escapeHtml(row.severity)}
+                </td>
+                <td style="padding: 10px 12px; color: #334155; max-width: 400px; overflow: hidden; text-overflow: ellipsis;">
+                  ${this.escapeHtml(row.title)}
+                </td>
+                <td style="padding: 10px 12px; color: #64748b; max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
+                  ${this.escapeHtml(row.description)}
+                </td>
+                <td style="padding: 10px 12px; color: #94a3b8; font-size: 12px;">
+                  ${this.escapeHtml(row.source)}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  /**
+   * 将诊断数组渲染为表格（与前端一致）
+   */
+  private generateDiagnosticsAsTable(diagnostics: any[], title: string, collapsedId: string): string {
+    const diagRows: Array<{severity: string; title: string; description: string; source?: string}> = [];
+
+    for (const diag of diagnostics) {
+      diagRows.push({
+        severity: diag.severity || 'info',
+        title: diag.diagnosis || diag.message || '',
+        description: Array.isArray(diag.suggestions) ? diag.suggestions.join('; ') : (diag.suggestions || ''),
+        source: diag.source || '',
+      });
+    }
+
+    if (diagRows.length === 0) {
+      return '';
+    }
+
+    return `
+      <div style="margin-bottom: 16px;">
+        <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #2c3e50;">
+          ${this.escapeHtml(title)}
+        </h4>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0;">
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b; width: 80px;">severity</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b;">title</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b;">description</th>
+              <th style="padding: 10px 12px; text-align: left; font-weight: 600; color: #64748b; width: 150px;">source</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${diagRows.map(row => `
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 10px 12px; color: ${row.severity === 'critical' ? '#dc2626' : row.severity === 'warning' ? '#d97706' : '#059669'}; font-weight: 500;">
+                  ${this.escapeHtml(row.severity)}
+                </td>
+                <td style="padding: 10px 12px; color: #334155;">
+                  ${this.escapeHtml(row.title)}
+                </td>
+                <td style="padding: 10px 12px; color: #64748b;">
+                  ${this.escapeHtml(row.description)}
+                </td>
+                <td style="padding: 10px 12px; color: #94a3b8; font-size: 12px;">
+                  ${this.escapeHtml(row.source)}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
   }
 
   /**
@@ -1300,7 +1473,7 @@ export class HTMLReportGenerator {
       .join('');
 
     return `
-      < div class="table-container ${totalRows > defaultVisibleRows ? 'scrollable' : ''}" >
+      <div class="table-container ${totalRows > defaultVisibleRows ? 'scrollable' : ''}">
         <table>
         <thead>
         <tr>
@@ -1341,12 +1514,18 @@ export class HTMLReportGenerator {
    * This method uses the column definitions from the envelope's display config
    * to render the table with proper formatting and styling.
    */
-  private generateTableFromEnvelope(envelope: DataEnvelope): string {
+  private generateTableFromEnvelope(envelope: DataEnvelope, traceStartNs: bigint | null): string {
     const { data, display } = envelope;
 
     // Ensure we have table data
     if (!data.columns || !data.rows || data.rows.length === 0) {
       return '<div class="empty-state">无数据</div>';
+    }
+
+    // 【FIX】Check for expandableData and use expandable rendering if present
+    // This enables click-to-expand rows in Agent-Driven HTML reports (like frontend does)
+    if (data.expandableData && data.expandableData.length > 0) {
+      return this.generateExpandableTableFromEnvelope(envelope, traceStartNs);
     }
 
     // Build column definitions (use explicit ones from display, or infer from column names)
@@ -1411,7 +1590,7 @@ export class HTMLReportGenerator {
                 ${displayColumnDefs.map(colDef => {
                   const colIdx = columnIndices.get(colDef.name);
                   const value = colIdx !== undefined ? row[colIdx] : undefined;
-                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef)}</td>`;
+                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef, traceStartNs)}</td>`;
                 }).join('')}
               </tr>
             `).join('')}
@@ -1421,7 +1600,7 @@ export class HTMLReportGenerator {
                 ${displayColumnDefs.map(colDef => {
                   const colIdx = columnIndices.get(colDef.name);
                   const value = colIdx !== undefined ? row[colIdx] : undefined;
-                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef)}</td>`;
+                  return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef, traceStartNs)}</td>`;
                 }).join('')}
               </tr>
             `).join('')}
@@ -1432,6 +1611,124 @@ export class HTMLReportGenerator {
             <span>▼ 显示更多 ${totalRows - defaultVisibleRows} 条记录</span>
           </div>
         ` : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Generate expandable table from DataEnvelope.expandableData while respecting display columns/metadata.
+   * This matches frontend behavior: show only visible columns, expand rows to show deep sections.
+   */
+  private generateExpandableTableFromEnvelope(envelope: DataEnvelope, traceStartNs: bigint | null): string {
+    const { data, display } = envelope;
+    const title = display.title || envelope.meta?.stepId || envelope.meta?.source || '数据表';
+
+    if (!data.columns || !data.rows || !data.expandableData) {
+      return '<div class="empty-state">无数据</div>';
+    }
+
+    const columns = data.columns;
+    const rows = data.rows;
+    const expandableData = data.expandableData as any[];
+
+    const columnDefs = display.columns || buildColumnDefinitions(columns);
+    const metadataFields = new Set(display.metadataFields || []);
+
+    // Extract metadata values from the first row for configured metadataFields
+    const metadataValues: Record<string, any> = {};
+    if (rows.length > 0) {
+      for (let i = 0; i < columnDefs.length; i++) {
+        const colDef = columnDefs[i];
+        if (metadataFields.has(colDef.name)) {
+          metadataValues[colDef.name] = rows[0][i];
+        }
+      }
+    }
+
+    const metadataLabels = Object.entries(metadataValues)
+      .map(([col, value]) => {
+        const label = columnDefs.find(d => d.name === col)?.label || col;
+        return `<span style="color: #666; font-size: 12px; margin-left: 8px;">${this.escapeHtml(label)}: <strong>${this.escapeHtml(String(value))}</strong></span>`;
+      })
+      .join('');
+
+    // Visible columns: exclude metadata + hidden
+    const visibleColumnDefs = columnDefs.filter(cd => !metadataFields.has(cd.name) && !cd.hidden);
+
+    const columnIndices = new Map<string, number>();
+    columns.forEach((c, idx) => columnIndices.set(c, idx));
+
+    // Convert each row to an object for detail "item" fallback
+    const rowObjects = rows.map((row: any[]) => {
+      const obj: Record<string, any> = {};
+      columns.forEach((c, i) => { obj[c] = row[i]; });
+      return obj;
+    });
+
+    // Unique section id (used only for future bulk operations / safety)
+    const sectionUniqueId = this.nextDomId(`expandable_${envelope.meta?.stepId || 'table'}`);
+
+    return `
+      <div class="report-card expandable-section" id="${sectionUniqueId}">
+        <div class="header" style="background: #f8fafc; padding: 16px; border-bottom: 1px solid var(--border-color);">
+          <h3 style="margin: 0; font-size: 16px; font-weight: 600; color: var(--text-main); display: flex; align-items: center;">
+            ${this.escapeHtml(title)}
+            <span class="badge" style="margin-left: 12px; font-weight: normal; font-size: 12px; background: #e0e7ff; color: #4338ca;">${rows.length} 条记录</span>
+          </h3>
+        </div>
+
+        <div class="table-container expandable-table">
+          ${metadataLabels ? `<div class="table-metadata">${metadataLabels}</div>` : ''}
+          <table>
+            <thead>
+              <tr>
+                ${visibleColumnDefs.map((colDef) => {
+                  const label = colDef.label || colDef.name;
+                  const tooltip = colDef.tooltip ? ` title="${this.escapeHtml(colDef.tooltip)}"` : '';
+                  return `<th${tooltip}>${this.escapeHtml(label)}</th>`;
+                }).join('')}
+                <th style="width: 80px;">详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row: any[], idx: number) => {
+                const exp = expandableData[idx];
+                const hasDetails = !!(exp && exp.result && exp.result.sections && Object.keys(exp.result.sections).length > 0);
+                const itemData = exp && exp.item ? exp.item : rowObjects[idx];
+                const detailData = exp ? { ...exp, item: itemData } : { item: itemData, result: { success: false, error: '无详情数据' } };
+                const rowId = `envelope_row_${this.domIdSeq++}`;
+                const totalColumns = visibleColumnDefs.length + 1; // +1 for 详情列
+
+                // 主数据行
+                const mainRow = `
+                  <tr class="expandable-row" data-row-id="${rowId}">
+                    ${visibleColumnDefs.map((colDef) => {
+                      const colIdx = columnIndices.get(colDef.name);
+                      const value = colIdx !== undefined ? row[colIdx] : undefined;
+                      return `<td class="${this.getCellClassFromDefinition(value, colDef)}">${this.formatCellValueFromDefinition(value, colDef, traceStartNs)}</td>`;
+                    }).join('')}
+                    <td>
+                      <button class="expand-btn" onclick="toggleExpandableRow('${rowId}')" style="background: none; border: none; cursor: pointer; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 8px;">
+                        <span class="expand-icon">▼</span> ${hasDetails ? '展开' : '详情'}
+                      </button>
+                    </td>
+                  </tr>
+                `;
+
+                // 展开详情行（默认隐藏，横跨所有列）
+                const detailsRow = `
+                  <tr id="${rowId}_details" class="details-row" style="display: none;">
+                    <td colspan="${totalColumns}" style="padding: 0; background: #fafbfc;">
+                      ${this.generateDetailContent(detailData)}
+                    </td>
+                  </tr>
+                `;
+
+                return mainRow + detailsRow;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
       </div>
     `;
   }
@@ -1469,7 +1766,7 @@ export class HTMLReportGenerator {
   /**
    * Format a cell value based on column definition
    */
-  private formatCellValueFromDefinition(value: any, colDef: ColumnDefinition): string {
+  private formatCellValueFromDefinition(value: any, colDef: ColumnDefinition, traceStartNs: bigint | null): string {
     if (value === null || value === undefined) {
       return '<span style="color: #999;">-</span>';
     }
@@ -1477,6 +1774,24 @@ export class HTMLReportGenerator {
     const format = colDef.format || 'default';
 
     switch (format) {
+      case 'timestamp_relative': {
+        const ts = this.parseNs(value);
+        if (ts !== null) {
+          const rel = traceStartNs ? ts - traceStartNs : ts;
+          const displayValue = this.formatRelativeSeconds(rel);
+          return `<span title="${this.escapeHtml(ts.toString())}">${this.escapeHtml(displayValue)}</span>`;
+        }
+        break;
+      }
+
+      case 'timestamp_absolute': {
+        const ts = this.parseNs(value);
+        if (ts !== null) {
+          return this.escapeHtml(ts.toString());
+        }
+        break;
+      }
+
       case 'compact':
         if (typeof value === 'number') {
           return this.formatCompactNumber(value);
@@ -1520,6 +1835,29 @@ export class HTMLReportGenerator {
           return `<span title="${this.escapeHtml(value)}">${this.escapeHtml(value.substring(0, 47))}...</span>`;
         }
         break;
+    }
+
+    // Type-based defaults when no explicit format is provided.
+    // This keeps HTML report output consistent with the frontend rendering.
+    if (format === 'default') {
+      if (colDef.type === 'timestamp') {
+        const ts = this.parseNs(value);
+        if (ts !== null) {
+          const rel = traceStartNs ? ts - traceStartNs : ts;
+          const displayValue = this.formatRelativeSeconds(rel);
+          return `<span title="${this.escapeHtml(ts.toString())}">${this.escapeHtml(displayValue)}</span>`;
+        }
+      }
+
+      if (colDef.type === 'duration') {
+        const dur = this.parseNs(value);
+        if (dur !== null) {
+          const sign = dur < 0n ? '-' : '';
+          const absNs = dur < 0n ? -dur : dur;
+          const ms = Number(absNs) / 1e6;
+          return `${sign}${ms.toFixed(2)} ms`;
+        }
+      }
     }
 
     // Default formatting based on type
@@ -1585,17 +1923,14 @@ export class HTMLReportGenerator {
       return '<span style="color: #999;">NULL</span>';
     }
     if (typeof value === 'number') {
-      const formatted = value.toLocaleString('zh-CN');
-      console.log(`[formatCellValue] Number: ${value} -> ${formatted} `);
-      return formatted;
+      return value.toLocaleString('zh-CN');
     }
     if (typeof value === 'boolean') {
       return value ? '<span style="color: #10b981;">✓</span>' : '<span style="color: #ef4444;">✗</span>';
     }
     const str = String(value);
-    console.log(`[formatCellValue] String: "${str}"(length = ${str.length})`);
     if (str.length > 200) {
-      return `< span title = "${this.escapeHtml(str)}" > ${this.escapeHtml(str.substring(0, 200))}...</span>`;
+      return `<span title="${this.escapeHtml(str)}">${this.escapeHtml(str.substring(0, 200))}...</span>`;
     }
     return this.escapeHtml(str);
   }
@@ -3184,10 +3519,15 @@ export class HTMLReportGenerator {
       if (items.length === 0) continue;
 
       // 【兼容性修复】如果有 expandableData，使用可展开行渲染
+      // 【BUG FIX】必须同时传递 columns 和 data，否则 generateExpandableSection 无法渲染主表格
       if (expandableData && expandableData.length > 0) {
+        const stepResult = value as any;
+        const dataField = stepResult.data;
         tableContents.push(this.generateExpandableSection(key, {
           title: displayName,
           expandableData,
+          columns: dataField.columns,  // 传递列定义
+          data: items,                  // 传递行数据（已转换为对象数组）
         }));
         continue;
       }
@@ -3589,6 +3929,7 @@ export class HTMLReportGenerator {
     const { traceId, query, result, hypotheses, dialogue, timestamp } = data;
     const dataEnvelopes = data.dataEnvelopes || [];
     const agentResponses = data.agentResponses || [];
+    const traceStartNs = data.traceStartNs ? this.parseNs(data.traceStartNs) : null;
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -3773,50 +4114,11 @@ export class HTMLReportGenerator {
       </div>
     </div>
 
-    ${hypotheses.length > 0 ? `
-    <div class="section">
-      <h2 class="section-title">假设与验证</h2>
-      ${hypotheses.map((h) => `
-        <div class="hypothesis-card ${h.status === 'confirmed' ? 'confirmed' : h.status === 'rejected' ? 'rejected' : ''}">
-          <div class="hypothesis-title">${this.escapeHtml(h.description)}</div>
-          <div class="hypothesis-meta">
-            <span>状态: ${this.escapeHtml(h.status)}</span>
-            <span>置信度: ${(h.confidence * 100).toFixed(0)}%</span>
-          </div>
-          <div class="confidence-bar">
-            <div class="confidence-fill" style="width: ${h.confidence * 100}%"></div>
-          </div>
-          ${h.supportingEvidence.length > 0 || h.contradictingEvidence.length > 0 ? `
-            <div class="evidence-section">
-              ${h.supportingEvidence.map((e: any) => `
-                <div class="evidence-item evidence-support">✓ ${this.escapeHtml(e.description || String(e))}</div>
-              `).join('')}
-              ${h.contradictingEvidence.map((e: any) => `
-                <div class="evidence-item evidence-contradict">✗ ${this.escapeHtml(e.description || String(e))}</div>
-              `).join('')}
-            </div>
-          ` : ''}
-        </div>
-      `).join('')}
-    </div>
-    ` : ''}
+    ${this.renderHypothesesSection(hypotheses)}
 
-    ${this.renderDataEnvelopesSection(dataEnvelopes)}
+    ${this.renderDataEnvelopesSection(dataEnvelopes, traceStartNs)}
 
-    ${dialogue.length > 0 ? `
-    <div class="section">
-      <h2 class="section-title">Agent 对话历史</h2>
-      ${dialogue.slice(0, 30).map((d) => this.renderEnhancedDialogue(d, agentResponses)).join('')}
-      ${dialogue.length > 30 ? `<div style="text-align: center; color: #666; padding: 10px;">... 还有 ${dialogue.length - 30} 条对话记录</div>` : ''}
-    </div>
-    ` : ''}
-
-    ${result.findings.length > 0 ? `
-    <div class="section">
-      <h2 class="section-title">发现的问题</h2>
-      ${result.findings.map((f) => this.renderEnhancedFinding(f)).join('')}
-    </div>
-    ` : ''}
+    ${this.renderFindingsSection(result.findings, dataEnvelopes)}
 
     <div class="section">
       <h2 class="section-title">分析结论</h2>
@@ -3848,6 +4150,54 @@ export class HTMLReportGenerator {
         }
       }
     }
+
+    // Toggle expandable row details (for iterator results with L4 deep data)
+    function toggleExpandableRow(arg) {
+      // Support both toggleExpandableRow(rowId: string) and toggleExpandableRow(buttonEl: HTMLElement)
+      var detailsRow = null;
+      var btn = null;
+
+      if (typeof arg === 'string') {
+        var rowId = arg;
+        detailsRow = document.getElementById(rowId + '_details');
+        var expandableRow = document.querySelector('.expandable-row[data-row-id=\"' + rowId + '\"]');
+        btn = expandableRow ? expandableRow.querySelector('.expand-btn') : null;
+      } else if (arg && arg.closest) {
+        btn = arg;
+        var tr = btn.closest('tr');
+        detailsRow = tr ? tr.nextElementSibling : null;
+      }
+
+      if (detailsRow) {
+        var isHidden = detailsRow.style.display === 'none';
+        detailsRow.style.display = isHidden ? 'table-row' : 'none';
+
+        if (btn) {
+          btn.innerHTML = isHidden
+            ? '<span class="expand-icon">▲</span> 收起'
+            : '<span class="expand-icon">▼</span> 展开';
+        }
+      }
+    }
+
+    // Expand/collapse all rows in a section
+    function toggleAllExpandableRows(sectionId, expand) {
+      var section = document.getElementById(sectionId);
+      if (!section) return;
+
+      var detailRows = section.querySelectorAll('.detail-row');
+      var buttons = section.querySelectorAll('.expand-btn');
+
+      detailRows.forEach(function(row) {
+        row.style.display = expand ? 'table-row' : 'none';
+      });
+
+      buttons.forEach(function(btn) {
+        btn.innerHTML = expand
+          ? '<span class="expand-icon">▲</span> 收起'
+          : '<span class="expand-icon">▼</span> 展开';
+      });
+    }
   </script>
 </body>
 </html>`;
@@ -3856,13 +4206,13 @@ export class HTMLReportGenerator {
   /**
    * Render the DataEnvelopes section with all collected SQL result tables
    */
-  private renderDataEnvelopesSection(envelopes: DataEnvelope[]): string {
+  private renderDataEnvelopesSection(envelopes: DataEnvelope[], traceStartNs: bigint | null): string {
     if (!envelopes || envelopes.length === 0) return '';
 
     return `
     <div class="section">
       <h2 class="section-title">📊 数据详情</h2>
-      ${envelopes.map((envelope, index) => this.renderSingleEnvelope(envelope, index)).join('')}
+      ${envelopes.map((envelope, index) => this.renderSingleEnvelope(envelope, index, traceStartNs)).join('')}
     </div>
     `;
   }
@@ -3870,7 +4220,7 @@ export class HTMLReportGenerator {
   /**
    * Render a single DataEnvelope as a card with table
    */
-  private renderSingleEnvelope(envelope: DataEnvelope, index: number): string {
+  private renderSingleEnvelope(envelope: DataEnvelope, index: number, traceStartNs: bigint | null): string {
     if (!envelope || !envelope.data) return '';
 
     const title = envelope.display?.title || `数据表 ${index + 1}`;
@@ -3883,7 +4233,7 @@ export class HTMLReportGenerator {
     if (stepId) metaParts.push(this.escapeHtml(stepId));
     if (source && source !== skillId) metaParts.push(this.escapeHtml(source));
 
-    const tableHtml = this.generateTableFromEnvelope(envelope);
+    const tableHtml = this.generateTableFromEnvelope(envelope, traceStartNs);
 
     return `
       <div class="envelope-card">
@@ -3904,51 +4254,148 @@ export class HTMLReportGenerator {
   private renderEnhancedFinding(finding: Finding): string {
     const severityClass = finding.severity || 'info';
 
+    // 【优化】格式化 details 字段，避免显示原始 JSON
     let detailsHtml = '';
     if (finding.details && Object.keys(finding.details).length > 0) {
-      const entries = Object.entries(finding.details).slice(0, 10);
-      detailsHtml = `
-        <div class="details-grid">
-          ${entries.map(([key, value]) => `
-            <div class="detail-key">${this.escapeHtml(key)}</div>
-            <div class="detail-value">${this.escapeHtml(typeof value === 'object' ? JSON.stringify(value) : String(value))}</div>
-          `).join('')}
-        </div>
-      `;
+      // 过滤掉大对象（如 summary、sample），只显示简单的标量值
+      const simpleEntries = Object.entries(finding.details)
+        .filter(([key, value]) => {
+          // 跳过大对象和数组
+          if (typeof value === 'object' && value !== null) return false;
+          // 跳过已经在 title 中显示的字段
+          if (key === 'jankCount' || key === 'jankRate') return false;
+          return true;
+        })
+        .slice(0, 6);
+
+      if (simpleEntries.length > 0) {
+        detailsHtml = `
+          <div class="details-grid" style="display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;">
+            ${simpleEntries.map(([key, value]) => `
+              <span style="color: #666; font-size: 12px;">
+                <span style="color: #888;">${this.formatMetricLabel(key)}:</span>
+                <strong style="color: #333;">${this.formatDetailValue(value)}</strong>
+              </span>
+            `).join('')}
+          </div>
+        `;
+      }
     }
 
     let evidenceHtml = '';
     if (finding.evidence && finding.evidence.length > 0) {
       evidenceHtml = `
-        <div class="evidence-list">
-          ${finding.evidence.slice(0, 8).map((e: any) => `
-            <div class="evidence-item">${this.escapeHtml(typeof e === 'string' ? e : (e.description || e.message || JSON.stringify(e)))}</div>
+        <div class="evidence-list" style="margin-top: 8px; padding-left: 12px; border-left: 2px solid #e5e7eb;">
+          ${finding.evidence.slice(0, 5).map((e: any) => `
+            <div style="font-size: 12px; color: #555; margin: 4px 0;">• ${this.escapeHtml(typeof e === 'string' ? e : (e.description || e.message || ''))}</div>
           `).join('')}
         </div>
       `;
     }
 
-    let recommendationsHtml = '';
-    if (finding.recommendations && finding.recommendations.length > 0) {
-      recommendationsHtml = `
-        <div class="recommendations">
-          ${finding.recommendations.map((r) => `
-            <div class="rec-item">${this.escapeHtml(r.text)}</div>
-          `).join('')}
-        </div>
-      `;
-    }
-
+    // 精简版 Finding 卡片 - 紧凑布局
     return `
-      <div class="finding ${severityClass}">
-        <div class="title">[${this.escapeHtml(finding.severity)}] ${this.escapeHtml(finding.title)}</div>
-        ${finding.description ? `<div class="description">${this.escapeHtml(finding.description)}</div>` : ''}
-        ${finding.confidence !== undefined ? `<div style="font-size: 11px; color: #888; margin-bottom: 4px;">置信度: ${(finding.confidence * 100).toFixed(0)}%</div>` : ''}
+      <div class="finding ${severityClass}" style="padding: 12px 16px; margin-bottom: 8px; border-radius: 6px; border-left: 3px solid ${this.getSeverityColor(severityClass)}; background: ${this.getSeverityBg(severityClass)};">
+        <div style="font-weight: 600; color: #1f2937; margin-bottom: 4px;">${this.escapeHtml(finding.title)}</div>
+        ${finding.description ? `<div style="font-size: 13px; color: #4b5563;">${this.escapeHtml(finding.description)}</div>` : ''}
         ${detailsHtml}
         ${evidenceHtml}
-        ${recommendationsHtml}
       </div>
     `;
+  }
+
+  /**
+   * 格式化 detail 值为更友好的显示
+   */
+  private formatDetailValue(value: any): string {
+    if (value === null || value === undefined) return '-';
+    if (typeof value === 'number') {
+      // 百分比
+      if (value > 0 && value < 1) return `${(value * 100).toFixed(1)}%`;
+      // 大数字加千分位
+      if (Number.isInteger(value)) return value.toLocaleString();
+      return value.toFixed(2);
+    }
+    return this.escapeHtml(String(value));
+  }
+
+  /**
+   * 获取 severity 对应的边框颜色
+   */
+  private getSeverityColor(severity: string): string {
+    switch (severity) {
+      case 'critical': return '#dc2626';
+      case 'warning': return '#f59e0b';
+      case 'info': return '#3b82f6';
+      default: return '#6b7280';
+    }
+  }
+
+  /**
+   * 获取 severity 对应的背景色
+   */
+  private getSeverityBg(severity: string): string {
+    switch (severity) {
+      case 'critical': return '#fef2f2';
+      case 'warning': return '#fffbeb';
+      case 'info': return '#eff6ff';
+      default: return '#f9fafb';
+    }
+  }
+
+  /**
+   * 渲染假设与验证部分 - 精简版
+   * 只在假设驱动模式下显示，且只显示已确认或高置信度的假设
+   */
+  private renderHypothesesSection(hypotheses: Array<{
+    description: string;
+    status: string;
+    confidence: number;
+    supportingEvidence: any[];
+    contradictingEvidence: any[];
+  }>): string {
+    if (!hypotheses || hypotheses.length === 0) return '';
+
+    // 过滤掉低价值假设（只保留 confirmed 或 confidence >= 0.6 的）
+    const meaningfulHypotheses = hypotheses.filter(h =>
+      h.status === 'confirmed' || h.confidence >= 0.6
+    );
+
+    if (meaningfulHypotheses.length === 0) return '';
+
+    return `
+    <div class="section" style="background: #fafafa; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+      <h2 class="section-title" style="font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+        <span style="color: #6366f1;">💡</span> 分析假设
+        <span style="font-size: 12px; color: #666; font-weight: normal;">(${meaningfulHypotheses.length})</span>
+      </h2>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        ${meaningfulHypotheses.map((h) => `
+          <div style="display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: white; border-radius: 6px; border: 1px solid #e5e7eb;">
+            <span style="font-size: 14px; color: ${h.status === 'confirmed' ? '#059669' : '#6366f1'};">
+              ${h.status === 'confirmed' ? '✓' : '?'}
+            </span>
+            <span style="flex: 1; font-size: 13px; color: #374151;">${this.escapeHtml(h.description)}</span>
+            <span style="font-size: 12px; color: #666; min-width: 50px; text-align: right;">
+              ${(h.confidence * 100).toFixed(0)}%
+            </span>
+            <div style="width: 60px; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden;">
+              <div style="width: ${h.confidence * 100}%; height: 100%; background: ${h.status === 'confirmed' ? '#059669' : '#6366f1'};"></div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    `;
+  }
+
+  /**
+   * 渲染发现的问题部分 - 已禁用
+   * 数据已在 DataEnvelopes 中详细展示，此部分冗余
+   */
+  private renderFindingsSection(_findings: Finding[], _dataEnvelopes: DataEnvelope[]): string {
+    // 直接返回空字符串，不再显示此部分
+    return '';
   }
 
   /**
