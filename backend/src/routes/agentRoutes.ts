@@ -47,6 +47,25 @@ import {
 } from '../services/pipelineSkillLoader';
 import { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
+// Teaching Module Types & Config (v2.0 - centralized)
+import {
+  validateActiveProcesses,
+  validateConfidence,
+  parseCandidates,
+  parseFeatures,
+  transformPinInstruction,
+  transformTeachingContent,
+  type ActiveProcess,
+  type PinInstructionResponse,
+  type RawPinInstruction,
+} from '../types/teaching.types';
+import {
+  TEACHING_CONFIG,
+  TEACHING_DEFAULTS,
+  TEACHING_LIMITS,
+  TEACHING_STEP_IDS,
+  TEACHING_FEATURES,
+} from '../config/teaching.config';
 
 const router = express.Router();
 
@@ -1122,46 +1141,64 @@ router.post('/teaching/pipeline', async (req, res) => {
     const traceRequirements = traceReqStepResult?.data?.rows || [];
 
     // Get active rendering processes (from 'active_rendering_processes' step - v3 smart pin)
-    // SQL returns: upid, process_name, frame_count, render_thread_tid
-    const activeProcessesStepResult = rawResults['active_rendering_processes'];
-    const activeRenderingProcesses = activeProcessesStepResult?.data?.rows?.map((row: any[]) => ({
-      upid: row[0],
-      processName: row[1],
-      frameCount: row[2],
-      renderThreadTid: row[3],
-    })) || [];
+    // v2.0: Use validated extraction with column name mapping instead of positional access
+    const activeProcessesStepResult = rawResults[TEACHING_STEP_IDS.activeProcesses];
+    const activeRenderingProcesses: ActiveProcess[] = TEACHING_FEATURES.useSqlValidation
+      ? validateActiveProcesses(activeProcessesStepResult)
+      : (activeProcessesStepResult?.data?.rows?.map((row: unknown[]) => ({
+          upid: row[0] as number,
+          processName: row[1] as string,
+          frameCount: row[2] as number,
+          renderThreadTid: row[3] as number,
+        })) || []);
 
-    console.log('[AgentRoutes] Active rendering processes:', activeRenderingProcesses.map((p: any) => `${p.processName} (${p.frameCount} frames)`));
+    if (TEACHING_FEATURES.debugLogging) {
+      console.log('[AgentRoutes] Active rendering processes:', activeRenderingProcesses.map((p) => `${p.processName} (${p.frameCount} frames)`));
+    }
 
-    // Default values if skill output is incomplete
-    const primaryPipelineId = pipelineResult?.primary_pipeline_id || 'ANDROID_VIEW_STANDARD_BLAST';
-    const primaryConfidence = pipelineResult?.primary_confidence || 0.5;
+    // Default values from centralized config if skill output is incomplete
+    const primaryPipelineId = pipelineResult?.primary_pipeline_id || TEACHING_DEFAULTS.pipelineId;
+    const primaryConfidence = validateConfidence(pipelineResult?.primary_confidence, TEACHING_DEFAULTS.confidence);
     const candidatesList = pipelineResult?.candidates_list || '';
     const featuresList = pipelineResult?.features_list || '';
-    const docPath = pipelineResult?.doc_path || 'rendering_pipelines/android_view_standard.md';
+    const docPath = pipelineResult?.doc_path || TEACHING_DEFAULTS.docPath;
 
-    // Parse candidates and features
+    // Parse candidates and features using validated utilities
     const candidates = candidatesList
-      ? candidatesList.split('; ').map((c: string) => {
-          const [id, score] = c.split(':');
-          return { id, confidence: parseFloat(score) || 0 };
-        })
+      ? parseCandidates(candidatesList, TEACHING_LIMITS.maxCandidates)
       : [{ id: primaryPipelineId, confidence: primaryConfidence }];
 
-    const features = featuresList
-      ? featuresList.split('; ').map((f: string) => {
-          const [id, score] = f.split(':');
-          return { id, confidence: parseFloat(score) || 0 };
-        })
-      : [];
-
-    // Get teaching content from documentation
-    const pipelineDocService = getPipelineDocService();
-    const teachingContent = pipelineDocService.getTeachingContent(primaryPipelineId);
+    const features = parseFeatures(featuresList);
 
     // Get base pin instructions from PipelineSkillLoader (new data-driven approach)
     // Ensure pipeline skills are loaded
     await ensurePipelineSkillsInitialized();
+
+    // Unified Teaching Content: prioritize YAML skill, fallback to .md documentation
+    // YAML provides structured data; .md provides richer content from full documentation
+    const yamlTeaching = pipelineSkillLoader.getTeachingContent(primaryPipelineId);
+    const pipelineDocService = getPipelineDocService();
+    const mdTeaching = pipelineDocService.getTeachingContent(primaryPipelineId);
+
+    // Transform teaching content to frontend-compatible format (camelCase)
+    // Priority: YAML > .md > default fallback
+    const teachingContent = yamlTeaching
+      ? {
+          title: yamlTeaching.title,
+          summary: yamlTeaching.summary,
+          // YAML uses single 'mermaid' string, convert to array for frontend
+          mermaidBlocks: yamlTeaching.mermaid ? [yamlTeaching.mermaid] : [],
+          // YAML uses snake_case with different structure, convert to frontend format
+          threadRoles: yamlTeaching.thread_roles.map(role => ({
+            thread: role.thread,
+            responsibility: role.role + (role.description ? `: ${role.description}` : ''),
+            traceTag: role.trace_tags,
+          })),
+          // YAML key_slices has name/thread/description, extract names for simple display
+          keySlices: yamlTeaching.key_slices.map(slice => slice.name),
+          docPath: pipelineSkillLoader.getPipelineMeta(primaryPipelineId)?.doc_path || '',
+        }
+      : mdTeaching;
 
     // Get pin instructions from pipeline skill YAML
     const basePinInstructions = pipelineSkillLoader.getAutoPinInstructions(primaryPipelineId);
@@ -1179,36 +1216,64 @@ router.post('/teaching/pipeline', async (req, res) => {
     // 3. If smart filter enabled and activeRenderingProcesses is empty → skipPin
     // 4. If smart filter not enabled → normal pin
 
-    // Build a set of process names with active rendering data (from SQL in skill)
-    const activeProcessNames = new Set(activeRenderingProcesses.map((p: any) => p.processName));
-    const hasActiveRenderingData = activeRenderingProcesses.length > 0;
+    // v2.0: Use centralized transformation function with type safety
+    // Transform pin instructions: convert snake_case to camelCase for frontend compatibility
+    const smartPinInstructions: PinInstructionResponse[] = TEACHING_FEATURES.useTypeTransforms
+      ? basePinInstructions.map((inst: PinInstruction) => {
+          // Check if this instruction has smart_filter enabled (from YAML config)
+          // Use single source of truth: smart_filter property on instruction
+          const hasSmartFilter = inst.smart_filter?.enabled ?? smartFilterConfigs.has(inst.pattern);
 
-    const smartPinInstructions = basePinInstructions.map((inst: PinInstruction) => {
-      // Check if this instruction has smart_filter enabled (from YAML config)
-      const hasSmartFilter = smartFilterConfigs.has(inst.pattern) || inst.smart_filter?.enabled;
+          // Convert to RawPinInstruction format for transformation
+          const rawInst: RawPinInstruction = {
+            pattern: inst.pattern,
+            match_by: inst.match_by,
+            priority: inst.priority,
+            reason: inst.reason,
+            smart_filter: hasSmartFilter ? inst.smart_filter : undefined,
+          };
 
-      if (hasSmartFilter) {
-        // This instruction requires smart filtering
-        if (hasActiveRenderingData) {
-          // SQL found active processes → enable smart pin filtering
-          return {
-            ...inst,
-            activeProcessNames: Array.from(activeProcessNames),
-            smartPin: true,
-            reason: `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`,
+          // Use centralized transformation
+          const transformed = transformPinInstruction(rawInst, activeRenderingProcesses);
+
+          // Add active process count to reason for smart pins
+          if (transformed.smartPin && !transformed.skipPin) {
+            transformed.reason = `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`;
+          }
+
+          return transformed;
+        })
+      : basePinInstructions.map((inst: PinInstruction) => {
+          // Legacy transformation (fallback when feature flag is disabled)
+          const hasSmartFilter = smartFilterConfigs.has(inst.pattern) || inst.smart_filter?.enabled;
+          const hasActiveRenderingData = activeRenderingProcesses.length > 0;
+          const activeProcessNames = new Set(activeRenderingProcesses.map((p) => p.processName));
+
+          const baseInstruction = {
+            pattern: inst.pattern,
+            matchBy: inst.match_by,
+            priority: inst.priority,
+            reason: inst.reason,
           };
-        } else {
-          // SQL returned empty → skip this pin instruction
-          return {
-            ...inst,
-            skipPin: true,
-            reason: `${inst.reason} (无活跃渲染数据，跳过)`,
-          };
-        }
-      }
-      // No smart filter configured → normal pin
-      return inst;
-    });
+
+          if (hasSmartFilter) {
+            if (hasActiveRenderingData) {
+              return {
+                ...baseInstruction,
+                activeProcessNames: Array.from(activeProcessNames),
+                smartPin: true,
+                reason: `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`,
+              };
+            } else {
+              return {
+                ...baseInstruction,
+                skipPin: true,
+                reason: `${inst.reason} (无活跃渲染数据，跳过)`,
+              };
+            }
+          }
+          return baseInstruction;
+        });
 
     // Build response
     const response = {

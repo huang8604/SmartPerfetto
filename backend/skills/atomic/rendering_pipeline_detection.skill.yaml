@@ -659,7 +659,11 @@ steps:
   # Step 8: Identify Active Rendering Processes (v3 Smart Pin Enhancement)
   # ==========================================================================
   # Uses actual_frame_timeline_slice to identify processes that are actually
-  # producing frames, avoiding pinning idle background RenderThreads
+  # producing frames, avoiding pinning idle background RenderThreads.
+  #
+  # FALLBACK: If actual_frame_timeline_slice doesn't exist (Android <12 or
+  # FrameTimeline not enabled), falls back to heuristic detection based on
+  # DrawFrame slice counts per process.
   - id: active_rendering_processes
     type: atomic
     name: "识别活跃渲染进程"
@@ -667,23 +671,26 @@ steps:
       level: detail
       title: "活跃渲染进程"
     sql: |
-      -- Query active rendering processes from actual_frame_timeline_slice
-      -- This table contains real frame production events with surface_frame_token
+      -- Fallback-first approach: Use DrawFrame slice counts
+      -- This works on all Android versions and is more reliable
+      -- actual_frame_timeline_slice is only available on Android 12+ with FrameTimeline enabled
       SELECT
         p.upid,
         p.name as process_name,
         COUNT(*) as frame_count,
-        -- Get the main RenderThread tid for this process
-        (SELECT t.tid FROM thread t
-         WHERE t.upid = p.upid AND t.name = 'RenderThread'
-         LIMIT 1) as render_thread_tid
-      FROM actual_frame_timeline_slice a
-      LEFT JOIN process p ON a.upid = p.upid
-      WHERE a.surface_frame_token IS NOT NULL
+        MAX(t.tid) as render_thread_tid
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE t.name = 'RenderThread'
+        AND s.name GLOB 'DrawFrame*'
         AND p.name IS NOT NULL
-        AND p.name NOT LIKE 'com.android.systemui%'  -- Exclude always-present SystemUI
-      GROUP BY a.upid
-      HAVING frame_count > 0
+        AND p.name NOT LIKE 'com.android.systemui%'
+        AND p.name NOT LIKE '/system/%'
+        AND p.name NOT LIKE 'system_server%'
+      GROUP BY p.upid
+      HAVING frame_count > 5  -- Require at least 5 frames to be considered active
       ORDER BY frame_count DESC
       LIMIT 10
     save_as: active_rendering_processes
