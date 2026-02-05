@@ -29,7 +29,7 @@ triggers:
   - pattern: "(图形|graphics|显示|display)"
     confidence: 0.7
 
-parameters:
+inputs:
   - name: process_name
     type: string
     required: false
@@ -40,10 +40,10 @@ parameters:
     default: 1
     description: "最小缓冲区大小阈值 (MB)"
 
-analysis_steps:
+steps:
   # Step 1: DMA Buffer 使用概览
   - id: dmabuf_overview
-    type: diagnostic
+    type: atomic
     name: "DMA Buffer 概览"
     description: "按进程统计 DMA Buffer 分配"
     sql: |
@@ -57,8 +57,8 @@ analysis_steps:
         SUM(buf_size) / 1024 / 1024 AS net_alloc_mb,
         MAX(buf_size) / 1024 / 1024 AS max_single_alloc_mb
       FROM android_dmabuf_allocs
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY process_name
       ORDER BY total_alloc_mb DESC;
@@ -77,7 +77,7 @@ analysis_steps:
 
   # Step 2: DMA Buffer 累积使用
   - id: dmabuf_cumulative
-    type: diagnostic
+    type: atomic
     name: "DMA Buffer 累积使用"
     description: "按进程追踪 DMA Buffer 累积使用量"
     sql: |
@@ -89,8 +89,8 @@ analysis_steps:
           MAX(ts) AS latest_ts,
           value AS latest_value
         FROM android_memory_cumulative_dmabuf
-        WHERE CASE WHEN '{{process_name}}' != ''
-                   THEN process_name GLOB '*{{process_name}}*'
+        WHERE CASE WHEN '${process_name}' != ''
+                   THEN process_name GLOB '*${process_name}*'
                    ELSE 1 END
         GROUP BY upid
       ),
@@ -99,8 +99,8 @@ analysis_steps:
           process_name,
           MAX(value) AS peak_value
         FROM android_memory_cumulative_dmabuf
-        WHERE CASE WHEN '{{process_name}}' != ''
-                   THEN process_name GLOB '*{{process_name}}*'
+        WHERE CASE WHEN '${process_name}' != ''
+                   THEN process_name GLOB '*${process_name}*'
                    ELSE 1 END
         GROUP BY upid
       )
@@ -120,7 +120,7 @@ analysis_steps:
 
   # Step 3: 大型 Buffer 分配
   - id: large_buffer_allocs
-    type: diagnostic
+    type: atomic
     name: "大型 Buffer 分配"
     description: "识别大型 DMA Buffer 分配"
     sql: |
@@ -133,9 +133,9 @@ analysis_steps:
         buf_size / 1024 / 1024 AS size_mb,
         inode
       FROM android_dmabuf_allocs
-      WHERE buf_size / 1024 / 1024 >= COALESCE({{min_size_mb}}, 1)
-        AND CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE buf_size / 1024 / 1024 >= COALESCE(${min_size_mb|1}, 1)
+        AND CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       ORDER BY buf_size DESC
       LIMIT 50;
@@ -149,7 +149,7 @@ analysis_steps:
 
   # Step 4: Buffer 分配频率
   - id: dmabuf_frequency
-    type: diagnostic
+    type: atomic
     name: "Buffer 分配频率"
     description: "按时间统计 DMA Buffer 分配频率"
     sql: |
@@ -162,8 +162,8 @@ analysis_steps:
         SUM(CASE WHEN buf_size > 0 THEN buf_size ELSE 0 END) / 1024 / 1024 AS alloc_mb,
         SUM(CASE WHEN buf_size < 0 THEN -buf_size ELSE 0 END) / 1024 / 1024 AS free_mb
       FROM android_dmabuf_allocs
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY time_sec
       ORDER BY time_sec;
@@ -179,7 +179,7 @@ analysis_steps:
 
   # Step 5: 线程级分配统计
   - id: thread_alloc_stats
-    type: diagnostic
+    type: atomic
     name: "线程级分配统计"
     description: "按线程统计 DMA Buffer 分配"
     sql: |
@@ -192,8 +192,8 @@ analysis_steps:
         SUM(CASE WHEN buf_size > 0 THEN buf_size ELSE 0 END) / 1024 / 1024 AS total_alloc_mb
       FROM android_dmabuf_allocs
       WHERE buf_size > 0
-        AND CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+        AND CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY process_name, thread_name
       ORDER BY total_alloc_mb DESC
@@ -205,7 +205,7 @@ analysis_steps:
 
   # Step 6: Buffer 生命周期分析
   - id: buffer_lifecycle
-    type: diagnostic
+    type: atomic
     name: "Buffer 生命周期"
     description: "分析 Buffer 从分配到释放的时间"
     sql: |
@@ -246,8 +246,8 @@ analysis_steps:
         AVG(lifetime) / 1e9 AS avg_lifetime_sec,
         MAX(lifetime) / 1e9 AS max_lifetime_sec
       FROM lifecycles
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY process_name
       ORDER BY not_freed_count DESC;
@@ -267,29 +267,31 @@ analysis_steps:
     type: ai_summary
     name: "DMA Buffer AI 分析"
     description: "综合分析 DMA Buffer 使用"
+    inputs: [dmabuf_overview, dmabuf_cumulative, large_buffer_allocs, dmabuf_frequency, thread_alloc_stats, buffer_lifecycle]
     depends_on:
       - dmabuf_overview
       - dmabuf_cumulative
       - large_buffer_allocs
       - dmabuf_frequency
+      - thread_alloc_stats
       - buffer_lifecycle
     prompt: |
       请基于以下 DMA Buffer 分析数据，提供专业的分析：
 
       ## DMA Buffer 概览
-      {{dmabuf_overview}
+          dmabuf_overview
 
       ## 累积使用
-      {{dmabuf_cumulative}
+          dmabuf_cumulative
 
       ## 大型 Buffer
-      {{large_buffer_allocs}
+          large_buffer_allocs
 
       ## 分配频率
-      {{dmabuf_frequency}
+          dmabuf_frequency
 
       ## 生命周期
-      {{buffer_lifecycle}
+          buffer_lifecycle
 
       请分析：
       1. DMA Buffer 使用是否正常
@@ -306,13 +308,13 @@ output:
     - title: "DMA Buffer 分析总结"
       content: |
         ## 概览
-        {{dmabuf_overview}
+            dmabuf_overview
 
         ## 累积使用
-        {{dmabuf_cumulative}
+            dmabuf_cumulative
 
         ## 生命周期分析
-        {{buffer_lifecycle}
+            buffer_lifecycle
 
         ## AI 综合分析
-        {{dmabuf_ai_summary}
+            dmabuf_ai_summary

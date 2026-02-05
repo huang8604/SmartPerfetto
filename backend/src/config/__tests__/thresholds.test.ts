@@ -28,10 +28,10 @@ import {
 
 describe('inferVsyncPeriodNs', () => {
   describe('无参数调用', () => {
-    it('应该返回 60Hz 默认值', () => {
+    it('应该返回 120Hz 默认值 (现代旗舰设备)', () => {
       const result = inferVsyncPeriodNs();
       expect(result).toBe(DEFAULT_VSYNC_PERIOD_NS);
-      expect(result).toBe(16666667n);
+      expect(result).toBe(8333333n); // 120Hz = 8.33ms
     });
   });
 
@@ -210,8 +210,8 @@ describe('默认值一致性', () => {
       expect(Number(VSYNC_PERIODS_NS[120]) / 1_000_000).toBeCloseTo(8.33, 1);
     });
 
-    it('DEFAULT_VSYNC_PERIOD_NS 应该等于 60Hz', () => {
-      expect(DEFAULT_VSYNC_PERIOD_NS).toBe(VSYNC_PERIODS_NS[60]);
+    it('DEFAULT_VSYNC_PERIOD_NS 应该等于 120Hz (现代旗舰设备)', () => {
+      expect(DEFAULT_VSYNC_PERIOD_NS).toBe(VSYNC_PERIODS_NS[120]);
     });
   });
 
@@ -258,12 +258,12 @@ describe('默认值一致性', () => {
       );
     });
 
-    it('avgWarningMs 应该等于 1 个 vsync (60Hz)', () => {
-      expect(DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgWarningMs).toBeCloseTo(16.67, 1);
+    it('avgWarningMs 应该等于 1 个 vsync (120Hz)', () => {
+      expect(DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgWarningMs).toBeCloseTo(8.33, 1);
     });
 
-    it('avgCriticalMs 应该等于 2 个 vsync (60Hz)', () => {
-      expect(DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgCriticalMs).toBeCloseTo(33.33, 1);
+    it('avgCriticalMs 应该等于 2 个 vsync (120Hz)', () => {
+      expect(DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS.avgCriticalMs).toBeCloseTo(16.67, 1);
     });
   });
 });

@@ -507,7 +507,7 @@ steps:
       insights:
         - template: "ANR 事件详细分析，按类型分组"
     source: anr_events
-    skill: anr_detail
+    item_skill: anr_detail
     item_params:
       anr_ts: anr_ts
       timeout_ns: timeout_ns

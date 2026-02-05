@@ -35,7 +35,7 @@ triggers:
   - pattern: "(保活|keep awake|wakelock)"
     confidence: 0.85
 
-parameters:
+inputs:
   - name: wakeup_source
     type: string
     required: false
@@ -46,10 +46,10 @@ parameters:
     default: true
     description: "是否包含 suspend 中止事件"
 
-analysis_steps:
+steps:
   # Step 1: 休眠唤醒概览
   - id: suspend_overview
-    type: diagnostic
+    type: atomic
     name: "休眠唤醒概览"
     description: "统计系统休眠和唤醒时间"
     sql: |
@@ -73,7 +73,7 @@ analysis_steps:
 
   # Step 2: 唤醒事件概览
   - id: wakeup_overview
-    type: diagnostic
+    type: atomic
     name: "唤醒事件概览"
     description: "统计唤醒事件类型分布"
     sql: |
@@ -86,7 +86,7 @@ analysis_steps:
         SUM(dur) / 1e9 AS total_awake_time_sec,
         AVG(dur) / 1e9 AS avg_awake_time_sec
       FROM android_wakeups
-      WHERE CASE WHEN NOT COALESCE({{include_aborts}}, 1)
+      WHERE CASE WHEN NOT COALESCE(${include_aborts|1}, 1)
                  THEN type = 'normal'
                  ELSE 1 END
       GROUP BY type, suspend_quality
@@ -105,7 +105,7 @@ analysis_steps:
 
   # Step 3: 唤醒源排行
   - id: wakeup_source_ranking
-    type: diagnostic
+    type: atomic
     name: "唤醒源排行"
     description: "按唤醒源统计唤醒次数和时间"
     sql: |
@@ -118,8 +118,8 @@ analysis_steps:
         SUM(dur) / 1e9 AS total_awake_sec,
         AVG(dur) / 1e9 AS avg_awake_sec
       FROM android_wakeups
-      WHERE CASE WHEN '{{wakeup_source}}' != ''
-                 THEN item GLOB '*{{wakeup_source}}*'
+      WHERE CASE WHEN '${wakeup_source}' != ''
+                 THEN item GLOB '*${wakeup_source}*'
                  ELSE 1 END
       GROUP BY item, type
       ORDER BY wakeup_count DESC
@@ -140,7 +140,7 @@ analysis_steps:
 
   # Step 4: Suspend Backoff 分析
   - id: suspend_backoff
-    type: diagnostic
+    type: atomic
     name: "Suspend Backoff 分析"
     description: "分析 suspend 失败和 backoff 情况"
     sql: |
@@ -172,7 +172,7 @@ analysis_steps:
 
   # Step 5: 唤醒时间线
   - id: wakeup_timeline
-    type: diagnostic
+    type: atomic
     name: "唤醒时间线"
     description: "按时间顺序列出唤醒事件"
     sql: |
@@ -195,7 +195,7 @@ analysis_steps:
 
   # Step 6: 休眠质量评估
   - id: suspend_quality_assessment
-    type: diagnostic
+    type: atomic
     name: "休眠质量评估"
     description: "综合评估系统休眠质量"
     sql: |
@@ -239,29 +239,31 @@ analysis_steps:
     type: ai_summary
     name: "休眠唤醒 AI 分析"
     description: "综合分析休眠唤醒行为"
+    inputs: [suspend_overview, wakeup_overview, wakeup_source_ranking, suspend_backoff, wakeup_timeline, suspend_quality_assessment]
     depends_on:
       - suspend_overview
       - wakeup_overview
       - wakeup_source_ranking
       - suspend_backoff
+      - wakeup_timeline
       - suspend_quality_assessment
     prompt: |
       请基于以下休眠唤醒分析数据，提供专业的分析：
 
       ## 休眠概览
-      {{suspend_overview}
+          suspend_overview
 
       ## 唤醒事件概览
-      {{wakeup_overview}
+          wakeup_overview
 
       ## 唤醒源排行
-      {{wakeup_source_ranking}
+          wakeup_source_ranking
 
       ## Suspend Backoff
-      {{suspend_backoff}
+          suspend_backoff
 
       ## 休眠质量
-      {{suspend_quality_assessment}
+          suspend_quality_assessment
 
       请分析：
       1. 系统休眠效率评估
@@ -278,13 +280,13 @@ output:
     - title: "休眠唤醒分析总结"
       content: |
         ## 休眠概览
-        {{suspend_overview}
+            suspend_overview
 
         ## 唤醒源排行
-        {{wakeup_source_ranking}
+            wakeup_source_ranking
 
         ## 休眠质量
-        {{suspend_quality_assessment}
+            suspend_quality_assessment
 
         ## AI 综合分析
-        {{suspend_ai_summary}
+            suspend_ai_summary

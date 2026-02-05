@@ -28,6 +28,7 @@ import {
   DisplayConfig,
   DisplayLevel,
   SkillEvent,
+  SynthesizeConfig,
 } from './types';
 import logger from '../../utils/logger';
 import { redactObjectForLLM, redactTextForLLM } from '../../utils/llmPrivacy';
@@ -45,54 +46,6 @@ import {
 // =============================================================================
 
 import { DisplayLayer } from './types';
-
-/**
- * Synthesize 配置 - 定义步骤数据如何贡献到最终摘要
- *
- * YAML 示例:
- * ```yaml
- * synthesize:
- *   role: overview
- *   fields:
- *     - key: total_frames
- *       label: 总帧数
- *     - key: janky_frames
- *       label: 掉帧数
- *       format: "{{value}} ({{jank_rate}}%)"
- *   insights:
- *     - condition: "jank_rate > 10"
- *       template: "掉帧率 {{jank_rate}}% 较高"
- * ```
- */
-export interface SynthesizeConfig {
-  /** 数据角色: overview(概览指标), list(列表统计), clusters(聚类分析), conclusion(结论) */
-  role: 'overview' | 'list' | 'clusters' | 'conclusion';
-  /** 字段映射 - 定义如何从数据中提取指标 */
-  fields?: Array<{
-    /** 源字段名 */
-    key: string;
-    /** 显示标签 */
-    label: string;
-    /** 格式化模板，支持 {{field}} 插值 */
-    format?: string;
-  }>;
-  /** 分组统计配置 - 用于 list 角色 */
-  groupBy?: Array<{
-    /** 分组字段名 */
-    field: string;
-    /** 分组标题 */
-    title: string;
-  }>;
-  /** 聚类配置 - 用于 clusters 角色 */
-  clusterBy?: string;
-  /** 洞察条件 - 自动生成的分析结论 */
-  insights?: Array<{
-    /** 条件表达式，如 "jank_rate > 10" */
-    condition?: string;
-    /** 洞察模板，支持 {{field}} 插值 */
-    template: string;
-  }>;
-}
 
 /**
  * Synthesize Data - 标记为 synthesize 的步骤数据
@@ -1084,93 +1037,82 @@ export class SkillExecutor {
     try {
       const displayResults: DisplayResult[] = [];
       const diagnostics: DiagnosticResult[] = [];
+      const synthesizeData: SynthesizeData[] = [];
       let aiSummary: string | undefined;
 
 
       // 根据 skill 类型执行
       switch (skill.type) {
         case 'atomic':
-          const atomicResult = await this.executeAtomicSkill(skill, context);
-          // Handle atomic skill errors
-          if (!atomicResult.success) {
-            this.emit({
-              type: 'skill_error',
-              skillId,
-              data: { error: atomicResult.error },
-            });
+          if (skill.sql) {
+            const atomicResult = await this.executeAtomicSkill(skill, context);
+            // Handle atomic skill errors
+            if (!atomicResult.success) {
+              this.emit({
+                type: 'skill_error',
+                skillId,
+                data: { error: atomicResult.error },
+              });
 
-            return {
-              skillId,
-              skillName: skill.meta.display_name,
-              success: false,
-              displayResults: [],
-              diagnostics: [],
-              executionTimeMs: Date.now() - startTime,
-              error: atomicResult.error,
-            };
-          }
-          if (atomicResult.display) {
-            displayResults.push(this.createDisplayResult('root', skill.meta.display_name, atomicResult, skill.output?.display));
+              return {
+                skillId,
+                skillName: skill.meta.display_name,
+                success: false,
+                displayResults: [],
+                diagnostics: [],
+                executionTimeMs: Date.now() - startTime,
+                error: atomicResult.error,
+              };
+            }
+            if (atomicResult.display) {
+              displayResults.push(this.createDisplayResult('root', skill.meta.display_name, atomicResult, skill.output?.display));
+            }
+          } else {
+            // Backward compatibility: some "atomic" skills are authored as step-based YAML.
+            // Treat them as composite execution when `sql` is absent but `steps` exist.
+            if (!skill.steps || skill.steps.length === 0) {
+              return {
+                skillId,
+                skillName: skill.meta.display_name,
+                success: false,
+                displayResults: [],
+                diagnostics: [],
+                executionTimeMs: Date.now() - startTime,
+                error: 'No SQL or steps defined for atomic skill',
+              };
+            }
+            const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
+            aiSummary = stepExec.aiSummary;
           }
           break;
 
         case 'composite':
         case 'iterator':
         case 'diagnostic':
-          if (skill.steps) {
-            for (const step of skill.steps) {
-              const stepResult = await this.executeStep(step, context, skillId);
-
-
-              if (stepResult.success) {
-                // 保存结果
-                context.results[step.id] = stepResult;
-
-                // 如果有 save_as，保存到变量
-                if ('save_as' in step && step.save_as) {
-                  context.variables[step.save_as] = stepResult.data;
-                }
-
-                // 收集需要展示的结果
-                if (this.shouldDisplay(step)) {
-                  displayResults.push(this.createDisplayResult(
-                    step.id,
-                    ('name' in step ? step.name : step.id) || step.id,
-                    stepResult,
-                    this.getDisplayConfig(step),
-                    ('sql' in step ? (step as AtomicStep).sql : undefined)
-                  ));
-                }
-
-                // Iterator 结果绑回源列表：将 expandableData 绑定到 source step 的 DisplayResult
-                if (step.type === 'iterator' && 'source' in step && (step as any).source) {
-                  const sourceName = (step as any).source;
-                  // source 引用的是 save_as 名称，需要找到对应的 step.id
-                  const sourceStep = skill.steps!.find((s: any) =>
-                    s.save_as === sourceName || s.id === sourceName
-                  );
-                  const sourceStepId = sourceStep ? sourceStep.id : sourceName;
-                  const sourceDisplayResult = displayResults.find(dr => dr.stepId === sourceStepId);
-                  // expandableData 在 DisplayResult.data 中（由 flattenIteratorResults 创建）
-                  const iteratorDisplayResult = displayResults.find(dr => dr.stepId === step.id);
-                  if (sourceDisplayResult?.data && iteratorDisplayResult?.data?.expandableData) {
-                    sourceDisplayResult.data.expandableData = iteratorDisplayResult.data.expandableData;
-                  }
-                }
-
-                // 收集诊断结果
-                if (step.type === 'diagnostic' && stepResult.data?.diagnostics) {
-                  diagnostics.push(...stepResult.data.diagnostics);
-                }
-
-                // 收集 AI 总结
-                if (step.type === 'ai_summary' && stepResult.data?.summary) {
-                  aiSummary = stepResult.data.summary;
-                }
-              }
+          {
+            if (!skill.steps || skill.steps.length === 0) {
+              return {
+                skillId,
+                skillName: skill.meta.display_name,
+                success: false,
+                displayResults: [],
+                diagnostics: [],
+                executionTimeMs: Date.now() - startTime,
+                error: `No steps defined for skill: ${skillId}`,
+              };
             }
+            const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
+            aiSummary = stepExec.aiSummary;
           }
           break;
+      }
+
+      // If skills provide data-driven synthesize configs, generate a deterministic
+      // "insight summary" DisplayResult so Agents can cite KPIs/insights without LLM.
+      // Best-effort and only triggers for config.role === 'overview'.
+      const synthesizeSummary = this.buildSynthesizeSummaryDisplayResult(synthesizeData);
+      if (synthesizeSummary) {
+        displayResults.unshift(synthesizeSummary);
       }
 
       this.emit({
@@ -1191,6 +1133,7 @@ export class SkillExecutor {
         displayResults,
         diagnostics,
         aiSummary,
+        synthesizeData: synthesizeData.length > 0 ? synthesizeData : undefined,
         rawResults: context.results,
         executionTimeMs: Date.now() - startTime,
       };
@@ -1212,6 +1155,102 @@ export class SkillExecutor {
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Execute a step-based skill (composite/iterator/diagnostic, and legacy atomic skills without root-level `sql`).
+   * Mutates `context.results` / `context.variables` and appends into `displayResults` / `diagnostics` / `synthesizeData`.
+   */
+  private async executeStepBasedSkill(
+    skill: SkillDefinition,
+    skillId: string,
+    context: SkillExecutionContext,
+    displayResults: DisplayResult[],
+    diagnostics: DiagnosticResult[],
+    synthesizeData: SynthesizeData[]
+  ): Promise<{ aiSummary?: string }> {
+    let aiSummary: string | undefined;
+
+    if (!skill.steps) {
+      return { aiSummary };
+    }
+
+    for (const step of skill.steps) {
+      const stepResult = await this.executeStep(step, context, skillId);
+
+      // Collect synthesize-marked data for downstream summarization (execute path parity).
+      // Supports:
+      // 1) synthesize: true (legacy)
+      // 2) synthesize: { role: ..., fields: ... } (data-driven)
+      if ('synthesize' in step && (step as any).synthesize) {
+        const synthesizeValue = (step as any).synthesize;
+        const displayConfig = this.getDisplayConfig(step) || {};
+
+        let config: SynthesizeConfig | undefined;
+        if (typeof synthesizeValue === 'object' && synthesizeValue.role) {
+          config = synthesizeValue as SynthesizeConfig;
+        }
+
+        synthesizeData.push({
+          stepId: step.id,
+          stepName: ('name' in step ? step.name : step.id) || step.id,
+          stepType: typeof (step as any).type === 'string' ? (step as any).type : 'skill',
+          layer: (displayConfig as DisplayConfig).layer,
+          data: stepResult.data,
+          success: stepResult.success,
+          config,
+        });
+      }
+
+      if (stepResult.success) {
+        // 保存结果
+        context.results[step.id] = stepResult;
+
+        // 如果有 save_as，保存到变量
+        if ('save_as' in step && step.save_as) {
+          context.variables[step.save_as] = stepResult.data;
+        }
+
+        // 收集需要展示的结果
+        if (this.shouldDisplay(step)) {
+          displayResults.push(this.createDisplayResult(
+            step.id,
+            ('name' in step ? step.name : step.id) || step.id,
+            stepResult,
+            this.getDisplayConfig(step),
+            ('sql' in step ? (step as AtomicStep).sql : undefined)
+          ));
+        }
+
+        // Iterator 结果绑回源列表：将 expandableData 绑定到 source step 的 DisplayResult
+        if ((step as any).type === 'iterator' && 'source' in step && (step as any).source) {
+          const sourceName = (step as any).source;
+          // source 引用的是 save_as 名称，需要找到对应的 step.id
+          const sourceStep = skill.steps!.find((s: any) =>
+            s.save_as === sourceName || s.id === sourceName
+          );
+          const sourceStepId = sourceStep ? sourceStep.id : sourceName;
+          const sourceDisplayResult = displayResults.find(dr => dr.stepId === sourceStepId);
+          // expandableData 在 DisplayResult.data 中（由 flattenIteratorResults 创建）
+          const iteratorDisplayResult = displayResults.find(dr => dr.stepId === step.id);
+          if (sourceDisplayResult?.data && iteratorDisplayResult?.data?.expandableData) {
+            sourceDisplayResult.data.expandableData = iteratorDisplayResult.data.expandableData;
+          }
+        }
+
+        // 收集诊断结果
+        if ((step as any).type === 'diagnostic' && stepResult.data?.diagnostics) {
+          diagnostics.push(...stepResult.data.diagnostics);
+        }
+
+        // 收集 AI 总结
+        if ((step as any).type === 'ai_summary' && stepResult.data?.summary) {
+          aiSummary = stepResult.data.summary;
+        }
+      }
+    }
+
+    return { aiSummary };
   }
 
   /**
@@ -1298,7 +1337,7 @@ export class SkillExecutor {
           synthesizeData.push({
             stepId: step.id,
             stepName: ('name' in step ? step.name : step.id) || step.id,
-            stepType: step.type,
+            stepType: typeof (step as any).type === 'string' ? (step as any).type : 'skill',
             layer: (displayConfig as DisplayConfig).layer,
             data: stepResult.data,
             success: stepResult.success,
@@ -1716,6 +1755,19 @@ export class SkillExecutor {
   ): Promise<StepResult> {
     const startTime = Date.now();
 
+    const itemSkillName = typeof (step as any).item_skill === 'string'
+      ? String((step as any).item_skill)
+      : (typeof (step as any).skill === 'string' ? String((step as any).skill) : '');
+    if (!itemSkillName) {
+      return {
+        stepId: step.id,
+        stepType: 'iterator',
+        success: false,
+        error: `Iterator item_skill is missing: ${step.id}`,
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+
     // 获取数据源
     const source = context.variables[step.source] || context.results[step.source]?.data;
     if (!source || !Array.isArray(source)) {
@@ -1731,7 +1783,32 @@ export class SkillExecutor {
 
     const results: any[] = [];
     const maxItems = step.max_items || 100;  // 性能保护
-    const items = source.slice(0, maxItems);
+    let items = [...source];
+
+    // Optional iterator filter (best-effort): allows skills to analyze only a subset of items.
+    // Example in YAML: filter: "jank_level == 'severe' OR jank_level == 'bad'"
+    const filterExprRaw = typeof (step as any).filter === 'string' ? String((step as any).filter).trim() : '';
+    if (filterExprRaw) {
+      const filterExpr = filterExprRaw
+        .replace(/\bOR\b/gi, '||')
+        .replace(/\bAND\b/gi, '&&');
+      try {
+        items = items.filter((item: any) => {
+          const itemObj = (item && typeof item === 'object') ? item : {};
+          const filterCtx: SkillExecutionContext = {
+            ...context,
+            // Expose item fields at root-level for convenience in filter expressions.
+            inherited: { ...(context.inherited || {}), ...itemObj },
+            currentItem: itemObj,
+          };
+          return ExpressionEvaluator.evaluateCondition(filterExpr, filterCtx);
+        });
+      } catch {
+        // Ignore filter evaluation errors (iterator still runs).
+      }
+    }
+
+    items = items.slice(0, maxItems);
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -1756,19 +1833,18 @@ export class SkillExecutor {
 
       // 执行子 skill
       const itemResult = await this.execute(
-        step.item_skill,
+        itemSkillName,
         context.traceId,
         params,
         { ...context.inherited, ...context.variables, item }
       );
 
-      if (itemResult.success) {
-        results.push({
-          itemIndex: i,
-          item,
-          result: itemResult,
-        });
-      }
+      // Always record the per-item result, even if it failed (so UI/Agents can see errors).
+      results.push({
+        itemIndex: i,
+        item,
+        result: itemResult,
+      });
     }
 
     return {
@@ -2298,6 +2374,12 @@ export class SkillExecutor {
     const config = displayConfig || { level: 'summary', format: 'table' };
     const data = stepResult.data;
 
+    // Extract column definitions from config (runtime data may be ColumnDefinition[] even though type says string[])
+    // This happens because skill YAML is loaded dynamically and contains full column definitions
+    const columnDefinitions = Array.isArray((config as any).columns)
+      ? (config as any).columns.filter((c: any) => typeof c === 'object' && c.name)
+      : undefined;
+
     // 根据数据类型确定展示格式
     let displayData: DisplayResult['data'];
 
@@ -2309,7 +2391,7 @@ export class SkillExecutor {
     } else if (Array.isArray(data) && data.length > 0) {
       // 检查是否是 iterator 结果（包含 itemIndex, item, result）
       if (this.isIteratorResult(data)) {
-        displayData = this.flattenIteratorResults(data, stepResult.stepType === 'iterator');
+        displayData = this.flattenIteratorResults(data, stepResult.stepType === 'iterator', columnDefinitions);
       } else {
         // 普通数组 - 转换为表格格式
         const firstItem = data[0];
@@ -2335,12 +2417,6 @@ export class SkillExecutor {
       displayData = { text: String(data) };
     }
 
-    // Extract column definitions from config (runtime data may be ColumnDefinition[] even though type says string[])
-    // This happens because skill YAML is loaded dynamically and contains full column definitions
-    const columnDefinitions = Array.isArray((config as any).columns)
-      ? (config as any).columns.filter((c: any) => typeof c === 'object' && c.name)
-      : undefined;
-
     return {
       stepId,
       title: config.title || title,
@@ -2354,6 +2430,436 @@ export class SkillExecutor {
       metadataFields: config.metadataFields,   // 提取到元数据的字段
       hidden_columns: config.hidden_columns,   // 隐藏的列
       columnDefinitions,                       // 完整的列定义（包含 hidden 等属性）
+    };
+  }
+
+  /**
+   * Build a deterministic "insight summary" DisplayResult from synthesize configs.
+   *
+   * Motivation:
+   * - Skills already carry `synthesize:` configs (role/fields/insights)
+   * - Agents need compact, citeable KPIs + insights without relying on ai_summary
+   *
+   * Current scope (v2):
+   * - Processes config.role in {'overview', 'conclusion', 'list', 'clusters'}
+   * - overview/conclusion: uses first row/object as the KPI row
+   * - list/clusters: summarizes group distributions + top items (best-effort)
+   */
+  private buildSynthesizeSummaryDisplayResult(synthesizeData: SynthesizeData[]): DisplayResult | null {
+    if (!Array.isArray(synthesizeData) || synthesizeData.length === 0) return null;
+
+    const keyRoleItems = synthesizeData.filter(item =>
+      item?.success === true &&
+      item?.config &&
+      typeof item.config === 'object' &&
+      ['overview', 'conclusion', 'list', 'clusters'].includes(String((item.config as any).role))
+    );
+    if (keyRoleItems.length === 0) return null;
+
+    const metrics: Array<{
+      label: string;
+      value: string | number;
+      unit?: string;
+      severity?: 'info' | 'warning' | 'critical';
+    }> = [];
+    const insights: string[] = [];
+
+    const resolvePath = (ctx: Record<string, any>, path: string): any => {
+      if (!path || !ctx) return undefined;
+      if (!path.includes('.')) return ctx[path];
+      const parts = path.split('.');
+      let cur: any = ctx;
+      for (const p of parts) {
+        if (cur === null || cur === undefined) return undefined;
+        cur = cur[p];
+      }
+      return cur;
+    };
+
+    const applyTemplate = (template: string, ctx: Record<string, any>): string => {
+      const t = String(template || '');
+      if (!t.includes('{{')) return t;
+      return t.replace(/\{\{\s*([a-zA-Z0-9_\\.]+)\s*\}\}/g, (_m, key) => {
+        const v = resolvePath(ctx, String(key || '').trim());
+        if (v === undefined || v === null) return '';
+        if (typeof v === 'object') {
+          try { return JSON.stringify(v); } catch { return String(v); }
+        }
+        return String(v);
+      });
+    };
+
+    const evalConditionOnRow = (condition: string, rowCtx: Record<string, any>): boolean => {
+      const expr = String(condition || '').trim();
+      if (!expr) return true;
+      try {
+        // YAML-defined expressions are trusted (skill author controlled).
+        const fn = new Function('ctx', `with (ctx) { return (${expr}); }`);
+        return Boolean(fn(rowCtx));
+      } catch {
+        return false;
+      }
+    };
+
+    const isPlainObject = (v: any): v is Record<string, any> => {
+      return typeof v === 'object' && v !== null && !Array.isArray(v);
+    };
+
+    const toNumber = (v: any): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (!s) return null;
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      }
+      return null;
+    };
+
+    const isIteratorData = (data: any): boolean => {
+      if (!Array.isArray(data) || data.length === 0) return false;
+      const first = data[0];
+      return isPlainObject(first) && 'itemIndex' in first && 'item' in first && 'result' in first;
+    };
+
+    const collectTemplateKeys = (template: string): string[] => {
+      const keys: string[] = [];
+      const t = String(template || '');
+      const re = /\{\{\s*([a-zA-Z0-9_\\.]+)\s*\}\}/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(t)) !== null) {
+        const key = String(m[1] || '').trim();
+        if (!key) continue;
+        // Only keep root path segment (we don't build nested objects in iterator extraction)
+        const root = key.includes('.') ? key.split('.')[0] : key;
+        if (root) keys.push(root);
+      }
+      return keys;
+    };
+
+    const resolveFieldFromSkillResult = (skillResult: any, field: string): any => {
+      if (!skillResult || !field) return undefined;
+
+      // 1) Prefer diagnostics for common fields
+      if (field === 'diagnosis' && Array.isArray(skillResult.diagnostics) && skillResult.diagnostics.length > 0) {
+        const d = skillResult.diagnostics[0];
+        if (d && typeof d.diagnosis === 'string' && d.diagnosis.trim()) return d.diagnosis;
+      }
+      if (field === 'confidence' && Array.isArray(skillResult.diagnostics) && skillResult.diagnostics.length > 0) {
+        const d = skillResult.diagnostics[0];
+        if (d && typeof d.confidence === 'number' && Number.isFinite(d.confidence)) return d.confidence;
+      }
+
+      // 2) Search rawResults step outputs for a field match (first row/object only)
+      const raw = (skillResult as any).rawResults;
+      if (raw && typeof raw === 'object') {
+        for (const stepResult of Object.values(raw)) {
+          const data = (stepResult as any)?.data;
+          if (Array.isArray(data) && data.length > 0) {
+            const first = data[0];
+            if (isPlainObject(first) && field in first) return (first as any)[field];
+          } else if (isPlainObject(data) && field in data) {
+            return (data as any)[field];
+          }
+        }
+      }
+
+      return undefined;
+    };
+
+    const resolveClusterBy = (clusterBy: any): { field: string; label?: string } | null => {
+      if (!clusterBy) return null;
+      if (typeof clusterBy === 'string') {
+        const field = clusterBy.trim();
+        return field ? { field } : null;
+      }
+      if (typeof clusterBy === 'object') {
+        const fieldRaw = (clusterBy as any)?.field;
+        const field = typeof fieldRaw === 'string' ? fieldRaw.trim() : '';
+        if (!field) return null;
+        const labelRaw = (clusterBy as any)?.label;
+        const label = typeof labelRaw === 'string' && labelRaw.trim() ? labelRaw.trim() : undefined;
+        return { field, label };
+      }
+      return null;
+    };
+
+    const extractRowsForListLikeRole = (data: any, config: SynthesizeConfig): Record<string, any>[] => {
+      if (!data) return [];
+
+      // Determine which fields we may need to synthesize summaries.
+      const needed = new Set<string>();
+      if (config.role === 'clusters') {
+        const c = resolveClusterBy(config.clusterBy);
+        if (c?.field) needed.add(c.field);
+      }
+      if (Array.isArray(config.groupBy)) {
+        for (const g of config.groupBy) {
+          if (g?.field) needed.add(String(g.field));
+        }
+      }
+      if (Array.isArray(config.fields)) {
+        for (const f of config.fields) {
+          if (f?.key) needed.add(String(f.key));
+          if (typeof f?.format === 'string') {
+            for (const k of collectTemplateKeys(f.format)) needed.add(k);
+          }
+        }
+      }
+      if (Array.isArray(config.insights)) {
+        for (const i of config.insights) {
+          if (typeof i?.template === 'string') {
+            for (const k of collectTemplateKeys(i.template)) needed.add(k);
+          }
+        }
+      }
+
+      // Iterator results: [{ itemIndex, item, result }]
+      if (isIteratorData(data)) {
+        const rows: Record<string, any>[] = [];
+        for (const it of data as any[]) {
+          const row: Record<string, any> = isPlainObject(it?.item) ? { ...(it.item as any) } : {};
+          // Fill missing fields from nested SkillExecutionResult
+          for (const key of needed) {
+            if (row[key] !== undefined) continue;
+            const v = resolveFieldFromSkillResult(it?.result, key);
+            if (v !== undefined) row[key] = v;
+          }
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      if (Array.isArray(data)) {
+        return data.filter(isPlainObject) as Record<string, any>[];
+      }
+      if (isPlainObject(data)) return [data];
+      return [];
+    };
+
+    const extractRowObject = (data: any): Record<string, any> | null => {
+      if (!data) return null;
+      if (Array.isArray(data) && data.length > 0) {
+        const first = data[0];
+        if (first && typeof first === 'object' && !Array.isArray(first)) {
+          return first as Record<string, any>;
+        }
+        return null;
+      }
+      if (typeof data === 'object' && !Array.isArray(data)) {
+        return data as Record<string, any>;
+      }
+      return null;
+    };
+
+    for (const item of keyRoleItems) {
+      const config = item.config as SynthesizeConfig;
+      const role = (config as any)?.role;
+
+      // list/clusters: summarize distribution + top items, best-effort
+      if (role === 'list' || role === 'clusters') {
+        const rows = extractRowsForListLikeRole(item.data, config);
+        if (rows.length === 0) continue;
+
+        const stepName = item.stepName || item.stepId;
+        const itemPrefix = keyRoleItems.length > 1 ? `${stepName}: ` : `${stepName}: `;
+
+        // Group distributions
+        const groupBy: Array<{ field: string; title: string }> = [];
+        if (role === 'clusters') {
+          const c = resolveClusterBy(config.clusterBy);
+          if (c?.field) {
+            groupBy.push({ field: c.field, title: `聚类(${c.label || c.field})` });
+          }
+        }
+        if (Array.isArray(config.groupBy)) {
+          for (const g of config.groupBy) {
+            if (!g || typeof g.field !== 'string' || typeof g.title !== 'string') continue;
+            groupBy.push({ field: g.field, title: g.title });
+          }
+        }
+
+        const pickDistributionMode = (): { mode: 'percent' | 'count'; valueKey?: string } => {
+          // If rows contain a numeric percent-like field, aggregate percentages (common for breakdown tables).
+          const percentKeys = ['percent', 'pct', 'percentage'];
+          for (const k of percentKeys) {
+            if (rows.some(r => toNumber(r?.[k]) !== null)) {
+              return { mode: 'percent', valueKey: k };
+            }
+          }
+          return { mode: 'count' };
+        };
+
+        const distMode = pickDistributionMode();
+
+        for (const g of groupBy) {
+          const field = g.field;
+          const totalCount = rows.length;
+
+          const buckets = new Map<string, { count: number; sum?: number }>();
+          for (const r of rows) {
+            const rawKey = r?.[field];
+            const key = rawKey === undefined || rawKey === null || String(rawKey).trim() === ''
+              ? 'unknown'
+              : String(rawKey);
+            if (!buckets.has(key)) {
+              buckets.set(key, { count: 0, sum: 0 });
+            }
+            const b = buckets.get(key)!;
+            b.count += 1;
+
+            if (distMode.mode === 'percent' && distMode.valueKey) {
+              const n = toNumber(r?.[distMode.valueKey]);
+              if (n !== null) b.sum = (b.sum || 0) + n;
+            }
+          }
+
+          const entries = Array.from(buckets.entries()).map(([k, v]) => ({ k, ...v }));
+          entries.sort((a, b) => {
+            if (distMode.mode === 'percent') return (b.sum || 0) - (a.sum || 0);
+            return b.count - a.count;
+          });
+
+          const top = entries.slice(0, 3);
+          const segs: string[] = [];
+          for (const e of top) {
+            if (distMode.mode === 'percent') {
+              segs.push(`${e.k} ${(e.sum || 0).toFixed(1).replace(/\.0$/, '')}%`);
+            } else {
+              const pct = totalCount > 0 ? Math.round(100 * e.count / totalCount) : 0;
+              segs.push(`${e.k} ${e.count} (${pct}%)`);
+            }
+          }
+          if (segs.length > 0) {
+            insights.push(`${g.title}: ${segs.join('，')}`);
+          }
+        }
+
+        // Top items: when fields define a (name,value) mapping
+        if (Array.isArray(config.fields) && config.fields.length >= 2) {
+          const nameField = config.fields[0];
+          const valueField = config.fields[1];
+          if (nameField?.key && valueField?.key) {
+            const items = rows.slice(0, 3).map(r => {
+              const name = r?.[nameField.key];
+              const raw = r?.[valueField.key];
+              const ctx = { ...(r || {}), value: raw };
+              const formatted = valueField.format ? applyTemplate(valueField.format, ctx).trim() : undefined;
+              const value = formatted !== undefined && formatted !== null && formatted !== ''
+                ? formatted
+                : (raw === undefined || raw === null ? '' : String(raw));
+              const nameStr = name === undefined || name === null ? '' : String(name);
+              const s = nameStr ? `${nameStr}: ${value}` : value;
+              return s.length > 90 ? s.slice(0, 90) + '…' : s;
+            }).filter(s => typeof s === 'string' && s.trim().length > 0);
+
+            if (items.length > 0) {
+              insights.push(`${itemPrefix}Top: ${items.join('；')}`);
+            }
+          }
+        }
+
+        // Optional row-level insights (evaluate on first row only to keep summary compact)
+        if (Array.isArray(config.insights) && config.insights.length > 0) {
+          const row0 = rows[0];
+          if (row0) {
+            for (const insight of config.insights) {
+              if (!insight || typeof insight.template !== 'string') continue;
+              const ok = insight.condition ? evalConditionOnRow(insight.condition, row0) : true;
+              if (!ok) continue;
+              const rendered = applyTemplate(insight.template, row0).trim();
+              if (rendered) insights.push(`${itemPrefix}${rendered}`);
+            }
+          }
+        }
+
+        // Light metric: list size (helps citation and sanity checks)
+        metrics.push({
+          label: `${stepName} 条目数`,
+          value: rows.length,
+        });
+
+        continue;
+      }
+
+      const row = extractRowObject(item.data);
+      if (!row) continue;
+
+      // Fields → metrics
+      if (Array.isArray(config.fields)) {
+        for (const field of config.fields) {
+          if (!field || typeof field.key !== 'string' || typeof field.label !== 'string') continue;
+          const raw = row[field.key];
+          if (raw === undefined || raw === null) continue;
+
+          const ctx = { ...row, value: raw };
+          const formatted = field.format ? applyTemplate(field.format, ctx) : undefined;
+          const value = formatted !== undefined && formatted !== null && String(formatted).trim() !== ''
+            ? String(formatted)
+            : (typeof raw === 'number' || typeof raw === 'string' ? raw : String(raw));
+
+          metrics.push({
+            label: field.label,
+            value,
+          });
+        }
+      }
+
+      // Insights → short bullet lines
+      if (Array.isArray(config.insights)) {
+        for (const insight of config.insights) {
+          if (!insight || typeof insight.template !== 'string') continue;
+          const ok = insight.condition ? evalConditionOnRow(insight.condition, row) : true;
+          if (!ok) continue;
+
+          const rendered = applyTemplate(insight.template, row).trim();
+          if (!rendered) continue;
+
+          const prefix = keyRoleItems.length > 1
+            ? `${item.stepName || item.stepId}: `
+            : '';
+          insights.push(`${prefix}${rendered}`);
+        }
+      }
+    }
+
+    // Dedupe while preserving order
+    const seenMetric = new Set<string>();
+    const dedupedMetrics = metrics.filter(m => {
+      const k = `${m.label}::${String(m.value)}`;
+      if (seenMetric.has(k)) return false;
+      seenMetric.add(k);
+      return true;
+    }).slice(0, 12);
+
+    const seenInsight = new Set<string>();
+    const dedupedInsights = insights.filter(s => {
+      const k = s.trim();
+      if (!k) return false;
+      if (seenInsight.has(k)) return false;
+      seenInsight.add(k);
+      return true;
+    }).slice(0, 8);
+
+    if (dedupedMetrics.length === 0 && dedupedInsights.length === 0) return null;
+
+    const content = dedupedInsights.length > 0
+      ? dedupedInsights.map(s => `- ${s}`).join('\n')
+      : '（无显式洞见，见指标）';
+
+    return {
+      stepId: '__synthesize_summary__',
+      title: '洞见摘要',
+      level: 'key',
+      layer: 'overview',
+      format: 'summary',
+      data: {
+        summary: {
+          title: '洞见摘要',
+          content,
+          metrics: dedupedMetrics,
+        },
+      },
     };
   }
 
@@ -2421,9 +2927,82 @@ export class SkillExecutor {
   /**
    * 将迭代器结果展平为可显示的表格
    */
-  private flattenIteratorResults(data: any[], _isIterator: boolean): DisplayResult['data'] {
+  private flattenIteratorResults(
+    data: any[],
+    _isIterator: boolean,
+    columnDefinitions?: Array<{ name: string }>
+  ): DisplayResult['data'] {
     if (data.length === 0) {
       return { text: '无迭代结果' };
+    }
+
+    const resolveFieldFromSkillResult = (skillResult: any, field: string): any => {
+      if (!skillResult || !field) return undefined;
+
+      // Prefer diagnostics for common fields
+      if (Array.isArray(skillResult.diagnostics) && skillResult.diagnostics.length > 0) {
+        const d = skillResult.diagnostics[0];
+        if (field === 'diagnosis' && d && typeof d.diagnosis === 'string' && d.diagnosis.trim()) {
+          return d.diagnosis;
+        }
+        if (field === 'confidence' && d && typeof d.confidence === 'number' && Number.isFinite(d.confidence)) {
+          return d.confidence;
+        }
+        if (field === 'severity' && d && typeof d.severity === 'string' && d.severity.trim()) {
+          return d.severity;
+        }
+      }
+
+      // Search rawResults step outputs for a field match (first row/object only)
+      const raw = (skillResult as any).rawResults;
+      if (raw && typeof raw === 'object') {
+        for (const stepResult of Object.values(raw)) {
+          const stepData = (stepResult as any)?.data;
+          if (Array.isArray(stepData) && stepData.length > 0) {
+            const first = stepData[0];
+            if (first && typeof first === 'object' && !Array.isArray(first) && field in (first as any)) {
+              return (first as any)[field];
+            }
+          } else if (stepData && typeof stepData === 'object' && !Array.isArray(stepData) && field in (stepData as any)) {
+            return (stepData as any)[field];
+          }
+        }
+      }
+
+      return undefined;
+    };
+
+    const explicitColumns = Array.isArray(columnDefinitions) && columnDefinitions.length > 0
+      ? columnDefinitions.map(c => c.name).filter((n: any) => typeof n === 'string' && n.trim().length > 0)
+      : [];
+
+    // If step defines explicit columns, prefer them and attempt to extract values
+    // from both `item` and nested `result` (SkillExecutionResult).
+    if (explicitColumns.length > 0) {
+      const columns = explicitColumns;
+      const rows = data.map((iterItem) => {
+        const item = iterItem.item || {};
+        const skillResult = iterItem.result;
+        return columns.map((col) => {
+          const v = (item && typeof item === 'object' && col in item)
+            ? item[col]
+            : resolveFieldFromSkillResult(skillResult, col);
+          return this.formatCellValue(v);
+        });
+      });
+
+      const expandableData = data.map((iterItem) => ({
+        item: iterItem.item,
+        result: {
+          success: iterItem.result?.success ?? false,
+          sections: this.convertDisplayResultsToSections(iterItem.result?.displayResults || []),
+          error: iterItem.result?.error,
+        },
+      }));
+
+      const summary = this.generateIteratorSummary(data, expandableData);
+
+      return { columns, rows, expandableData, summary };
     }
 
     // 从 item 中提取关键字段用于显示
@@ -2477,8 +3056,74 @@ export class SkillExecutor {
     const successCount = expandableData.filter(d => d.result.success).length;
     const failCount = data.length - successCount;
 
-    // 尝试从 sections 中提取关键指标生成汇总
+    const firstItem = expandableData[0]?.item || {};
+    const isJankLike =
+      ('frame_id' in firstItem) ||
+      ('jank_type' in firstItem) ||
+      ('vsync_missed' in firstItem);
+    const isStartupLike =
+      ('startup_id' in firstItem) ||
+      ('startup_type' in firstItem) ||
+      ('ttid_ms' in firstItem) ||
+      ('ttfd_ms' in firstItem);
+
+    // Try to extract key indicators from sections to generate a summary.
+    // Prefer domain-specific summaries; fall back to a generic iterator summary.
     const summaryLines: string[] = [];
+
+    if (!isJankLike && !isStartupLike) {
+      summaryLines.push(`**迭代分析汇总**`);
+      summaryLines.push('');
+      summaryLines.push(`共分析 ${data.length} 项，成功 ${successCount} 项${failCount > 0 ? `，失败 ${failCount} 项` : ''}。`);
+      return {
+        title: '汇总报告',
+        content: summaryLines.join('\n'),
+      };
+    }
+
+    if (isStartupLike) {
+      summaryLines.push(`**启动事件分析汇总**`);
+      summaryLines.push('');
+      summaryLines.push(`共分析 ${data.length} 个启动事件，成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}。`);
+
+      // Startup type distribution (best-effort)
+      const typeCounts = new Map<string, number>();
+      for (const { item } of expandableData) {
+        const t = item?.startup_type;
+        const k = t === undefined || t === null || String(t).trim() === '' ? 'unknown' : String(t);
+        typeCounts.set(k, (typeCounts.get(k) || 0) + 1);
+      }
+      const typeTop = Array.from(typeCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      if (typeTop.length > 0) {
+        summaryLines.push('');
+        summaryLines.push(`启动类型分布: ${typeTop.map(([k, v]) => `${k} ${v}`).join('，')}`);
+      }
+
+      // Top slow startups by dur_ms
+      const withDur = expandableData
+        .map(({ item }) => ({
+          startup_id: item?.startup_id,
+          startup_type: item?.startup_type,
+          dur_ms: Number(item?.dur_ms),
+        }))
+        .filter(r => Number.isFinite(r.dur_ms));
+      withDur.sort((a, b) => b.dur_ms - a.dur_ms);
+      const slowTop = withDur.slice(0, 3);
+      if (slowTop.length > 0) {
+        summaryLines.push('');
+        summaryLines.push('最慢启动:');
+        for (const s of slowTop) {
+          summaryLines.push(`- startup_id=${s.startup_id ?? '?'} (${s.startup_type ?? 'unknown'}) ${s.dur_ms.toFixed(0)}ms`);
+        }
+      }
+
+      return {
+        title: '汇总报告',
+        content: summaryLines.join('\n'),
+      };
+    }
+
+    // Jank/frame iterator summary (existing behavior)
     summaryLines.push(`**掉帧分析汇总**`);
     summaryLines.push('');
     summaryLines.push(`共分析 ${data.length} 个掉帧帧，成功 ${successCount} 个${failCount > 0 ? `，失败 ${failCount} 个` : ''}。`);

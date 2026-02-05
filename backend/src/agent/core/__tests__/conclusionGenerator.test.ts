@@ -65,7 +65,7 @@ describe('conclusionGenerator', () => {
     };
   });
 
-  test('uses standard root-cause prompt for early turns', async () => {
+  test('uses insight-first prompt for early turns', async () => {
     const conclusion = await generateConclusion(
       sharedContext as any,
       findings,
@@ -78,17 +78,17 @@ describe('conclusionGenerator', () => {
 
     expect(conclusion).toBe('测试结论');
     expect(mockModelRouter.callWithFallback).toHaveBeenCalledWith(
-      expect.stringContaining('根因分析'),
+      expect.stringContaining('## 结论（按可能性排序）'),
       'synthesis',
       expect.objectContaining({
-        promptId: 'agent.conclusionGenerator',
-        promptVersion: '1.0.0',
-        contractVersion: 'conclusion_text@1.0.0',
+        promptId: 'agent.conclusionGenerator.insight.initial_report',
+        promptVersion: '2.0.0',
+        contractVersion: 'conclusion_insight_text@2.0.0',
       })
     );
   });
 
-  test('switches to dialogue mode prompt when turnCount >= 1', async () => {
+  test('uses focused-answer prompt when turnCount >= 1', async () => {
     const conclusion = await generateConclusion(
       sharedContext as any,
       findings,
@@ -104,20 +104,20 @@ describe('conclusionGenerator', () => {
       expect.stringContaining('HISTORY_CONTEXT'),
       'synthesis',
       expect.objectContaining({
-        promptId: 'agent.conclusionGenerator.dialogue',
-        promptVersion: '1.0.0',
-        contractVersion: 'conclusion_dialogue_text@1.0.0',
+        promptId: 'agent.conclusionGenerator.insight.focused_answer',
+        promptVersion: '2.0.0',
+        contractVersion: 'conclusion_insight_text@2.0.0',
       })
     );
 
-    // Ensure prompt includes the core dialogue instructions
+    // Ensure prompt includes core multi-turn instructions (but no forced Q/A template).
     const calledPrompt = (mockModelRouter.callWithFallback as jest.Mock).mock.calls[0][0] as string;
     expect(calledPrompt).toContain('多轮对话');
-    expect(calledPrompt).toContain('输出尽量短');
-    expect(calledPrompt).toContain('Q:');
+    expect(calledPrompt).toContain('## 输出要求（必须严格遵守）');
+    expect(calledPrompt).toContain('总长度尽量控制在 25 行以内');
   });
 
-  test('dialogue mode falls back to question-driven text when LLM fails', async () => {
+  test('insight mode falls back to 4-section markdown when LLM fails (follow-up)', async () => {
     mockModelRouter.callWithFallback = jest.fn().mockRejectedValue(new Error('LLM down'));
 
     const conclusion = await generateConclusion(
@@ -130,12 +130,14 @@ describe('conclusionGenerator', () => {
       { turnCount: 3, historyContext: 'HISTORY' }
     );
 
-    expect(conclusion).toContain('Q:');
-    expect(conclusion).toContain('A.');
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('## 证据链（对应上述结论）');
+    expect(conclusion).toContain('## 不确定性与反例');
+    expect(conclusion).toContain('## 下一步（最高信息增益）');
     expect(emittedUpdates.some(u => u.type === 'degraded')).toBe(true);
   });
 
-  test('non-dialogue mode falls back to simple markdown summary when LLM fails', async () => {
+  test('insight mode falls back to 4-section markdown when LLM fails (initial)', async () => {
     mockModelRouter.callWithFallback = jest.fn().mockRejectedValue(new Error('LLM down'));
 
     const conclusion = await generateConclusion(
@@ -148,7 +150,47 @@ describe('conclusionGenerator', () => {
       { turnCount: 0 }
     );
 
-    expect(conclusion).toContain('## 分析结论');
-    expect(conclusion).toContain('严重问题');
+    expect(conclusion).toContain('## 结论（按可能性排序）');
+    expect(conclusion).toContain('主线程阻塞导致掉帧');
+  });
+
+  test('injects per-conclusion evidence mapping into evidence-chain section when LLM forgets to cite', async () => {
+    mockModelRouter.callWithFallback = jest.fn().mockResolvedValue({
+      success: true,
+      response: `## 结论（按可能性排序）
+1. 主线程阻塞（置信度: 80%）
+
+## 证据链（对应上述结论）
+- 观察到多次长时间 Runnable/Running
+
+## 不确定性与反例
+- 仍需排除 RenderThread/GPU 的影响
+
+## 下一步（最高信息增益）
+- 针对关键帧做 drill-down`,
+      modelId: 'test-model',
+      usage: { inputTokens: 100, outputTokens: 50, totalCost: 0.001 },
+      latencyMs: 500,
+    });
+
+    const findingsWithEvidence: Finding[] = [
+      {
+        ...findings[0],
+        evidence: [{ evidenceId: 'ev_0123456789ab', title: '[frame_agent] scrolling_analysis', kind: 'skill' }],
+      },
+    ];
+
+    const conclusion = await generateConclusion(
+      sharedContext as any,
+      findingsWithEvidence,
+      { ...intent, followUpType: 'extend' },
+      mockModelRouter as unknown as ModelRouter,
+      emitter,
+      undefined,
+      { turnCount: 2, historyContext: 'HISTORY' }
+    );
+
+    expect(conclusion).toContain('C1（自动补全）');
+    expect(conclusion).toContain('ev_0123456789ab');
   });
 });

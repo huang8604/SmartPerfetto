@@ -56,23 +56,50 @@ export class StrategyExecutor implements AnalysisExecutor {
   async execute(ctx: ExecutionContext, emitter: ProgressEmitter): Promise<ExecutorResult> {
     const allFindings: Finding[] = [];
     let stagedConfidence = 0.5;
-    let informationGaps: string[] = [];
+    // Seed with cross-turn contradictions so deterministic strategies can still surface them.
+    let informationGaps: string[] = (() => {
+      const cx = ctx.sessionContext?.getTraceAgentState()?.contradictions;
+      if (!Array.isArray(cx) || cx.length === 0) return [];
+      return cx
+        .slice(-3)
+        .map(c => `矛盾: ${String((c as any)?.description || '').trim()}`)
+        .filter(s => s !== '矛盾:');
+    })();
     let stopReason: string | null = null;
     let rounds = 0;
+    const hardMaxRounds = Math.max(1, ctx.config.maxRounds);
 
     // Accumulate captured entities across all stages
     const allCapturedEntities: CapturedEntities[] = [];
     const analyzedFrameIds: string[] = [];
     const analyzedSessionIds: string[] = [];
 
-    // Phase 1 Fix: Use prebuilt intervals from follow-up resolution if available
-    // This allows drill-down queries to skip discovery stages
-    const prebuiltIntervals = ctx.options.prebuiltIntervals || [];
+    // Phase 1 Fix: Use prebuilt intervals from follow-up resolution if available.
+    // v2.0: Fall back to incrementalScope-derived focusIntervals for incremental turns.
+    // This allows multi-turn follow-ups to skip redundant discovery stages.
+    const prebuiltIntervals = (ctx.options.prebuiltIntervals && ctx.options.prebuiltIntervals.length > 0)
+      ? ctx.options.prebuiltIntervals
+      : (ctx.incrementalScope?.focusIntervals && ctx.incrementalScope.focusIntervals.length > 0)
+        ? ctx.incrementalScope.focusIntervals
+        : [];
     const hasPrebuiltContext = prebuiltIntervals.length > 0;
 
     if (hasPrebuiltContext) {
-      emitter.log(`[FollowUp] Using ${prebuiltIntervals.length} pre-built interval(s) from follow-up resolution`);
+      const source = (ctx.options.prebuiltIntervals && ctx.options.prebuiltIntervals.length > 0)
+        ? 'follow-up'
+        : 'incremental';
+      emitter.log(`[FollowUp] Using ${prebuiltIntervals.length} pre-built interval(s) (${source})`);
     }
+
+    // Infer prebuilt granularity for smarter stage skipping.
+    // Example: drill-down to a specific frame should skip "session_overview".
+    const prebuiltEntityType: 'frame' | 'session' | 'unknown' = (() => {
+      if (!hasPrebuiltContext) return 'unknown';
+      const meta = prebuiltIntervals[0]?.metadata || {};
+      if (meta.sourceEntityType === 'frame' || meta.frame_id || meta.frameId) return 'frame';
+      if (meta.sourceEntityType === 'session' || meta.session_id || meta.sessionId) return 'session';
+      return 'unknown';
+    })();
 
     const state: StrategyExecutionState = {
       strategyId: this.strategy.id,
@@ -88,6 +115,7 @@ export class StrategyExecutor implements AnalysisExecutor {
     // Determine which stages will actually run (for accurate progress reporting)
     const stagesToRun = this.strategy.stages.filter(stage => {
       if (!hasPrebuiltContext) return true;
+      if (prebuiltEntityType === 'frame' && stage.name === 'session_overview') return false;
       const isDiscoveryStage = !!stage.extractIntervals;
       const allTasksGlobal = stage.tasks.every(t => t.scope === 'global');
       return !(isDiscoveryStage && allTasksGlobal);
@@ -147,6 +175,33 @@ export class StrategyExecutor implements AnalysisExecutor {
         continue;
       }
 
+      // If prebuilt intervals are already frame-level, skip session-level extraction stages.
+      if (hasPrebuiltContext && prebuiltEntityType === 'frame' && stage.name === 'session_overview') {
+        emitter.log(`[FollowUp] Skipping stage "${stage.name}" - prebuilt intervals are already frame-level`);
+        emitter.emitUpdate('stage_transition', {
+          stageIndex: i,
+          totalStages: this.strategy.stages.length,
+          stageName: stage.name,
+          intervalCount: state.focusIntervals.length,
+          skipped: true,
+          skipReason: 'Pre-built frame intervals (skip session overview)',
+        });
+        continue;
+      }
+
+      // Hard safety cap: prevent unusually long strategies from running too many stages.
+      // (softMaxRounds is a preference used by adaptive loops; deterministic strategies should be stage-driven.)
+      if (rounds >= hardMaxRounds) {
+        stopReason = `Reached hard stage budget (${hardMaxRounds})`;
+        emitter.log(`[Budget] ${stopReason}; stopping before stage "${stage.name}"`);
+        emitter.emitUpdate('progress', {
+          phase: 'early_stop',
+          reason: stopReason,
+          message: `提前终止: ${stopReason}`,
+        });
+        break;
+      }
+
       rounds++;
 
       // Phase 3: Emit stage_transition event
@@ -179,6 +234,11 @@ export class StrategyExecutor implements AnalysisExecutor {
         stopReason = `No tasks generated for strategy stage: ${stage.name}`;
         break;
       }
+
+      const stageExperimentId = ctx.sessionContext?.startTraceAgentExperiment({
+        type: 'run_skill',
+        objective: `[strategy:${this.strategy.id}] stage=${stage.name} intervals=${state.focusIntervals.length} agentTasks=${agentTasks.length} directSkillTasks=${directSkillTasks.length}`,
+      });
 
       if (agentTasks.length > 0) {
         emitter.emitUpdate('progress', {
@@ -251,7 +311,25 @@ export class StrategyExecutor implements AnalysisExecutor {
         emitDataEnvelopes(responsesForEmit, emitter, registry);
       }
 
-      const synthesis = await synthesizeFeedback(responses, ctx.sharedContext, this.services.modelRouter, emitter, this.services.messageBus);
+      // v2.0: Ingest tool outputs as durable evidence digests (goal-driven agent scaffold).
+      // Evidence digests are durable and bounded, but frame_analysis can generate
+      // a large amount of per-frame tool outputs; prefer a derived summary when large.
+      let stageProducedEvidenceIds: string[] = [];
+      if (stage.name === 'frame_analysis' && responses.length > 10) {
+        emitter.log(`[Evidence] Skip per-response evidence ingestion for frame_analysis (${responses.length} responses); rely on derived summaries`);
+      } else {
+        stageProducedEvidenceIds =
+          ctx.sessionContext?.ingestEvidenceFromResponses(responses, { stageName: stage.name, round: rounds }) || [];
+      }
+
+      const synthesis = await synthesizeFeedback(
+        responses,
+        ctx.sharedContext,
+        this.services.modelRouter,
+        emitter,
+        this.services.messageBus,
+        ctx.sessionContext
+      );
       const agentCount = agentResponses.length;
       const directCount = directResponses.length;
       const synthesisMessage = agentCount > 0 && directCount > 0
@@ -288,10 +366,39 @@ export class StrategyExecutor implements AnalysisExecutor {
               `primary=${jankSummary.primaryCause?.label} (${jankSummary.primaryCause?.percentage}%), ` +
               `secondary=${jankSummary.secondaryCauses.length} causes`
             );
+
+            // Also record a compact derived evidence digest for citations.
+            const summaryEvidenceId = ctx.sessionContext?.addEvidenceDigest({
+              kind: 'derived',
+              title: `[strategy] frame_analysis · jank cause summary`,
+              digest: `frames=${jankSummary.totalJankFrames} primary=${jankSummary.primaryCause?.label || 'unknown'}(${jankSummary.primaryCause?.percentage || 0}%) secondary=${jankSummary.secondaryCauses.length}`,
+              source: {
+                stage: stage.name,
+                strategyId: this.strategy.id,
+              },
+            });
+            if (summaryEvidenceId) {
+              stageProducedEvidenceIds.push(summaryEvidenceId);
+            }
           }
         } catch (error: any) {
           emitter.log(`[JankSummary] Failed to compute jank cause summary: ${error.message}`);
         }
+      }
+
+      if (stageExperimentId) {
+        const ok = responses.some(r => r.success);
+        const firstErr = (() => {
+          const failed = responses.find(r => !r.success);
+          const err = failed?.toolResults?.find(tr => !tr.success)?.error;
+          return typeof err === 'string' ? err.slice(0, 200) : undefined;
+        })();
+        ctx.sessionContext?.completeTraceAgentExperiment({
+          id: stageExperimentId,
+          status: ok ? 'succeeded' : 'failed',
+          producedEvidenceIds: stageProducedEvidenceIds,
+          error: ok ? undefined : firstErr,
+        });
       }
 
       // Update confidence from successful responses
@@ -704,6 +811,7 @@ export class StrategyExecutor implements AnalysisExecutor {
       .find(h => h.status === 'proposed' || h.status === 'investigating');
     const relevantFindings = ctx.sharedContext.confirmedFindings.slice(-5);
     const intentSummary = { primaryGoal: ctx.intent.primaryGoal, aspects: ctx.intent.aspects };
+    const historyContext = ctx.sessionContext?.generatePromptContext(700)?.trim() || '';
 
     const tasks: AgentTask[] = [];
 
@@ -739,6 +847,7 @@ export class StrategyExecutor implements AnalysisExecutor {
               adb: ctx.options.adb,
               adbContext: ctx.options.adbContext,
               scopeLabel: scope.scopeLabel,
+              ...(historyContext ? { historyContext } : {}),
               ...(template.skillParams && { skillParams: template.skillParams }),
               ...(template.focusTools && { focusTools: template.focusTools }),
             },

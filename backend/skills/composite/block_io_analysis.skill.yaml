@@ -29,7 +29,7 @@ triggers:
   - pattern: "(IO 延迟|IO latency|IO 等待)"
     confidence: 0.85
 
-parameters:
+inputs:
   - name: device
     type: string
     required: false
@@ -40,10 +40,10 @@ parameters:
     default: 5
     description: "最小队列深度阈值"
 
-analysis_steps:
+steps:
   # Step 1: IO 操作概览
   - id: io_overview
-    type: diagnostic
+    type: atomic
     name: "IO 操作概览"
     description: "统计块设备 I/O 操作"
     sql: |
@@ -75,7 +75,7 @@ analysis_steps:
 
   # Step 2: 设备级 IO 分析
   - id: device_io_stats
-    type: diagnostic
+    type: atomic
     name: "设备级 IO 统计"
     description: "按设备统计 IO 操作"
     sql: |
@@ -107,7 +107,7 @@ analysis_steps:
 
   # Step 3: IO 队列深度分析
   - id: io_queue_depth
-    type: diagnostic
+    type: atomic
     name: "IO 队列深度"
     description: "分析块设备队列深度变化"
     sql: |
@@ -135,7 +135,7 @@ analysis_steps:
 
   # Step 4: 高队列深度时段
   - id: high_queue_periods
-    type: diagnostic
+    type: atomic
     name: "高队列深度时段"
     description: "识别 IO 队列深度较高的时段"
     sql: |
@@ -146,7 +146,7 @@ analysis_steps:
         dev,
         ops_in_queue_or_device AS queue_depth
       FROM linux_active_block_io_operations_by_device
-      WHERE ops_in_queue_or_device >= COALESCE({{min_queue_depth}}, 5)
+      WHERE ops_in_queue_or_device >= COALESCE(${min_queue_depth|5}, 5)
       ORDER BY ops_in_queue_or_device DESC
       LIMIT 100;
     interpretation:
@@ -156,7 +156,7 @@ analysis_steps:
 
   # Step 5: 长耗时 IO 操作
   - id: long_io_operations
-    type: diagnostic
+    type: atomic
     name: "长耗时 IO"
     description: "识别耗时较长的 IO 操作"
     sql: |
@@ -181,7 +181,7 @@ analysis_steps:
 
   # Step 6: IO 与线程阻塞关联
   - id: io_thread_blocking
-    type: diagnostic
+    type: atomic
     name: "IO 阻塞线程分析"
     description: "分析因 IO 阻塞的线程"
     sql: |
@@ -225,6 +225,7 @@ analysis_steps:
     type: ai_summary
     name: "IO 性能 AI 分析"
     description: "综合分析 IO 性能"
+    inputs: [io_overview, device_io_stats, io_queue_depth, high_queue_periods, long_io_operations, io_thread_blocking]
     depends_on:
       - io_overview
       - device_io_stats
@@ -235,19 +236,19 @@ analysis_steps:
       请基于以下 IO 分析数据，提供专业的分析：
 
       ## IO 概览
-      {{io_overview}
+          io_overview
 
       ## 设备 IO 统计
-      {{device_io_stats}
+          device_io_stats
 
       ## 队列深度
-      {{io_queue_depth}
+          io_queue_depth
 
       ## 长耗时 IO
-      {{long_io_operations}
+          long_io_operations
 
       ## 线程阻塞分析
-      {{io_thread_blocking}
+          io_thread_blocking
 
       请分析：
       1. IO 负载评估
@@ -264,13 +265,13 @@ output:
     - title: "IO 分析总结"
       content: |
         ## IO 概览
-        {{io_overview}
+            io_overview
 
         ## 队列深度
-        {{io_queue_depth}
+            io_queue_depth
 
         ## 线程阻塞
-        {{io_thread_blocking}
+            io_thread_blocking
 
         ## AI 综合分析
-        {{io_ai_summary}
+            io_ai_summary

@@ -340,6 +340,6 @@ steps:
         END as suggestion,
         CASE
           WHEN (SELECT throttled_cpu_count FROM throttled_cpus) > 0
-            THEN '考虑: 1) 减少后台任务 2) 优化 CPU 密集操作 3) 添加冷却间隔'
+            THEN '考虑: 1. 减少后台任务 2. 优化 CPU 密集操作 3. 添加冷却间隔'
           ELSE '当前热状态良好'
         END as recommendation

@@ -288,6 +288,14 @@ export class EntityStore {
   }
 
   /**
+   * Get all analyzed frame IDs.
+   * Used by IncrementalAnalyzer to build PreviousAnalysisState.
+   */
+  getAnalyzedFrameIds(): EntityId[] {
+    return Array.from(this.analyzedFrameIds);
+  }
+
+  /**
    * Set the candidate frame list from last discovery stage.
    * Used by extend to know which frames can be analyzed next.
    */
@@ -356,6 +364,14 @@ export class EntityStore {
    */
   wasSessionAnalyzed(id: EntityId | number): boolean {
     return this.analyzedSessionIds.has(normalizeId(id));
+  }
+
+  /**
+   * Get all analyzed session IDs.
+   * Used by IncrementalAnalyzer to build PreviousAnalysisState.
+   */
+  getAnalyzedSessionIds(): EntityId[] {
+    return Array.from(this.analyzedSessionIds);
   }
 
   /**

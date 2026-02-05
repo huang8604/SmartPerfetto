@@ -29,6 +29,8 @@ import type { CircuitBreaker } from './circuitBreaker';
 import type { ModelRouter } from './modelRouter';
 import type { FocusInterval } from '../strategies/types';
 import type { AdbCollaborationConfig, AdbContext } from '../../services/adb';
+import type { IncrementalScope } from './incrementalAnalyzer';
+import type { EnhancedSessionContext } from '../context/enhancedSessionContext';
 
 // =============================================================================
 // Agent ID Constants
@@ -52,6 +54,12 @@ export const AGENT_IDS = {
 export interface AgentDrivenOrchestratorConfig {
   /** Maximum analysis rounds */
   maxRounds: number;
+  /**
+   * Preferred maximum rounds (soft budget).
+   * Executors may choose to stop after reaching this budget *if* results are already "good enough".
+   * This should never be treated as a hard cap (use maxRounds for safety limits).
+   */
+  softMaxRounds?: number;
   /** Maximum concurrent agent tasks */
   maxConcurrentTasks: number;
   /** Confidence threshold to conclude */
@@ -183,6 +191,19 @@ export interface AnalysisOptions {
    * These bypass the normal interval extraction and go directly to per-interval stages
    */
   prebuiltIntervals?: FocusInterval[];
+
+  /**
+   * Optional strategy hint (computed by registry match) for hypothesis-driven planning.
+   * When default loop mode prefers hypothesis+experiments, we still surface the best-matching
+   * strategy so the planner can reuse its structure without forcing the deterministic pipeline.
+   */
+  suggestedStrategy?: {
+    id: string;
+    name: string;
+    confidence?: number;
+    matchMethod?: 'keyword' | 'llm' | 'none';
+    reasoning?: string;
+  };
 }
 
 // =============================================================================
@@ -203,6 +224,157 @@ export interface StreamingEventPayloads {
   conclusion: { sessionId: string; summary: string; confidence: number; rounds: number };
   finding: { round: number; findings: Finding[] };
   error: { message: string };
+
+  // New intervention-related events
+  intervention_required: InterventionRequiredPayload;
+  intervention_resolved: InterventionResolvedPayload;
+  intervention_timeout: InterventionTimeoutPayload;
+
+  // Strategy selection events
+  strategy_selected: StrategySelectedPayload;
+  strategy_fallback: StrategyFallbackPayload;
+
+  // SQL generation events
+  sql_generated: SQLGeneratedPayload;
+  sql_validation_failed: SQLValidationFailedPayload;
+
+  // Focus tracking events
+  focus_updated: FocusUpdatedPayload;
+  incremental_scope: IncrementalScopePayload;
+}
+
+// =============================================================================
+// Intervention Event Payloads
+// =============================================================================
+
+/**
+ * Payload for intervention_required event
+ */
+export interface InterventionRequiredPayload {
+  interventionId: string;
+  type: 'low_confidence' | 'ambiguity' | 'timeout' | 'agent_request' | 'circuit_breaker' | 'validation_required';
+  options: InterventionOptionPayload[];
+  context: {
+    confidence: number;
+    elapsedTimeMs: number;
+    roundsCompleted: number;
+    progressSummary: string;
+    triggerReason: string;
+    findingsCount: number;
+  };
+  timeout: number;
+}
+
+export interface InterventionOptionPayload {
+  id: string;
+  label: string;
+  description: string;
+  action: 'continue' | 'focus' | 'abort' | 'custom' | 'select_option';
+  recommended?: boolean;
+}
+
+/**
+ * Payload for intervention_resolved event
+ */
+export interface InterventionResolvedPayload {
+  interventionId: string;
+  action: string;
+  sessionId: string;
+  directive?: {
+    action: 'continue' | 'focus' | 'abort' | 'restart';
+    reason: string;
+  };
+}
+
+/**
+ * Payload for intervention_timeout event
+ */
+export interface InterventionTimeoutPayload {
+  interventionId: string;
+  sessionId: string;
+  defaultAction: string;
+  timeoutMs: number;
+}
+
+// =============================================================================
+// Strategy Selection Event Payloads
+// =============================================================================
+
+/**
+ * Payload for strategy_selected event
+ */
+export interface StrategySelectedPayload {
+  strategyId: string;
+  strategyName: string;
+  confidence: number;
+  reasoning: string;
+  selectionMethod: 'llm' | 'keyword' | 'default';
+}
+
+/**
+ * Payload for strategy_fallback event
+ */
+export interface StrategyFallbackPayload {
+  reason: string;
+  candidatesEvaluated: number;
+  topCandidateConfidence?: number;
+  fallbackTo: 'hypothesis_driven' | 'default_strategy';
+}
+
+// =============================================================================
+// SQL Generation Event Payloads
+// =============================================================================
+
+/**
+ * Payload for sql_generated event
+ */
+export interface SQLGeneratedPayload {
+  sql: string;
+  explanation: string;
+  riskLevel: 'safe' | 'moderate' | 'high';
+  objective: string;
+  agentId: string;
+}
+
+/**
+ * Payload for sql_validation_failed event
+ */
+export interface SQLValidationFailedPayload {
+  sql: string;
+  errors: string[];
+  agentId: string;
+}
+
+// =============================================================================
+// Focus Tracking Event Payloads
+// =============================================================================
+
+/**
+ * Payload for focus_updated event
+ */
+export interface FocusUpdatedPayload {
+  focusType: 'entity' | 'timeRange' | 'metric' | 'question';
+  target: {
+    entityType?: string;
+    entityId?: string;
+    timeRange?: { start: string; end: string };
+    metricName?: string;
+    question?: string;
+  };
+  weight: number;
+  interactionType: string;
+}
+
+/**
+ * Payload for incremental_scope event
+ */
+export interface IncrementalScopePayload {
+  scopeType: 'entity' | 'timeRange' | 'question' | 'full';
+  entitiesCount: number;
+  timeRangesCount: number;
+  isExtension: boolean;
+  reason: string;
+  relevantAgents: string[];
 }
 
 type StreamingEventType = StreamingUpdate['type'];
@@ -227,10 +399,14 @@ export interface ProgressEmitter {
 // Analysis Services (aggregate dependency — reduces God Dependency on ModelRouter)
 // =============================================================================
 
+import type { EmittedEnvelopeRegistry } from './emittedEnvelopeRegistry';
+
 export interface AnalysisServices {
   modelRouter: ModelRouter;
   messageBus: AgentMessageBus;
   circuitBreaker: CircuitBreaker;
+  /** Session-scoped registry for deduplicating emitted DataEnvelopes */
+  emittedEnvelopeRegistry?: EmittedEnvelopeRegistry;
 }
 
 // =============================================================================
@@ -245,6 +421,17 @@ export interface ExecutionContext {
   initialHypotheses: Hypothesis[];
   sharedContext: SharedAgentContext;
   options: AnalysisOptions;
+  /**
+   * Session-scoped multi-turn context (v2.0).
+   * Provides access to durable per-trace state (EntityStore, FocusStore-derived state, TraceAgentState).
+   */
+  sessionContext?: EnhancedSessionContext;
+  /**
+   * Incremental analysis scope hint (v2.0).
+   * When present, executors should prefer analyzing only what is new/relevant
+   * instead of re-running full analysis on every turn.
+   */
+  incrementalScope?: IncrementalScope;
   config: AgentDrivenOrchestratorConfig;
 }
 
@@ -253,6 +440,24 @@ export interface ExecutionContext {
 // =============================================================================
 
 import type { CapturedEntities } from './entityCapture';
+
+/**
+ * Intervention request from executor for orchestrator to handle.
+ * When set, the orchestrator will pause execution and request user intervention.
+ */
+export interface InterventionRequest {
+  type: 'low_confidence' | 'ambiguity' | 'timeout' | 'agent_request';
+  reason: string;
+  confidence: number;
+  possibleDirections: Array<{
+    id: string;
+    description: string;
+    confidence: number;
+  }>;
+  progressSummary: string;
+  elapsedTimeMs: number;
+  roundsCompleted: number;
+}
 
 export interface ExecutorResult {
   findings: Finding[];
@@ -276,6 +481,18 @@ export interface ExecutorResult {
     frames?: string[];
     sessions?: string[];
   };
+
+  /**
+   * Intervention request from executor (v2.0).
+   * When set, orchestrator will pause and wait for user decision before proceeding.
+   */
+  interventionRequest?: InterventionRequest;
+
+  /**
+   * Indicates whether execution was paused due to intervention.
+   * The orchestrator can resume with user's directive when this is true.
+   */
+  pausedForIntervention?: boolean;
 }
 
 // =============================================================================

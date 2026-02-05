@@ -335,6 +335,11 @@ export interface StreamingUpdate {
   type: 'data' | 'thought' | 'tool_call' | 'finding' | 'progress' | 'conclusion' | 'error' | 'scene_detected' | 'track_data' | 'skill_layered_result' | 'worker_thought' | 'architecture_detected'
     | 'hypothesis_generated' | 'agent_task_dispatched' | 'agent_dialogue' | 'agent_response' | 'round_start' | 'synthesis_complete' | 'strategy_decision'
     | 'degraded' | 'stage_transition' | 'circuit_breaker'
+    // Agent-Driven Architecture v2.0 events
+    | 'intervention_required' | 'intervention_resolved' | 'intervention_timeout'
+    | 'strategy_selected' | 'strategy_fallback'
+    | 'sql_generated' | 'sql_validation_failed'
+    | 'focus_updated' | 'incremental_scope'
     /** @deprecated Use 'skill_layered_result' instead. Will be removed in v3.0 */
     | 'skill_data';
   content: any;

@@ -9,6 +9,8 @@
  * - 展示控制（display）
  */
 
+import type { ColumnDefinition } from '../../types/dataContract';
+
 // =============================================================================
 // 基础类型
 // =============================================================================
@@ -31,6 +33,47 @@ export type DisplayFormat = 'table' | 'chart' | 'text' | 'timeline' | 'summary';
 export type DisplayLayer = 'overview' | 'list' | 'session' | 'deep';
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+// =============================================================================
+// Synthesize (v2.0) - Deterministic Insight Summary
+// =============================================================================
+
+/**
+ * Synthesize 配置 - 定义步骤数据如何贡献到最终摘要（洞见摘要）
+ *
+ * 支持两种形式：
+ * - synthesize: true（旧版：仅标记该步骤参与摘要）
+ * - synthesize: { role, fields, ... }（新版：数据驱动摘要）
+ */
+export interface SynthesizeConfig {
+  /** 数据角色: overview(概览指标), list(列表统计), clusters(聚类分析), conclusion(结论) */
+  role: 'overview' | 'list' | 'clusters' | 'conclusion';
+  /** 字段映射 - 定义如何从数据中提取指标 */
+  fields?: Array<{
+    /** 源字段名 */
+    key: string;
+    /** 显示标签 */
+    label: string;
+    /** 格式化模板，支持 {{field}} 插值 */
+    format?: string;
+  }>;
+  /** 分组统计配置 - 用于 list 角色 */
+  groupBy?: Array<{
+    /** 分组字段名 */
+    field: string;
+    /** 分组标题 */
+    title: string;
+  }>;
+  /** 聚类配置 - 用于 clusters 角色 */
+  clusterBy?: string | { field: string; label?: string };
+  /** 洞察条件 - 自动生成的分析结论 */
+  insights?: Array<{
+    /** 条件表达式，如 "jank_rate > 10" */
+    condition?: string;
+    /** 洞察模板，支持 {{field}} 插值 */
+    template: string;
+  }>;
+}
 
 // =============================================================================
 // 输入/输出定义
@@ -60,7 +103,7 @@ export interface DisplayConfig {
   layer?: DisplayLayer;         // 分层展示层级
   title?: string;
   format?: DisplayFormat;
-  columns?: string[];           // 指定展示哪些列
+  columns?: Array<string | Partial<ColumnDefinition>>; // 指定展示哪些列（支持简写或完整列定义）
   aggregate?: boolean;          // 是否汇总迭代结果
   highlight?: HighlightRule[];  // 高亮规则
   expandable?: boolean;         // 是否支持展开查看详细分析（用于 L2 列表关联 L4 deep 数据）
@@ -109,7 +152,7 @@ export interface AtomicStep {
   optional?: boolean;
   on_empty?: string;
   condition?: string;  // 执行条件，不满足时跳过此步骤
-  synthesize?: boolean; // 标记此步骤数据用于最终总结
+  synthesize?: boolean | SynthesizeConfig; // 标记/配置此步骤用于最终总结
 }
 
 /**
@@ -123,6 +166,7 @@ export interface SkillRefStep {
   params?: Record<string, any>;  // 传递给子 skill 的参数
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 /**
@@ -138,7 +182,7 @@ export interface IteratorStep {
   display?: DisplayConfig | boolean;
   save_as?: string;
   max_items?: number;   // 最大迭代数量（性能保护）
-  synthesize?: boolean; // 标记此步骤数据用于最终总结
+  synthesize?: boolean | SynthesizeConfig; // 标记/配置此步骤用于最终总结
 }
 
 /**
@@ -151,6 +195,7 @@ export interface ParallelStep {
   steps: (AtomicStep | SkillRefStep)[];
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 /**
@@ -166,6 +211,7 @@ export interface DiagnosticStep {
   fallback?: DiagnosticFallback;  // 规则无法确定时的回退
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 /**
@@ -180,6 +226,7 @@ export interface AIDecisionStep {
   output_schema?: Record<string, any>;  // 期望的输出结构
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 /**
@@ -193,6 +240,7 @@ export interface AISummaryStep {
   inputs?: string[];
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 /**
@@ -209,6 +257,7 @@ export interface ConditionalStep {
   else?: string | SkillStep;  // 默认分支
   display?: DisplayConfig | boolean;
   save_as?: string;
+  synthesize?: boolean | SynthesizeConfig;
 }
 
 // 所有步骤类型的联合
@@ -369,6 +418,12 @@ export interface SkillExecutionResult {
   // AI 生成的总结
   aiSummary?: string;
 
+  /**
+   * Data marked via YAML step-level `synthesize:` for downstream summarization.
+   * Optional and best-effort; callers should treat it as advisory.
+   */
+  synthesizeData?: any[];
+
   // 原始结果（用于调试）
   rawResults?: Record<string, StepResult>;
 
@@ -402,6 +457,12 @@ export interface DisplayResult {
     summary?: {
       title: string;
       content: string;
+      metrics?: Array<{
+        label: string;
+        value: string | number;
+        unit?: string;
+        severity?: 'info' | 'warning' | 'critical';
+      }>;
     };
   };
   highlight?: HighlightRule[];
@@ -614,4 +675,3 @@ export interface SimplifiedSkillResult {
   displayResults?: DisplayResult[];
   aiSummary?: string;
 }
-

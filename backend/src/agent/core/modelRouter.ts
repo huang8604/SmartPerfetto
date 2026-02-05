@@ -117,8 +117,8 @@ const TASK_STRENGTH_MAPPING: Record<TaskType, ModelStrength[]> = {
 
 // 默认配置
 const DEFAULT_CONFIG: Partial<ModelRouterConfig> = {
-  defaultModel: 'glm-4',  // 使用 GLM 作为默认模型
-  fallbackChain: ['glm-4', 'deepseek-chat', 'deepseek-coder'],
+  defaultModel: 'deepseek-chat',  // 使用 DeepSeek 作为默认模型
+  fallbackChain: ['deepseek-chat', 'deepseek-coder', 'glm-4'],
   enableEnsemble: false,
   ensembleThreshold: 0.8,
   taskModelMapping: {},

@@ -26,6 +26,264 @@ import {
 } from '../../types/dataContract';
 
 // =============================================================================
+// Skill Normalization (Backward Compatibility)
+// =============================================================================
+
+function firstNonEmptyLine(text: string): string {
+  const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  return lines[0] || '';
+}
+
+/**
+ * Normalize skill YAML variants into a stable runtime shape.
+ *
+ * Why:
+ * - Some legacy skills use `description` + `tags` at top-level instead of `meta`.
+ * - Some atomic skills define SQL via `steps` (single atomic step) instead of `sql`.
+ * - Some legacy steps omit `type` but include `sql` (should be treated as atomic).
+ *
+ * The executor assumes `meta.display_name` / `meta.description` exist.
+ */
+function normalizeSkillDefinition(raw: any, filePath: string): SkillDefinition | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const skill: any = raw;
+
+  // Normalize triggers variants (legacy YAML may use array form with pattern/confidence objects)
+  if (skill.triggers) {
+    const t = skill.triggers;
+
+    // Legacy: triggers: [{ pattern: '...', confidence: 0.9 }, ...] OR triggers: ['foo', '(bar|baz)']
+    if (Array.isArray(t)) {
+      const keywords: string[] = [];
+      const patterns: string[] = [];
+      const looksLikeRegex = (s: string): boolean => /[\\^$.*+?()[\]{}|]/.test(s);
+
+      for (const item of t) {
+        if (typeof item === 'string') {
+          const s = item.trim();
+          if (!s) continue;
+          if (looksLikeRegex(s)) patterns.push(s);
+          else keywords.push(s);
+          continue;
+        }
+        if (item && typeof item === 'object') {
+          if (typeof (item as any).pattern === 'string' && String((item as any).pattern).trim()) {
+            patterns.push(String((item as any).pattern).trim());
+          }
+          if (typeof (item as any).keyword === 'string' && String((item as any).keyword).trim()) {
+            keywords.push(String((item as any).keyword).trim());
+          }
+        }
+      }
+
+      const normalized: any = {};
+      if (keywords.length > 0) normalized.keywords = keywords;
+      if (patterns.length > 0) normalized.patterns = patterns;
+      if (Object.keys(normalized).length > 0) {
+        skill.triggers = normalized;
+      }
+    } else if (t && typeof t === 'object') {
+      // Legacy: triggers: { pattern: '...' }
+      if (typeof (t as any).pattern === 'string' && !(t as any).patterns) {
+        const p = String((t as any).pattern).trim();
+        delete (t as any).pattern;
+        if (p) (t as any).patterns = [p];
+      }
+      // Ensure patterns/keywords are arrays when provided as a single string
+      if (typeof (t as any).patterns === 'string') {
+        (t as any).patterns = [String((t as any).patterns)];
+      }
+      if (typeof (t as any).keywords === 'string') {
+        (t as any).keywords = [String((t as any).keywords)];
+      }
+    }
+  }
+
+  // Normalize legacy root-level display to output.display (executor reads output.display)
+  if (skill.display && typeof skill.display === 'object') {
+    if (!skill.output || typeof skill.output !== 'object') {
+      skill.output = {};
+    }
+    if (!skill.output.display) {
+      skill.output.display = skill.display;
+    }
+  }
+
+  // Fill meta if missing (best-effort)
+  if (!skill.meta || typeof skill.meta !== 'object') {
+    const fallbackDisplayName =
+      (typeof skill.display_name === 'string' && skill.display_name.trim()) ||
+      (typeof skill.displayName === 'string' && skill.displayName.trim()) ||
+      (typeof skill.name === 'string' && skill.name.trim()) ||
+      path.basename(filePath).replace(/\.skill\.ya?ml$/i, '');
+
+    const fallbackDescription =
+      (typeof skill.description === 'string' && firstNonEmptyLine(skill.description)) ||
+      `Skill: ${fallbackDisplayName}`;
+
+    const tags = Array.isArray(skill.tags) ? skill.tags.map(String) : undefined;
+    const icon = typeof skill.icon === 'string' && skill.icon.trim() ? String(skill.icon) : undefined;
+
+    skill.meta = {
+      display_name: fallbackDisplayName,
+      description: fallbackDescription,
+      ...(icon ? { icon } : {}),
+      ...(tags && tags.length > 0 ? { tags } : {}),
+    };
+  } else {
+    // Ensure required meta fields exist
+    if (!skill.meta.display_name && typeof skill.name === 'string') {
+      skill.meta.display_name = skill.name;
+    }
+    if (!skill.meta.description) {
+      const fromTop = typeof skill.description === 'string' ? firstNonEmptyLine(skill.description) : '';
+      skill.meta.description = fromTop || `Skill: ${skill.meta.display_name || skill.name || 'unknown'}`;
+    }
+    // Backfill tags/icon from legacy fields
+    if (!Array.isArray(skill.meta.tags) && Array.isArray(skill.tags)) {
+      skill.meta.tags = skill.tags.map(String);
+    }
+    if (!skill.meta.icon && typeof skill.icon === 'string') {
+      skill.meta.icon = String(skill.icon);
+    }
+  }
+
+  // Normalize step variants (type inference, iterator item_skill alias)
+  if (Array.isArray(skill.steps)) {
+    const toNumber = (v: any): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (!s) return null;
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      }
+      return null;
+    };
+
+    const normalizeConditionToJsExpr = (expr: string): string => {
+      let e = String(expr || '').trim();
+      if (!e) return '';
+      e = e.replace(/\bAND\b/gi, '&&').replace(/\bOR\b/gi, '||');
+      // Convert SQL-style '=' into JS '==' (but preserve >=, <=, !=, ==).
+      e = e.replace(/([^<>=!])=([^=])/g, '$1==$2');
+      return e;
+    };
+
+    const convertInterpretationToSynthesize = (step: any): any | null => {
+      const interp = step?.interpretation;
+      if (!interp || typeof interp !== 'object') return null;
+
+      const keyMetrics = Array.isArray((interp as any).key_metrics)
+        ? (interp as any).key_metrics
+        : Array.isArray((interp as any).keyMetrics)
+          ? (interp as any).keyMetrics
+          : [];
+
+      const analysisHints = Array.isArray((interp as any).analysis_hints)
+        ? (interp as any).analysis_hints
+        : Array.isArray((interp as any).analysisHints)
+          ? (interp as any).analysisHints
+          : [];
+
+      const fields: any[] = [];
+      const insights: any[] = [];
+
+      for (const km of keyMetrics) {
+        if (!km || typeof km !== 'object') continue;
+        const key = typeof (km as any).name === 'string' ? String((km as any).name).trim() : '';
+        if (!key) continue;
+        const label = typeof (km as any).description === 'string' && String((km as any).description).trim()
+          ? String((km as any).description).trim()
+          : key;
+        fields.push({ key, label });
+
+        const th = (km as any).thresholds;
+        if (th && typeof th === 'object') {
+          const warning = toNumber((th as any).warning);
+          const critical = toNumber((th as any).critical);
+          if (typeof critical === 'number') {
+            insights.push({
+              condition: `${key} >= ${critical}`,
+              template: `${label} 偏高：{{${key}}} (≥${critical})`,
+            });
+          }
+          if (typeof warning === 'number') {
+            const cond = typeof critical === 'number'
+              ? `${key} >= ${warning} && ${key} < ${critical}`
+              : `${key} >= ${warning}`;
+            insights.push({
+              condition: cond,
+              template: `${label} 略高：{{${key}}} (≥${warning})`,
+            });
+          }
+        }
+      }
+
+      for (const hint of analysisHints) {
+        if (!hint || typeof hint !== 'object') continue;
+        const condRaw = typeof (hint as any).condition === 'string' ? String((hint as any).condition) : '';
+        const template = typeof (hint as any).insight === 'string' ? String((hint as any).insight).trim() : '';
+        if (!template) continue;
+        const condition = condRaw ? normalizeConditionToJsExpr(condRaw) : undefined;
+        insights.push({
+          ...(condition ? { condition } : {}),
+          template,
+        });
+      }
+
+      if (fields.length === 0 && insights.length === 0) return null;
+
+      const layer = step?.display && typeof step.display === 'object' ? (step.display as any).layer : undefined;
+      const role = layer === 'list' ? 'list' : 'overview';
+
+      return {
+        role,
+        ...(fields.length > 0 ? { fields } : {}),
+        ...(insights.length > 0 ? { insights } : {}),
+      };
+    };
+
+    const normalizeStep = (step: any): void => {
+      if (!step || typeof step !== 'object') return;
+
+      // Legacy: step without type but with sql => atomic
+      if (!(step as any).type && typeof (step as any).sql === 'string') {
+        (step as any).type = 'atomic';
+      }
+
+      // Backward compatibility: iterator may use `skill:` instead of `item_skill:`
+      if ((step as any).type === 'iterator' && typeof (step as any).skill === 'string' && typeof (step as any).item_skill !== 'string') {
+        (step as any).item_skill = (step as any).skill;
+      }
+
+      // Legacy: many skills carry an "interpretation" block which used to be ignored.
+      // Convert it into synthesize config so SkillExecutor can generate deterministic summaries.
+      if (!(step as any).synthesize && (step as any).interpretation) {
+        const synth = convertInterpretationToSynthesize(step);
+        if (synth) {
+          (step as any).synthesize = synth;
+        }
+      }
+
+      // Recurse into parallel steps
+      if ((step as any).type === 'parallel' && Array.isArray((step as any).steps)) {
+        for (const nested of (step as any).steps) {
+          normalizeStep(nested);
+        }
+      }
+    };
+
+    for (const step of skill.steps) {
+      normalizeStep(step);
+    }
+  }
+
+  return skill as SkillDefinition;
+}
+
+// =============================================================================
 // Skill Validation
 // =============================================================================
 
@@ -334,18 +592,19 @@ class SkillRegistry {
       if (entry.isDirectory()) {
         await this.loadModuleSkillsRecursively(fullPath);
       } else if (entry.name.endsWith('.skill.yaml') || entry.name.endsWith('.skill.yml')) {
-        try {
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          const skill = yaml.load(content) as SkillDefinition;
+          try {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const loaded = yaml.load(content) as any;
+            const skill = normalizeSkillDefinition(loaded, fullPath);
 
-          if (skill && skill.name) {
-            // Validate display configurations
-            const warnings = validateSkillDisplayConfig(skill);
-            for (const warn of warnings) {
-              console.warn(`[SkillLoader] Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`);
-            }
+            if (skill && skill.name) {
+              // Validate display configurations
+              const warnings = validateSkillDisplayConfig(skill);
+              for (const warn of warnings) {
+                console.warn(`[SkillLoader] Validation warning in ${skill.name}${warn.stepId ? `.${warn.stepId}` : ''}: ${warn.field} - ${warn.message} (value: ${warn.value})`);
+              }
 
-            this.skills.set(skill.name, skill);
+              this.skills.set(skill.name, skill);
 
             // Track module skills separately for efficient lookup
             if (skill.module) {
@@ -404,7 +663,8 @@ class SkillRegistry {
       const filePath = path.join(dir, file);
       try {
         const content = fs.readFileSync(filePath, 'utf-8');
-        const skill = yaml.load(content) as SkillDefinition;
+        const loaded = yaml.load(content) as any;
+        const skill = normalizeSkillDefinition(loaded, filePath);
 
         if (skill && skill.name) {
           // Validate display configurations

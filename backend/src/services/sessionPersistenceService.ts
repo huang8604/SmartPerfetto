@@ -18,6 +18,8 @@ import {
   EntityStoreSnapshot,
 } from '../agent/context/entityStore';
 import { EnhancedSessionContext } from '../agent/context/enhancedSessionContext';
+import { FocusStore, FocusStoreSnapshot } from '../agent/context/focusStore';
+import { TraceAgentState } from '../agent/state/traceAgentState';
 
 const DB_DIR = path.join(process.cwd(), 'data', 'sessions');
 const DB_PATH = path.join(DB_DIR, 'sessions.db');
@@ -394,6 +396,124 @@ export class SessionPersistenceService {
     try {
       const session = this.getSession(sessionId);
       return !!(session?.metadata?.sessionContextSnapshot);
+    } catch {
+      return false;
+    }
+  }
+
+  // ==========================================================================
+  // FocusStore Persistence (Phase 3.1)
+  // ==========================================================================
+
+  /**
+   * Save FocusStore snapshot for a session.
+   * This restores focus-aware incremental analysis across restarts.
+   */
+  saveFocusStore(sessionId: string, focusStore: FocusStore): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) {
+        console.warn(`[SessionPersistence] Cannot save FocusStore: session ${sessionId} not found`);
+        return false;
+      }
+
+      const metadata: SessionMetadata = session.metadata || {};
+      metadata.focusStoreSnapshot = focusStore.serialize();
+
+      const metadataJson = JSON.stringify(metadata);
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(metadataJson, Date.now(), sessionId);
+
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to save FocusStore:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Load FocusStore snapshot for a session.
+   * Returns null if session doesn't exist or has no FocusStore snapshot.
+   */
+  loadFocusStore(sessionId: string): FocusStoreSnapshot | null {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session?.metadata?.focusStoreSnapshot) {
+        return null;
+      }
+      return session.metadata.focusStoreSnapshot;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to load FocusStore:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Check if a session has persisted FocusStore data.
+   */
+  hasFocusStore(sessionId: string): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      return !!(session?.metadata?.focusStoreSnapshot);
+    } catch {
+      return false;
+    }
+  }
+
+  // ==========================================================================
+  // TraceAgentState Persistence (v1)
+  // ==========================================================================
+
+  /**
+   * Save TraceAgentState snapshot for a session.
+   * This is the durable single-source-of-truth state for goal-driven analysis.
+   */
+  saveTraceAgentState(sessionId: string, state: TraceAgentState): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) {
+        console.warn(`[SessionPersistence] Cannot save TraceAgentState: session ${sessionId} not found`);
+        return false;
+      }
+
+      const metadata: SessionMetadata = session.metadata || {};
+      metadata.traceAgentStateSnapshot = state;
+
+      const metadataJson = JSON.stringify(metadata);
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(metadataJson, Date.now(), sessionId);
+
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to save TraceAgentState:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Load TraceAgentState snapshot for a session.
+   * Returns null if session doesn't exist or has no snapshot.
+   */
+  loadTraceAgentState(sessionId: string): TraceAgentState | null {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session?.metadata?.traceAgentStateSnapshot) {
+        return null;
+      }
+      return session.metadata.traceAgentStateSnapshot;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to load TraceAgentState:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Check if a session has persisted TraceAgentState data.
+   */
+  hasTraceAgentState(sessionId: string): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      return !!(session?.metadata?.traceAgentStateSnapshot);
     } catch {
       return false;
     }

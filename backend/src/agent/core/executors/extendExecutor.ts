@@ -35,6 +35,7 @@ import type { EnhancedSessionContext } from '../../context/enhancedSessionContex
 import type { FrameEntity, SessionEntity, EntityId } from '../../context/entityStore';
 import type { FocusInterval, DirectSkillTask, StageTaskTemplate } from '../../strategies/types';
 import type { AgentResponse } from '../../types/agentProtocol';
+import type { FocusStore, UserFocus } from '../../context/focusStore';
 
 // =============================================================================
 // Configuration
@@ -48,6 +49,8 @@ const DEFAULT_SKILL_ID = 'jank_frame_detail';
 // =============================================================================
 
 export class ExtendExecutor implements AnalysisExecutor {
+  private focusStore?: FocusStore;
+
   constructor(
     private sessionContext: EnhancedSessionContext,
     private services: AnalysisServices,
@@ -55,6 +58,13 @@ export class ExtendExecutor implements AnalysisExecutor {
     private traceId?: string,
     private batchSize: number = DEFAULT_BATCH_SIZE
   ) {}
+
+  /**
+   * Set FocusStore for focus-aware prioritization (v2.0)
+   */
+  setFocusStore(focusStore: FocusStore): void {
+    this.focusStore = focusStore;
+  }
 
   async execute(ctx: ExecutionContext, emitter: ProgressEmitter): Promise<ExecutorResult> {
     emitter.log('[Extend] Starting extend analysis');
@@ -81,8 +91,11 @@ export class ExtendExecutor implements AnalysisExecutor {
     const entityType: 'frame' | 'session' = unanalyzedFrames.length > 0 ? 'frame' : 'session';
     const unanalyzedIds = entityType === 'frame' ? unanalyzedFrames : unanalyzedSessions;
 
-    // Take a batch
-    const batchIds = unanalyzedIds.slice(0, this.batchSize);
+    // Prioritize based on FocusStore if available (v2.0)
+    const prioritizedIds = this.prioritizeByFocus(entityType, unanalyzedIds, emitter);
+
+    // Take a batch from prioritized list
+    const batchIds = prioritizedIds.slice(0, this.batchSize);
     emitter.log(`[Extend] Processing batch of ${batchIds.length} ${entityType}s`);
 
     emitter.emitUpdate('progress', {
@@ -100,12 +113,35 @@ export class ExtendExecutor implements AnalysisExecutor {
       return this.buildResolutionFailedResult(batchIds.length);
     }
 
+    const experimentId = ctx.sessionContext?.startTraceAgentExperiment({
+      type: 'run_skill',
+      objective: `[extend] entityType=${entityType} batch=${batchIds.length}`,
+    });
+
     // Run analysis on the batch
     const { findings, responses } = await this.runBatchAnalysis(
       entityType,
       intervals,
       emitter
     );
+
+    // v2.0: Ingest tool outputs as durable evidence digests (goal-driven agent scaffold).
+    const producedEvidenceIds =
+      ctx.sessionContext?.ingestEvidenceFromResponses(responses, { stageName: 'extend', round: 1 }) || [];
+    if (experimentId) {
+      const ok = responses.some(r => r.success);
+      const firstErr = (() => {
+        const failed = responses.find(r => !r.success);
+        const err = failed?.toolResults?.find(tr => !tr.success)?.error;
+        return typeof err === 'string' ? err.slice(0, 200) : undefined;
+      })();
+      ctx.sessionContext?.completeTraceAgentExperiment({
+        id: experimentId,
+        status: ok ? 'succeeded' : 'failed',
+        producedEvidenceIds,
+        error: ok ? undefined : firstErr,
+      });
+    }
 
     // Capture entities from responses
     const capturedEntities = captureEntitiesFromResponses(responses);
@@ -161,6 +197,89 @@ export class ExtendExecutor implements AnalysisExecutor {
       capturedEntities,
       analyzedEntityIds,
     };
+  }
+
+  // ===========================================================================
+  // Focus-Aware Prioritization (v2.0)
+  // ===========================================================================
+
+  /**
+   * Prioritize entities based on user focus from FocusStore.
+   *
+   * This enables the system to analyze entities that the user has shown
+   * interest in (via clicks, questions, etc.) before other candidates.
+   */
+  private prioritizeByFocus(
+    entityType: 'frame' | 'session',
+    ids: EntityId[],
+    emitter: ProgressEmitter
+  ): EntityId[] {
+    if (!this.focusStore || ids.length === 0) {
+      return ids;
+    }
+
+    const entityStore = this.sessionContext.getEntityStore();
+    const topFocuses = this.focusStore.getTopFocuses(5);
+
+    if (topFocuses.length === 0) {
+      emitter.log('[Extend] No user focus - using default order');
+      return ids;
+    }
+
+    // Score each entity based on relevance to user focus
+    const scored = ids.map(id => {
+      let score = 0;
+      const entity = entityType === 'frame'
+        ? entityStore.getFrame(id)
+        : entityStore.getSession(id);
+
+      if (!entity) return { id, score };
+
+      for (const focus of topFocuses) {
+        // Match by entity type and ID
+        if (focus.type === 'entity') {
+          if (focus.target.entityType === entityType && focus.target.entityId === id) {
+            score += focus.weight * 10; // Direct match
+          }
+        }
+
+        // Match by time range overlap
+        if (focus.type === 'timeRange' && focus.target.timeRange && entity.start_ts && entity.end_ts) {
+          const focusStart = BigInt(focus.target.timeRange.start);
+          const focusEnd = BigInt(focus.target.timeRange.end);
+          const entityStart = BigInt(entity.start_ts);
+          const entityEnd = BigInt(entity.end_ts);
+
+          // Check for overlap
+          if (entityStart <= focusEnd && entityEnd >= focusStart) {
+            score += focus.weight * 5; // Time overlap
+          }
+        }
+
+        // Match by session for frames
+        if (entityType === 'frame' && focus.target.entityType === 'session') {
+          const frame = entity as FrameEntity;
+          if (frame.session_id === focus.target.entityId) {
+            score += focus.weight * 3; // Same session
+          }
+        }
+      }
+
+      return { id, score };
+    });
+
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+
+    const prioritizedIds = scored.map(s => s.id);
+
+    // Log prioritization if any reordering happened
+    const topScores = scored.slice(0, 3).filter(s => s.score > 0);
+    if (topScores.length > 0) {
+      emitter.log(`[Extend] Focus-aware prioritization: top ${topScores.length} entities scored ${topScores.map(s => s.score.toFixed(2)).join(', ')}`);
+    }
+
+    return prioritizedIds;
   }
 
   // ===========================================================================

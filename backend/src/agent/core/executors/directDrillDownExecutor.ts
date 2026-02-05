@@ -185,6 +185,11 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
       message: `直接执行 ${skillId} (跳过策略流水线)`,
     });
 
+    const experimentId = ctx.sessionContext?.startTraceAgentExperiment({
+      type: 'run_skill',
+      objective: `[drill_down] ${skillId} intervals=${validIntervals.length}`,
+    });
+
     // Build direct skill tasks
     const template: StageTaskTemplate = {
       agentId,
@@ -211,8 +216,26 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
 
     const responses = await directExecutor.executeTasks(tasks, emitter);
 
-    // Emit data envelopes
-    emitDataEnvelopes(responses, emitter);
+    // Emit data envelopes (with deduplication via registry)
+    emitDataEnvelopes(responses, emitter, this.services.emittedEnvelopeRegistry);
+
+    // v2.0: Ingest tool outputs as durable evidence digests (goal-driven agent scaffold).
+    const producedEvidenceIds =
+      ctx.sessionContext?.ingestEvidenceFromResponses(responses, { stageName: 'drill_down', round: 1 }) || [];
+    if (experimentId) {
+      const ok = responses.some(r => r.success);
+      const firstErr = (() => {
+        const failed = responses.find(r => !r.success);
+        const err = failed?.toolResults?.find(tr => !tr.success)?.error;
+        return typeof err === 'string' ? err.slice(0, 200) : undefined;
+      })();
+      ctx.sessionContext?.completeTraceAgentExperiment({
+        id: experimentId,
+        status: ok ? 'succeeded' : 'failed',
+        producedEvidenceIds,
+        error: ok ? undefined : firstErr,
+      });
+    }
 
     // Synthesize findings
     const synthesis = await synthesizeFeedback(
@@ -220,7 +243,8 @@ export class DirectDrillDownExecutor implements AnalysisExecutor {
       ctx.sharedContext,
       this.services.modelRouter,
       emitter,
-      this.services.messageBus
+      this.services.messageBus,
+      ctx.sessionContext
     );
 
     allFindings.push(...synthesis.newFindings);

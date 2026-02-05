@@ -124,7 +124,11 @@ export class DirectSkillExecutor {
     const skillId = template.directSkillId;
     if (!skillId) {
       return this.buildErrorResponse(template.agentId, taskId, startTime,
-        `No directSkillId specified for direct_skill template`);
+        `No directSkillId specified for direct_skill template`, {
+          executionMode: 'direct_skill',
+          kind: 'skill',
+          toolName: 'unknown_direct_skill',
+        });
     }
 
     try {
@@ -137,10 +141,20 @@ export class DirectSkillExecutor {
       const result = await skillExecutor.execute(skillId, this.traceId, params);
 
       // 3. Convert to AgentResponse
-      return this.buildResponse(result, template, taskId, startTime, scopeLabel);
+      return this.buildResponse(result, template, taskId, startTime, scopeLabel, interval);
     } catch (error: any) {
       emitter.log(`DirectSkill[${skillId}]: error for ${scopeLabel}: ${error.message}`);
-      return this.buildErrorResponse(template.agentId, taskId, startTime, error.message);
+      return this.buildErrorResponse(template.agentId, taskId, startTime, error.message, {
+        executionMode: 'direct_skill',
+        kind: 'skill',
+        toolName: skillId,
+        skillId,
+        scopeLabel,
+        ...(interval?.processName && { packageName: interval.processName }),
+        ...(interval?.startTs && interval?.endTs && { timeRange: { start: String(interval.startTs), end: String(interval.endTs) } }),
+        ...(interval?.metadata?.sourceEntityType && { sourceEntityType: interval.metadata.sourceEntityType }),
+        ...(interval?.metadata?.sourceEntityId && { sourceEntityId: String(interval.metadata.sourceEntityId) }),
+      });
     }
   }
 
@@ -174,6 +188,33 @@ export class DirectSkillExecutor {
       params.end_ts = interval.endTs;
       if (interval.processName) {
         params.package = interval.processName;
+      }
+    }
+
+    // Normalize/alias common params for legacy skills.
+    if (params.start_ts !== undefined && params.start_ts !== null) {
+      params.start_ts = String(params.start_ts);
+    }
+    if (params.end_ts !== undefined && params.end_ts !== null) {
+      params.end_ts = String(params.end_ts);
+    }
+
+    const pkg = typeof params.package === 'string' ? params.package.trim() : '';
+    if (pkg) {
+      if (params.package_name === undefined) params.package_name = pkg;
+      if (params.process_name === undefined) params.process_name = pkg;
+    }
+
+    if (params.start_ts && params.end_ts) {
+      try {
+        const startNs = BigInt(String(params.start_ts));
+        const endNs = BigInt(String(params.end_ts));
+        const startSec = (startNs / 1000000000n).toString();
+        const endSec = (endNs / 1000000000n).toString();
+        if (params.time_range_start === undefined) params.time_range_start = startSec;
+        if (params.time_range_end === undefined) params.time_range_end = endSec;
+      } catch {
+        // best-effort only
       }
     }
 
@@ -250,7 +291,8 @@ export class DirectSkillExecutor {
     template: StageTaskTemplate,
     taskId: string,
     startTime: number,
-    scopeLabel: string
+    scopeLabel: string,
+    interval: FocusInterval
   ): AgentResponse {
     // Extract findings from diagnostics (taskId ensures globally unique finding IDs)
     let findings = this.extractFindings(result, template, taskId, scopeLabel);
@@ -289,6 +331,17 @@ export class DirectSkillExecutor {
       findings,
       executionTimeMs: result.executionTimeMs,
       dataEnvelopes,
+      metadata: {
+        kind: 'skill',
+        toolName: result.skillId,
+        skillId: result.skillId,
+        executionMode: 'direct_skill',
+        scopeLabel,
+        ...(interval?.processName && { packageName: interval.processName }),
+        ...(interval?.startTs && interval?.endTs && { timeRange: { start: String(interval.startTs), end: String(interval.endTs) } }),
+        ...(interval?.metadata?.sourceEntityType && { sourceEntityType: interval.metadata.sourceEntityType }),
+        ...(interval?.metadata?.sourceEntityId && { sourceEntityId: String(interval.metadata.sourceEntityId) }),
+      },
     };
 
     // Compute confidence from diagnostics
@@ -469,7 +522,8 @@ export class DirectSkillExecutor {
     agentId: string,
     taskId: string,
     startTime: number,
-    errorMessage: string
+    errorMessage: string,
+    metadata?: Record<string, any>
   ): AgentResponse {
     return {
       agentId,
@@ -482,6 +536,10 @@ export class DirectSkillExecutor {
         success: false,
         error: errorMessage,
         executionTimeMs: Date.now() - startTime,
+        metadata: {
+          executionMode: 'direct_skill',
+          ...(metadata || {}),
+        },
       }],
     };
   }

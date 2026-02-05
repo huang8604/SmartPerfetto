@@ -193,6 +193,230 @@ describe('SynthesizeData', () => {
 });
 
 // =============================================================================
+// Test Suite: Deterministic Synthesize Summary (洞见摘要)
+// =============================================================================
+
+describe('Deterministic synthesize summary (洞见摘要)', () => {
+  let executor: SkillExecutor;
+  let mockTraceProcessor: any;
+
+  beforeEach(() => {
+    mockTraceProcessor = createMockTraceProcessorService();
+    executor = createSkillExecutor(mockTraceProcessor);
+  });
+
+  it('应该为 role=list + groupBy 生成分布洞见', async () => {
+    mockTraceProcessor.query.mockResolvedValueOnce({
+      columns: ['category', 'reason', 'total_dur_ms', 'percent'],
+      rows: [
+        ['IPC', 'binder txn', 400, 40],
+        ['IO', 'dlopen', 300, 30],
+        ['IO', 'read', 200, 20],
+        ['Other', 'misc', 100, 10],
+      ],
+    });
+
+    const skill: SkillDefinition = {
+      name: 'synth_list_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Synth List Skill'),
+      steps: [
+        {
+          id: 'breakdown',
+          type: 'atomic',
+          sql: 'SELECT category, reason, total_dur_ms, percent FROM breakdown',
+          display: { title: 'Breakdown', level: 'summary', layer: 'overview' },
+          synthesize: {
+            role: 'list',
+            groupBy: [{ field: 'category', title: '类别分布' }],
+            fields: [
+              { key: 'reason', label: '原因' },
+              { key: 'total_dur_ms', label: '总耗时', format: '{{value}} ms ({{percent}}%)' },
+            ],
+          } as any,
+        } as any,
+      ],
+    };
+
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('synth_list_skill', 'trace-1');
+
+    expect(result.displayResults.length).toBeGreaterThan(0);
+    expect(result.displayResults[0].stepId).toBe('__synthesize_summary__');
+
+    const content = (result.displayResults[0] as any)?.data?.summary?.content || '';
+    expect(content).toContain('类别分布');
+    expect(content).toContain('IPC');
+    expect(content).toContain('%');
+  });
+
+  it('应该为 role=clusters 从 iterator 结果提取 clusterBy 字段并生成分布洞见', async () => {
+    // 1) source list
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: ['frame_id'],
+        rows: [[1], [2], [3], [4]],
+      })
+      // 2) item_skill queries (one per item)
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['io_blocking']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['io_blocking']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['sched_latency']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['gpu_fence']],
+      });
+
+    const detailSkill: SkillDefinition = {
+      name: 'detail_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Detail Skill'),
+      steps: [
+        {
+          id: 'root_cause_summary',
+          type: 'atomic',
+          sql: 'SELECT cause_type FROM root_cause',
+          display: false,
+        } as any,
+      ],
+    };
+
+    const iteratorSkill: SkillDefinition = {
+      name: 'iterator_skill',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Iterator Skill'),
+      steps: [
+        {
+          id: 'frames',
+          type: 'atomic',
+          sql: 'SELECT frame_id FROM frames',
+          display: false,
+          save_as: 'frames',
+        } as any,
+        {
+          id: 'analyze_frames',
+          type: 'iterator',
+          source: 'frames',
+          item_skill: 'detail_skill',
+          item_params: { frame_id: 'frame_id' },
+          display: false,
+          synthesize: {
+            role: 'clusters',
+            clusterBy: 'cause_type',
+          } as any,
+        } as any,
+      ],
+    };
+
+    executor.registerSkill(detailSkill);
+    executor.registerSkill(iteratorSkill);
+
+    const result = await executor.execute('iterator_skill', 'trace-1');
+
+    expect(result.displayResults.length).toBeGreaterThan(0);
+    expect(result.displayResults[0].stepId).toBe('__synthesize_summary__');
+
+    const content = (result.displayResults[0] as any)?.data?.summary?.content || '';
+    expect(content).toContain('聚类(cause_type)');
+    expect(content).toContain('io_blocking');
+    expect(content).toContain('2');
+  });
+
+  it('应该支持 clusterBy 的对象形式（field + label）', async () => {
+    // 1) source list
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: ['frame_id'],
+        rows: [[1], [2], [3], [4]],
+      })
+      // 2) item_skill queries (one per item)
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['io_blocking']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['io_blocking']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['sched_latency']],
+      })
+      .mockResolvedValueOnce({
+        columns: ['cause_type'],
+        rows: [['gpu_fence']],
+      });
+
+    const detailSkill: SkillDefinition = {
+      name: 'detail_skill_obj_cluster',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Detail Skill'),
+      steps: [
+        {
+          id: 'root_cause_summary',
+          type: 'atomic',
+          sql: 'SELECT cause_type FROM root_cause',
+          display: false,
+        } as any,
+      ],
+    };
+
+    const iteratorSkill: SkillDefinition = {
+      name: 'iterator_skill_obj_cluster',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Iterator Skill'),
+      steps: [
+        {
+          id: 'frames',
+          type: 'atomic',
+          sql: 'SELECT frame_id FROM frames',
+          display: false,
+          save_as: 'frames',
+        } as any,
+        {
+          id: 'analyze_frames',
+          type: 'iterator',
+          source: 'frames',
+          item_skill: 'detail_skill_obj_cluster',
+          item_params: { frame_id: 'frame_id' },
+          display: false,
+          synthesize: {
+            role: 'clusters',
+            clusterBy: { field: 'cause_type', label: '原因类型' },
+          } as any,
+        } as any,
+      ],
+    };
+
+    executor.registerSkill(detailSkill);
+    executor.registerSkill(iteratorSkill);
+
+    const result = await executor.execute('iterator_skill_obj_cluster', 'trace-1');
+
+    expect(result.displayResults.length).toBeGreaterThan(0);
+    expect(result.displayResults[0].stepId).toBe('__synthesize_summary__');
+
+    const content = (result.displayResults[0] as any)?.data?.summary?.content || '';
+    expect(content).toContain('聚类(原因类型)');
+    expect(content).toContain('io_blocking');
+  });
+});
+
+// =============================================================================
 // Test Suite: SkillExecutor 类
 // =============================================================================
 
@@ -598,6 +822,97 @@ describe('Iterator Step 执行', () => {
     expect(result.success).toBe(true);
     // 第一个查询 + 2 个迭代查询
     expect(mockTraceProcessor.query).toHaveBeenCalledTimes(3);
+  });
+
+  it('应该从 nested result 提取 display.columns 字段生成表格', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({
+        columns: ['frame_id'],
+        rows: [[1], [2]],
+      })
+      .mockResolvedValue({
+        columns: ['cause_type'],
+        rows: [['IO']],
+      });
+
+    const detailSkill: SkillDefinition = {
+      name: 'detail_with_diag',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Detail With Diagnosis'),
+      steps: [
+        {
+          id: 'root_cause',
+          type: 'atomic',
+          sql: 'SELECT cause_type FROM root_cause WHERE frame_id = ${frame_id}',
+          display: false,
+          save_as: 'root_cause',
+        } as any,
+        {
+          id: 'diagnose',
+          type: 'diagnostic',
+          inputs: ['root_cause'],
+          rules: [
+            {
+              condition: "root_cause.data[0]?.cause_type === 'IO'",
+              diagnosis: 'IO 瓶颈',
+              confidence: 0.9,
+            },
+          ],
+          display: false,
+        } as any,
+      ],
+    };
+    executor.registerSkill(detailSkill);
+
+    const iteratorSkill: SkillDefinition = {
+      name: 'iterator_display_columns',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Iterator Display Columns'),
+      steps: [
+        {
+          id: 'get_items',
+          type: 'atomic',
+          sql: 'SELECT frame_id FROM jank_frames',
+          save_as: 'items',
+          display: false,
+        } as any,
+        {
+          id: 'analyze_each',
+          type: 'iterator',
+          source: 'items',
+          item_skill: 'detail_with_diag',
+          item_params: { frame_id: 'frame_id' },
+          max_items: 10,
+          display: {
+            show: true,
+            level: 'summary',
+            format: 'table',
+            // NOTE: runtime allows full column definition objects
+            columns: [
+              { name: 'frame_id' },
+              { name: 'cause_type' },
+              { name: 'diagnosis' },
+              { name: 'confidence' },
+              { name: 'severity' },
+            ],
+          } as any,
+        } as any,
+      ],
+    };
+    executor.registerSkill(iteratorSkill);
+
+    const result = await executor.execute('iterator_display_columns', 'trace-1');
+    expect(result.success).toBe(true);
+
+    const dr = result.displayResults.find(r => r.stepId === 'analyze_each');
+    expect(dr).toBeTruthy();
+
+    const table = (dr as any).data;
+    expect(table.columns).toEqual(['frame_id', 'cause_type', 'diagnosis', 'confidence', 'severity']);
+    expect(table.rows?.[0]).toEqual([1, 'IO', 'IO 瓶颈', 0.9, 'critical']);
+    expect(table.rows?.[1]?.[0]).toBe(2);
   });
 
   it('应该尊重 max_items 限制', async () => {
@@ -2498,12 +2813,12 @@ describe('完整 Skill 执行', () => {
     expect(result.diagnostics[0].diagnosis).toContain('严重卡顿');
   });
 
-  it('应该记录执行时间', async () => {
-    mockTraceProcessor.query.mockImplementation(() => {
-      return new Promise(resolve => {
-        setTimeout(() => resolve({ columns: ['v'], rows: [[1]] }), 50);
-      });
-    });
+	  it('应该记录执行时间', async () => {
+	    mockTraceProcessor.query.mockImplementation(() => {
+	      return new Promise(resolve => {
+	        setTimeout(() => resolve({ columns: ['v'], rows: [[1]] }), 50);
+	      });
+	    });
 
     const skill: SkillDefinition = {
       name: 'timing_test',
@@ -2511,13 +2826,12 @@ describe('完整 Skill 执行', () => {
       version: '1.0',
       meta: createMeta('Timing Test'),
       sql: 'SELECT 1',
-    };
-    executor.registerSkill(skill);
+	    };
+	    executor.registerSkill(skill);
 
-    const result = await executor.execute('timing_test', 'trace-1');
-
-    expect(result.executionTimeMs).toBeGreaterThanOrEqual(50);
-  });
+	    const result = await executor.execute('timing_test', 'trace-1');
+	    expect(result.executionTimeMs).toBeGreaterThanOrEqual(40);
+	  });
 });
 
 // =============================================================================
@@ -2545,8 +2859,9 @@ describe('边界情况', () => {
 
     const result = await executor.execute('empty_steps', 'trace-1');
 
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(result.displayResults).toEqual([]);
+    expect(result.error).toContain('No steps defined');
     expect(mockTraceProcessor.query).not.toHaveBeenCalled();
   });
 

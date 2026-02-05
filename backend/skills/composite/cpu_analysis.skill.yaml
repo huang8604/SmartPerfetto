@@ -89,6 +89,8 @@ steps:
         FROM sched_slice ss
         JOIN thread t ON ss.utid = t.utid
         JOIN process p ON t.upid = p.upid
+        WHERE (${start_ts} IS NULL OR ss.ts + ss.dur > ${start_ts})
+          AND (${end_ts} IS NULL OR ss.ts < ${end_ts})
         GROUP BY p.upid
       ),
       candidates AS (
@@ -166,7 +168,9 @@ steps:
           SELECT SUM(dur) FROM sched_slice ss2
           JOIN thread t2 ON ss2.utid = t2.utid
           JOIN process p2 ON t2.upid = p2.upid
-          WHERE p2.name GLOB '${package}*'
+          WHERE p2.upid = ${target_process.data[0].upid}
+            AND (${start_ts} IS NULL OR ss2.ts + ss2.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ss2.ts < ${end_ts})
         ), 1) as percent,
         COUNT(*) as slice_count,
         COUNT(DISTINCT ss.cpu) as core_count
@@ -174,7 +178,9 @@ steps:
       JOIN thread t ON ss.utid = t.utid
       JOIN process p ON t.upid = p.upid
       JOIN cpu_classification cc ON ss.cpu = cc.cpu
-      WHERE p.name GLOB '${package}*'
+      WHERE p.upid = ${target_process.data[0].upid}
+        AND (${start_ts} IS NULL OR ss.ts + ss.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ss.ts < ${end_ts})
       GROUP BY cc.core_type
       ORDER BY cc.capacity DESC
     save_as: core_stats
@@ -226,7 +232,9 @@ steps:
       JOIN thread t ON ss.utid = t.utid
       JOIN process p ON t.upid = p.upid
       JOIN cpu_classification cc ON ss.cpu = cc.cpu
-      WHERE p.name GLOB '${package}*'
+      WHERE p.upid = ${target_process.data[0].upid}
+        AND (${start_ts} IS NULL OR ss.ts + ss.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ss.ts < ${end_ts})
       GROUP BY t.utid
       ORDER BY cpu_time_ms DESC
       LIMIT 10
@@ -259,7 +267,7 @@ steps:
         SELECT t.utid
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*' AND t.tid = p.pid
+        WHERE p.upid = ${target_process.data[0].upid} AND t.tid = p.pid
         LIMIT 1
       )
       SELECT
@@ -275,13 +283,18 @@ steps:
         END as state_desc,
         SUM(ts.dur) / 1e6 as total_dur_ms,
         ROUND(100.0 * SUM(ts.dur) / (
-          SELECT SUM(dur) FROM thread_state WHERE utid = (SELECT utid FROM main_thread)
+          SELECT SUM(ts2.dur) FROM thread_state ts2
+          WHERE ts2.utid = (SELECT utid FROM main_thread)
+            AND (${start_ts} IS NULL OR ts2.ts + ts2.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ts2.ts < ${end_ts})
         ), 1) as percent,
         COUNT(*) as count,
         -- IO 等待详情
         CASE WHEN ts.state = 'D' THEN ts.io_wait ELSE NULL END as io_wait
       FROM thread_state ts
       WHERE ts.utid = (SELECT utid FROM main_thread)
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       GROUP BY ts.state
       ORDER BY total_dur_ms DESC
     save_as: main_thread_states
@@ -315,7 +328,7 @@ steps:
         SELECT t.utid, t.name
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*' AND t.tid = p.pid
+        WHERE p.upid = ${target_process.data[0].upid} AND t.tid = p.pid
         LIMIT 1
       )
       SELECT
@@ -338,6 +351,8 @@ steps:
       WHERE ts.utid = (SELECT utid FROM main_thread)
         AND ts.state IN ('R', 'R+')
         AND ts.dur > 1000000  -- > 1ms
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       ORDER BY ts.dur DESC
       LIMIT 20
     save_as: runnable_delays
@@ -356,7 +371,7 @@ steps:
         SELECT t.utid
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*' AND t.tid = p.pid
+        WHERE p.upid = ${target_process.data[0].upid} AND t.tid = p.pid
         LIMIT 1
       )
       SELECT
@@ -370,12 +385,17 @@ steps:
         END as core_type,
         SUM(ss.dur) / 1e6 as total_time_ms,
         ROUND(100.0 * SUM(ss.dur) / (
-          SELECT SUM(dur) FROM sched_slice WHERE utid = (SELECT utid FROM main_thread)
+          SELECT SUM(ss2.dur) FROM sched_slice ss2
+          WHERE ss2.utid = (SELECT utid FROM main_thread)
+            AND (${start_ts} IS NULL OR ss2.ts + ss2.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR ss2.ts < ${end_ts})
         ), 1) as percent,
         COUNT(*) as slice_count
       FROM sched_slice ss
       JOIN cpu c ON ss.cpu = c.cpu
       WHERE ss.utid = (SELECT utid FROM main_thread)
+        AND (${start_ts} IS NULL OR ss.ts + ss.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ss.ts < ${end_ts})
       GROUP BY ss.cpu
       ORDER BY total_time_ms DESC
     save_as: main_thread_cores
@@ -394,7 +414,7 @@ steps:
         SELECT t.utid
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*' AND t.tid = p.pid
+        WHERE p.upid = ${target_process.data[0].upid} AND t.tid = p.pid
         LIMIT 1
       )
       SELECT
@@ -408,6 +428,8 @@ steps:
       WHERE ts.utid = (SELECT utid FROM main_thread)
         AND ts.blocked_function IS NOT NULL
         AND ts.dur > 1000000  -- > 1ms
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       GROUP BY ts.blocked_function, ts.state
       ORDER BY total_dur_ms DESC
       LIMIT 15
@@ -434,10 +456,15 @@ steps:
         cf.freq / 1000 as freq_mhz,
         SUM(cf.dur) / 1e6 as duration_ms,
         ROUND(100.0 * SUM(cf.dur) / (
-          SELECT SUM(dur) FROM cpu_frequency_counters WHERE cpu = cf.cpu
+          SELECT SUM(cf2.dur) FROM cpu_frequency_counters cf2
+          WHERE cf2.cpu = cf.cpu
+            AND (${start_ts} IS NULL OR cf2.ts + cf2.dur > ${start_ts})
+            AND (${end_ts} IS NULL OR cf2.ts < ${end_ts})
         ), 1) as percent
       FROM cpu_frequency_counters cf
       JOIN cpu c ON cf.cpu = c.cpu
+      WHERE (${start_ts} IS NULL OR cf.ts + cf.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR cf.ts < ${end_ts})
       GROUP BY cf.cpu, cf.freq
       HAVING duration_ms > 10  -- 过滤太短的
       ORDER BY cf.cpu, freq_mhz DESC
@@ -458,7 +485,7 @@ steps:
         SELECT t.utid
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE p.name GLOB '${package}*' AND t.tid = p.pid
+        WHERE p.upid = ${target_process.data[0].upid} AND t.tid = p.pid
         LIMIT 1
       )
       SELECT
@@ -474,6 +501,8 @@ steps:
       JOIN process waker_p ON waker_t.upid = waker_p.upid
       WHERE ts.utid = (SELECT utid FROM main_thread)
         AND ts.state IN ('R', 'R+')
+        AND (${start_ts} IS NULL OR ts.ts + ts.dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
       GROUP BY waker_t.utid
       ORDER BY wakeup_count DESC
       LIMIT 15
@@ -503,7 +532,8 @@ steps:
     rules:
       # 大核使用率低
       - condition: |
-          core_stats.data.find(c => c.core_type.includes('big') || c.core_type.includes('prime'))?.percent || 0 < 30
+          (core_stats?.data?.length || 0) > 0 &&
+          ((core_stats.data.find(c => (c.core_type || '').includes('big') || (c.core_type || '').includes('prime'))?.percent) || 0) < 30
         severity: warning
         diagnosis: "大核使用率偏低 (<30%)"
         confidence: medium
@@ -514,18 +544,19 @@ steps:
 
       # 主线程 Running 比例低
       - condition: |
-          main_thread_states.data.find(s => s.state === 'Running')?.percent || 0 < 50
+          (main_thread_states?.data?.length || 0) > 0 &&
+          ((main_thread_states.data.find(s => s.state === 'Running')?.percent) || 0) < 50
         severity: warning
-        diagnosis: "主线程 CPU 利用率偏低 (Running ${main_thread_states.data.find(s => s.state === 'Running')?.percent}%)"
+        diagnosis: "主线程 CPU 利用率偏低 (Running ${main_thread_states?.data?.find(s => s.state === 'Running')?.percent}%)"
         confidence: medium
         suggestions:
           - "检查主线程是否存在等待或阻塞"
           - "分析 Sleeping/IO 等待原因"
 
       # 严重调度延迟
-      - condition: "runnable_delays.data[0]?.wait_ms > 16"
+      - condition: "((runnable_delays?.data?.[0]?.wait_ms) || 0) > 16"
         severity: critical
-        diagnosis: "存在严重调度延迟 (${runnable_delays.data[0].wait_ms}ms)"
+        diagnosis: "存在严重调度延迟 (${runnable_delays?.data?.[0]?.wait_ms}ms)"
         confidence: high
         suggestions:
           - "检查系统 CPU 负载是否过高"
@@ -533,18 +564,18 @@ steps:
           - "检查是否有高优先级任务抢占"
 
       # 频繁调度延迟
-      - condition: "runnable_delays.data.length > 10"
+      - condition: "(runnable_delays?.data?.length || 0) > 10"
         severity: warning
-        diagnosis: "调度延迟频繁发生 (${runnable_delays.data.length} 次 >1ms)"
+        diagnosis: "调度延迟频繁发生 (${runnable_delays?.data?.length} 次 >1ms)"
         confidence: medium
         suggestions:
           - "优化线程模型，减少线程切换"
           - "合并短任务，减少调度开销"
 
       # 阻塞函数问题
-      - condition: "blocked_functions.data[0]?.total_dur_ms > 50"
+      - condition: "((blocked_functions?.data?.[0]?.total_dur_ms) || 0) > 50"
         severity: warning
-        diagnosis: "主线程阻塞在 ${blocked_functions.data[0].blocked_function} 上 ${blocked_functions.data[0].total_dur_ms}ms"
+        diagnosis: "主线程阻塞在 ${blocked_functions?.data?.[0]?.blocked_function} 上 ${blocked_functions?.data?.[0]?.total_dur_ms}ms"
         confidence: high
         suggestions:
           - "分析阻塞原因，考虑异步化"

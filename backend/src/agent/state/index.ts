@@ -8,3 +8,18 @@ export { CheckpointManager } from './checkpointManager';
 export { SessionStore } from './sessionStore';
 
 export type { SessionData } from './sessionStore';
+
+export {
+  TRACE_AGENT_STATE_VERSION,
+  createInitialTraceAgentState,
+  migrateTraceAgentState,
+  summarizeTraceAgentState,
+} from './traceAgentState';
+
+export type {
+  TraceAgentState,
+  TraceAgentPreferences,
+  TraceAgentGoalSpec,
+  TraceAgentCoverage,
+  TraceAgentTurnLogEntry,
+} from './traceAgentState';

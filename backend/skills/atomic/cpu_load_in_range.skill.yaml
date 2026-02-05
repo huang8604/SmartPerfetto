@@ -109,7 +109,7 @@ steps:
         GROUP BY cpu
       )
       SELECT
-        c.cpu,
+        t.cpu,
         COALESCE(cl.cluster_type, 'little') as core_type,
         ROUND(AVG(c.value), 2) as avg_runqueue,
         MAX(c.value) as max_runqueue
@@ -119,8 +119,8 @@ steps:
       WHERE t.name = 'runqueue_length'
         AND c.ts >= ${start_ts}
         AND c.ts < ${end_ts}
-      GROUP BY c.cpu
-      ORDER BY c.cpu
+      GROUP BY t.cpu
+      ORDER BY t.cpu
     save_as: runqueue
     optional: true
 

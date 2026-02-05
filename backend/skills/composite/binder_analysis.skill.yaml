@@ -47,6 +47,14 @@ inputs:
     type: string
     required: false
     description: "应用包名（可选）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
 
 steps:
   # ========== 检查 Binder 数据 ==========
@@ -62,10 +70,54 @@ steps:
         COUNT(*) as txn_count,
         CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
       FROM android_binder_txns
-      WHERE client_process GLOB '${package}*'
-         OR server_process GLOB '${package}*'
-         OR '${package}' = ''
+      WHERE (
+          client_process GLOB '${package}*'
+          OR server_process GLOB '${package}*'
+          OR '${package}' = ''
+        )
+        AND (${start_ts} IS NULL OR client_ts + client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR client_ts < ${end_ts})
     save_as: binder_check
+
+  # ========== 选择目标进程（让分析更聚焦）==========
+  - id: get_process
+    type: atomic
+    name: "选择目标进程"
+    display:
+      level: summary
+      layer: overview
+      title: "目标进程"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: txn_count
+          label: "事务数"
+          type: number
+          format: compact
+        - name: total_client_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最长耗时"
+          type: duration
+          format: duration_ms
+    sql: |
+      SELECT
+        bt.client_process as process_name,
+        COUNT(*) as txn_count,
+        ROUND(SUM(bt.client_dur) / 1e6, 2) as total_client_ms,
+        ROUND(MAX(bt.client_dur) / 1e6, 2) as max_dur_ms
+      FROM android_binder_txns bt
+      WHERE (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
+        AND (bt.client_process GLOB '${package}*' OR '${package}' = '')
+      GROUP BY bt.client_process
+      ORDER BY txn_count DESC, total_client_ms DESC
+      LIMIT 1
+    save_as: target_process
+    condition: binder_check.data[0]?.status === 'available'
 
   # ========== Binder 概览（关联多个统计维度）==========
   - id: binder_overview
@@ -142,11 +194,12 @@ steps:
           WHEN MAX(client_dur) / 1e6 > 16 THEN '良好'
           ELSE '优秀'
         END as rating
-      FROM android_binder_txns
-      WHERE client_process GLOB '${package}*'
-         OR server_process GLOB '${package}*'
+      FROM android_binder_txns bt
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
     save_as: binder_overview
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 发出的调用分析（按接口分组）==========
   - id: outgoing_by_interface
@@ -209,12 +262,14 @@ steps:
         -- 同步/异步
         SUM(CASE WHEN bt.is_sync = 1 THEN 1 ELSE 0 END) as sync_count
       FROM android_binder_txns bt
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
       GROUP BY bt.aidl_interface, bt.server_process
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: outgoing_by_interface
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 主线程同步 Binder（关键卡顿原因）==========
   - id: main_thread_sync_binder
@@ -284,13 +339,15 @@ steps:
           ELSE 'normal'
         END as severity
       FROM android_binder_txns bt
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_sync = 1
         AND bt.is_main_thread = 1
       ORDER BY bt.client_dur DESC
       LIMIT 20
     save_as: main_thread_binder
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== Binder 阻塞分析（JOIN thread_state）==========
   - id: binder_blocking_analysis
@@ -317,14 +374,16 @@ steps:
         AND ts.ts >= bt.client_ts
         AND ts.ts < bt.client_ts + bt.client_dur
       )
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_main_thread = 1
         AND bt.client_dur > 5000000  -- > 5ms
       GROUP BY bt.id, ts.state
       ORDER BY bt.client_dur DESC, state_dur_ms DESC
       LIMIT 30
     save_as: binder_blocking
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 服务端响应分析（JOIN 服务进程）==========
   - id: server_response_analysis
@@ -347,13 +406,15 @@ steps:
         -- 传输开销 = client_dur - server_dur
         ROUND(AVG(bt.client_dur - bt.server_dur) / 1e6, 2) as avg_transport_overhead_ms
       FROM android_binder_txns bt
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_sync = 1
       GROUP BY bt.server_process, bt.aidl_interface
       ORDER BY total_client_wait_ms DESC
       LIMIT 15
     save_as: server_response
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== Binder 与帧关联分析（深度 JOIN）==========
   - id: binder_frame_correlation
@@ -378,16 +439,18 @@ steps:
         bt.client_ts >= af.ts
         AND bt.client_ts < af.ts + af.dur
         AND af.upid = (
-          SELECT upid FROM process WHERE name GLOB '${package}*' LIMIT 1
+          SELECT upid FROM process WHERE name = '${target_process.data[0].process_name}' LIMIT 1
         )
       )
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
         AND bt.is_main_thread = 1
         AND bt.client_dur > 1000000  -- > 1ms
       ORDER BY bt.client_dur DESC
       LIMIT 20
     save_as: binder_frame
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 接收的调用分析 ==========
   - id: incoming_calls
@@ -406,12 +469,14 @@ steps:
         ROUND(AVG(bt.server_dur) / 1e6, 2) as avg_dur_ms,
         ROUND(MAX(bt.server_dur) / 1e6, 2) as max_dur_ms
       FROM android_binder_txns bt
-      WHERE bt.server_process GLOB '${package}*'
+      WHERE bt.server_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
       GROUP BY bt.client_process, bt.aidl_interface
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: incoming_calls
-    condition: binder_check.data[0]?.status === 'available'
+    condition: binder_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 逐个慢 Binder 事务详细分析 ==========
   - id: analyze_slow_binder
@@ -425,7 +490,7 @@ steps:
       layer: deep
       title: "慢 Binder 事务详细分析"
     source: main_thread_binder
-    skill: binder_detail
+    item_skill: binder_detail
     item_params:
       binder_ts: binder_ts
       binder_end_ts: binder_end_ts

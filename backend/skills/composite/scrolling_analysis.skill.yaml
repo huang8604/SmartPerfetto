@@ -559,12 +559,12 @@ steps:
         - name: start_ts
           label: "开始时间"
           type: timestamp
-          clickAction: navigate_timeline
+          clickAction: navigate_range
+          durationColumn: duration
         - name: end_ts
           label: "结束时间"
           type: timestamp
-          clickAction: navigate_range
-          durationColumn: start_ts
+          clickAction: navigate_timeline
         - name: frame_count
           label: "帧数"
           type: number
@@ -574,6 +574,10 @@ steps:
           type: duration
           format: duration_ms
           unit: ms
+          hidden: true
+        - name: duration
+          label: "持续时间"
+          type: duration
         - name: avg_dur
           label: "平均帧耗时"
           type: duration
@@ -842,12 +846,12 @@ steps:
         - name: start_ts
           label: "开始时间"
           type: timestamp
-          clickAction: navigate_timeline
+          clickAction: navigate_range
+          durationColumn: dur
         - name: end_ts
           label: "结束时间"
           type: timestamp
-          clickAction: navigate_range
-          durationColumn: start_ts
+          clickAction: navigate_timeline
         - name: dur
           label: "帧耗时"
           type: duration
@@ -916,9 +920,6 @@ steps:
           type: number
           hidden: true
         - name: render_dur_ms
-          type: number
-          hidden: true
-        - name: dur_ns
           type: number
           hidden: true
         - name: dur_ms
@@ -1140,8 +1141,7 @@ steps:
         printf('%d', COALESCE(render_end_ts, actual_end)) as render_end_ts,
         COALESCE(render_end_ts - render_start_ts, 0) as render_dur,
         ROUND(COALESCE(render_end_ts - render_start_ts, 0) / 1e6, 2) as render_dur_ms,
-        printf('%d', actual_dur) as dur_ns,
-        actual_dur as dur,
+        printf('%d', actual_dur) as dur,
         ROUND(actual_dur / 1e6, 2) as dur_ms,
         jank_type,
         jank_severity_type,
@@ -1402,6 +1402,9 @@ steps:
           ELSE 'UNKNOWN'
         END as problem_category,
         -- 问题组件
+        -- 注意：MAIN_THREAD_BLOCKING (休眠/阻塞) 与 MAIN_THREAD (耗时操作) 是互斥的
+        -- Q4 > 30% 表示主线程大部分时间在等待，问题是"阻塞"
+        -- 只有 Q4 <= 30% 且 avg_dur > 16ms，才判定为"主线程耗时操作"
         CASE
           WHEN (SELECT sf_jank FROM analysis) > (SELECT app_jank FROM analysis) * 2 THEN 'SURFACE_FLINGER'
           WHEN (SELECT main_q3_pct FROM analysis) > 15 THEN 'CPU_SCHEDULING'
@@ -1409,7 +1412,9 @@ steps:
           WHEN (SELECT main_q4_pct FROM analysis) > 30 THEN 'MAIN_THREAD_BLOCKING'
           WHEN (SELECT render_q4_pct FROM analysis) > 50 THEN 'RENDER_THREAD'
           WHEN (SELECT main_q2_pct FROM analysis) > 50 THEN 'CPU_AFFINITY'
-          WHEN (SELECT avg_dur_ms FROM analysis) > 16 THEN 'MAIN_THREAD'
+          -- 修复: 只有在 Q4 不高（主线程不是在等待）的情况下才判定为"耗时操作"
+          WHEN (SELECT avg_dur_ms FROM analysis) > 16
+               AND COALESCE((SELECT main_q4_pct FROM analysis), 0) <= 30 THEN 'MAIN_THREAD'
           ELSE 'UNKNOWN'
         END as problem_component,
         -- 置信度 (0-1)

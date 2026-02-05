@@ -96,15 +96,19 @@ steps:
           label: "耗时"
           type: duration
           format: duration_ms
+          hidden: true
         - name: start_ts
           label: "开始时间"
           type: timestamp
-          clickAction: navigate_timeline
+          clickAction: navigate_range
+          durationColumn: dur_ns
         - name: end_ts
           label: "结束时间"
           type: timestamp
-          clickAction: navigate_range
-          durationColumn: start_ts
+          clickAction: navigate_timeline
+        - name: dur_ns
+          label: "耗时"
+          type: duration
         - name: ttid_ms
           label: "TTID"
           type: duration
@@ -124,6 +128,7 @@ steps:
         s.dur / 1e6 as dur_ms,
         printf('%d', s.ts) as start_ts,
         printf('%d', s.ts + s.dur) as end_ts,
+        printf('%d', s.dur) as dur_ns,
         -- 关联 TTID/TTFD 数据
         ttd.time_to_initial_display / 1e6 as ttid_ms,
         ttd.time_to_full_display / 1e6 as ttfd_ms,
@@ -149,7 +154,8 @@ steps:
       FROM android_startups s
       LEFT JOIN android_startup_time_to_display ttd USING (startup_id)
       WHERE s.package GLOB '${package}*' OR '${package}' = ''
-      ORDER BY s.ts ASC
+      -- Prefer the slowest startup first (used by diagnosis + synthesize overview)
+      ORDER BY s.dur DESC, s.ts ASC
     save_as: startups
     on_empty: "未检测到启动事件。请确认 Trace 包含应用启动数据。"
 
@@ -677,7 +683,7 @@ steps:
       layer: deep
       title: "启动事件详细分析"
     source: startups
-    skill: startup_detail
+    item_skill: startup_detail
     item_params:
       startup_id: startup_id
       start_ts: start_ts
@@ -713,9 +719,9 @@ steps:
     inputs: [startups, breakdown, main_thread_slices, startup_binder, main_thread_states, gc_during_startup]
     rules:
       # 冷启动时间过长
-      - condition: "startups.data[0]?.dur_ms > 2000 && startups.data[0]?.startup_type === 'cold'"
+      - condition: "((startups?.data?.[0]?.dur_ms) || 0) > 2000 && startups?.data?.[0]?.startup_type === 'cold'"
         severity: critical
-        diagnosis: "冷启动时间过长 (${startups.data[0].dur_ms}ms)"
+        diagnosis: "冷启动时间过长 (${startups?.data?.[0]?.dur_ms}ms)"
         confidence: high
         suggestions:
           - "检查 Application.onCreate() 中的初始化逻辑"
@@ -723,9 +729,9 @@ steps:
           - "将耗时操作移到后台线程"
 
       # Binder 调用占比过高
-      - condition: "startup_binder.data[0]?.percent_of_startup > 20"
+      - condition: "(startup_binder?.data?.length || 0) > 0 && ((startup_binder.data[0]?.percent_of_startup) || 0) > 20"
         severity: warning
-        diagnosis: "Binder 调用占启动时间 ${startup_binder.data[0].percent_of_startup}%"
+        diagnosis: "Binder 调用占启动时间 ${startup_binder?.data?.[0]?.percent_of_startup}%"
         confidence: high
         suggestions:
           - "减少启动期间的 IPC 调用"
@@ -733,7 +739,7 @@ steps:
           - "使用异步 Binder 调用"
 
       # 主线程 Running 比例低
-      - condition: "main_thread_states.data.find(s => s.state === 'Running')?.percent < 50"
+      - condition: "(main_thread_states?.data?.length || 0) > 0 && ((main_thread_states.data.find(s => s.state === 'Running')?.percent) || 0) < 50"
         severity: warning
         diagnosis: "主线程 Running 比例偏低"
         confidence: medium
@@ -742,16 +748,16 @@ steps:
           - "将阻塞操作移到后台线程"
 
       # GC 影响
-      - condition: "gc_during_startup.data[0]?.percent_of_startup > 5"
+      - condition: "(gc_during_startup?.data?.length || 0) > 0 && ((gc_during_startup.data[0]?.percent_of_startup) || 0) > 5"
         severity: warning
-        diagnosis: "GC 占启动时间 ${gc_during_startup.data[0].percent_of_startup}%"
+        diagnosis: "GC 占启动时间 ${gc_during_startup?.data?.[0]?.percent_of_startup}%"
         confidence: medium
         suggestions:
           - "减少启动期间的对象分配"
           - "避免在启动时创建大量临时对象"
 
       # 类加载耗时
-      - condition: "breakdown.data.find(b => b.category === 'ClassLoading')?.percent > 15"
+      - condition: "(breakdown?.data?.length || 0) > 0 && ((breakdown.data.find(b => b.category === 'ClassLoading')?.percent) || 0) > 15"
         severity: info
         diagnosis: "类加载占比较高"
         confidence: medium

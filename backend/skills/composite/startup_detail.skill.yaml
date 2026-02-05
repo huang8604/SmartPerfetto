@@ -35,6 +35,8 @@ prerequisites:
   modules:
     - android.startup.startups
     - android.binder
+    - sched
+    - linux.cpu.frequency
 
 inputs:
   - name: startup_id
@@ -90,7 +92,7 @@ steps:
       title: "启动 #${startup_id} 详情"
     sql: |
       SELECT
-          startup_id} as startup_id,
+        ${startup_id} as startup_id,
         '${package}' as package,
         '${startup_type}' as startup_type,
         CASE '${startup_type}'
@@ -214,21 +216,19 @@ steps:
       ),
       freq_samples AS (
         SELECT
-          c.cpu,
-          c.value as freq_khz,
+          cf.cpu,
+          cf.freq as freq_khz,
           rs.core_type,
-          MIN(c.ts + c.dur, ${end_ts}) - MAX(c.ts, rs.ts) as overlap_dur
-        FROM counter c
-        JOIN cpu_counter_track cct ON c.track_id = cct.id
-        JOIN running_samples rs ON cct.cpu = rs.cpu
-        WHERE cct.name = 'cpufreq'
-          AND c.ts < ${end_ts}
-          AND c.ts + c.dur > rs.ts
-          AND c.ts < rs.ts + rs.dur
+          MIN(cf.ts + cf.dur, ${end_ts}) - MAX(cf.ts, rs.ts) as overlap_dur
+        FROM cpu_frequency_counters cf
+        JOIN running_samples rs ON cf.cpu = rs.cpu
+        WHERE cf.ts < ${end_ts}
+          AND cf.ts + cf.dur > rs.ts
+          AND cf.ts < rs.ts + rs.dur
       )
       SELECT
         core_type,
-        ROUND(AVG(freq_khz) / 1000, 0) as avg_freq_mhz,
+        ROUND(SUM(freq_khz * overlap_dur) / NULLIF(SUM(overlap_dur), 0) / 1000, 0) as avg_freq_mhz,
         ROUND(MAX(freq_khz) / 1000, 0) as max_freq_mhz,
         ROUND(MIN(freq_khz) / 1000, 0) as min_freq_mhz
       FROM freq_samples

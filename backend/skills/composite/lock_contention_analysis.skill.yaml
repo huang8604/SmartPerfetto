@@ -31,7 +31,7 @@ triggers:
   - pattern: "(synchronized|mutex|futex)"
     confidence: 0.85
 
-parameters:
+inputs:
   - name: process_name
     type: string
     required: false
@@ -42,10 +42,10 @@ parameters:
     default: 10
     description: "最小锁等待时间阈值 (毫秒)"
 
-analysis_steps:
+steps:
   # Step 1: 锁竞争概览
   - id: contention_overview
-    type: diagnostic
+    type: atomic
     name: "锁竞争概览"
     description: "统计 trace 中所有锁竞争事件"
     sql: |
@@ -61,10 +61,10 @@ analysis_steps:
         AVG(waiter_count) AS avg_waiters
       FROM android_monitor_contention
       WHERE
-        CASE WHEN '{{process_name}}' != ''
-             THEN process_name GLOB '*{{process_name}}*'
+        CASE WHEN '${process_name}' != ''
+             THEN process_name GLOB '*${process_name}*'
              ELSE 1 END
-        AND dur / 1e6 >= COALESCE({{min_duration_ms}}, 10)
+        AND dur / 1e6 >= COALESCE(${min_duration_ms|10}, 10)
       GROUP BY process_name
       ORDER BY total_blocked_time_ms DESC;
     interpretation:
@@ -87,7 +87,7 @@ analysis_steps:
 
   # Step 2: 主线程锁竞争详情
   - id: main_thread_contentions
-    type: diagnostic
+    type: atomic
     name: "主线程锁竞争"
     description: "分析阻塞主线程的锁竞争"
     sql: |
@@ -105,10 +105,10 @@ analysis_steps:
         AVG(waiter_count) AS avg_waiters
       FROM android_monitor_contention
       WHERE is_blocked_thread_main = 1
-        AND CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+        AND CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
-        AND dur / 1e6 >= COALESCE({{min_duration_ms}}, 10)
+        AND dur / 1e6 >= COALESCE(${min_duration_ms|10}, 10)
       GROUP BY process_name, short_blocking_method, blocking_thread_name
       ORDER BY total_blocked_ms DESC
       LIMIT 30;
@@ -127,7 +127,7 @@ analysis_steps:
 
   # Step 3: 热点锁分析
   - id: hot_locks
-    type: diagnostic
+    type: atomic
     name: "热点锁分析"
     description: "识别竞争最激烈的锁"
     sql: |
@@ -141,8 +141,8 @@ analysis_steps:
         SUM(dur) / 1e6 AS total_contention_ms,
         MAX(waiter_count) AS max_waiters
       FROM android_monitor_contention
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY short_blocking_method, blocking_src
       ORDER BY total_contention_ms DESC
@@ -159,7 +159,7 @@ analysis_steps:
 
   # Step 4: 锁链分析 (锁传递链)
   - id: lock_chain_analysis
-    type: diagnostic
+    type: atomic
     name: "锁链分析"
     description: "分析锁等待链，识别锁传递"
     sql: |
@@ -175,8 +175,8 @@ analysis_steps:
         c.waiter_count
       FROM android_monitor_contention_chain c
       WHERE (c.parent_id IS NOT NULL OR c.child_id IS NOT NULL)
-        AND CASE WHEN '{{process_name}}' != ''
-                 THEN c.process_name GLOB '*{{process_name}}*'
+        AND CASE WHEN '${process_name}' != ''
+                 THEN c.process_name GLOB '*${process_name}*'
                  ELSE 1 END
       ORDER BY c.dur DESC
       LIMIT 50;
@@ -189,7 +189,7 @@ analysis_steps:
 
   # Step 5: 持锁线程状态分析
   - id: blocking_thread_state
-    type: diagnostic
+    type: atomic
     name: "持锁线程状态"
     description: "分析持锁线程在锁竞争期间的状态"
     sql: |
@@ -217,7 +217,7 @@ analysis_steps:
 
   # Step 6: 持锁线程阻塞函数分析
   - id: blocking_functions
-    type: diagnostic
+    type: atomic
     name: "持锁时阻塞函数"
     description: "分析持锁线程在内核中被哪些函数阻塞"
     sql: |
@@ -247,7 +247,7 @@ analysis_steps:
 
   # Step 7: 锁竞争与 Binder 关联
   - id: contention_binder_correlation
-    type: diagnostic
+    type: atomic
     name: "锁竞争与 Binder 关联"
     description: "分析锁竞争期间的 Binder 调用"
     sql: |
@@ -260,10 +260,10 @@ analysis_steps:
         COUNT(*) AS contention_count,
         AVG(c.dur) / 1e6 AS avg_contention_ms
       FROM android_monitor_contention c
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN c.process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN c.process_name GLOB '*${process_name}*'
                  ELSE 1 END
-        AND c.dur / 1e6 >= COALESCE({{min_duration_ms}}, 10)
+        AND c.dur / 1e6 >= COALESCE(${min_duration_ms|10}, 10)
       GROUP BY c.process_name, c.short_blocking_method, in_binder_txn
       ORDER BY contention_count DESC
       LIMIT 30;
@@ -277,6 +277,7 @@ analysis_steps:
     type: ai_summary
     name: "锁竞争 AI 分析"
     description: "综合分析锁竞争问题"
+    inputs: [contention_overview, main_thread_contentions, hot_locks, lock_chain_analysis, blocking_thread_state, blocking_functions, contention_binder_correlation]
     depends_on:
       - contention_overview
       - main_thread_contentions
@@ -284,26 +285,27 @@ analysis_steps:
       - lock_chain_analysis
       - blocking_thread_state
       - blocking_functions
+      - contention_binder_correlation
     prompt: |
       请基于以下锁竞争分析数据，提供专业的分析：
 
       ## 锁竞争概览
-      {{contention_overview}
+          contention_overview
 
       ## 主线程锁竞争
-      {{main_thread_contentions}
+          main_thread_contentions
 
       ## 热点锁
-      {{hot_locks}
+          hot_locks
 
       ## 锁链分析
-      {{lock_chain_analysis}
+          lock_chain_analysis
 
       ## 持锁线程状态
-      {{blocking_thread_state}
+          blocking_thread_state
 
       ## 阻塞函数分析
-      {{blocking_functions}
+          blocking_functions
 
       请分析：
       1. 锁竞争严重程度评估
@@ -320,13 +322,13 @@ output:
     - title: "锁竞争分析总结"
       content: |
         ## 锁竞争概览
-        {{contention_overview}
+            contention_overview
 
         ## 主线程锁竞争
-        {{main_thread_contentions}
+            main_thread_contentions
 
         ## 热点锁
-        {{hot_locks}
+            hot_locks
 
         ## AI 综合分析
-        {{contention_ai_summary}
+            contention_ai_summary

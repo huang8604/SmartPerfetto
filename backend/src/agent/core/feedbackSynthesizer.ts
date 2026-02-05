@@ -15,6 +15,7 @@ import {
 import { AgentMessageBus } from '../communication';
 import { ModelRouter } from './modelRouter';
 import { ProgressEmitter } from './orchestratorTypes';
+import type { EnhancedSessionContext } from '../context/enhancedSessionContext';
 import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../utils/llmJson';
 
 type FeedbackSynthesisJsonPayload = {
@@ -72,15 +73,39 @@ const FEEDBACK_SYNTHESIS_JSON_SCHEMA: LlmJsonSchema<FeedbackSynthesisJsonPayload
  * Output: "title (metric1=val1, metric2=val2)"
  */
 function formatFindingBrief(f: Finding): string {
+  const evIds = (() => {
+    if (!Array.isArray((f as any).evidence)) return [];
+    const ids: string[] = [];
+    for (const e of (f as any).evidence) {
+      if (!e) continue;
+      if (typeof e === 'string') {
+        if (/^ev_[0-9a-f]{12}$/.test(e.trim())) ids.push(e.trim());
+        continue;
+      }
+      if (typeof e === 'object') {
+        const id = (e as any).evidenceId || (e as any).evidence_id;
+        if (typeof id === 'string' && /^ev_[0-9a-f]{12}$/.test(id.trim())) ids.push(id.trim());
+      }
+    }
+    // Dedupe while preserving order
+    const seen = new Set<string>();
+    return ids.filter(id => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  })();
+  const evStr = evIds.length > 0 ? evIds.slice(0, 2).join('|') : '';
+
   if (!f.details || typeof f.details !== 'object' || Object.keys(f.details).length === 0) {
-    return f.title;
+    return evStr ? `${f.title} (ev=${evStr})` : f.title;
   }
   const entries = Object.entries(f.details).slice(0, 4);
   const metrics = entries.map(([k, v]) => {
     const val = typeof v === 'object' ? JSON.stringify(v).slice(0, 50) : String(v);
     return `${k}=${val}`;
   }).join(', ');
-  return `${f.title} (${metrics})`;
+  return `${f.title} (${metrics}${evStr ? `, ev=${evStr}` : ''})`;
 }
 
 export interface SynthesisResult {
@@ -102,7 +127,8 @@ export async function synthesizeFeedback(
   sharedContext: SharedAgentContext,
   modelRouter: ModelRouter,
   emitter: ProgressEmitter,
-  messageBus?: AgentMessageBus
+  messageBus?: AgentMessageBus,
+  sessionContext?: EnhancedSessionContext
 ): Promise<SynthesisResult> {
   const allFindings: Finding[] = [];
   const newFindings: Finding[] = [];
@@ -112,13 +138,46 @@ export async function synthesizeFeedback(
     allFindings.push(...response.findings);
   }
 
-  // Deduplicate by title
-  const seenTitles = new Set<string>();
+  // Semantic deduplication: group by category + severity, merge similar findings
+  // This is more robust than simple title matching as it handles:
+  // 1. Same issue reported with different wording
+  // 2. Multiple agents supporting the same conclusion (boost confidence)
+  const groupedFindings = new Map<string, Finding[]>();
   for (const finding of allFindings) {
-    if (!seenTitles.has(finding.title)) {
-      seenTitles.add(finding.title);
-      newFindings.push(finding);
+    const groupKey = `${finding.category || 'unknown'}:${finding.severity}`;
+    if (!groupedFindings.has(groupKey)) {
+      groupedFindings.set(groupKey, []);
     }
+    groupedFindings.get(groupKey)!.push(finding);
+  }
+
+  // For each group, keep the highest-confidence finding and merge evidence
+  const seenTitles = new Set<string>();
+  for (const [, group] of groupedFindings) {
+    // Sort by confidence (descending)
+    group.sort((a, b) => (b.confidence || 0.5) - (a.confidence || 0.5));
+    const best = group[0];
+
+    // Skip if we've already seen this exact title
+    if (seenTitles.has(best.title)) {
+      continue;
+    }
+    seenTitles.add(best.title);
+
+    // Merge evidence from other findings in the same group
+    for (let i = 1; i < group.length; i++) {
+      const otherEvidence = group[i].evidence;
+      if (otherEvidence && Array.isArray(otherEvidence)) {
+        best.evidence = [...(best.evidence || []), ...otherEvidence];
+      }
+    }
+
+    // Boost confidence when multiple agents support the same conclusion
+    if (group.length > 1) {
+      best.confidence = Math.min(1, (best.confidence || 0.5) + 0.1);
+    }
+
+    newFindings.push(best);
   }
 
   // Use LLM to synthesize correlations and gaps
@@ -137,6 +196,7 @@ ${Array.from(sharedContext.hypotheses.values()).map(h => `- ${h.description} (${
 2. 是否存在数据矛盾？
 3. 哪些假设得到数据支持或被否定？
 4. 当前数据是否存在不一致或异常？
+5. 若可能，请在矛盾描述中引用 evidence id（例如 ev_123...），便于后续追溯证据链。
 
 请以 JSON 返回：
 {
@@ -171,6 +231,48 @@ ${Array.from(sharedContext.hypotheses.values()).map(h => `- ${h.description} (${
     });
     const parsed = parseLlmJson<FeedbackSynthesisJsonPayload>(response.response, FEEDBACK_SYNTHESIS_JSON_SCHEMA);
     informationGaps = parsed.informationGaps || [];
+
+    // Process contradictions - mark conflicting findings with reduced confidence
+    // This prevents self-contradictory conclusions like "主线程耗时" vs "主线程阻塞 90%"
+    const contradictions = parsed.contradictions || [];
+    if (contradictions.length > 0) {
+      emitter.log(`[feedbackSynthesizer] Detected contradictions: ${contradictions.join('; ')}`);
+
+      // Record contradictions into durable per-trace state (best-effort).
+      for (const c of contradictions) {
+        const evidenceIds = Array.from(new Set(
+          String(c || '').match(/\bev_[0-9a-f]{12}\b/g) || []
+        ));
+        sessionContext?.recordTraceAgentContradiction({
+          description: c,
+          severity: 'major',
+          ...(evidenceIds.length > 0 && { evidenceIds }),
+        });
+      }
+
+      // Mark contradicted findings for downstream filtering
+      for (const finding of newFindings) {
+        for (const contradiction of contradictions) {
+          // Check if this finding is mentioned in the contradiction
+          if (contradiction.toLowerCase().includes(finding.title.toLowerCase()) ||
+              (finding.category && contradiction.toLowerCase().includes(finding.category.toLowerCase()))) {
+            // Reduce confidence for contradicted findings
+            finding.confidence = Math.max(0.3, (finding.confidence || 0.7) - 0.3);
+            // Mark as contradicted for conclusionGenerator to filter
+            finding.details = {
+              ...finding.details,
+              _contradicted: true,
+              _contradictionReason: contradiction,
+            };
+            emitter.log(`[feedbackSynthesizer] Marked finding "${finding.title}" as contradicted`);
+          }
+        }
+      }
+
+      // Also treat contradictions as top-priority gaps to drive next experiments.
+      const cxGaps = contradictions.map(c => `矛盾: ${c}`);
+      informationGaps = Array.from(new Set([...cxGaps, ...informationGaps]));
+    }
 
     // Process hypothesis updates via messageBus (ensures broadcasts fire)
     if (parsed.hypothesisUpdates) {

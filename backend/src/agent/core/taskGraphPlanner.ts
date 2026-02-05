@@ -114,27 +114,50 @@ export async function planTaskGraph(
   options: AnalysisOptions,
   modelRouter: ModelRouter,
   agentRegistry: DomainAgentRegistry,
-  emitter: ProgressEmitter
+  emitter: ProgressEmitter,
+  hints?: { maxTasks?: number; historyContext?: string }
 ): Promise<TaskGraphPlan> {
   const hypotheses = Array.from(sharedContext.hypotheses.values())
     .filter(h => h.status === 'proposed' || h.status === 'investigating');
   const allowedDomains = ['frame', 'cpu', 'binder', 'memory', 'startup', 'interaction', 'anr', 'system', 'gpu', 'surfaceflinger', 'input', 'art'];
 
+  const maxTasks = typeof hints?.maxTasks === 'number'
+    ? Math.max(1, Math.floor(hints.maxTasks))
+    : undefined;
+  const historyContext = typeof hints?.historyContext === 'string' ? hints.historyContext : '';
+
+  const cxGaps = (Array.isArray(informationGaps) ? informationGaps : [])
+    .map(g => String(g || '').trim())
+    .filter(Boolean)
+    .filter(g => /^\s*矛盾[:：]/.test(g));
+  const otherGaps = (Array.isArray(informationGaps) ? informationGaps : [])
+    .map(g => String(g || '').trim())
+    .filter(Boolean)
+    .filter(g => !/^\s*矛盾[:：]/.test(g));
+
   const prompt = `你是主编排 Agent，需要输出任务图（Task Graph）。任务图要求：
 - 每个任务只包含"证据与指标产出"，不要输出最终结论。
 - 每个节点必须包含 domain、time_range、evidence_needed。
 - domain 必须来自允许列表。
+- 任务应最大化信息增益：优先选择能验证/排除当前假设、填补信息缺口的最少步骤。
+- 若存在“矛盾”，必须优先设计最小实验来消解矛盾（而不是继续堆叠更多指标却不解释冲突）。
+${typeof maxTasks === 'number' ? `- 本轮最多输出 ${maxTasks} 个 task（代表最多 ${maxTasks} 个实验）。` : ''}
 
 用户查询: "${query}"
 分析目标: ${intent.primaryGoal}
+${historyContext ? `\n对话上下文摘要（用于避免重复、承接已做过的事）:\n${historyContext}\n` : ''}
+${options.suggestedStrategy ? `建议策略（仅供参考，可复用其结构但不强制执行）:\n- ${options.suggestedStrategy.name} (id=${options.suggestedStrategy.id}, confidence=${typeof options.suggestedStrategy.confidence === 'number' ? options.suggestedStrategy.confidence.toFixed(2) : 'n/a'}, method=${options.suggestedStrategy.matchMethod || 'n/a'})\n${options.suggestedStrategy.reasoning ? `- reasoning: ${options.suggestedStrategy.reasoning}` : ''}\n` : ''}
 当前假设:
 ${hypotheses.map(h => `- ${h.description} (confidence: ${h.confidence.toFixed(2)})`).join('\n') || '无'}
 
 已确认发现:
 ${sharedContext.confirmedFindings.map(f => `- [${f.severity}] ${f.title}`).join('\n') || '无'}
 
-信息缺口:
-${informationGaps.join('\n') || '无'}
+高优先级矛盾（必须优先消解）:
+${cxGaps.join('\n') || '无'}
+
+信息缺口（用于下一步实验选择）:
+${otherGaps.join('\n') || '无'}
 
 可用 domain:
 ${allowedDomains.join(', ')}
@@ -194,7 +217,10 @@ ${allowedDomains.join(', ')}
       });
 
       addMandatoryDomainsIfMissing(nodes, query, options, sharedContext);
-      return { nodes };
+      const trimmedNodes = typeof maxTasks === 'number'
+        ? trimNodesByBudget(nodes, maxTasks, query)
+        : nodes;
+      return { nodes: trimmedNodes };
   } catch (error) {
     emitter.log(`Failed to plan task graph: ${error}`);
     emitter.emitUpdate('degraded', { module: 'taskGraphPlanner', fallback: 'heuristic task graph' });
@@ -202,7 +228,10 @@ ${allowedDomains.join(', ')}
 
   const fallbackNodes = buildFallbackTaskGraph(query, options, sharedContext, agentRegistry);
   addMandatoryDomainsIfMissing(fallbackNodes, query, options, sharedContext);
-  return { nodes: fallbackNodes };
+  const trimmedFallbackNodes = typeof maxTasks === 'number'
+    ? trimNodesByBudget(fallbackNodes, maxTasks, query)
+    : fallbackNodes;
+  return { nodes: trimmedFallbackNodes };
 }
 
 // =============================================================================
@@ -219,11 +248,13 @@ export function buildTasksFromGraph(
   sharedContext: SharedAgentContext,
   options: AnalysisOptions,
   agentRegistry: DomainAgentRegistry,
-  emitter: ProgressEmitter
+  emitter: ProgressEmitter,
+  hints?: { historyContext?: string }
 ): AgentTask[] {
   const tasks: AgentTask[] = [];
   const hypotheses = Array.from(sharedContext.hypotheses.values())
     .filter(h => h.status === 'proposed' || h.status === 'investigating');
+  const historyContext = typeof hints?.historyContext === 'string' ? hints.historyContext.trim() : '';
 
   for (const node of taskGraph.nodes) {
     const resolvedDomain = normalizeDomain(node.domain);
@@ -257,6 +288,7 @@ export function buildTasksFromGraph(
           packageName: options.packageName,
           adb: options.adb,
           adbContext: options.adbContext,
+          ...(historyContext ? { historyContext } : {}),
         },
       },
       dependencies: node.dependsOn || [],
@@ -333,4 +365,32 @@ function buildFallbackTaskGraph(
   });
 
   return nodes;
+}
+
+function trimNodesByBudget(nodes: TaskGraphNode[], maxTasks: number, query: string): TaskGraphNode[] {
+  if (nodes.length <= maxTasks) return nodes;
+
+  const queryLower = query.toLowerCase();
+  const requiredDomains: string[] = [];
+
+  const scrollOrJank =
+    queryLower.includes('滑动') ||
+    queryLower.includes('scroll') ||
+    queryLower.includes('jank') ||
+    queryLower.includes('掉帧') ||
+    queryLower.includes('卡顿');
+
+  if (scrollOrJank) requiredDomains.push('frame');
+
+  const required = new Set(requiredDomains.map(d => normalizeDomain(d)));
+
+  // Stable prioritization: keep required domains first, then preserve original order.
+  const scored = nodes.map((n, index) => {
+    const domain = normalizeDomain(n.domain);
+    const score = required.has(domain) ? 10 : 0;
+    return { n, index, score };
+  });
+
+  scored.sort((a, b) => (b.score - a.score) || (a.index - b.index));
+  return scored.slice(0, maxTasks).map(s => s.n);
 }

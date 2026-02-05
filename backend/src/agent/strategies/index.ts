@@ -24,6 +24,11 @@ export {
   intervalHelpers,
 } from './helpers';
 
-export { StrategyRegistry, createStrategyRegistry } from './registry';
+export {
+  StrategyRegistry,
+  createStrategyRegistry,
+  createEnhancedStrategyRegistry,
+  type StrategyMatchResult,
+} from './registry';
 export { scrollingStrategy } from './scrollingStrategy';
 export { sceneReconstructionQuickStrategy, sceneReconstructionStrategy } from './sceneReconstructionStrategy';

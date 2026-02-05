@@ -168,6 +168,122 @@ describe('EnhancedSessionContext', () => {
       expect(restored.getAllTurns().length).toBe(1);
       expect(restored.getFinding('finding-1')).toBeDefined();
     });
+
+    test('should persist semantic working memory', () => {
+      const ctx = new EnhancedSessionContext('session-1', 'trace-1');
+      const turn = ctx.addTurn('Test question', mockIntent, undefined, [mockFinding]);
+
+      ctx.updateWorkingMemoryFromConclusion({
+        turnIndex: turn.turnIndex,
+        query: 'Test question',
+        confidence: 0.9,
+        conclusion: `## 结论（按可能性排序）
+- 主因：CPU 过载导致掉帧
+
+## 下一步（最高信息增益）
+- 查看 RenderThread 热点切片
+`,
+      });
+
+      const json = ctx.serialize();
+      const restored = EnhancedSessionContext.deserialize(json);
+
+      const promptCtx = restored.generatePromptContext(800);
+      expect(promptCtx).toContain('语义记忆');
+      expect(promptCtx).toContain('CPU 过载');
+      expect(promptCtx).toContain('RenderThread');
+    });
+
+    test('should persist TraceAgentState', () => {
+      const ctx = new EnhancedSessionContext('session-1', 'trace-1');
+      const turn = ctx.addTurn('Test question', mockIntent, undefined, [mockFinding]);
+
+      ctx.getOrCreateTraceAgentState('分析卡顿根因');
+      ctx.updateTraceAgentGoalFromIntent('scrolling_jank_root_cause');
+      ctx.recordTraceAgentTurn({
+        turnId: turn.id,
+        turnIndex: turn.turnIndex,
+        query: 'Test question',
+        followUpType: 'initial',
+        intentPrimaryGoal: mockIntent.primaryGoal,
+        conclusion: `## 结论（按可能性排序）
+- 主因：主线程阻塞
+`,
+        confidence: 0.8,
+      });
+
+      const json = ctx.serialize();
+      const restored = EnhancedSessionContext.deserialize(json);
+      const state = restored.getTraceAgentState();
+
+      expect(state).not.toBeNull();
+      expect(state?.goal?.normalizedGoal).toBe('scrolling_jank_root_cause');
+
+      const promptCtx = restored.generatePromptContext(800);
+      expect(promptCtx).toContain('目标与偏好');
+      expect(promptCtx).toContain('每轮最多实验');
+    });
+
+    test('should ingest evidence digests with provenance metadata', () => {
+      const ctx = new EnhancedSessionContext('session-1', 'trace-1');
+      ctx.getOrCreateTraceAgentState('分析卡顿根因');
+
+      const responses: any[] = [
+        {
+          agentId: 'frame_agent',
+          taskId: 't1',
+          success: true,
+          findings: [{ ...mockFinding, id: 'finding-a' }],
+          confidence: 0.8,
+          executionTimeMs: 10,
+          toolResults: [
+            {
+              success: true,
+              executionTimeMs: 12,
+              dataEnvelopes: [{ display: { title: 'fps_table' }, data: { rows: [[1], [2]] } }],
+              metadata: { kind: 'skill', toolName: 'scrolling_analysis', skillId: 'scrolling_analysis', executionMode: 'agent' },
+            },
+          ],
+        },
+        {
+          agentId: 'cpu_agent',
+          taskId: 't2',
+          success: false,
+          findings: [{ ...mockFinding, id: 'finding-b' }],
+          confidence: 0.4,
+          executionTimeMs: 5,
+          toolResults: [
+            {
+              success: false,
+              executionTimeMs: 3,
+              error: 'no such table: foo',
+              metadata: { kind: 'sql', toolName: '_dynamic_sql_upgrade', type: 'dynamic_sql_upgrade', sql: 'select * from foo' },
+            },
+          ],
+        },
+      ];
+
+      const first = ctx.ingestEvidenceFromResponses(responses as any, { stageName: 'test', round: 1 });
+      expect(first.length).toBe(2);
+      expect(responses[0].toolResults[0].metadata.evidenceId).toBeDefined();
+      expect(responses[1].toolResults[0].metadata.evidenceId).toBeDefined();
+      expect(responses[0].findings[0].evidence).toEqual(expect.arrayContaining([
+        expect.objectContaining({ evidenceId: responses[0].toolResults[0].metadata.evidenceId }),
+      ]));
+
+      const state = ctx.getTraceAgentState();
+      expect(state?.evidence.length).toBe(2);
+      expect(state?.evidence[0].source?.toolName).toBeDefined();
+
+      const kinds = new Set(state?.evidence.map(e => e.kind));
+      expect(kinds.has('skill')).toBe(true);
+      expect(kinds.has('sql')).toBe(true);
+
+      // Deterministic dedupe: ingesting the same payload again should add nothing.
+      const second = ctx.ingestEvidenceFromResponses(responses as any, { stageName: 'test', round: 1 });
+      expect(second.length).toBe(2);
+      expect(ctx.getTraceAgentState()?.evidence.length).toBe(2);
+    });
   });
 });
 

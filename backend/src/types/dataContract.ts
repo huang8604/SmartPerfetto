@@ -134,9 +134,19 @@ export const DEFAULT_COLUMN_PATTERNS: Array<{
   pattern: RegExp;
   definition: Partial<ColumnDefinition>;
 }> = [
-  // Timestamp columns
-  { pattern: /^ts$|_ts$|timestamp$|_timestamp$|start_time|end_time/i,
+  // Timestamp columns (special-case start/end + *_ts_str variants)
+  // - end timestamps should jump to a point (navigate_timeline)
+  // - start timestamps should prefer range selection when dur_str exists
+  { pattern: /^end_ts$|^end_ts_str$|^ts_end$|^end_time$/i,
     definition: { type: 'timestamp', format: 'timestamp_relative', clickAction: 'navigate_timeline', unit: 'ns' } },
+  { pattern: /^ts$|^ts_str$|^start_ts$|^start_ts_str$|^start_time$/i,
+    definition: { type: 'timestamp', format: 'timestamp_relative', clickAction: 'navigate_range', unit: 'ns', durationColumn: 'dur_str' } },
+  { pattern: /_ts$|timestamp$|_timestamp$|start_time|end_time/i,
+    definition: { type: 'timestamp', format: 'timestamp_relative', clickAction: 'navigate_timeline', unit: 'ns' } },
+
+  // Duration columns stored as digit strings (e.g., ts_str + dur_str for precise navigation)
+  { pattern: /^dur_str$|_dur_str$|^duration_str$|_duration_str$/i,
+    definition: { type: 'duration', format: 'duration_ms', unit: 'ns' } },
 
   // Duration columns with explicit unit suffixes (MUST be before generic duration pattern)
   // These patterns indicate the value is ALREADY in the specified unit, not nanoseconds

@@ -29,6 +29,7 @@ perfetto/out/
 # SQLite WAL files (runtime, regenerated automatically)
 *.db-shm
 *.db-wal
+backend/data/sessions/*.db
 
 # Uploaded trace files (user data, not needed in repo)
 backend/uploads/*

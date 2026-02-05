@@ -51,6 +51,14 @@ inputs:
     type: string
     required: false
     description: "应用包名（可选）"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
 
 steps:
   # ========== 检查输入事件数据 ==========
@@ -66,8 +74,45 @@ steps:
         COUNT(*) as event_count,
         CASE WHEN COUNT(*) > 0 THEN 'available' ELSE 'unavailable' END as status
       FROM android_input_events
-      WHERE process_name GLOB '${package}*' OR '${package}' = ''
+      WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
     save_as: input_check
+
+  # ========== 选择目标进程（让分析更聚焦）==========
+  - id: get_process
+    type: atomic
+    name: "选择目标进程"
+    display:
+      level: summary
+      layer: overview
+      title: "目标进程"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: event_count
+          label: "事件数"
+          type: number
+          format: compact
+        - name: max_total_ms
+          label: "最大延迟"
+          type: duration
+          format: duration_ms
+    sql: |
+      SELECT
+        process_name,
+        COUNT(*) as event_count,
+        ROUND(MAX(total_latency_dur) / 1e6, 2) as max_total_ms
+      FROM android_input_events
+      WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
+      GROUP BY process_name
+      ORDER BY event_count DESC, max_total_ms DESC
+      LIMIT 1
+    save_as: target_process
+    condition: input_check.data[0]?.status === 'available'
 
   # ========== 输入延迟概览（使用 android_input_events）==========
   - id: input_latency_overview
@@ -120,9 +165,11 @@ steps:
           ELSE '较差 (>200ms)'
         END as rating
       FROM android_input_events
-      WHERE process_name GLOB '${package}*' OR '${package}' = ''
+      WHERE process_name = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
     save_as: latency_overview
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 按事件类型分析 ==========
   - id: latency_by_event_type
@@ -156,11 +203,13 @@ steps:
         -- 慢事件数
         SUM(CASE WHEN total_latency_dur / 1e6 > 100 THEN 1 ELSE 0 END) as slow_events
       FROM android_input_events
-      WHERE process_name GLOB '${package}*' OR '${package}' = ''
+      WHERE process_name = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
       GROUP BY event_type, event_action
       ORDER BY avg_latency_ms DESC
     save_as: latency_by_type
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 慢输入事件详情 ==========
   - id: slow_input_events
@@ -216,12 +265,14 @@ steps:
           ELSE 'ACK'
         END as main_bottleneck
       FROM android_input_events
-      WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+      WHERE process_name = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
         AND total_latency_dur > 100000000  -- > 100ms
       ORDER BY total_latency_dur DESC
       LIMIT 20
     save_as: slow_events
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 输入期间主线程状态分析（深度 JOIN）==========
   - id: input_thread_state
@@ -236,7 +287,7 @@ steps:
         SELECT t.utid, p.name as process_name
         FROM thread t
         JOIN process p ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+        WHERE p.name = '${target_process.data[0].process_name}'
           AND t.tid = p.pid
         LIMIT 1
       ),
@@ -247,7 +298,9 @@ steps:
           total_latency_dur,
           event_type
         FROM android_input_events
-        WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+        WHERE process_name = '${target_process.data[0].process_name}'
+          AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+          AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
           AND total_latency_dur > 50000000  -- > 50ms
         ORDER BY total_latency_dur DESC
         LIMIT 10
@@ -272,7 +325,7 @@ steps:
       ORDER BY si.total_latency_dur DESC, state_dur_ms DESC
       LIMIT 30
     save_as: input_thread_state
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 输入期间 Binder 调用 ==========
   - id: input_binder_calls
@@ -289,7 +342,9 @@ steps:
           receive_ts + receive_dur as input_end_ts,
           total_latency_dur
         FROM android_input_events
-        WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+        WHERE process_name = '${target_process.data[0].process_name}'
+          AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+          AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
           AND total_latency_dur > 50000000
         ORDER BY total_latency_dur DESC
         LIMIT 10
@@ -305,12 +360,14 @@ steps:
       JOIN slow_inputs si ON (
         bt.client_ts >= si.input_ts AND bt.client_ts < si.input_end_ts
       )
-      WHERE bt.client_process GLOB '${package}*'
+      WHERE bt.client_process = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR bt.client_ts + bt.client_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR bt.client_ts < ${end_ts})
       GROUP BY bt.server_process, bt.aidl_name
       ORDER BY total_dur_ms DESC
       LIMIT 15
     save_as: input_binder
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 输入到帧关联分析 ==========
   - id: input_to_frame
@@ -338,13 +395,15 @@ steps:
         END as rating
       FROM android_input_events ie
       LEFT JOIN android_frames af ON ie.frame_id = af.frame_id
-      WHERE (ie.process_name GLOB '${package}*' OR '${package}' = '')
+      WHERE ie.process_name = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR ie.receive_ts + ie.receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ie.dispatch_ts < ${end_ts})
         AND ie.frame_id IS NOT NULL
         AND ie.end_to_end_latency_dur > 0
       ORDER BY ie.end_to_end_latency_dur DESC
       LIMIT 20
     save_as: input_to_frame
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 延迟分布分析 ==========
   - id: latency_distribution
@@ -376,10 +435,14 @@ steps:
         COUNT(*) as count,
         ROUND(100.0 * COUNT(*) / (
           SELECT COUNT(*) FROM android_input_events
-          WHERE process_name GLOB '${package}*' OR '${package}' = ''
+          WHERE process_name = '${target_process.data[0].process_name}'
+            AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+            AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
         ), 1) as percent
       FROM android_input_events
-      WHERE process_name GLOB '${package}*' OR '${package}' = ''
+      WHERE process_name = '${target_process.data[0].process_name}'
+        AND (${start_ts} IS NULL OR receive_ts + receive_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR dispatch_ts < ${end_ts})
       GROUP BY latency_bucket
       ORDER BY
         CASE latency_bucket
@@ -390,7 +453,7 @@ steps:
           ELSE 5
         END
     save_as: latency_distribution
-    condition: input_check.data[0]?.status === 'available'
+    condition: input_check.data[0]?.status === 'available' && target_process.data.length > 0
 
   # ========== 逐个慢输入事件详细分析 ==========
   - id: analyze_slow_events
@@ -404,7 +467,7 @@ steps:
       layer: deep
       title: "慢输入事件详细分析"
     source: slow_events
-    skill: click_response_detail
+    item_skill: click_response_detail
     item_params:
       event_ts: event_ts
       event_end_ts: event_end_ts

@@ -36,7 +36,7 @@ triggers:
   - pattern: "(卡顿|jank|掉帧)"
     confidence: 0.7
 
-parameters:
+inputs:
   - name: process_name
     type: string
     required: false
@@ -46,11 +46,19 @@ parameters:
     required: false
     default: 5
     description: "最小 GC 时长阈值 (毫秒)"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
 
-analysis_steps:
+steps:
   # Step 1: GC 概览
   - id: gc_overview
-    type: diagnostic
+    type: atomic
     name: "GC 概览"
     description: "统计 GC 事件数量和类型分布"
     sql: |
@@ -67,10 +75,12 @@ analysis_steps:
         SUM(reclaimed_mb) AS total_reclaimed_mb,
         AVG(reclaimed_mb) AS avg_reclaimed_mb
       FROM android_garbage_collection_events
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
-        AND gc_dur / 1e6 >= COALESCE({{min_gc_dur_ms}}, 5)
+        AND gc_dur / 1e6 >= COALESCE(${min_gc_dur_ms|5}, 5)
+        AND (${start_ts} IS NULL OR gc_ts + gc_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
       GROUP BY process_name, gc_type, is_mark_compact
       ORDER BY total_gc_dur_ms DESC;
     interpretation:
@@ -92,7 +102,7 @@ analysis_steps:
 
   # Step 2: GC 耗时分解
   - id: gc_time_breakdown
-    type: diagnostic
+    type: atomic
     name: "GC 耗时分解"
     description: "分析 GC 期间时间花在哪里"
     sql: |
@@ -109,9 +119,11 @@ analysis_steps:
         SUM(gc_int_dur) / 1e6 AS total_sleep_ms,
         SUM(gc_dur) / 1e6 AS total_wall_ms
       FROM android_garbage_collection_events
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
+        AND (${start_ts} IS NULL OR gc_ts + gc_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
       GROUP BY process_name, gc_type
       ORDER BY total_wall_ms DESC;
     interpretation:
@@ -130,7 +142,7 @@ analysis_steps:
 
   # Step 3: 长耗时 GC 事件
   - id: long_gc_events
-    type: diagnostic
+    type: atomic
     name: "长耗时 GC 事件"
     description: "识别耗时较长的 GC 事件"
     sql: |
@@ -148,10 +160,12 @@ analysis_steps:
         max_heap_mb,
         min_heap_mb
       FROM android_garbage_collection_events
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
-        AND gc_dur / 1e6 >= COALESCE({{min_gc_dur_ms}}, 5) * 2  -- 2x threshold
+        AND gc_dur / 1e6 >= COALESCE(${min_gc_dur_ms|5}, 5) * 2  -- 2x threshold
+        AND (${start_ts} IS NULL OR gc_ts + gc_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
       ORDER BY gc_dur DESC
       LIMIT 30;
     interpretation:
@@ -164,7 +178,7 @@ analysis_steps:
 
   # Step 4: GC 与帧影响关联
   - id: gc_frame_impact
-    type: diagnostic
+    type: atomic
     name: "GC 对帧的影响"
     description: "分析 GC 发生时对帧渲染的影响"
     sql: |
@@ -177,9 +191,11 @@ analysis_steps:
           gc_dur AS dur,
           process_name
         FROM android_garbage_collection_events
-        WHERE CASE WHEN '{{process_name}}' != ''
-                   THEN process_name GLOB '*{{process_name}}*'
+        WHERE CASE WHEN '${process_name}' != ''
+                   THEN process_name GLOB '*${process_name}*'
                    ELSE 1 END
+          AND (${start_ts} IS NULL OR gc_ts + gc_dur > ${start_ts})
+          AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
       ),
       overlapping_frames AS (
         SELECT
@@ -207,7 +223,7 @@ analysis_steps:
 
   # Step 5: 进程级 GC 统计
   - id: process_gc_stats
-    type: diagnostic
+    type: atomic
     name: "进程 GC 统计"
     description: "按进程统计 GC 效率和内存使用"
     sql: |
@@ -223,8 +239,8 @@ analysis_steps:
         s.gc_running_efficiency
       FROM _android_garbage_collection_process_stats s
       JOIN process ON s.upid = process.id
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process.name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process.name GLOB '*${process_name}*'
                  ELSE 1 END
       ORDER BY gc_cpu_sec DESC;
     interpretation:
@@ -241,7 +257,7 @@ analysis_steps:
 
   # Step 6: GC 频率分析
   - id: gc_frequency
-    type: diagnostic
+    type: atomic
     name: "GC 频率分析"
     description: "按时间统计 GC 频率"
     sql: |
@@ -253,9 +269,11 @@ analysis_steps:
         SUM(gc_dur) / 1e6 AS gc_dur_ms,
         SUM(reclaimed_mb) AS reclaimed_mb
       FROM android_garbage_collection_events
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN process_name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN process_name GLOB '*${process_name}*'
                  ELSE 1 END
+        AND (${start_ts} IS NULL OR gc_ts + gc_dur > ${start_ts})
+        AND (${end_ts} IS NULL OR gc_ts < ${end_ts})
       GROUP BY time_sec
       HAVING gc_count > 0
       ORDER BY time_sec;
@@ -272,6 +290,7 @@ analysis_steps:
     type: ai_summary
     name: "GC 性能 AI 分析"
     description: "综合分析 GC 行为"
+    inputs: [gc_overview, gc_time_breakdown, long_gc_events, gc_frame_impact, process_gc_stats, gc_frequency]
     depends_on:
       - gc_overview
       - gc_time_breakdown
@@ -283,22 +302,22 @@ analysis_steps:
       请基于以下 GC 分析数据，提供专业的分析：
 
       ## GC 概览
-      {{gc_overview}
+          gc_overview
 
       ## 耗时分解
-      {{gc_time_breakdown}
+          gc_time_breakdown
 
       ## 长耗时 GC
-      {{long_gc_events}
+          long_gc_events
 
       ## 帧影响
-      {{gc_frame_impact}
+          gc_frame_impact
 
       ## 进程统计
-      {{process_gc_stats}
+          process_gc_stats
 
       ## 频率分析
-      {{gc_frequency}
+          gc_frequency
 
       请分析：
       1. GC 负载评估
@@ -315,13 +334,13 @@ output:
     - title: "GC 分析总结"
       content: |
         ## GC 概览
-        {{gc_overview}
+            gc_overview
 
         ## 耗时分解
-        {{gc_time_breakdown}
+            gc_time_breakdown
 
         ## 帧影响
-        {{gc_frame_impact}
+            gc_frame_impact
 
         ## AI 综合分析
-        {{gc_ai_summary}
+            gc_ai_summary

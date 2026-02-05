@@ -29,7 +29,7 @@ import {
   createIterationStrategyPlanner,
 } from '../agents/iterationStrategyPlanner';
 import {
-  createStrategyRegistry,
+  createEnhancedStrategyRegistry,
   StrategyRegistry,
 } from '../strategies';
 import {
@@ -41,6 +41,16 @@ import { CircuitBreaker } from './circuitBreaker';
 import { resolveDrillDown, DrillDownResolved } from './drillDownResolver';
 import { applyCapturedEntities } from './entityCapture';
 import { detectAdbContext } from '../../services/adb';
+import { summarizeTraceAgentState } from '../state/traceAgentState';
+import type { FocusInterval } from '../strategies/types';
+import { detectTraceConfig } from './executors/traceConfigDetector';
+
+// New Agent-Driven Architecture components (v2.0)
+import { InterventionController, InterventionPoint, InterventionOption } from './interventionController';
+import { FocusStore, FocusInteraction } from '../context/focusStore';
+import { IncrementalAnalyzer, PreviousAnalysisState, IncrementalScope } from './incrementalAnalyzer';
+import { detectTraceContext } from './strategySelector';
+import { createEmittedEnvelopeRegistry } from './emittedEnvelopeRegistry';
 
 import {
   AgentDrivenOrchestratorConfig,
@@ -76,6 +86,11 @@ export class AgentDrivenOrchestrator extends EventEmitter {
   private strategyRegistry: StrategyRegistry;
   private circuitBreaker: CircuitBreaker;
 
+  // New Agent-Driven Architecture components (v2.0)
+  private interventionController: InterventionController;
+  private focusStore: FocusStore;
+  private incrementalAnalyzer: IncrementalAnalyzer;
+
   constructor(modelRouter: ModelRouter, config?: Partial<AgentDrivenOrchestratorConfig>) {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -88,8 +103,22 @@ export class AgentDrivenOrchestrator extends EventEmitter {
 
     this.agentRegistry = createDomainAgentRegistry(modelRouter);
     this.strategyPlanner = createIterationStrategyPlanner(modelRouter);
-    this.strategyRegistry = createStrategyRegistry();
+
+    // Use enhanced registry with LLM semantic matching (keyword_first mode for backward compatibility)
+    this.strategyRegistry = createEnhancedStrategyRegistry(modelRouter, 'keyword_first');
     this.circuitBreaker = new CircuitBreaker();
+
+    // Initialize new Agent-Driven Architecture components
+    this.interventionController = new InterventionController({
+      confidenceThreshold: this.config.confidenceThreshold,
+      timeoutThresholdMs: 120000, // 2 minutes default
+      userResponseTimeoutMs: 60000, // 1 minute for user to respond
+    });
+    this.focusStore = new FocusStore();
+    this.incrementalAnalyzer = new IncrementalAnalyzer();
+
+    // Forward intervention events to SSE stream
+    this.setupInterventionEventForwarding();
 
     // Register all agents with message bus
     for (const agent of this.agentRegistry.getAll()) {
@@ -122,6 +151,26 @@ export class AgentDrivenOrchestrator extends EventEmitter {
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const turnCount = sessionContext.getAllTurns().length;
     emitter.log(`Session has ${turnCount} previous turns`);
+
+    // Initialize goal-driven TraceAgentState (v1 scaffold, persisted via SessionContext).
+    const traceAgentState = sessionContext.getOrCreateTraceAgentState(query);
+    emitter.emitUpdate('progress', {
+      phase: 'agent_state_loaded',
+      message: '加载 Agent 状态（目标/偏好/历史摘要）',
+      state: summarizeTraceAgentState(traceAgentState),
+    });
+
+    // Per-turn experiment budget:
+    // - maxRounds is a hard safety cap (prevents runaway cost/latency).
+    // - maxExperimentsPerTurn is a *preference* (soft budget): stop early only if results are good enough.
+    const maxExperimentsPerTurn = Number(traceAgentState?.preferences?.maxExperimentsPerTurn || 3);
+    const hardMaxRounds = Math.max(1, this.config.maxRounds);
+    const softMaxRounds = Math.max(1, Math.floor(maxExperimentsPerTurn));
+    const effectiveConfig: AgentDrivenOrchestratorConfig = {
+      ...this.config,
+      maxRounds: hardMaxRounds,
+      softMaxRounds: Math.min(hardMaxRounds, softMaxRounds),
+    };
 
     try {
       // 1. Initialize shared context
@@ -168,9 +217,40 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         ...(adbContext ? { adbContext } : {}),
       };
 
+      // 1.2 Detect trace configuration (VSync/refresh rate) once per turn.
+      // StrategyExecutor does this too, but the default hypothesis+exp loop needs it as well
+      // for accurate jank thresholds and contradiction resolution.
+      if (!sharedContext.traceConfig && effectiveOptions.traceProcessorService) {
+        try {
+          const traceConfig = await detectTraceConfig(
+            effectiveOptions.traceProcessorService,
+            this.modelRouter,
+            traceId,
+            emitter
+          );
+          sharedContext.traceConfig = traceConfig;
+
+          // Also mirror into globalMetrics for backward compatibility.
+          sharedContext.globalMetrics = sharedContext.globalMetrics || {};
+          sharedContext.globalMetrics.refreshRateHz = traceConfig.refreshRateHz;
+          sharedContext.globalMetrics.vsyncPeriodMs = traceConfig.vsyncPeriodMs;
+          sharedContext.globalMetrics.isVRR = traceConfig.isVRR;
+
+          emitter.emitUpdate('progress', {
+            phase: 'trace_config',
+            message: `刷新率/帧预算: ${traceConfig.refreshRateHz}Hz / ${traceConfig.vsyncPeriodMs}ms${traceConfig.isVRR ? ` (VRR:${traceConfig.vrrMode})` : ''}`,
+            traceConfig,
+          });
+        } catch (e: any) {
+          emitter.log(`[TraceConfig] Detection failed (ignored): ${e?.message || e}`);
+        }
+      }
+
       // 2. Understand intent WITH session context for multi-turn awareness
       emitter.emitUpdate('progress', { phase: 'understanding', message: '理解用户意图' });
       const intent = await understandIntent(query, sessionContext, this.modelRouter, emitter);
+      // Update goal from intent (best-effort)
+      sessionContext.updateTraceAgentGoalFromIntent(intent.primaryGoal);
 
       // Log follow-up detection
       if (intent.followUpType && intent.followUpType !== 'initial') {
@@ -191,6 +271,10 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           emitter.log(`Built ${followUpResolution.focusIntervals.length} focus interval(s) for drill-down`);
         }
       }
+
+      // 3.5 Record input focus early so it can influence incremental scope/task planning (v2.0).
+      // This captures explicit entities/time ranges from follow-up resolution before we decide scope.
+      this.recordInputFocus(query, intent, followUpResolution, sessionContext, emitter);
 
       // 4. Generate hypotheses - with smart skip for drill-down on cached entities
       // Fix: 对于 drill-down follow-up，如果目标实体已在 EntityStore 中有完整分析，
@@ -273,6 +357,14 @@ export class AgentDrivenOrchestrator extends EventEmitter {
 
         if (drillDownResolved && drillDownResolved.intervals.length > 0) {
           effectiveIntervals = drillDownResolved.intervals;
+          // Record resolved drill-down targets with real timestamps (v2.0).
+          this.recordFocusFromIntervals(
+            drillDownResolved.intervals,
+            'drill_down',
+            'system',
+            sessionContext,
+            emitter
+          );
 
           // Log resolution traces for observability
           for (const trace of drillDownResolved.traces) {
@@ -286,6 +378,45 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           });
         }
       }
+
+      // 5.5 Determine incremental analysis scope (v2.0)
+      // Uses FocusStore to decide if full or incremental analysis is needed
+      // Note: entityStore already declared above (line ~225), reuse it
+      const previousFindings = sessionContext.getAllFindings();
+      const previousState: PreviousAnalysisState | undefined = (previousFindings.length > 0 && entityStore)
+        ? {
+            findings: previousFindings,
+            analyzedEntityIds: new Set(
+              [
+                ...entityStore.getAnalyzedFrameIds().map(id => `frame_${id}`),
+                ...entityStore.getAnalyzedSessionIds().map(id => `session_${id}`),
+              ]
+            ),
+            analyzedTimeRanges: [], // Could be tracked in future
+            analyzedQuestions: new Set(),
+          }
+        : undefined;
+
+      const incrementalScope: IncrementalScope = entityStore
+        ? this.incrementalAnalyzer.determineScope(
+            query,
+            this.focusStore,
+            entityStore,
+            previousState
+          )
+        : { type: 'full', isExtension: false, reason: 'No entity store', relevantAgents: [], relevantSkills: [] };
+
+      // Emit scope information for observability
+      emitter.emitUpdate('incremental_scope', {
+        scopeType: incrementalScope.type,
+        entitiesCount: incrementalScope.entities?.length || 0,
+        timeRangesCount: incrementalScope.timeRanges?.length || 0,
+        isExtension: incrementalScope.isExtension,
+        reason: incrementalScope.reason,
+        relevantAgents: incrementalScope.relevantAgents,
+      });
+
+      emitter.log(`[IncrementalAnalysis] Scope: ${incrementalScope.type}, reason: ${incrementalScope.reason}`);
 
       // 6. Build execution context with follow-up resolution
       const executionCtx: ExecutionContext = {
@@ -306,14 +437,20 @@ export class AgentDrivenOrchestrator extends EventEmitter {
             prebuiltIntervals: effectiveIntervals,
           }),
         },
-        config: this.config,
+        sessionContext,
+        incrementalScope,
+        config: effectiveConfig,
       };
 
       // 7. Select and run executor
+      // Create session-scoped envelope registry to prevent duplicate data emission
+      const emittedEnvelopeRegistry = createEmittedEnvelopeRegistry();
+
       const services: AnalysisServices = {
         modelRouter: this.modelRouter,
         messageBus: this.messageBus,
         circuitBreaker: this.circuitBreaker,
+        emittedEnvelopeRegistry,
       };
 
       // Executor selection priority:
@@ -341,14 +478,17 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           traceId
         );
       } else if (followUpType === 'extend') {
-        // Extend: analyze unanalyzed candidate entities
+        // Extend: analyze unanalyzed candidate entities with focus-aware prioritization (v2.0)
         emitter.log('[Routing] Using ExtendExecutor for extend request');
-        executor = new ExtendExecutor(
+        const extendExecutor = new ExtendExecutor(
           sessionContext,
           services,
           options.traceProcessorService,
           traceId
         );
+        // Set FocusStore for focus-aware entity prioritization
+        extendExecutor.setFocusStore(this.focusStore);
+        executor = extendExecutor;
       } else {
         const isDrillDown = followUpResolution.isFollowUp &&
           followUpType === 'drill_down' &&
@@ -365,19 +505,137 @@ export class AgentDrivenOrchestrator extends EventEmitter {
           emitter.log(`[Routing] Using DirectDrillDownExecutor for ${effectiveIntervals!.length} interval(s)`);
           executor = new DirectDrillDownExecutor(enhancedFollowUp, services);
         } else {
-          // Normal path: strategy matching or hypothesis-driven
-          const matchedStrategy = this.strategyRegistry.match(query);
-          if (matchedStrategy) {
-            emitter.log(`[Routing] Using StrategyExecutor: ${matchedStrategy.name}`);
-            executor = new StrategyExecutor(matchedStrategy, services);
+          // Normal path: enhanced strategy matching with LLM semantic understanding
+          // Detect trace context for LLM strategy selection
+          let traceContext = undefined;
+          try {
+            traceContext = await detectTraceContext(options.traceProcessorService, traceId);
+          } catch (e: any) {
+            emitter.log(`[StrategySelection] Failed to detect trace context: ${e.message}`);
+          }
+
+          // Use enhanced matching (keyword-first with LLM fallback)
+          const matchResult = await this.strategyRegistry.matchEnhanced(query, intent, traceContext);
+
+          if (matchResult.strategy) {
+            // Emit strategy selection event for observability
+            emitter.emitUpdate('strategy_selected', {
+              strategyId: matchResult.strategy.id,
+              strategyName: matchResult.strategy.name,
+              confidence: matchResult.confidence,
+              reasoning: matchResult.reasoning || 'Keyword match',
+              selectionMethod: matchResult.matchMethod === 'keyword' ? 'keyword' : 'llm',
+            });
+
+            // Always attach suggested strategy hint for downstream planning (even if we don't execute it).
+            executionCtx.options.suggestedStrategy = {
+              id: matchResult.strategy.id,
+              name: matchResult.strategy.name,
+              confidence: matchResult.confidence,
+              matchMethod: matchResult.matchMethod,
+              reasoning: matchResult.reasoning,
+            };
+
+            const forceStrategy = ['1', 'true', 'yes', 'on'].includes(
+              String(process.env.SMARTPERFETTO_FORCE_STRATEGY || '').trim().toLowerCase()
+            );
+            const preferHypothesisLoop = !forceStrategy && traceAgentState.preferences?.defaultLoopMode === 'hypothesis_experiment';
+            if (preferHypothesisLoop) {
+              emitter.emitUpdate('strategy_fallback', {
+                reason: 'prefer_hypothesis_experiment_loop',
+                candidatesEvaluated: this.strategyRegistry.getAll().length,
+                topCandidateConfidence: matchResult.confidence,
+                fallbackTo: 'hypothesis_driven',
+              });
+
+              emitter.log(`[Routing] Strategy matched (${matchResult.strategy.name}) but prefer hypothesis+exp loop; using HypothesisExecutor`);
+              const hypothesisExecutor = new HypothesisExecutor(services, this.agentRegistry, this.strategyPlanner);
+              hypothesisExecutor.setFocusStore(this.focusStore);
+              executor = hypothesisExecutor;
+            } else {
+              emitter.log(`[Routing] Using StrategyExecutor: ${matchResult.strategy.name} (method: ${matchResult.matchMethod}, confidence: ${matchResult.confidence.toFixed(2)})`);
+              executor = new StrategyExecutor(matchResult.strategy, services);
+            }
           } else {
-            emitter.log('[Routing] Using HypothesisExecutor (no strategy match)');
-            executor = new HypothesisExecutor(services, this.agentRegistry, this.strategyPlanner);
+            // No strategy match - emit fallback event
+            if (matchResult.fallbackReason) {
+              emitter.emitUpdate('strategy_fallback', {
+                reason: matchResult.fallbackReason,
+                candidatesEvaluated: this.strategyRegistry.getAll().length,
+                topCandidateConfidence: matchResult.confidence,
+                fallbackTo: 'hypothesis_driven',
+              });
+            }
+
+            emitter.log(`[Routing] Using HypothesisExecutor (${matchResult.fallbackReason || 'no strategy match'})`);
+            const hypothesisExecutor = new HypothesisExecutor(services, this.agentRegistry, this.strategyPlanner);
+            // Set FocusStore for focus-aware analysis planning (v2.0)
+            hypothesisExecutor.setFocusStore(this.focusStore);
+            executor = hypothesisExecutor;
           }
         }
       }
 
       const executorResult = await executor.execute(executionCtx, emitter);
+
+      // 7.5 Handle intervention request if present (v2.0)
+      if (executorResult.interventionRequest) {
+        const ir = executorResult.interventionRequest;
+        emitter.log(`[Orchestrator] Executor requested intervention: ${ir.type} - ${ir.reason}`);
+
+        // Build options for intervention
+        const focusOptions: InterventionOption[] = ir.possibleDirections.map(dir => ({
+          id: `focus_${dir.id}`,
+          label: dir.description,
+          description: `置信度 ${(dir.confidence * 100).toFixed(0)}%`,
+          action: 'focus',
+          params: { directions: [dir.id] },
+          recommended: false,
+        }));
+
+        // Build complete options list
+        const options: InterventionOption[] = [
+          {
+            id: 'continue',
+            label: '继续分析',
+            description: '继续当前分析策略',
+            action: 'continue',
+            recommended: true,
+          },
+          ...focusOptions,
+          {
+            id: 'abort',
+            label: '结束分析',
+            description: '以当前结果结束',
+            action: 'abort',
+            recommended: false,
+          },
+        ];
+
+        // Create intervention through controller (triggers SSE event)
+        this.interventionController.createAgentIntervention(
+          sessionId,
+          ir.reason,
+          options,
+          {
+            currentFindings: executorResult.findings,
+            possibleDirections: ir.possibleDirections.map(dir => ({
+              id: dir.id,
+              description: dir.description,
+              confidence: dir.confidence,
+              requiredAgents: [],
+            })),
+            elapsedTimeMs: ir.elapsedTimeMs,
+            confidence: ir.confidence,
+            roundsCompleted: ir.roundsCompleted,
+            progressSummary: ir.progressSummary,
+          }
+        );
+
+        // Note: Analysis continues (non-blocking intervention).
+        // User can respond via /api/agent/:sessionId/intervene endpoint.
+        // The response will be handled in the next analysis turn.
+      }
 
       // 8. Apply captured entities to EntityStore (single write-back point)
       if (executorResult.capturedEntities) {
@@ -396,14 +654,30 @@ export class AgentDrivenOrchestrator extends EventEmitter {
         }
       }
 
+      // 8.25 Refresh deterministic coverage snapshot for planning & conclusions (v1 scaffold).
+      // Uses EntityStore analyzed IDs + evidence provenance to build "what we covered" context.
+      sessionContext.refreshTraceAgentCoverage();
+
+      // 8.5 Merge findings with previous analysis (v2.0 incremental analysis)
+      // If this is an incremental turn, merge new findings with existing ones
+      let mergedFindings = executorResult.findings;
+      if (incrementalScope.isExtension && previousFindings.length > 0) {
+        mergedFindings = this.incrementalAnalyzer.mergeFindings(
+          previousFindings,
+          executorResult.findings
+        );
+        emitter.log(`[IncrementalAnalysis] Merged ${executorResult.findings.length} new findings with ${previousFindings.length} previous → ${mergedFindings.length} total`);
+      }
+
       // 9. Generate conclusion
       emitter.emitUpdate('progress', { phase: 'concluding', message: '生成分析结论' });
       const conclusion = await generateConclusion(
-        sharedContext, executorResult.findings, intent,
+        sharedContext, mergedFindings, intent,
         this.modelRouter, emitter, executorResult.stopReason || undefined, {
           turnCount,
-          // Provide compact dialogue summary for turn>=2 iterative mode
-          historyContext: turnCount > 0 ? sessionContext.generatePromptContext(600) : '',
+          // Always provide compact context so conclusion can cite current-turn evidence digests too.
+          // (Turn 1 has no turns yet, but TraceAgentState evidence/experiments already exist.)
+          historyContext: sessionContext.generatePromptContext(600),
         }
       );
 
@@ -418,7 +692,7 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       const result: AnalysisResult = {
         sessionId,
         success: true,
-        findings: executorResult.findings,
+        findings: mergedFindings,
         hypotheses: Array.from(sharedContext.hypotheses.values()),
         conclusion,
         confidence: executorResult.confidence,
@@ -427,14 +701,47 @@ export class AgentDrivenOrchestrator extends EventEmitter {
       };
 
       // 11. Record this turn in session context for future follow-ups
-      sessionContext.addTurn(query, intent, {
+      // Note: Only record the new findings from this turn, not merged ones
+      const recordedTurn = sessionContext.addTurn(query, intent, {
         success: result.success,
-        findings: result.findings,
+        findings: executorResult.findings, // New findings only for this turn
         confidence: result.confidence,
         message: conclusion,
-      }, result.findings);
+      }, executorResult.findings);
 
-      emitter.log(`Analysis complete: ${executorResult.findings.length} findings, ${executorResult.rounds} rounds (turn ${turnCount + 1})`);
+      // v2.0: Update semantic working memory from the final conclusion for better multi-turn coherence.
+      sessionContext.updateWorkingMemoryFromConclusion({
+        turnIndex: recordedTurn.turnIndex,
+        query,
+        conclusion,
+        confidence: result.confidence,
+      });
+
+      // v1: Record TraceAgentState audit entry for this turn (goal-driven agent scaffold).
+      sessionContext.recordTraceAgentTurn({
+        turnId: recordedTurn.id,
+        turnIndex: recordedTurn.turnIndex,
+        query,
+        followUpType: intent.followUpType,
+        intentPrimaryGoal: intent.primaryGoal,
+        conclusion,
+        confidence: result.confidence,
+      });
+
+      // Emit a compact state summary after saving updates (frontend can ignore if unsupported).
+      const updatedState = sessionContext.getTraceAgentState();
+      if (updatedState) {
+        emitter.emitUpdate('progress', {
+          phase: 'agent_state_saved',
+          message: '更新 Agent 状态（本轮审计）',
+          state: summarizeTraceAgentState(updatedState),
+        });
+      }
+
+      // 12. Update FocusStore with user interaction patterns
+      this.updateFocusStore(query, intent, result, emitter);
+
+      emitter.log(`Analysis complete: ${executorResult.findings.length} new findings (${mergedFindings.length} total), ${executorResult.rounds} rounds (turn ${turnCount + 1})`);
       return result;
 
     } catch (error: any) {
@@ -510,6 +817,314 @@ export class AgentDrivenOrchestrator extends EventEmitter {
   reset(): void {
     this.messageBus.reset();
     this.circuitBreaker.reset();
+    // Note: InterventionController is session-scoped, no global clear needed
+    this.focusStore.clear();
+  }
+
+  // ==========================================================================
+  // New Agent-Driven Architecture Methods (v2.0)
+  // ==========================================================================
+
+  /**
+   * Set up intervention event forwarding to SSE stream.
+   * This enables the frontend to display intervention panels when needed.
+   */
+  private setupInterventionEventForwarding(): void {
+    this.interventionController.on('intervention_required', (intervention: InterventionPoint) => {
+      this.emitRaw('intervention_required', {
+        interventionId: intervention.id,
+        type: intervention.type,
+        options: intervention.options.map(opt => ({
+          id: opt.id,
+          label: opt.label,
+          description: opt.description,
+          action: opt.action,
+          recommended: opt.recommended,
+        })),
+        context: {
+          confidence: intervention.context.confidence,
+          elapsedTimeMs: intervention.context.elapsedTimeMs,
+          roundsCompleted: intervention.context.roundsCompleted || 0,
+          progressSummary: intervention.context.progressSummary || '',
+          triggerReason: intervention.context.triggerReason || '',
+          findingsCount: intervention.context.currentFindings?.length || 0,
+        },
+        timeout: intervention.timeout || 60000,
+      });
+    });
+
+    this.interventionController.on('intervention_resolved', (data: any) => {
+      this.emitRaw('intervention_resolved', {
+        interventionId: data.interventionId,
+        action: data.action,
+        sessionId: data.sessionId,
+        directive: data.directive,
+      });
+    });
+
+    this.interventionController.on('intervention_timeout', (data: any) => {
+      this.emitRaw('intervention_timeout', {
+        interventionId: data.interventionId,
+        sessionId: data.sessionId,
+        defaultAction: data.defaultAction,
+        timeoutMs: data.timeoutMs,
+      });
+    });
+  }
+
+  /**
+   * Update FocusStore based on query intent and analysis results.
+   * This enables incremental analysis for follow-up queries.
+   */
+  private updateFocusStore(
+    query: string,
+    intent: any,
+    result: AnalysisResult,
+    emitter: ProgressEmitter
+  ): void {
+    // Extract entity focuses from findings
+    for (const finding of result.findings) {
+      // Check for process references in description or title
+      const processMatch = finding.description?.match(/process:\s*([^\s,]+)/i) ||
+                          finding.title?.match(/process:\s*([^\s,]+)/i);
+      if (processMatch) {
+        const processName = processMatch[1];
+        this.focusStore.recordInteraction({
+          type: 'explicit',
+          target: { entityType: 'process', entityId: processName },
+          source: 'agent',
+          timestamp: Date.now(),
+        });
+      }
+
+      // Check for thread references in description or title
+      const threadMatch = finding.description?.match(/thread:\s*([^\s,]+)/i) ||
+                         finding.title?.match(/thread:\s*([^\s,]+)/i);
+      if (threadMatch) {
+        const threadName = threadMatch[1];
+        this.focusStore.recordInteraction({
+          type: 'explicit',
+          target: { entityType: 'thread', entityId: threadName },
+          source: 'agent',
+          timestamp: Date.now(),
+        });
+      }
+
+      // Check for frame references in evidence or related data
+      const frameMatch = finding.description?.match(/frame[_\s]?id:\s*(\d+)/i);
+      if (frameMatch) {
+        this.focusStore.recordInteraction({
+          type: 'explicit',
+          target: { entityType: 'frame', entityId: frameMatch[1] },
+          source: 'agent',
+          timestamp: Date.now(),
+        });
+      }
+
+      // Check for time range references in timestamps
+      if (finding.timestampsNs && finding.timestampsNs.length >= 2) {
+        const sortedTs = [...finding.timestampsNs].sort((a, b) => a - b);
+        this.focusStore.recordInteraction({
+          type: 'explicit',
+          target: {
+            timeRange: {
+              start: BigInt(sortedTs[0]),
+              end: BigInt(sortedTs[sortedTs.length - 1]),
+            },
+          },
+          source: 'agent',
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // Emit focus update event for observability
+    const topFocuses = this.focusStore.getTopFocuses(3);
+    if (topFocuses.length > 0) {
+      const focus = topFocuses[0];
+
+      // Convert target for SSE (bigint → string for JSON serialization)
+      const target: {
+        entityType?: string;
+        entityId?: string;
+        timeRange?: { start: string; end: string };
+        metricName?: string;
+        question?: string;
+      } = {
+        entityType: focus.target.entityType,
+        entityId: focus.target.entityId,
+        metricName: focus.target.metricName,
+        question: focus.target.question,
+      };
+
+      if (focus.target.timeRange) {
+        target.timeRange = {
+          start: String(focus.target.timeRange.start),
+          end: String(focus.target.timeRange.end),
+        };
+      }
+
+      emitter.emitUpdate('focus_updated', {
+        focusType: focus.type,
+        target,
+        weight: focus.weight,
+        interactionType: 'analysis_complete',
+      });
+    }
+  }
+
+  /**
+   * Get the FocusStore for external access (e.g., route handlers for user interaction events).
+   */
+  getFocusStore(): FocusStore {
+    return this.focusStore;
+  }
+
+  /**
+   * Get the InterventionController for external access (e.g., route handlers for user responses).
+   */
+  getInterventionController(): InterventionController {
+    return this.interventionController;
+  }
+
+  /**
+   * Record a user interaction from the frontend (e.g., clicking a timestamp in the table).
+   * This updates the FocusStore for incremental analysis.
+   */
+  recordUserInteraction(interaction: FocusInteraction): void {
+    this.focusStore.recordInteraction(interaction);
+    const focusType =
+      interaction.target.entityType && interaction.target.entityId ? 'entity'
+      : interaction.target.timeRange ? 'timeRange'
+      : interaction.target.metricName ? 'metric'
+      : interaction.target.question ? 'question'
+      : 'question';
+    this.emitRaw('focus_updated', {
+      focusType,
+      target: interaction.target,
+      weight: 0.5, // Initial weight
+      interactionType: interaction.source,
+    });
+  }
+
+  // ==========================================================================
+  // Focus capture helpers (v2.0)
+  // ==========================================================================
+
+  private recordInputFocus(
+    query: string,
+    intent: any,
+    followUpResolution: FollowUpResolution,
+    sessionContext: EnhancedSessionContext,
+    emitter: ProgressEmitter
+  ): void {
+    // Always record current query as a question focus so "what user asked now"
+    // can dominate incremental scope decisions.
+    this.focusStore.recordInteraction({
+      type: 'query',
+      target: { question: query, questionCategory: intent?.followUpType || undefined },
+      source: 'query',
+      timestamp: Date.now(),
+    });
+
+    // If follow-up resolution produced explicit focus intervals, record them.
+    if (followUpResolution.focusIntervals && followUpResolution.focusIntervals.length > 0) {
+      const interactionType: FocusInteraction['type'] =
+        intent?.followUpType === 'compare' ? 'compare'
+        : intent?.followUpType === 'extend' ? 'extend'
+        : intent?.followUpType === 'drill_down' ? 'drill_down'
+        : 'query';
+
+      this.recordFocusFromIntervals(
+        followUpResolution.focusIntervals,
+        interactionType,
+        'query',
+        sessionContext,
+        emitter
+      );
+      return;
+    }
+
+    // Fallback: record referenced entities even when timestamps are missing.
+    for (const entity of intent?.referencedEntities || []) {
+      if (entity.type !== 'frame' && entity.type !== 'session') continue;
+      const entityId = entity.value !== undefined ? entity.value : entity.id;
+      if (entityId === undefined || entityId === null) continue;
+      this.focusStore.recordInteraction({
+        type: intent?.followUpType === 'compare' ? 'compare' : 'drill_down',
+        target: {
+          entityType: entity.type,
+          entityId: String(entityId),
+        },
+        source: 'query',
+        timestamp: Date.now(),
+      });
+    }
+
+    // Fallback: record time range when present in resolved params.
+    const startTs = followUpResolution.resolvedParams?.start_ts ?? followUpResolution.resolvedParams?.startTs;
+    const endTs = followUpResolution.resolvedParams?.end_ts ?? followUpResolution.resolvedParams?.endTs;
+    if (startTs && endTs) {
+      this.focusStore.recordInteraction({
+        type: 'query',
+        target: { timeRange: { start: String(startTs), end: String(endTs) } },
+        source: 'query',
+        timestamp: Date.now(),
+      });
+    }
+
+    // Keep focuses consistent with cached entities.
+    this.focusStore.syncWithEntityStore(sessionContext.getEntityStore());
+  }
+
+  private recordFocusFromIntervals(
+    intervals: FocusInterval[],
+    interactionType: FocusInteraction['type'],
+    source: FocusInteraction['source'],
+    sessionContext: EnhancedSessionContext,
+    emitter: ProgressEmitter
+  ): void {
+    for (const interval of intervals) {
+      const meta = interval.metadata || {};
+      const sourceEntityType = meta.sourceEntityType;
+      const sourceEntityId =
+        meta.sourceEntityId ??
+        meta.frame_id ?? meta.frameId ??
+        meta.session_id ?? meta.sessionId;
+
+      if ((sourceEntityType === 'frame' || sourceEntityType === 'session') && sourceEntityId !== undefined) {
+        this.focusStore.recordInteraction({
+          type: interactionType,
+          target: {
+            entityType: sourceEntityType,
+            entityId: String(sourceEntityId),
+            entityName: interval.processName || undefined,
+          },
+          source,
+          timestamp: Date.now(),
+          context: { label: interval.label },
+        });
+      }
+
+      if (interval.startTs && interval.endTs && interval.startTs !== '0' && interval.endTs !== '0') {
+        this.focusStore.recordInteraction({
+          type: interactionType,
+          target: { timeRange: { start: interval.startTs, end: interval.endTs } },
+          source,
+          timestamp: Date.now(),
+          context: { label: interval.label },
+        });
+      }
+    }
+
+    // Keep focuses consistent with cached entities.
+    this.focusStore.syncWithEntityStore(sessionContext.getEntityStore());
+
+    // Emit a lightweight debug log for observability.
+    const primary = this.focusStore.getPrimaryFocus();
+    if (primary) {
+      emitter.log(`[FocusStore] Primary focus: ${primary.type} (${primary.id}) w=${primary.weight.toFixed(2)}`);
+    }
   }
 }
 

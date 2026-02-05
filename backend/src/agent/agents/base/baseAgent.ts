@@ -63,6 +63,43 @@ export interface SkillDefinitionForAgent {
 }
 
 /**
+ * Configuration for the dynamic SQL upgrade path.
+ * When predefined Skills return insufficient results, agents can
+ * "upgrade" to dynamic SQL generation for more flexible analysis.
+ */
+export interface UpgradeConfig {
+  /** Enable the upgrade path (default: true) */
+  enabled: boolean;
+  /** Minimum number of failed/empty steps before considering upgrade */
+  minFailedSteps: number;
+  /** Maximum retries for dynamic SQL (default: 2) */
+  maxRetries: number;
+  /** Required: explicit objective must be derivable from task */
+  requireExplicitObjective: boolean;
+}
+
+/**
+ * Result of checking if upgrade to dynamic SQL is eligible.
+ */
+export interface UpgradeEligibility {
+  /** Whether upgrade should be attempted */
+  eligible: boolean;
+  /** Reason for the decision */
+  reason: string;
+  /** Suggested objective for SQL generation */
+  suggestedObjective?: string;
+  /** Failed step information for context */
+  failedSteps?: string[];
+}
+
+const DEFAULT_UPGRADE_CONFIG: UpgradeConfig = {
+  enabled: true,
+  minFailedSteps: 1,
+  maxRetries: 2,
+  requireExplicitObjective: true,
+};
+
+/**
  * Understanding of a task
  */
 export interface TaskUnderstanding {
@@ -240,6 +277,10 @@ export abstract class BaseAgent extends EventEmitter {
   protected reasoningTrace: ReasoningStep[] = [];
   /** Current iteration */
   protected currentIteration: number = 0;
+  /** Upgrade path configuration */
+  protected upgradeConfig: UpgradeConfig = { ...DEFAULT_UPGRADE_CONFIG };
+  /** Track upgrade attempts per task */
+  private upgradeAttempts: number = 0;
 
   constructor(config: AgentConfig, modelRouter: ModelRouter, skillDefs?: SkillDefinitionForAgent[]) {
     super();
@@ -315,6 +356,7 @@ export abstract class BaseAgent extends EventEmitter {
     this.sharedContext = sharedContext;
     this.reasoningTrace = [];
     this.currentIteration = 0;
+    this.resetUpgradeState(); // Reset upgrade attempts for new task
 
     // Ensure skill-based tools are loaded (lazy initialization)
     await this.ensureToolsLoaded();
@@ -435,7 +477,12 @@ export abstract class BaseAgent extends EventEmitter {
           // cascade failures when tool names are filtered out, as step numbers
           // get re-assigned but dependsOn values aren't updated.
         }))
-        .filter((step: any) => step.toolName && this.tools.has(step.toolName));
+        .filter((step: any) => step.toolName && this.tools.has(step.toolName))
+        // Deduplicate tools: LLM may return duplicate tool calls which cause redundant execution.
+        // Keep the first occurrence of each tool (preserves LLM's priority order).
+        .filter((step: any, index: number, self: any[]) =>
+          self.findIndex((s: any) => s.toolName === step.toolName) === index
+        );
 
       if (plannedSteps.length === 0) {
         const fallbackTools = understanding.recommendedTools.length > 0
@@ -504,6 +551,9 @@ export abstract class BaseAgent extends EventEmitter {
       },
     };
 
+    // Log plan steps for debugging duplicate execution issues
+    console.log(`[${this.config.id}] Executing plan with ${plan.steps.length} step(s): [${plan.steps.map(s => s.toolName).join(', ')}]`);
+
     // Execute each step
     for (const step of plan.steps) {
       // Check dependencies
@@ -559,7 +609,55 @@ export abstract class BaseAgent extends EventEmitter {
 
     // Agent execution succeeds if at least one tool returned data successfully.
     // Individual tool failures (e.g., missing tables) don't invalidate the whole analysis.
-    const success = anyStepSucceeded || stepResults.length === 0;
+    let success = anyStepSucceeded || stepResults.length === 0;
+
+    // ==========================================================================
+    // Upgrade Path: Try dynamic SQL when predefined Skills return insufficient results
+    // ==========================================================================
+    if (this.upgradeConfig.enabled && !anyStepSucceeded && allFindings.length === 0) {
+      const upgradeCheck = this.checkUpgradeEligibility(task, stepResults, toolContext);
+
+      if (upgradeCheck.eligible && upgradeCheck.suggestedObjective) {
+        this.emit('upgrade_attempting', {
+          agentId: this.config.id,
+          reason: upgradeCheck.reason,
+          objective: upgradeCheck.suggestedObjective,
+          attempt: this.upgradeAttempts + 1,
+        });
+
+        const upgradeResult = await this.tryDynamicSQLUpgrade(
+          upgradeCheck.suggestedObjective,
+          toolContext,
+          task
+        );
+
+        if (upgradeResult.success) {
+          // Merge upgrade results
+          if (upgradeResult.findings) {
+            allFindings.push(...upgradeResult.findings);
+          }
+          stepResults.push({
+            stepNumber: stepResults.length + 1,
+            toolName: '_dynamic_sql_upgrade',
+            result: upgradeResult,
+            observations: [`Dynamic SQL upgrade succeeded: ${upgradeResult.data?.rows?.length || 0} rows returned`],
+          });
+          anyStepSucceeded = true;
+          success = true;
+
+          this.emit('upgrade_succeeded', {
+            agentId: this.config.id,
+            findingsCount: upgradeResult.findings?.length || 0,
+            rowCount: upgradeResult.data?.rows?.length || 0,
+          });
+        } else {
+          this.emit('upgrade_failed', {
+            agentId: this.config.id,
+            error: upgradeResult.error,
+          });
+        }
+      }
+    }
 
     return {
       steps: stepResults,
@@ -567,6 +665,215 @@ export abstract class BaseAgent extends EventEmitter {
       success,
       totalTimeMs: stepResults.reduce((sum, r) => sum + r.result.executionTimeMs, 0),
     };
+  }
+
+  // ==========================================================================
+  // Upgrade Path Methods (v2.0)
+  // ==========================================================================
+
+  /**
+   * Check if the agent should attempt a dynamic SQL upgrade.
+   *
+   * Upgrade is eligible when:
+   * 1. Upgrade path is enabled
+   * 2. Predefined skills returned no useful results
+   * 3. We haven't exceeded retry limits
+   * 4. Task has a clear objective we can convert to SQL
+   */
+  protected checkUpgradeEligibility(
+    task: AgentTask,
+    stepResults: ExecutionStepResult[],
+    toolContext: AgentToolContext
+  ): UpgradeEligibility {
+    // Check if upgrade is enabled
+    if (!this.upgradeConfig.enabled) {
+      return { eligible: false, reason: 'Upgrade path disabled' };
+    }
+
+    // Check retry limit
+    if (this.upgradeAttempts >= this.upgradeConfig.maxRetries) {
+      return { eligible: false, reason: `Max upgrade retries (${this.upgradeConfig.maxRetries}) exceeded` };
+    }
+
+    // Check if trace processor is available
+    if (!toolContext.traceProcessorService) {
+      return { eligible: false, reason: 'TraceProcessorService not available' };
+    }
+
+    // Count failed steps
+    const failedSteps = stepResults.filter(s => !s.result.success);
+    const failedStepNames = failedSteps.map(s => s.toolName);
+
+    if (failedSteps.length < this.upgradeConfig.minFailedSteps) {
+      return { eligible: false, reason: `Not enough failed steps (${failedSteps.length} < ${this.upgradeConfig.minFailedSteps})` };
+    }
+
+    // Build suggested objective from task description
+    const suggestedObjective = this.buildUpgradeObjective(task, failedStepNames);
+
+    if (!suggestedObjective && this.upgradeConfig.requireExplicitObjective) {
+      return { eligible: false, reason: 'Could not derive clear objective from task' };
+    }
+
+    return {
+      eligible: true,
+      reason: `${failedSteps.length} steps failed, attempting dynamic SQL upgrade`,
+      suggestedObjective: suggestedObjective || task.description,
+      failedSteps: failedStepNames,
+    };
+  }
+
+  /**
+   * Build an objective for dynamic SQL based on the failed task.
+   * Subclasses can override for domain-specific objective building.
+   */
+  protected buildUpgradeObjective(task: AgentTask, failedTools: string[]): string | undefined {
+    // Extract key information from task
+    const { description, context } = task;
+    const timeRange = context.timeRange;
+    const packageName = context.additionalData?.packageName;
+
+    // Build a focused objective
+    const parts: string[] = [];
+
+    // Add main objective
+    parts.push(description);
+
+    // Add time constraints if available
+    if (timeRange?.start && timeRange?.end) {
+      parts.push(`时间范围: ${timeRange.start} - ${timeRange.end}`);
+    }
+
+    // Add package/process filter if available
+    if (packageName) {
+      parts.push(`目标进程: ${packageName}`);
+    }
+
+    // Add context about what failed
+    if (failedTools.length > 0) {
+      parts.push(`注意: 以下预定义分析失败 [${failedTools.join(', ')}]，请尝试其他方式获取数据`);
+    }
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Attempt to execute dynamic SQL for the given objective.
+   *
+   * This is the "escape hatch" when predefined Skills can't satisfy the analysis need.
+   */
+  protected async tryDynamicSQLUpgrade(
+    objective: string,
+    toolContext: AgentToolContext,
+    task: AgentTask
+  ): Promise<AgentToolResult> {
+    this.upgradeAttempts++;
+    const startTime = Date.now();
+
+    console.log(`[${this.config.id}] Attempting dynamic SQL upgrade (attempt ${this.upgradeAttempts})`);
+
+    try {
+      const result = await this.generateAndExecuteSQL(objective, toolContext);
+
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.error || 'Dynamic SQL execution failed',
+          executionTimeMs: Date.now() - startTime,
+          metadata: {
+            kind: 'sql',
+            toolName: '_dynamic_sql_upgrade',
+            type: 'dynamic_sql_upgrade',
+            objective,
+            upgradeAttempt: this.upgradeAttempts,
+            ...(toolContext.packageName && { packageName: toolContext.packageName }),
+            ...(toolContext.timeRange && { timeRange: toolContext.timeRange }),
+            ...(typeof result.repairAttempts === 'number' && { repairAttempts: result.repairAttempts }),
+            ...(Array.isArray(result.repairErrors) && result.repairErrors.length > 0 && { repairErrorsCount: result.repairErrors.length }),
+            sql: result.generatedSQL?.sql,
+            explanation: result.generatedSQL?.explanation,
+          },
+        };
+      }
+
+      // Convert query result to findings if we got data
+      const findings: Finding[] = [];
+
+      if (result.queryResult?.rows && result.queryResult.rows.length > 0) {
+        // Generate a finding summarizing the dynamic query results
+        findings.push({
+          id: `dynamic_sql_${this.config.id}_${Date.now()}`,
+          category: 'dynamic_analysis',
+          type: 'dynamic_sql_result',
+          severity: 'info',
+          title: `动态查询结果 (${result.queryResult.rows.length} 行)`,
+          description: result.generatedSQL?.explanation || '通过动态 SQL 获取的分析数据',
+          source: this.config.id,
+          confidence: 0.7, // Lower confidence for dynamic results
+          details: {
+            sql: result.generatedSQL?.sql,
+            rowCount: result.queryResult.rows.length,
+            columns: result.queryResult.columns,
+            // Include first few rows as preview
+            sampleData: result.queryResult.rows.slice(0, 5),
+            objective,
+            upgradeAttempt: this.upgradeAttempts,
+          },
+        });
+      }
+
+      return {
+        success: true,
+        data: result.queryResult,
+        findings,
+        executionTimeMs: Date.now() - startTime,
+        metadata: {
+          kind: 'sql',
+          toolName: '_dynamic_sql_upgrade',
+          type: 'dynamic_sql_upgrade',
+          objective,
+          upgradeAttempt: this.upgradeAttempts,
+          ...(toolContext.packageName && { packageName: toolContext.packageName }),
+          ...(toolContext.timeRange && { timeRange: toolContext.timeRange }),
+          ...(typeof result.repairAttempts === 'number' && { repairAttempts: result.repairAttempts }),
+          ...(Array.isArray(result.repairErrors) && result.repairErrors.length > 0 && { repairErrorsCount: result.repairErrors.length }),
+          sql: result.generatedSQL?.sql,
+          explanation: result.generatedSQL?.explanation,
+        },
+      };
+    } catch (error: any) {
+      console.error(`[${this.config.id}] Dynamic SQL upgrade failed:`, error.message);
+      return {
+        success: false,
+        error: `Dynamic SQL upgrade failed: ${error.message}`,
+        executionTimeMs: Date.now() - startTime,
+        metadata: {
+          kind: 'sql',
+          toolName: '_dynamic_sql_upgrade',
+          type: 'dynamic_sql_upgrade',
+          objective,
+          upgradeAttempt: this.upgradeAttempts,
+          ...(toolContext.packageName && { packageName: toolContext.packageName }),
+          ...(toolContext.timeRange && { timeRange: toolContext.timeRange }),
+          error: String(error?.message || error),
+        },
+      };
+    }
+  }
+
+  /**
+   * Reset upgrade attempts counter. Called at the start of each task.
+   */
+  protected resetUpgradeState(): void {
+    this.upgradeAttempts = 0;
+  }
+
+  /**
+   * Configure the upgrade path behavior.
+   * Subclasses can call this to customize upgrade behavior.
+   */
+  protected configureUpgrade(config: Partial<UpgradeConfig>): void {
+    this.upgradeConfig = { ...this.upgradeConfig, ...config };
   }
 
   /**
@@ -719,7 +1026,7 @@ export abstract class BaseAgent extends EventEmitter {
           description: input.description || input.name,
           default: input.default,
         })),
-        execute: this.createSkillToolExecutor(skillDef.skillId, skillDef.category),
+        execute: this.createSkillToolExecutor(skillDef.toolName, skillDef.skillId, skillDef.category),
       };
 
       this.tools.set(tool.name, tool);
@@ -736,11 +1043,25 @@ export abstract class BaseAgent extends EventEmitter {
    * Shared across all domain agents — eliminates code duplication.
    */
   protected createSkillToolExecutor(
+    toolName: string,
     skillId: string,
     category: string
   ): (params: Record<string, any>, context: AgentToolContext) => Promise<AgentToolResult> {
     return async (params: Record<string, any>, context: AgentToolContext): Promise<AgentToolResult> => {
       const startTime = Date.now();
+      const additional = (context.additionalContext || {}) as Record<string, any>;
+      const scopeLabel = typeof additional.scopeLabel === 'string' ? additional.scopeLabel.trim() : '';
+
+      const baseMetadata: Record<string, any> = {
+        kind: 'skill',
+        toolName,
+        skillId,
+        category,
+        executionMode: 'agent',
+        ...(context.packageName && { packageName: context.packageName }),
+        ...(context.timeRange && { timeRange: context.timeRange }),
+        ...(scopeLabel && { scopeLabel }),
+      };
 
       try {
         if (!context.traceProcessorService) {
@@ -748,6 +1069,7 @@ export abstract class BaseAgent extends EventEmitter {
             success: false,
             error: 'TraceProcessorService not available',
             executionTimeMs: Date.now() - startTime,
+            metadata: baseMetadata,
           };
         }
 
@@ -758,21 +1080,44 @@ export abstract class BaseAgent extends EventEmitter {
           context.aiService
         );
 
-        const execParams: Record<string, any> = {
-          ...params,
-          package: context.packageName,
-        };
+        const execParams: Record<string, any> = { ...params };
+
+        // Normalize package/process parameters:
+        // - Prefer explicit context.packageName when present
+        // - Avoid overwriting user-provided params with undefined
+        if (typeof context.packageName === 'string' && context.packageName.trim()) {
+          execParams.package = context.packageName.trim();
+        }
+
+        // Backwards-compatible aliases used by some legacy skills.
+        const pkg = typeof execParams.package === 'string' ? execParams.package.trim() : '';
+        if (pkg) {
+          if (execParams.package_name === undefined) execParams.package_name = pkg;
+          if (execParams.process_name === undefined) execParams.process_name = pkg;
+        }
 
         if (context.timeRange) {
           // Pass timestamps as strings to preserve precision for values > Number.MAX_SAFE_INTEGER.
           // SQL template substitution (${start_ts}) handles string values correctly.
           execParams.start_ts = String(context.timeRange.start);
           execParams.end_ts = String(context.timeRange.end);
+
+          // Legacy GPU/other skills use seconds-based range fields.
+          // Provide them as integer seconds (string) to keep SQL template substitution simple.
+          try {
+            const startNs = BigInt(execParams.start_ts);
+            const endNs = BigInt(execParams.end_ts);
+            const startSec = (startNs / 1000000000n).toString();
+            const endSec = (endNs / 1000000000n).toString();
+            if (execParams.time_range_start === undefined) execParams.time_range_start = startSec;
+            if (execParams.time_range_end === undefined) execParams.time_range_end = endSec;
+          } catch {
+            // Best-effort only; keep start_ts/end_ts as the source of truth.
+          }
         }
 
         // Generic skill params: orchestrators pass extra skill parameters via additionalContext.skillParams.
         // This allows controlling skill behavior without the baseAgent needing to know specific skill IDs.
-        const additional = (context.additionalContext || {}) as Record<string, any>;
         if (additional.skillParams && typeof additional.skillParams === 'object') {
           for (const [key, val] of Object.entries(additional.skillParams)) {
             if (val !== undefined && val !== null) {
@@ -789,7 +1134,6 @@ export abstract class BaseAgent extends EventEmitter {
         // Derive group: if a task has both a timeRange and a scopeLabel, it's part of a
         // multi-interval analysis and should be grouped by its interval.
         // This is generic — works for scrolling intervals, startup phases, ANR windows, etc.
-        const scopeLabel = typeof additional.scopeLabel === 'string' ? additional.scopeLabel.trim() : '';
         const derivedGroup =
           (typeof additional.group === 'string' && additional.group)  // explicit override
             ? additional.group
@@ -838,12 +1182,19 @@ export abstract class BaseAgent extends EventEmitter {
           dataEnvelopes: dataEnvelopes.length > 0 ? dataEnvelopes : undefined,
           error: result.error,
           executionTimeMs: Date.now() - startTime,
+          metadata: {
+            ...baseMetadata,
+            // Keep params compact; this is for provenance/debugging, not full replay.
+            paramsKeys: Object.keys(execParams).slice(0, 40),
+            ...(derivedGroup && { group: derivedGroup }),
+          },
         };
       } catch (error: any) {
         return {
           success: false,
           error: error.message,
           executionTimeMs: Date.now() - startTime,
+          metadata: baseMetadata,
         };
       }
     };
@@ -892,7 +1243,60 @@ export abstract class BaseAgent extends EventEmitter {
         });
       }
     }
+
+    // Deterministic insight finding from synthesize summary (洞见摘要) if available.
+    // This improves "agent-ness" by turning structured skill outputs into citeable findings,
+    // reducing reliance on ai_summary.
+    const synthFinding = this.extractSynthesizeSummaryFinding(result, skillId, category);
+    if (synthFinding) {
+      findings.push(synthFinding);
+    }
     return findings;
+  }
+
+  private extractSynthesizeSummaryFinding(
+    result: SkillExecutionResult,
+    skillId: string,
+    category: string
+  ): Finding | null {
+    const displayResults = Array.isArray(result.displayResults) ? result.displayResults : [];
+    if (displayResults.length === 0) return null;
+
+    const dr = displayResults.find(d =>
+      d &&
+      typeof d === 'object' &&
+      (d as any).format === 'summary' &&
+      (d as any)?.data &&
+      (d as any).data.summary &&
+      typeof (d as any).data.summary.content === 'string'
+    );
+    if (!dr) return null;
+
+    const summary = (dr as any).data.summary;
+    const content = String(summary.content || '').trim();
+    if (!content) return null;
+
+    const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+    const severities = new Set(metrics.map((m: any) => m?.severity).filter(Boolean));
+    const severity: Finding['severity'] =
+      severities.has('critical') ? 'critical'
+      : severities.has('warning') ? 'warning'
+      : 'info';
+
+    const title = `洞见摘要 · ${result.skillName || skillId}`;
+    const MAX_DESC = 600;
+    const description = content.length > MAX_DESC ? content.slice(0, MAX_DESC - 1) + '…' : content;
+
+    return {
+      id: `${skillId}_synth_${Date.now()}`,
+      category,
+      severity,
+      title,
+      description,
+      source: skillId,
+      confidence: 0.75,
+      details: metrics.length > 0 ? { metrics: metrics.slice(0, 12) } : undefined,
+    };
   }
 
   /**
@@ -1084,6 +1488,15 @@ ${this.getToolDescriptionsForLLM()}
     if (task.context.evidenceNeeded && task.context.evidenceNeeded.length > 0) {
       lines.push(`- 需输出证据: ${task.context.evidenceNeeded.join(', ')}`);
     }
+
+    const historyContext = (task.context.additionalData as any)?.historyContext;
+    if (typeof historyContext === 'string' && historyContext.trim()) {
+      const trimmed = historyContext.trim();
+      const MAX_CHARS = 2200; // prompt budget protection
+      lines.push('');
+      lines.push('对话上下文摘要（同一 trace，避免重复与遗忘）:');
+      lines.push(trimmed.length > MAX_CHARS ? trimmed.slice(0, MAX_CHARS) + '…' : trimmed);
+    }
     return lines.length > 0 ? lines.join('\n') : '';
   }
 
@@ -1093,6 +1506,315 @@ ${this.getToolDescriptionsForLLM()}
   setSharedContext(context: SharedAgentContext): void {
     this.sharedContext = context;
   }
+
+  // ==========================================================================
+  // Dynamic SQL Generation (v2.0 - Agent Autonomy)
+  // ==========================================================================
+
+  /**
+   * SQL generator instance (lazy initialized).
+   * Provides agents with the ability to generate dynamic SQL queries.
+   */
+  private sqlGenerator: import('../../tools/sqlGenerator').SQLGenerator | null = null;
+  private sqlValidator: import('../../tools/sqlValidator').SQLValidator | null = null;
+
+  /**
+   * Get or create SQL generator instance.
+   */
+  protected async getSQLGenerator(): Promise<import('../../tools/sqlGenerator').SQLGenerator> {
+    if (!this.sqlGenerator) {
+      const { SQLGenerator } = await import('../../tools/sqlGenerator');
+      this.sqlGenerator = new SQLGenerator(this.modelRouter);
+    }
+    return this.sqlGenerator;
+  }
+
+  /**
+   * Get or create SQL validator instance.
+   */
+  protected async getSQLValidator(): Promise<import('../../tools/sqlValidator').SQLValidator> {
+    if (!this.sqlValidator) {
+      const { SQLValidator } = await import('../../tools/sqlValidator');
+      this.sqlValidator = new SQLValidator();
+    }
+    return this.sqlValidator;
+  }
+
+  /**
+   * Generate and execute a dynamic SQL query.
+   *
+   * This gives agents true autonomy to explore data beyond predefined Skills.
+   * The method:
+   * 1. Generates SQL using LLM based on the objective
+   * 2. Validates the SQL for safety
+   * 3. Executes the query
+   * 4. Returns results with metadata
+   *
+   * @param objective - What the agent wants to analyze
+   * @param context - Tool context with trace processor service
+   * @param schemaContext - Optional schema context (auto-detected if not provided)
+   * @returns Query result with data and metadata
+   */
+  protected async generateAndExecuteSQL(
+    objective: string,
+    context: import('../../types/agentProtocol').AgentToolContext,
+    schemaContext?: import('../../tools/sqlGenerator').SchemaContext
+  ): Promise<DynamicSQLResult> {
+    const startTime = Date.now();
+
+    if (!context.traceProcessorService) {
+      return {
+        success: false,
+        error: 'TraceProcessorService not available',
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+
+    try {
+      const generator = await this.getSQLGenerator();
+      const validator = await this.getSQLValidator();
+
+      // Get schema context if not provided
+      let schema = schemaContext;
+      if (!schema) {
+        const { detectSchema } = await import('../../tools/sqlGenerator');
+        schema = await detectSchema(context.traceProcessorService, context.traceId);
+      }
+
+      // Generate SQL
+      const genResult = await generator.generateSQL(objective, schema);
+
+      if (!genResult.success || !genResult.sql) {
+        return {
+          success: false,
+          error: genResult.error || 'SQL generation failed',
+          validationErrors: genResult.validationErrors,
+          executionTimeMs: Date.now() - startTime,
+        };
+      }
+
+      const MAX_REPAIR_ATTEMPTS = 2;
+      let repairAttempts = 0;
+      const repairErrors: string[] = [];
+      const attemptedSql = new Set<string>();
+
+      let currentGeneratedSQL = genResult.sql;
+      let sqlToExecute = validator.ensureLimit(currentGeneratedSQL.sql, 1000);
+      attemptedSql.add(sqlToExecute);
+
+      while (true) {
+        // Validate SQL (safety gate)
+        const validation = validator.validate(sqlToExecute);
+        if (!validation.valid) {
+          this.emit('sql_validation_failed', {
+            agentId: this.config.id,
+            sql: sqlToExecute,
+            errors: validation.errors.map(e => e.message),
+          });
+
+          const errMsg = `SQL validation failed: ${validation.errors.map(e => e.message).join(', ')}`;
+          repairErrors.push(errMsg);
+
+          if (repairAttempts >= MAX_REPAIR_ATTEMPTS) {
+            return {
+              success: false,
+              error: errMsg,
+              validationErrors: validation.errors.map(e => e.message),
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+
+          repairAttempts++;
+          const repaired = await generator.repairSQL({
+            objective,
+            schemaContext: schema,
+            previousSQL: sqlToExecute,
+            error: errMsg,
+          });
+
+          if (!repaired.success || !repaired.sql) {
+            return {
+              success: false,
+              error: repaired.error || errMsg,
+              validationErrors: repaired.validationErrors || validation.errors.map(e => e.message),
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+
+          currentGeneratedSQL = repaired.sql;
+          sqlToExecute = validator.ensureLimit(currentGeneratedSQL.sql, 1000);
+          if (attemptedSql.has(sqlToExecute)) {
+            return {
+              success: false,
+              error: `SQL repair loop produced duplicate SQL (stopping)`,
+              validationErrors: [errMsg],
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+          attemptedSql.add(sqlToExecute);
+          continue;
+        }
+
+        // Log for debugging
+        console.log(`[${this.config.id}] Executing dynamic SQL for: ${objective}`);
+        console.log(`[${this.config.id}] SQL: ${sqlToExecute.slice(0, 200)}...`);
+
+        // Emit event for tracking
+        this.emit('sql_generated', {
+          agentId: this.config.id,
+          objective,
+          sql: sqlToExecute,
+          riskLevel: currentGeneratedSQL.riskLevel,
+          repairAttempts,
+        });
+
+        try {
+          // Execute SQL
+          const queryResult = await context.traceProcessorService.query(
+            context.traceId,
+            sqlToExecute
+          );
+
+          const executionTimeMs = Date.now() - startTime;
+
+          // Process results
+          const data = this.processSQLResult(queryResult);
+
+          return {
+            success: true,
+            data,
+            generatedSQL: currentGeneratedSQL,
+            queryResult,
+            validation,
+            repairAttempts,
+            repairErrors: repairErrors.length > 0 ? repairErrors : undefined,
+            executionTimeMs,
+          };
+        } catch (error: any) {
+          const errMsg = String(error?.message || error);
+          repairErrors.push(errMsg);
+
+          if (repairAttempts >= MAX_REPAIR_ATTEMPTS) {
+            return {
+              success: false,
+              error: errMsg,
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+
+          repairAttempts++;
+          const repaired = await generator.repairSQL({
+            objective,
+            schemaContext: schema,
+            previousSQL: sqlToExecute,
+            error: errMsg,
+          });
+
+          if (!repaired.success || !repaired.sql) {
+            return {
+              success: false,
+              error: repaired.error || errMsg,
+              validationErrors: repaired.validationErrors,
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+
+          currentGeneratedSQL = repaired.sql;
+          sqlToExecute = validator.ensureLimit(currentGeneratedSQL.sql, 1000);
+          if (attemptedSql.has(sqlToExecute)) {
+            return {
+              success: false,
+              error: `SQL repair loop produced duplicate SQL (stopping)`,
+              generatedSQL: currentGeneratedSQL,
+              repairAttempts,
+              repairErrors,
+              executionTimeMs: Date.now() - startTime,
+            };
+          }
+          attemptedSql.add(sqlToExecute);
+        }
+      }
+
+    } catch (error: any) {
+      console.warn(`[${this.config.id}] Dynamic SQL execution failed: ${error.message}`);
+      return {
+        success: false,
+        error: error.message,
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  /**
+   * Process raw SQL query result into structured data.
+   */
+  private processSQLResult(queryResult: any): any {
+    if (!queryResult) return null;
+
+    // Handle columnar format { columns, rows }
+    if (queryResult.columns && queryResult.rows) {
+      const columns = queryResult.columns as string[];
+      const rows = queryResult.rows as any[][];
+
+      return rows.map(row => {
+        const obj: Record<string, any> = {};
+        for (let i = 0; i < columns.length; i++) {
+          obj[columns[i]] = row[i];
+        }
+        return obj;
+      });
+    }
+
+    // Return as-is if already in object format
+    return queryResult;
+  }
+
+  /**
+   * Check if dynamic SQL generation is enabled for this agent.
+   * Subclasses can override to control when SQL generation is allowed.
+   */
+  protected isDynamicSQLEnabled(): boolean {
+    // By default, enabled for all agents
+    // Can be controlled via config or environment variable
+    return process.env.AGENT_DYNAMIC_SQL !== 'false';
+  }
+}
+
+// =============================================================================
+// Dynamic SQL Result Type
+// =============================================================================
+
+/**
+ * Result of dynamic SQL generation and execution.
+ */
+export interface DynamicSQLResult {
+  success: boolean;
+  data?: any;
+  error?: string;
+  validationErrors?: string[];
+  generatedSQL?: import('../../tools/sqlGenerator').GeneratedSQL;
+  queryResult?: any;
+  validation?: import('../../tools/sqlValidator').ValidationResult;
+  /** Number of repair attempts performed (0 means no repair) */
+  repairAttempts?: number;
+  /** Error trail from validation/execution/repair attempts (best-effort) */
+  repairErrors?: string[];
+  executionTimeMs: number;
 }
 
 export default BaseAgent;

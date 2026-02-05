@@ -47,6 +47,18 @@ export interface SessionMetadata {
    * Includes conversation history, findings, and entity references.
    */
   sessionContextSnapshot?: string;
+
+  /**
+   * Serialized FocusStore snapshot for restoring user focus across restarts.
+   * Includes weighted focus targets (entity/timeRange/question).
+   */
+  focusStoreSnapshot?: import('../agent/context/focusStore').FocusStoreSnapshot;
+
+  /**
+   * Trace-scoped goal-driven agent state snapshot (v1).
+   * Single-source-of-truth state for hypotheses/evidence/experiments (iteratively built).
+   */
+  traceAgentStateSnapshot?: import('../agent/state/traceAgentState').TraceAgentState;
 }
 
 export interface SessionFilter {

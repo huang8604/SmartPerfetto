@@ -7,6 +7,8 @@
 import { SessionPersistenceService } from '../sessionPersistenceService';
 import { createEntityStore, EntityStore } from '../../agent/context/entityStore';
 import { EnhancedSessionContext } from '../../agent/context/enhancedSessionContext';
+import { FocusStore } from '../../agent/context/focusStore';
+import { createInitialTraceAgentState } from '../../agent/state/traceAgentState';
 import { StoredSession, StoredMessage } from '../../models/sessionSchema';
 
 describe('SessionPersistenceService - Phase 3 Features', () => {
@@ -233,6 +235,119 @@ describe('SessionPersistenceService - Phase 3 Features', () => {
       const loadedStore = service.loadEntityStore(testSessionId);
       expect(loadedStore).not.toBeNull();
       expect(loadedStore?.getFrame('999')).toBeDefined();
+    });
+  });
+
+  describe('FocusStore Persistence', () => {
+    const testSessionId = `test_focus_${Date.now()}`;
+
+    afterEach(() => {
+      service.deleteSession(testSessionId);
+    });
+
+    test('saveFocusStore and loadFocusStore round-trip (BigInt-safe)', () => {
+      // Create and save a session first
+      const session = createTestSession(testSessionId);
+      service.saveSession(session);
+
+      const focusStore = new FocusStore();
+
+      // Entity focus
+      focusStore.recordEntityClick('frame', '1436069');
+
+      // Time range focus (use BigInt to validate JSON-safe normalization)
+      focusStore.recordTimeRangeClick(BigInt(1000), BigInt(2000));
+
+      // Question focus
+      focusStore.recordQuestion('为什么会卡顿？', 'performance');
+
+      // Persist
+      const saved = service.saveFocusStore(testSessionId, focusStore);
+      expect(saved).toBe(true);
+
+      // Load snapshot
+      const snapshot = service.loadFocusStore(testSessionId);
+      expect(snapshot).not.toBeNull();
+      expect(snapshot?.focuses?.length).toBeGreaterThan(0);
+
+      // Ensure BigInt-like fields are JSON-safe strings
+      const timeFocus = snapshot!.focuses.find(f => f.type === 'timeRange');
+      expect(timeFocus).toBeDefined();
+      expect(typeof timeFocus?.target?.timeRange?.start).toBe('string');
+      expect(typeof timeFocus?.target?.timeRange?.end).toBe('string');
+
+      // Rehydrate and validate behavior
+      const restored = FocusStore.deserialize(snapshot!);
+      const top = restored.getTopFocuses(3);
+      expect(top.length).toBeGreaterThan(0);
+    });
+
+    test('hasFocusStore returns correct status', () => {
+      const session = createTestSession(testSessionId);
+      service.saveSession(session);
+
+      expect(service.hasFocusStore(testSessionId)).toBe(false);
+
+      const focusStore = new FocusStore();
+      focusStore.recordQuestion('Test', 'performance');
+      service.saveFocusStore(testSessionId, focusStore);
+
+      expect(service.hasFocusStore(testSessionId)).toBe(true);
+    });
+  });
+
+  describe('TraceAgentState Persistence', () => {
+    const testSessionId = `test_trace_state_${Date.now()}`;
+
+    afterEach(() => {
+      service.deleteSession(testSessionId);
+    });
+
+    test('saveTraceAgentState and loadTraceAgentState round-trip', () => {
+      const session = createTestSession(testSessionId);
+      service.saveSession(session);
+
+      const state = createInitialTraceAgentState({
+        sessionId: testSessionId,
+        traceId: `trace_${testSessionId}`,
+        userGoal: '分析卡顿根因',
+        now: Date.now(),
+      });
+      state.goal.normalizedGoal = 'scrolling_jank_root_cause';
+      state.turnLog.push({
+        id: 'turn-1',
+        turnIndex: 0,
+        timestamp: Date.now(),
+        query: '为什么会卡顿？',
+        conclusionSummary: '主线程长 runnable',
+        confidence: 0.7,
+      });
+
+      const saved = service.saveTraceAgentState(testSessionId, state);
+      expect(saved).toBe(true);
+
+      const loaded = service.loadTraceAgentState(testSessionId);
+      expect(loaded).not.toBeNull();
+      expect(loaded?.goal?.userGoal).toBe('分析卡顿根因');
+      expect(loaded?.goal?.normalizedGoal).toBe('scrolling_jank_root_cause');
+      expect(Array.isArray(loaded?.turnLog)).toBe(true);
+      expect(loaded?.turnLog?.length).toBeGreaterThan(0);
+    });
+
+    test('hasTraceAgentState returns correct status', () => {
+      const session = createTestSession(testSessionId);
+      service.saveSession(session);
+
+      expect(service.hasTraceAgentState(testSessionId)).toBe(false);
+
+      const state = createInitialTraceAgentState({
+        sessionId: testSessionId,
+        traceId: `trace_${testSessionId}`,
+        userGoal: 'Test',
+      });
+      service.saveTraceAgentState(testSessionId, state);
+
+      expect(service.hasTraceAgentState(testSessionId)).toBe(true);
     });
   });
 

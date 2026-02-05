@@ -270,6 +270,14 @@ export class IterationStrategyPlanner {
   private shouldConclude(context: IterationContext): boolean {
     const { evaluation } = context;
 
+    const majorOrCritical = Array.isArray(evaluation.contradictions)
+      ? evaluation.contradictions.filter(c => c.severity === 'major' || c.severity === 'critical').length
+      : 0;
+    // Never conclude with unresolved major/critical contradictions.
+    if (majorOrCritical > 0) {
+      return false;
+    }
+
     // Conclude if evaluation passed and meets quality thresholds
     if (evaluation.passed &&
         evaluation.qualityScore >= this.config.minQualityForConclusion &&
@@ -331,6 +339,8 @@ export class IterationStrategyPlanner {
 - 当前迭代: ${iterationCount}/${maxIterations}
 - 质量分数: ${evaluation.qualityScore.toFixed(2)}
 - 完整性分数: ${evaluation.completenessScore.toFixed(2)}
+- 矛盾数量: ${evaluation.contradictions.length}
+${evaluation.contradictions.length > 0 ? `- 主要矛盾: ${evaluation.contradictions.slice(0, 2).map(c => `[${c.severity}] ${c.description}`).join('；')}` : ''}
 
 ## 发现汇总
 - 总发现数: ${allFindings.length}
@@ -343,6 +353,10 @@ export class IterationStrategyPlanner {
 - 不足: ${fb.weaknesses.join('; ') || '无'}
 - 缺失方面: ${fb.missingAspects.join(', ') || '无'}
 - 改进建议: ${fb.improvementSuggestions.join('; ') || '无'}
+
+## 决策原则（必须遵守）
+- 若存在 major/critical 矛盾，优先选择能消解矛盾的策略（continue/deep_dive），不要 conclude。
+- 优先选择“最高信息增益”的下一步：用最少的新增证据验证/排除最大的不确定性。
 
 ## 可用策略
 1. **continue** - 继续执行剩余分析任务
@@ -388,6 +402,18 @@ export class IterationStrategyPlanner {
    */
   private getHeuristicDecision(context: IterationContext): StrategyDecision {
     const { evaluation, intent, allFindings } = context;
+
+    const majorOrCritical = Array.isArray(evaluation.contradictions)
+      ? evaluation.contradictions.filter(c => c.severity === 'major' || c.severity === 'critical').length
+      : 0;
+    if (majorOrCritical > 0) {
+      return {
+        strategy: 'continue',
+        confidence: 0.7,
+        reasoning: `存在 ${majorOrCritical} 处 major/critical 矛盾，需要补充证据消解冲突后再下结论`,
+        priorityActions: ['优先消解矛盾（补充能区分两种解释的证据）'],
+      };
+    }
 
     // Check for critical findings that need deep dive
     const criticalFindings = allFindings.filter(f => f.severity === 'critical');

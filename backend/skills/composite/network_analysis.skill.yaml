@@ -32,7 +32,7 @@ triggers:
   - pattern: "(网络唤醒|network wakeup|数据传输)"
     confidence: 0.8
 
-parameters:
+inputs:
   - name: package_name
     type: string
     required: false
@@ -41,11 +41,19 @@ parameters:
     type: string
     required: false
     description: "网络接口过滤 (wlan0, rmnet_data0 等)"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳（纳秒，可选）"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳（纳秒，可选）"
 
-analysis_steps:
+steps:
   # Step 1: 网络流量概览
   - id: network_overview
-    type: diagnostic
+    type: atomic
     name: "网络流量概览"
     description: "按接口和方向统计网络流量"
     sql: |
@@ -59,9 +67,11 @@ analysis_steps:
         SUM(packet_length) / 1024 AS total_kb,
         SUM(packet_length) / 1024 / 1024 AS total_mb
       FROM android_network_packets
-      WHERE CASE WHEN '{{interface}}' != ''
-                 THEN iface GLOB '*{{interface}}*'
+      WHERE CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
                  ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY iface, direction
       ORDER BY total_kb DESC;
     interpretation:
@@ -73,7 +83,7 @@ analysis_steps:
 
   # Step 2: 应用流量排行
   - id: app_traffic_ranking
-    type: diagnostic
+    type: atomic
     name: "应用流量排行"
     description: "按应用统计网络流量使用"
     sql: |
@@ -86,12 +96,14 @@ analysis_steps:
         SUM(packet_count) AS total_packets,
         SUM(packet_length) / 1024 AS total_kb
       FROM android_network_packets
-      WHERE CASE WHEN '{{package_name}}' != ''
-                 THEN package_name GLOB '*{{package_name}}*'
+      WHERE CASE WHEN '${package_name}' != ''
+                 THEN package_name GLOB '*${package_name}*'
                  ELSE 1 END
-        AND CASE WHEN '{{interface}}' != ''
-                 THEN iface GLOB '*{{interface}}*'
+        AND CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
                  ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY package_name, direction
       ORDER BY total_kb DESC
       LIMIT 30;
@@ -102,7 +114,7 @@ analysis_steps:
 
   # Step 3: 传输协议分布
   - id: transport_distribution
-    type: diagnostic
+    type: atomic
     name: "传输协议分布"
     description: "分析各传输协议的使用情况"
     sql: |
@@ -114,9 +126,14 @@ analysis_steps:
         SUM(packet_count) AS total_packets,
         SUM(packet_length) / 1024 AS total_kb
       FROM android_network_packets
-      WHERE CASE WHEN '{{package_name}}' != ''
-                 THEN package_name GLOB '*{{package_name}}*'
+      WHERE CASE WHEN '${package_name}' != ''
+                 THEN package_name GLOB '*${package_name}*'
                  ELSE 1 END
+        AND CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
+                 ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY packet_transport
       ORDER BY total_kb DESC;
     interpretation:
@@ -131,7 +148,7 @@ analysis_steps:
 
   # Step 4: 端口使用分析
   - id: port_analysis
-    type: diagnostic
+    type: atomic
     name: "端口使用分析"
     description: "分析常用端口的流量"
     sql: |
@@ -154,9 +171,14 @@ analysis_steps:
         SUM(packet_length) / 1024 AS total_kb
       FROM android_network_packets
       WHERE remote_port IS NOT NULL
-        AND CASE WHEN '{{package_name}}' != ''
-                 THEN package_name GLOB '*{{package_name}}*'
+        AND CASE WHEN '${package_name}' != ''
+                 THEN package_name GLOB '*${package_name}*'
                  ELSE 1 END
+        AND CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
+                 ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY remote_port
       ORDER BY total_kb DESC
       LIMIT 20;
@@ -169,7 +191,7 @@ analysis_steps:
 
   # Step 5: TCP 标志分析
   - id: tcp_flags_analysis
-    type: diagnostic
+    type: atomic
     name: "TCP 标志分析"
     description: "分析 TCP 连接状态"
     sql: |
@@ -182,9 +204,14 @@ analysis_steps:
       FROM android_network_packets
       WHERE packet_transport = 'TCP'
         AND packet_tcp_flags IS NOT NULL
-        AND CASE WHEN '{{package_name}}' != ''
-                 THEN package_name GLOB '*{{package_name}}*'
+        AND CASE WHEN '${package_name}' != ''
+                 THEN package_name GLOB '*${package_name}*'
                  ELSE 1 END
+        AND CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
+                 ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY packet_tcp_flags
       ORDER BY flag_count DESC
       LIMIT 15;
@@ -197,7 +224,7 @@ analysis_steps:
 
   # Step 6: 流量时间分布
   - id: traffic_timeline
-    type: diagnostic
+    type: atomic
     name: "流量时间分布"
     description: "按时间统计网络流量"
     sql: |
@@ -210,9 +237,14 @@ analysis_steps:
         SUM(CASE WHEN direction = 'Transmitted' THEN packet_length ELSE 0 END) / 1024 AS tx_kb,
         SUM(CASE WHEN direction = 'Received' THEN packet_length ELSE 0 END) / 1024 AS rx_kb
       FROM android_network_packets
-      WHERE CASE WHEN '{{package_name}}' != ''
-                 THEN package_name GLOB '*{{package_name}}*'
+      WHERE CASE WHEN '${package_name}' != ''
+                 THEN package_name GLOB '*${package_name}*'
                  ELSE 1 END
+        AND CASE WHEN '${interface}' != ''
+                 THEN iface GLOB '*${interface}*'
+                 ELSE 1 END
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY time_sec
       ORDER BY time_sec;
     interpretation:
@@ -224,16 +256,28 @@ analysis_steps:
 
   # Step 7: 网络唤醒成本分析
   - id: network_uptime_cost
-    type: diagnostic
+    type: atomic
     name: "网络功耗影响"
     description: "分析网络活动对功耗的影响 (使用 10 秒空闲超时模型)"
     sql: |
       INCLUDE PERFETTO MODULE android.network_packets;
 
-      WITH uptime_spans AS (
+      WITH filtered_packets AS (
+        SELECT *
+        FROM android_network_packets
+        WHERE CASE WHEN '${package_name}' != ''
+                   THEN package_name GLOB '*${package_name}*'
+                   ELSE 1 END
+          AND CASE WHEN '${interface}' != ''
+                   THEN iface GLOB '*${interface}*'
+                   ELSE 1 END
+          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ),
+      uptime_spans AS (
         SELECT *
         FROM android_network_uptime_spans!(
-          android_network_packets,
+          filtered_packets,
           (iface),
           10000000000  -- 10 second timeout
         )
@@ -263,33 +307,35 @@ analysis_steps:
     type: ai_summary
     name: "网络性能 AI 分析"
     description: "综合分析网络使用模式"
+    inputs: [network_overview, app_traffic_ranking, transport_distribution, port_analysis, tcp_flags_analysis, traffic_timeline, network_uptime_cost]
     depends_on:
       - network_overview
       - app_traffic_ranking
       - transport_distribution
       - port_analysis
+      - tcp_flags_analysis
       - traffic_timeline
       - network_uptime_cost
     prompt: |
       请基于以下网络分析数据，提供专业的分析：
 
       ## 流量概览
-      {{network_overview}
+          network_overview
 
       ## 应用流量排行
-      {{app_traffic_ranking}
+          app_traffic_ranking
 
       ## 传输协议分布
-      {{transport_distribution}
+          transport_distribution
 
       ## 端口使用
-      {{port_analysis}
+          port_analysis
 
       ## 流量时间分布
-      {{traffic_timeline}
+          traffic_timeline
 
       ## 功耗影响
-      {{network_uptime_cost}
+          network_uptime_cost
 
       请分析：
       1. 网络流量使用模式
@@ -306,13 +352,13 @@ output:
     - title: "网络分析总结"
       content: |
         ## 流量概览
-        {{network_overview}
+            network_overview
 
         ## 应用流量排行
-        {{app_traffic_ranking}
+            app_traffic_ranking
 
         ## 功耗影响
-        {{network_uptime_cost}
+            network_uptime_cost
 
         ## AI 综合分析
-        {{network_ai_summary}
+            network_ai_summary

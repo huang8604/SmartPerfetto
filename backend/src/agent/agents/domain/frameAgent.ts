@@ -199,6 +199,20 @@ export class FrameAgent extends BaseAgent {
   /**
    * Frame agent extracts additional findings from raw results beyond diagnostics,
    * including jank summaries, consumer jank, and jank frame lists.
+   *
+   * Key design: Merge jank statistics from multiple sources into a single Finding
+   * to avoid duplicate/conflicting reports (e.g., "13 frames" vs "39 frames" vs "25 frames").
+   *
+   * Priority order for data source selection (default for user-facing jank analysis):
+   * 1. Consumer-side detection (consumerSummary) - closest to user perception, includes SF/HWC issues
+   * 2. Frame list count (jankList.length) - concrete per-frame data
+   * 3. App-side report (perfSummary) - app's own tracking, may miss system-layer jank
+   *
+   * IMPORTANT trade-off notes for Android performance experts:
+   * - Consumer > App: Better for "why does user see jank?" analysis
+   * - App > Consumer: Better for "is this App's fault?" attribution
+   * - When consumer jank >> app jank, the delta is likely SF/HWC/GPU layer issues
+   * - All sources are preserved in evidence[] for expert review
    */
   protected extractFindingsFromResult(result: SkillExecutionResult, skillId: string, category: string): Finding[] {
     // Start with base diagnostic findings
@@ -210,34 +224,87 @@ export class FrameAgent extends BaseAgent {
     const consumerSummary = extractSummaryRow(rawResults, ['consumer_jank_summary']);
     const jankList = extractListRows(rawResults, ['get_app_jank_frames', 'app_jank_frames', 'consumer_jank_frames']);
 
-    if (perfSummary) {
-      const jankCount = toNumber(perfSummary.janky_frames ?? perfSummary.jank_frames ?? perfSummary.jank_count);
-      const jankRate = toNumber(perfSummary.jank_rate ?? perfSummary.consumer_jank_rate ?? perfSummary.app_jank_rate);
-      if (jankCount > 0 || jankRate > 0) {
-        findings.push(buildJankFinding(skillId, '滑动卡顿检测', jankCount, jankRate, perfSummary));
-      }
+    // Collect all available jank data sources
+    const perfJankCount = perfSummary
+      ? toNumber(perfSummary.janky_frames ?? perfSummary.jank_frames ?? perfSummary.jank_count)
+      : 0;
+    const perfJankRate = perfSummary
+      ? toNumber(perfSummary.jank_rate ?? perfSummary.consumer_jank_rate ?? perfSummary.app_jank_rate)
+      : 0;
+    const consumerJankCount = consumerSummary
+      ? toNumber(consumerSummary.consumer_jank_frames ?? consumerSummary.jank_frames)
+      : 0;
+    const consumerJankRate = consumerSummary
+      ? toNumber(consumerSummary.consumer_jank_rate)
+      : 0;
+    const listJankCount = jankList?.length ?? 0;
+
+    // Select the most reliable data source (priority: consumer > list > app report)
+    let primaryJankCount = 0;
+    let primaryJankRate = 0;
+    let dataSource = '';
+    const evidenceSources: string[] = [];
+
+    if (consumerJankCount > 0 || consumerJankRate > 0) {
+      primaryJankCount = consumerJankCount;
+      primaryJankRate = consumerJankRate;
+      dataSource = '消费端检测';
+    } else if (listJankCount > 0) {
+      primaryJankCount = listJankCount;
+      // Estimate rate if we have total frames from perfSummary
+      const totalFrames = perfSummary ? toNumber(perfSummary.total_frames) : 0;
+      primaryJankRate = totalFrames > 0 ? (listJankCount / totalFrames) * 100 : 0;
+      dataSource = '帧列表统计';
+    } else if (perfJankCount > 0 || perfJankRate > 0) {
+      primaryJankCount = perfJankCount;
+      primaryJankRate = perfJankRate;
+      dataSource = 'App 报告';
     }
 
-    if (consumerSummary) {
-      const jankCount = toNumber(consumerSummary.consumer_jank_frames ?? consumerSummary.jank_frames);
-      const jankRate = toNumber(consumerSummary.consumer_jank_rate);
-      if (jankCount > 0 || jankRate > 0) {
-        findings.push(buildJankFinding(skillId, 'Consumer 侧掉帧', jankCount, jankRate, consumerSummary));
-      }
+    // Build evidence list showing all data sources for transparency
+    if (perfJankCount > 0 || perfJankRate > 0) {
+      evidenceSources.push(`App 报告: ${perfJankCount} 帧 (${perfJankRate.toFixed(1)}%)`);
+    }
+    if (consumerJankCount > 0 || consumerJankRate > 0) {
+      evidenceSources.push(`消费端: ${consumerJankCount} 帧 (${consumerJankRate.toFixed(1)}%)`);
+    }
+    if (listJankCount > 0) {
+      evidenceSources.push(`帧列表: ${listJankCount} 帧`);
     }
 
-    if (jankList && jankList.length > 0) {
+    // Generate a single consolidated Finding for jank detection
+    if (primaryJankCount > 0 || primaryJankRate > 0) {
+      const severity: Finding['severity'] =
+        primaryJankRate >= DEFAULT_JANK_THRESHOLDS.criticalRate ||
+        primaryJankCount >= DEFAULT_JANK_THRESHOLDS.criticalCount
+          ? 'critical'
+          : primaryJankRate >= DEFAULT_JANK_THRESHOLDS.warningRate ||
+            primaryJankCount >= DEFAULT_JANK_THRESHOLDS.warningCount
+            ? 'warning'
+            : 'info';
+
       findings.push({
-        id: `${skillId}_${Date.now()}_${findings.length}`,
+        id: `${skillId}_jank_consolidated_${Date.now()}`,
         category: 'frame',
         type: 'issue',
-        // Use configurable threshold for jank list severity
-        severity: jankList.length > JANK_LIST_CRITICAL_THRESHOLD ? 'critical' : 'warning',
-        title: `检测到 ${jankList.length} 个卡顿帧`,
-        description: '存在明显掉帧，建议进一步查看帧级详细分析',
+        severity,
+        title: `滑动卡顿检测: ${primaryJankCount} 帧 (${primaryJankRate.toFixed(1)}%)`,
+        description: `数据来源: ${dataSource}`,
         source: skillId,
         confidence: DEFAULT_RAW_FINDING_CONFIDENCE,
-        details: { sample: jankList.slice(0, 5) },
+        details: {
+          jankCount: primaryJankCount,
+          jankRate: primaryJankRate,
+          dataSource,
+          // Include all sources for debugging/comparison
+          allSources: {
+            app: perfJankCount > 0 ? { count: perfJankCount, rate: perfJankRate } : null,
+            consumer: consumerJankCount > 0 ? { count: consumerJankCount, rate: consumerJankRate } : null,
+            list: listJankCount > 0 ? { count: listJankCount } : null,
+          },
+          sample: jankList?.slice(0, 5) ?? [],
+        },
+        evidence: evidenceSources,
       });
     }
 

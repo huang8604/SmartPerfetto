@@ -36,7 +36,7 @@ triggers:
   - pattern: "(GPU 内存|gpu memory|显存)"
     confidence: 0.9
 
-parameters:
+inputs:
   - name: process_name
     type: string
     required: false
@@ -50,10 +50,10 @@ parameters:
     required: false
     description: "分析时间范围结束 (秒)"
 
-analysis_steps:
+steps:
   # Step 1: GPU 频率分布分析
   - id: gpu_frequency_distribution
-    type: diagnostic
+    type: atomic
     name: "GPU 频率分布"
     description: "分析 GPU 各频率档位的时间占比"
     sql: |
@@ -66,11 +66,11 @@ analysis_steps:
         ROUND(SUM(dur) * 100.0 / (SELECT SUM(dur) FROM android_gpu_frequency WHERE gpu_id = g.gpu_id), 2) AS time_pct
       FROM android_gpu_frequency g
       WHERE dur > 0
-        AND CASE WHEN {{time_range_start}} IS NOT NULL
-                 THEN ts >= {{time_range_start}} * 1e9
+        AND CASE WHEN ${time_range_start} IS NOT NULL
+                 THEN ts >= ${time_range_start} * 1e9
                  ELSE 1 END
-        AND CASE WHEN {{time_range_end}} IS NOT NULL
-                 THEN ts <= {{time_range_end}} * 1e9
+        AND CASE WHEN ${time_range_end} IS NOT NULL
+                 THEN ts <= ${time_range_end} * 1e9
                  ELSE 1 END
       GROUP BY gpu_id, gpu_freq
       ORDER BY gpu_id, gpu_freq DESC;
@@ -86,7 +86,7 @@ analysis_steps:
 
   # Step 2: GPU 频率变化分析
   - id: gpu_frequency_changes
-    type: diagnostic
+    type: atomic
     name: "GPU 频率变化统计"
     description: "分析 GPU 频率变化模式"
     sql: |
@@ -125,7 +125,7 @@ analysis_steps:
 
   # Step 3: GPU 内存使用分析 (按进程)
   - id: gpu_memory_by_process
-    type: diagnostic
+    type: atomic
     name: "各进程 GPU 内存使用"
     description: "统计各进程的 GPU 内存使用量"
     sql: |
@@ -138,8 +138,8 @@ analysis_steps:
         MIN(gm.gpu_memory) / 1024 / 1024 AS min_gpu_memory_mb
       FROM android_gpu_memory_per_process gm
       JOIN process p ON gm.upid = p.id
-      WHERE CASE WHEN '{{process_name}}' != ''
-                 THEN p.name GLOB '*{{process_name}}*'
+      WHERE CASE WHEN '${process_name}' != ''
+                 THEN p.name GLOB '*${process_name}*'
                  ELSE 1 END
       GROUP BY p.name
       ORDER BY max_gpu_memory_mb DESC
@@ -154,7 +154,7 @@ analysis_steps:
 
   # Step 4: GPU 内存变化趋势
   - id: gpu_memory_timeline
-    type: diagnostic
+    type: atomic
     name: "GPU 内存变化趋势"
     description: "追踪目标进程 GPU 内存随时间变化"
     sql: |
@@ -167,8 +167,8 @@ analysis_steps:
           MAX(gm.gpu_memory) AS gpu_memory
         FROM android_gpu_memory_per_process gm
         JOIN process p ON gm.upid = p.id
-        WHERE CASE WHEN '{{process_name}}' != ''
-                   THEN p.name GLOB '*{{process_name}}*'
+        WHERE CASE WHEN '${process_name}' != ''
+                   THEN p.name GLOB '*${process_name}*'
                    ELSE 1 END
         GROUP BY time_sec, p.name
       )
@@ -190,7 +190,7 @@ analysis_steps:
 
   # Step 5: GPU 与帧渲染关联分析
   - id: gpu_frame_correlation
-    type: diagnostic
+    type: atomic
     name: "GPU 与帧渲染关联"
     description: "分析 GPU 频率与帧渲染/Jank 的关系"
     sql: |
@@ -230,7 +230,7 @@ analysis_steps:
 
   # Step 6: GPU 高负载时段识别
   - id: gpu_high_load_periods
-    type: diagnostic
+    type: atomic
     name: "GPU 高负载时段"
     description: "识别 GPU 持续高频运行的时段"
     sql: |
@@ -274,29 +274,31 @@ analysis_steps:
     type: ai_summary
     name: "GPU 性能 AI 分析"
     description: "综合分析 GPU 频率、内存和帧渲染"
+    inputs: [gpu_frequency_distribution, gpu_frequency_changes, gpu_memory_by_process, gpu_memory_timeline, gpu_frame_correlation, gpu_high_load_periods]
     depends_on:
       - gpu_frequency_distribution
       - gpu_frequency_changes
       - gpu_memory_by_process
+      - gpu_memory_timeline
       - gpu_frame_correlation
       - gpu_high_load_periods
     prompt: |
       请基于以下 GPU 分析数据，提供专业的性能分析：
 
       ## GPU 频率分布
-      {{gpu_frequency_distribution}
+          gpu_frequency_distribution
 
       ## 频率变化统计
-      {{gpu_frequency_changes}
+          gpu_frequency_changes
 
       ## GPU 内存使用
-      {{gpu_memory_by_process}
+          gpu_memory_by_process
 
       ## 帧渲染关联
-      {{gpu_frame_correlation}
+          gpu_frame_correlation
 
       ## 高负载时段
-      {{gpu_high_load_periods}
+          gpu_high_load_periods
 
       请分析：
       1. GPU 整体负载水平评估
@@ -313,13 +315,13 @@ output:
     - title: "GPU 分析总结"
       content: |
         ## GPU 频率分析
-        {{gpu_frequency_distribution}
+            gpu_frequency_distribution
 
         ## GPU 内存分析
-        {{gpu_memory_by_process}
+            gpu_memory_by_process
 
         ## GPU-帧渲染关联
-        {{gpu_frame_correlation}
+            gpu_frame_correlation
 
         ## AI 综合分析
-        {{gpu_ai_summary}
+            gpu_ai_summary

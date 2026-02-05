@@ -33,7 +33,7 @@ triggers:
   - pattern: "(中断延迟|interrupt latency)"
     confidence: 0.85
 
-parameters:
+inputs:
   - name: irq_name
     type: string
     required: false
@@ -44,10 +44,10 @@ parameters:
     default: 100
     description: "最小中断持续时间阈值 (微秒)"
 
-analysis_steps:
+steps:
   # Step 1: 中断概览
   - id: irq_overview
-    type: diagnostic
+    type: atomic
     name: "中断概览"
     description: "统计硬中断和软中断的数量和耗时"
     sql: |
@@ -75,7 +75,7 @@ analysis_steps:
 
   # Step 2: 硬中断排行
   - id: hard_irq_ranking
-    type: diagnostic
+    type: atomic
     name: "硬中断排行"
     description: "按耗时排列硬中断"
     sql: |
@@ -89,10 +89,10 @@ analysis_steps:
         MAX(dur) / 1e3 AS max_dur_us,
         COUNT(parent_id) AS preempted_count
       FROM linux_hard_irqs
-      WHERE CASE WHEN '{{irq_name}}' != ''
-                 THEN name GLOB '*{{irq_name}}*'
+      WHERE CASE WHEN '${irq_name}' != ''
+                 THEN name GLOB '*${irq_name}*'
                  ELSE 1 END
-        AND dur / 1e3 >= COALESCE({{min_duration_us}}, 100)
+        AND dur / 1e3 >= COALESCE(${min_duration_us|100}, 100)
       GROUP BY name
       ORDER BY total_dur_ms DESC
       LIMIT 20;
@@ -110,7 +110,7 @@ analysis_steps:
 
   # Step 3: 软中断排行
   - id: soft_irq_ranking
-    type: diagnostic
+    type: atomic
     name: "软中断排行"
     description: "按耗时排列软中断"
     sql: |
@@ -123,10 +123,10 @@ analysis_steps:
         AVG(dur) / 1e3 AS avg_dur_us,
         MAX(dur) / 1e3 AS max_dur_us
       FROM linux_soft_irqs
-      WHERE CASE WHEN '{{irq_name}}' != ''
-                 THEN name GLOB '*{{irq_name}}*'
+      WHERE CASE WHEN '${irq_name}' != ''
+                 THEN name GLOB '*${irq_name}*'
                  ELSE 1 END
-        AND dur / 1e3 >= COALESCE({{min_duration_us}}, 100)
+        AND dur / 1e3 >= COALESCE(${min_duration_us|100}, 100)
       GROUP BY name
       ORDER BY total_dur_ms DESC
       LIMIT 20;
@@ -142,7 +142,7 @@ analysis_steps:
 
   # Step 4: 长耗时中断事件
   - id: long_irq_events
-    type: diagnostic
+    type: atomic
     name: "长耗时中断"
     description: "识别耗时超过阈值的中断"
     sql: |
@@ -154,9 +154,9 @@ analysis_steps:
         CASE WHEN is_soft_irq THEN 'Soft' ELSE 'Hard' END AS irq_type,
         dur / 1e3 AS dur_us
       FROM linux_irqs
-      WHERE dur / 1e3 >= COALESCE({{min_duration_us}}, 100) * 10  -- 10x threshold for "long"
-        AND CASE WHEN '{{irq_name}}' != ''
-                 THEN name GLOB '*{{irq_name}}*'
+      WHERE dur / 1e3 >= COALESCE(${min_duration_us|100}, 100) * 10  -- 10x threshold for "long"
+        AND CASE WHEN '${irq_name}' != ''
+                 THEN name GLOB '*${irq_name}*'
                  ELSE 1 END
       ORDER BY dur DESC
       LIMIT 50;
@@ -170,7 +170,7 @@ analysis_steps:
 
   # Step 5: 中断时间分布
   - id: irq_timeline
-    type: diagnostic
+    type: atomic
     name: "中断时间分布"
     description: "按时间统计中断频率"
     sql: |
@@ -194,7 +194,7 @@ analysis_steps:
 
   # Step 6: 中断嵌套分析 (硬中断抢占)
   - id: irq_nesting
-    type: diagnostic
+    type: atomic
     name: "中断嵌套分析"
     description: "分析硬中断的嵌套情况"
     sql: |
@@ -227,6 +227,7 @@ analysis_steps:
     type: ai_summary
     name: "中断性能 AI 分析"
     description: "综合分析中断行为"
+    inputs: [irq_overview, hard_irq_ranking, soft_irq_ranking, long_irq_events, irq_timeline, irq_nesting]
     depends_on:
       - irq_overview
       - hard_irq_ranking
@@ -238,22 +239,22 @@ analysis_steps:
       请基于以下中断分析数据，提供专业的分析：
 
       ## 中断概览
-      {{irq_overview}
+          irq_overview
 
       ## 硬中断排行
-      {{hard_irq_ranking}
+          hard_irq_ranking
 
       ## 软中断排行
-      {{soft_irq_ranking}
+          soft_irq_ranking
 
       ## 长耗时中断
-      {{long_irq_events}
+          long_irq_events
 
       ## 时间分布
-      {{irq_timeline}
+          irq_timeline
 
       ## 中断嵌套
-      {{irq_nesting}
+          irq_nesting
 
       请分析：
       1. 中断负载评估
@@ -270,13 +271,13 @@ output:
     - title: "中断分析总结"
       content: |
         ## 中断概览
-        {{irq_overview}
+            irq_overview
 
         ## 硬中断排行
-        {{hard_irq_ranking}
+            hard_irq_ranking
 
         ## 软中断排行
-        {{soft_irq_ranking}
+            soft_irq_ranking
 
         ## AI 综合分析
-        {{irq_ai_summary}
+            irq_ai_summary

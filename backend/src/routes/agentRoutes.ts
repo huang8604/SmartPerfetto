@@ -25,6 +25,9 @@ import {
   ModelRouter,
   Hypothesis,
 } from '../agent';
+// Agent-Driven Architecture v2.0 - Intervention & Focus
+import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
+import type { FocusInteraction } from '../agent/context/focusStore';
 // DataEnvelope types for v2.0 data contract
 import {
   generateEventId,
@@ -517,6 +520,272 @@ router.post('/:sessionId/respond', async (req, res) => {
   return res.json({ success: true, sessionId, status: session.status });
 });
 
+// =============================================================================
+// Agent-Driven Architecture v2.0 - Intervention & Focus Endpoints
+// =============================================================================
+
+/**
+ * POST /api/agent/:sessionId/intervene
+ *
+ * Handle user intervention response during analysis.
+ * Called when the frontend receives an 'intervention_required' event and
+ * the user selects an option.
+ *
+ * Request body:
+ * {
+ *   interventionId: string,    // ID from intervention_required event
+ *   action: 'continue' | 'focus' | 'abort' | 'custom' | 'select_option',
+ *   selectedOptionId?: string, // ID of selected option
+ *   customInput?: string,      // User's custom input (for action='custom')
+ *   params?: Record<string, any> // Additional parameters
+ * }
+ *
+ * Response:
+ * {
+ *   success: boolean,
+ *   sessionId: string,
+ *   directive?: AnalysisDirective  // How analysis should proceed
+ * }
+ */
+router.post('/:sessionId/intervene', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Session not found',
+    });
+  }
+
+  const { interventionId, action, selectedOptionId, customInput, params } = req.body;
+
+  // Validate required fields
+  if (!interventionId || typeof interventionId !== 'string') {
+    return res.status(400).json({
+      success: false,
+      error: 'interventionId is required',
+    });
+  }
+
+  const allowedActions = new Set(['continue', 'focus', 'abort', 'custom', 'select_option']);
+  if (!action || !allowedActions.has(action)) {
+    return res.status(400).json({
+      success: false,
+      error: `Invalid action: ${String(action)}. Allowed: ${Array.from(allowedActions).join(', ')}`,
+    });
+  }
+
+  try {
+    const interventionController = session.orchestrator.getInterventionController();
+
+    // Check if there's a pending intervention
+    if (!interventionController.hasPendingIntervention(sessionId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'No pending intervention for this session',
+      });
+    }
+
+    // Build user decision
+    const decision: UserDecision = {
+      interventionId,
+      action,
+      selectedOptionId,
+      customInput,
+      params,
+    };
+
+    // Process the decision (interventionId is used internally to find the session)
+    const directive = interventionController.handleUserDecision(decision);
+
+    // Update session status if needed
+    if (directive.action === 'abort') {
+      session.status = 'failed';
+      session.error = 'Aborted by user intervention';
+    } else if (session.status === 'awaiting_user') {
+      session.status = 'running';
+    }
+
+    return res.json({
+      success: true,
+      sessionId,
+      directive,
+    });
+  } catch (error: any) {
+    console.error(`[Intervene] Error processing intervention for session ${sessionId}:`, error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process intervention',
+    });
+  }
+});
+
+/**
+ * POST /api/agent/:sessionId/interaction
+ *
+ * Record user interaction from the frontend.
+ * Used to update the FocusStore for incremental analysis support.
+ *
+ * Request body:
+ * {
+ *   type: 'click' | 'query' | 'drill_down' | 'compare' | 'extend' | 'explicit',
+ *   target: {
+ *     entityType?: 'frame' | 'process' | 'thread' | 'session',
+ *     entityId?: string,
+ *     timeRange?: { start: string, end: string },  // ns as string
+ *     metricName?: string,
+ *     question?: string
+ *   },
+ *   context?: Record<string, any>  // Additional context
+ * }
+ *
+ * Response:
+ * {
+ *   success: boolean,
+ *   sessionId: string,
+ *   focusCount: number  // Current number of tracked focuses
+ * }
+ */
+router.post('/:sessionId/interaction', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Session not found',
+    });
+  }
+
+  const { type, target, context } = req.body;
+
+  // Validate type
+  const allowedTypes = new Set(['click', 'query', 'drill_down', 'compare', 'extend', 'explicit']);
+  if (!type || !allowedTypes.has(type)) {
+    return res.status(400).json({
+      success: false,
+      error: `Invalid interaction type: ${String(type)}. Allowed: ${Array.from(allowedTypes).join(', ')}`,
+    });
+  }
+
+  // Validate target
+  if (!target || typeof target !== 'object') {
+    return res.status(400).json({
+      success: false,
+      error: 'target is required and must be an object',
+    });
+  }
+
+  try {
+    // Convert timeRange strings to BigInt if present
+    const processedTarget = { ...target };
+    if (target.timeRange) {
+      processedTarget.timeRange = {
+        start: BigInt(target.timeRange.start),
+        end: BigInt(target.timeRange.end),
+      };
+    }
+
+    // Build interaction
+    const interaction: FocusInteraction = {
+      type,
+      target: processedTarget,
+      source: 'ui',
+      timestamp: Date.now(),
+      context,
+    };
+
+    // Record the interaction
+    session.orchestrator.recordUserInteraction(interaction);
+
+    // Get current focus count
+    const focusStore = session.orchestrator.getFocusStore();
+    const focusCount = focusStore.getTopFocuses(100).length;
+
+    return res.json({
+      success: true,
+      sessionId,
+      focusCount,
+    });
+  } catch (error: any) {
+    console.error(`[Interaction] Error recording interaction for session ${sessionId}:`, error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to record interaction',
+    });
+  }
+});
+
+/**
+ * GET /api/agent/:sessionId/focus
+ *
+ * Get current user focus state for a session.
+ * Useful for debugging and displaying focus indicators in the UI.
+ *
+ * Query params:
+ * - limit: Max number of focuses to return (default: 10)
+ *
+ * Response:
+ * {
+ *   success: boolean,
+ *   sessionId: string,
+ *   focuses: UserFocus[],
+ *   context: string  // LLM-ready focus context summary
+ * }
+ */
+router.get('/:sessionId/focus', (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      error: 'Session not found',
+    });
+  }
+
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
+    const focusStore = session.orchestrator.getFocusStore();
+
+    // Get top focuses
+    const focuses = focusStore.getTopFocuses(limit).map(f => ({
+      id: f.id,
+      type: f.type,
+      target: {
+        ...f.target,
+        // Convert BigInt to string for JSON serialization
+        ...(f.target.timeRange && {
+          timeRange: {
+            start: String(f.target.timeRange.start),
+            end: String(f.target.timeRange.end),
+          },
+        }),
+      },
+      weight: f.weight,
+      lastInteractionTime: f.lastInteractionTime,
+      interactionCount: f.interactionHistory.length,
+    }));
+
+    // Get LLM-ready context
+    const context = focusStore.buildFocusContext();
+
+    return res.json({
+      success: true,
+      sessionId,
+      focuses,
+      context,
+    });
+  } catch (error: any) {
+    console.error(`[Focus] Error getting focus for session ${sessionId}:`, error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get focus state',
+    });
+  }
+});
+
 /**
  * GET /api/agent/sessions
  *
@@ -667,8 +936,19 @@ router.post('/resume', async (req, res) => {
       });
     }
 
-    // Use provided traceId or fall back to persisted one
-    const effectiveTraceId = traceId || persistedSession.traceId;
+    // Security/consistency: long-term memory is scoped to the same trace.
+    // Reject attempts to resume a session against a different trace.
+    if (traceId && traceId !== persistedSession.traceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'traceId mismatch for resume',
+        hint: `This session was created for traceId=${persistedSession.traceId}. Upload/choose that trace to resume.`,
+        code: 'TRACE_ID_MISMATCH',
+      });
+    }
+
+    // Use persisted traceId (or request-provided when identical).
+    const effectiveTraceId = persistedSession.traceId;
 
     // Verify trace exists
     const traceProcessorService = getTraceProcessorService();
@@ -683,27 +963,35 @@ router.post('/resume', async (req, res) => {
     }
 
     // Restore the EnhancedSessionContext (includes EntityStore)
-    const restoredContext = persistenceService.loadSessionContext(sessionId);
-    if (!restoredContext) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to deserialize session context',
-      });
-    }
+	    const restoredContext = persistenceService.loadSessionContext(sessionId);
+	    if (!restoredContext) {
+	      return res.status(500).json({
+	        success: false,
+	        error: 'Failed to deserialize session context',
+	      });
+	    }
 
-    // Register the restored context in the session context manager
-    // This replaces any stale in-memory context
-    const contextManager = sessionContextManager;
-    // We need to directly inject the restored context
-    // First, get or create will create a new one, so we need to manually set it
-    // Let's add the context to the manager by using the internal get method
-    // Actually, we need to use the deserialized context directly
+	    // Inject the restored context into the session context manager (preserves internal state)
+	    sessionContextManager.set(sessionId, effectiveTraceId, restoredContext);
 
-    // Create a new orchestrator for this session
-    const modelRouter = getModelRouter();
-    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
-      enableLogging: true,
-    });
+	    // Create a new orchestrator for this session
+	    const modelRouter = getModelRouter();
+	    const orchestrator = createAgentDrivenOrchestrator(modelRouter, {
+	      enableLogging: true,
+	    });
+
+	    // Restore FocusStore (if present) so focus-aware incremental planning survives restarts
+	    const focusSnapshot = persistenceService.loadFocusStore(sessionId);
+	    if (focusSnapshot) {
+	      orchestrator.getFocusStore().loadSnapshot(focusSnapshot);
+	      orchestrator.getFocusStore().syncWithEntityStore(restoredContext.getEntityStore());
+	    }
+
+	    // Restore TraceAgentState (if present) for goal-driven continuity across restarts.
+	    const traceAgentStateSnapshot = persistenceService.loadTraceAgentState(sessionId);
+	    if (traceAgentStateSnapshot) {
+	      restoredContext.setTraceAgentState(traceAgentStateSnapshot);
+	    }
 
     // Create logger
     const logger = createSessionLogger(sessionId);
@@ -719,76 +1007,42 @@ router.post('/resume', async (req, res) => {
     });
 
     // Create the session record
-    sessions.set(sessionId, {
-      orchestrator,
-      sessionId,
-      sseClients: [],
-      status: 'completed', // Previous analysis was completed
-      traceId: effectiveTraceId,
-      query: persistedSession.question,
-      createdAt: persistedSession.createdAt,
-      logger,
-      hypotheses: [],
-      agentDialogue: [],
-      dataEnvelopes: [],
-      agentResponses: [],
-    });
+	    sessions.set(sessionId, {
+	      orchestrator,
+	      sessionId,
+	      sseClients: [],
+	      status: 'completed', // Previous analysis was completed
+	      traceId: effectiveTraceId,
+	      query: persistedSession.question,
+	      createdAt: persistedSession.createdAt,
+	      logger,
+	      hypotheses: [],
+	      agentDialogue: [],
+	      dataEnvelopes: [],
+	      agentResponses: [],
+	    });
 
-    // Inject the restored context into the session context manager
-    // Note: We need to handle this carefully since EnhancedSessionContext
-    // uses sessionContextManager internally
-    // The cleanest approach is to use getOrCreate and then manually
-    // update the internal state
-    const freshContext = sessionContextManager.getOrCreate(sessionId, effectiveTraceId);
-
-    // Manually restore EntityStore data from persisted context
-    const restoredStore = restoredContext.getEntityStore();
-    const freshStore = freshContext.getEntityStore();
-
-    // Transfer all entities from restored store to fresh store
-    for (const frame of restoredStore.getAllFrames()) {
-      freshStore.upsertFrame(frame);
-    }
-    for (const session of restoredStore.getAllSessions()) {
-      freshStore.upsertSession(session);
-    }
-
-    // Transfer candidate and analyzed tracking
-    const restoredSnapshot = restoredStore.serialize();
-    if (restoredSnapshot.lastCandidateFrameIds) {
-      freshStore.setLastCandidateFrames(restoredSnapshot.lastCandidateFrameIds);
-    }
-    if (restoredSnapshot.lastCandidateSessionIds) {
-      freshStore.setLastCandidateSessions(restoredSnapshot.lastCandidateSessionIds);
-    }
-    if (restoredSnapshot.analyzedFrameIds) {
-      for (const id of restoredSnapshot.analyzedFrameIds) {
-        freshStore.markFrameAnalyzed(id);
-      }
-    }
-    if (restoredSnapshot.analyzedSessionIds) {
-      for (const id of restoredSnapshot.analyzedSessionIds) {
-        freshStore.markSessionAnalyzed(id);
-      }
-    }
-
-    // Restore turns from persisted context
-    for (const turn of restoredContext.getAllTurns()) {
-      freshContext.addTurn(turn.query, turn.intent, turn.result, turn.findings);
-    }
-
-    return res.json({
-      success: true,
-      sessionId,
-      traceId: effectiveTraceId,
-      status: 'completed',
-      message: 'Session restored from persistence',
-      restored: true,
-      restoredStats: {
-        turnCount: restoredContext.getAllTurns().length,
-        entityStore: restoredStore.getStats(),
-      },
-    });
+	    return res.json({
+	      success: true,
+	      sessionId,
+	      traceId: effectiveTraceId,
+	      status: 'completed',
+	      message: 'Session restored from persistence',
+	      restored: true,
+	      restoredStats: {
+	        turnCount: restoredContext.getAllTurns().length,
+	        entityStore: restoredContext.getEntityStore().getStats(),
+	        focusStore: focusSnapshot ? orchestrator.getFocusStore().getStats() : null,
+	        traceAgentState: traceAgentStateSnapshot
+	          ? {
+	              version: traceAgentStateSnapshot.version,
+	              updatedAt: traceAgentStateSnapshot.updatedAt,
+	              turns: Array.isArray(traceAgentStateSnapshot.turnLog) ? traceAgentStateSnapshot.turnLog.length : 0,
+	              goal: traceAgentStateSnapshot.goal?.normalizedGoal || traceAgentStateSnapshot.goal?.userGoal || '',
+	            }
+	          : null,
+	      },
+	    });
   } catch (error: any) {
     console.error('[AgentRoutes] Session restore failed:', error);
     return res.status(500).json({
@@ -1942,20 +2196,42 @@ async function runAgentDrivenAnalysis(
           });
         }
 
-        // Save the full session context (includes EntityStore)
-        const saved = persistenceService.saveSessionContext(sessionId, sessionContext);
-        if (saved) {
-          const storeStats = sessionContext.getEntityStore().getStats();
-          logger.info('AgentDrivenAnalysis', 'Session context persisted to DB', {
-            sessionId,
-            entityStoreStats: storeStats,
-          });
-        }
-      }
-    } catch (persistError: any) {
-      // Don't fail the analysis if persistence fails - just log the error
-      logger.warn('AgentDrivenAnalysis', 'Failed to persist session context', {
-        error: persistError.message,
+	        // Save the full session context (includes EntityStore)
+	        const saved = persistenceService.saveSessionContext(sessionId, sessionContext);
+	        if (saved) {
+	          const storeStats = sessionContext.getEntityStore().getStats();
+	          logger.info('AgentDrivenAnalysis', 'Session context persisted to DB', {
+	            sessionId,
+	            entityStoreStats: storeStats,
+	          });
+	        }
+
+	        // Persist FocusStore so focus-aware incremental planning can survive restarts
+	        const focusSaved = persistenceService.saveFocusStore(sessionId, session.orchestrator.getFocusStore());
+	        if (focusSaved) {
+	          logger.info('AgentDrivenAnalysis', 'FocusStore persisted to DB', {
+	            sessionId,
+	            focusStats: session.orchestrator.getFocusStore().getStats(),
+	          });
+	        }
+
+	        // Persist TraceAgentState (goal-driven agent scaffold) for cross-restart continuity.
+	        const traceAgentState = sessionContext.getTraceAgentState();
+	        if (traceAgentState) {
+	          const stateSaved = persistenceService.saveTraceAgentState(sessionId, traceAgentState);
+	          if (stateSaved) {
+	            logger.info('AgentDrivenAnalysis', 'TraceAgentState persisted to DB', {
+	              sessionId,
+	              version: traceAgentState.version,
+	              updatedAt: traceAgentState.updatedAt,
+	            });
+	          }
+	        }
+	      }
+	    } catch (persistError: any) {
+	      // Don't fail the analysis if persistence fails - just log the error
+	      logger.warn('AgentDrivenAnalysis', 'Failed to persist session context', {
+	        error: persistError.message,
       });
     }
 

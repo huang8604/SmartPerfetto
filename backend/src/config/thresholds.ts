@@ -86,9 +86,15 @@ export const VSYNC_PERIODS_NS: Record<number, bigint> = {
 
 /**
  * Default VSync period when refresh rate is unknown.
- * Uses 60Hz as the conservative default for most devices.
+ * Uses 120Hz as the modern default for flagship devices.
+ *
+ * Rationale: Most modern Android flagships (2022+) support 120Hz displays.
+ * Using 120Hz as default is more conservative for jank detection:
+ * - A frame that's fine at 60Hz (16ms) would be janky at 120Hz (8.3ms)
+ * - Better to catch potential issues than miss them
+ * - The vsync_config skill will override this with actual trace data
  */
-export const DEFAULT_VSYNC_PERIOD_NS = VSYNC_PERIODS_NS[60];
+export const DEFAULT_VSYNC_PERIOD_NS = VSYNC_PERIODS_NS[120];
 
 /**
  * Number of VSync periods to use when estimating frame end time
@@ -104,9 +110,9 @@ export const DEFAULT_VSYNC_PERIODS_FOR_FRAME_ESTIMATION = 2;
  * Infer VSync period from trace context or use default.
  *
  * Resolution order:
- * 1. Detected VSync period from trace (vsync_period_ns)
+ * 1. Detected VSync period from trace (vsync_period_ns) - from vsync_config skill
  * 2. Device refresh rate config (device_refresh_rate)
- * 3. Default 60Hz
+ * 3. Default 120Hz (modern flagship assumption)
  *
  * @param traceContext - Context containing detected trace properties
  * @returns VSync period in nanoseconds as BigInt
@@ -115,7 +121,7 @@ export function inferVsyncPeriodNs(traceContext?: {
   detectedVsyncPeriodNs?: string | bigint | number;
   deviceRefreshRate?: number;
 }): bigint {
-  // Try detected value first
+  // Try detected value first (from vsync_config skill)
   if (traceContext?.detectedVsyncPeriodNs) {
     try {
       const detected = BigInt(traceContext.detectedVsyncPeriodNs);
@@ -137,7 +143,7 @@ export function inferVsyncPeriodNs(traceContext?: {
     }
   }
 
-  // Default to 60Hz
+  // Default to 120Hz (modern flagship devices)
   return DEFAULT_VSYNC_PERIOD_NS;
 }
 
@@ -300,13 +306,16 @@ export interface FrameTimeDisplayThresholds {
 }
 
 /**
- * Default frame time display thresholds (60Hz assumptions).
+ * Default frame time display thresholds (120Hz assumptions).
+ *
+ * Updated from 60Hz to 120Hz to match modern devices.
+ * These are UI display thresholds; actual jank detection uses vsync_config skill.
  */
 export const DEFAULT_FRAME_TIME_DISPLAY_THRESHOLDS: FrameTimeDisplayThresholds = {
-  avgWarningMs: 16.67,   // 1 VSync (60Hz)
-  avgCriticalMs: 33.33,  // 2 VSyncs (60Hz)
-  maxWarningMs: 33.33,   // 2 VSyncs (60Hz)
-  maxCriticalMs: 100,    // ~6 VSyncs (severe)
+  avgWarningMs: 8.33,    // 1 VSync (120Hz)
+  avgCriticalMs: 16.67,  // 2 VSyncs (120Hz)
+  maxWarningMs: 16.67,   // 2 VSyncs (120Hz)
+  maxCriticalMs: 100,    // ~12 VSyncs (severe)
 };
 
 /**

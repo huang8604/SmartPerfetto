@@ -81,13 +81,23 @@ export async function executeTaskGraph(
   return responses;
 }
 
+import {
+  EmittedEnvelopeRegistry,
+  generateDeduplicationKey,
+} from './emittedEnvelopeRegistry';
+
 /**
  * Emit DataEnvelopes from agent responses via SSE.
- * Filters out empty tables to reduce noise.
+ * Filters out empty tables and duplicates (if registry provided).
+ *
+ * @param responses - Agent responses containing DataEnvelopes
+ * @param emitter - Progress emitter for SSE
+ * @param registry - Optional registry for session-level deduplication
  */
 export function emitDataEnvelopes(
   responses: AgentResponse[],
-  emitter: ProgressEmitter
+  emitter: ProgressEmitter,
+  registry?: EmittedEnvelopeRegistry
 ): void {
   const toolResultCounts = responses.map(r => ({
     agentId: r.agentId,
@@ -101,7 +111,7 @@ export function emitDataEnvelopes(
     .flatMap(result => result.dataEnvelopes || []);
 
   // Filter out envelopes with no data rows (empty tables add noise without value)
-  const envelopes = allEnvelopes.filter(env => {
+  let envelopes = allEnvelopes.filter(env => {
     const payload = env.data as any;
     if (!payload) return false;
     // Keep non-table formats (text, summary, chart, etc.)
@@ -111,15 +121,27 @@ export function emitDataEnvelopes(
     return rows && Array.isArray(rows) && rows.length > 0;
   });
 
-  const filteredCount = allEnvelopes.length - envelopes.length;
-  if (filteredCount > 0) {
-    emitter.log(`Filtered out ${filteredCount} empty DataEnvelope(s)`);
+  const emptyFilteredCount = allEnvelopes.length - envelopes.length;
+  if (emptyFilteredCount > 0) {
+    emitter.log(`Filtered out ${emptyFilteredCount} empty DataEnvelope(s)`);
+  }
+
+  // Apply session-level deduplication if registry provided
+  let duplicateFilteredCount = 0;
+  if (registry) {
+    const beforeCount = envelopes.length;
+    envelopes = registry.filterNewEnvelopes(envelopes);
+    duplicateFilteredCount = beforeCount - envelopes.length;
+    if (duplicateFilteredCount > 0) {
+      emitter.log(`Filtered out ${duplicateFilteredCount} duplicate DataEnvelope(s)`);
+    }
   }
 
   if (envelopes.length > 0) {
-    emitter.log(`Emitting ${envelopes.length} DataEnvelope(s): [${envelopes.map(e => e.meta?.source || 'unknown').join(', ')}]`);
+    const keys = envelopes.map(e => generateDeduplicationKey(e));
+    emitter.log(`Emitting ${envelopes.length} DataEnvelope(s): [${keys.join(', ')}]`);
     emitter.emitUpdate('data', envelopes);
   } else {
-    emitter.log('No DataEnvelopes to emit (all responses had empty toolResults or no envelopes)');
+    emitter.log('No DataEnvelopes to emit (all responses had empty toolResults, no envelopes, or duplicates)');
   }
 }
