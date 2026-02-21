@@ -42,6 +42,9 @@ const ANNOTATION_RULES: AnnotationRule[] = [
   { term: '频率不足', plainMeaning: 'CPU频率偏低' },
 ];
 
+const CLUSTER_SECTION_HEADER_RE = /^##\s*(?:掉帧聚类（先看大头）|掉帧聚类|聚类（先看大头）|聚类)\s*$/;
+const NEXT_HEADER_RE = /^##\s+/;
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -65,6 +68,114 @@ function humanizeNarrativeTerms(text: string): string {
   }
 
   return out;
+}
+
+function humanizeClusterToken(text: string): string {
+  return String(text || '')
+    .replace(/\bK(\d+)\s*聚类\b/g, '第$1类分组')
+    .replace(/\bK(\d+)\s*[:：]\s*/g, '第$1类：')
+    .replace(/\bK(\d+)\s*(?=[（(])/g, '第$1类')
+    .replace(/\bK(\d+)\b/g, '第$1类')
+    .replace(/第(\d+)类：\s+/g, '第$1类：');
+}
+
+function humanizeEvidenceLabels(text: string): string {
+  let out = String(text || '');
+
+  out = out.replace(
+    /^(\s*[-*]\s*)C(\d+)\s*[（(]自动补全[）)]\s*[:：]\s*/gim,
+    '$1证据$2（对应结论$2）：'
+  );
+  out = out.replace(
+    /^(\s*[-*]\s*)C(\d+)\s*[:：]\s*/gim,
+    '$1证据$2（对应结论$2）：'
+  );
+  out = out.replace(
+    /(证据链\s*[:：]\s*)C(\d+)\s*[:：]\s*/gi,
+    '$1证据$2（对应结论$2）：'
+  );
+
+  return out;
+}
+
+function normalizeClusterHierarchy(text: string): string {
+  const lines = String(text || '').split('\n');
+  const rewritten: string[] = [];
+  let inClusterSection = false;
+  let hasParentLine = false;
+  let insertedParentLine = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (CLUSTER_SECTION_HEADER_RE.test(trimmed)) {
+      inClusterSection = true;
+      hasParentLine = false;
+      insertedParentLine = false;
+      rewritten.push(line);
+      continue;
+    }
+
+    if (inClusterSection && NEXT_HEADER_RE.test(trimmed)) {
+      inClusterSection = false;
+      rewritten.push(line);
+      continue;
+    }
+
+    if (!inClusterSection) {
+      rewritten.push(line);
+      continue;
+    }
+
+    if (!trimmed) {
+      rewritten.push(line);
+      continue;
+    }
+
+    const withoutBullet = trimmed.replace(/^[-*]\s*/, '');
+    if (/^聚类帧聚合（/.test(withoutBullet) || /^聚类帧分组（/.test(withoutBullet)) {
+      hasParentLine = true;
+      rewritten.push(`- ${humanizeClusterToken(withoutBullet.replace(/^聚类帧聚合/, '聚类帧分组'))}`);
+      continue;
+    }
+
+    if (/^(?:K\d+|第\d+类)(?:\s*[（(:：]|$)/.test(withoutBullet)) {
+      if (!hasParentLine && !insertedParentLine) {
+        rewritten.push('- 聚类分组明细');
+        insertedParentLine = true;
+      }
+      rewritten.push(`  - ${humanizeClusterToken(withoutBullet)}`);
+      continue;
+    }
+
+    rewritten.push(humanizeClusterToken(line));
+  }
+
+  return rewritten.join('\n');
+}
+
+function humanizeOpaqueLabels(text: string): string {
+  let out = String(text || '');
+
+  out = normalizeClusterHierarchy(out);
+  out = humanizeEvidenceLabels(out);
+  out = out.replace(/(负载主导簇\s*[:：]\s*)K(\d+)/g, '$1第$2类');
+  out = out.replace(/对\s*K(\d+)\s*聚类/g, '对第$1类分组');
+  out = humanizeClusterToken(out);
+
+  return out;
+}
+
+function collapseRepeatedInnerSpaces(text: string): string {
+  return String(text || '')
+    .split('\n')
+    .map((line) => {
+      const indentMatch = line.match(/^[ \t]*/);
+      const indent = indentMatch ? indentMatch[0] : '';
+      const body = line.slice(indent.length).replace(/[ \t]{2,}/g, ' ');
+      return `${indent}${body}`;
+    })
+    .join('\n');
 }
 
 export function sanitizeNarrativeForClient(narrative: string): string {
@@ -94,11 +205,13 @@ export function sanitizeNarrativeForClient(narrative: string): string {
 
   // Replace jargon-heavy wording with plain-language phrasing.
   out = humanizeNarrativeTerms(out);
+  out = humanizeOpaqueLabels(out);
 
   // Cleanup artifacts introduced by ID removal.
   out = out.replace(/[（(]\s*[）)]/g, '');
+  out = out.replace(/[·]\s*$/gm, '');
   out = out.replace(/[ \t]+$/gm, '');
-  out = out.replace(/[ \t]{2,}/g, ' ');
+  out = collapseRepeatedInnerSpaces(out);
   out = out.replace(/\n{3,}/g, '\n\n');
 
   return out.trim();

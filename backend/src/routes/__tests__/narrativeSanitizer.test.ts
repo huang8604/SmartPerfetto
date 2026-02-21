@@ -10,8 +10,8 @@ describe('narrativeSanitizer', () => {
     const output = sanitizeNarrativeForClient(input);
 
     expect(output).toContain('## 证据链（对应上述结论）');
-    expect(output).toContain('- C1: 规则裁决=混合型（APP 触发 + SF 放大）');
-    expect(output).toContain('- C2: 责任分布样本 SF=25 (100.0%)，APP=0 (0.0%)');
+    expect(output).toContain('- 证据1（对应结论1）：规则裁决=混合型（APP 触发 + SF 放大）');
+    expect(output).toContain('- 证据2（对应结论2）：责任分布样本 SF=25 (100.0%)，APP=0 (0.0%)');
     expect(output).not.toContain('ev_5f64858c9de6');
     expect(output).not.toContain('ev_0a31195bb6f3');
     expect(output).not.toContain('证据索引（自动补全）');
@@ -67,5 +67,29 @@ describe('narrativeSanitizer', () => {
     const twice = sanitizeNarrativeForClient(once);
 
     expect(twice).toBe(once);
+  });
+
+  test('humanizes K/C labels and enforces parent-child hierarchy in cluster section', () => {
+    const input = `## 掉帧聚类（先看大头）
+- 聚类帧聚合（全量帧，覆盖 6 帧）
+- K1（4帧）: 1435500 / 1435508 / 1435517 / 1435526
+- K2（2帧）: 1435601 / 1435609
+- K1: 主线程耗时操作/频率不足/显示系统处理不过来（SF消费端背压）
+
+## 证据链（对应上述结论）
+- C1: 逐帧统计显示主线程耗时占比 65%
+- C2: 频率拉升存在延迟`;
+
+    const output = sanitizeNarrativeForClient(input);
+
+    expect(output).toContain('- 聚类帧分组（全量帧，覆盖 6 帧）');
+    expect(output).toContain('  - 第1类（4帧）: 1435500 / 1435508 / 1435517 / 1435526');
+    expect(output).toContain('  - 第2类（2帧）: 1435601 / 1435609');
+    expect(output).toContain('  - 第1类：主线程耗时操作/频率不足（CPU频率偏低）/显示系统处理不过来（SF消费端背压）');
+    expect(output).toContain('- 证据1（对应结论1）：逐帧统计显示主线程耗时占比 65%');
+    expect(output).toContain('- 证据2（对应结论2）：频率拉升存在延迟');
+    expect(output).not.toContain('K1');
+    expect(output).not.toContain('K2');
+    expect(output).not.toContain('- C1:');
   });
 });
