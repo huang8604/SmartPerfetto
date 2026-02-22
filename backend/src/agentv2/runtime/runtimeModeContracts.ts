@@ -14,3 +14,7 @@ export interface RuntimeModeHandler {
   supports(mode: RuntimeMode): boolean;
   execute(request: RuntimeModeExecutionRequest): Promise<AnalysisResult>;
 }
+
+export interface RuntimeModeHandlerRegistrationOptions {
+  prepend?: boolean;
+}

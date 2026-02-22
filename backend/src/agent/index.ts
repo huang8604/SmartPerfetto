@@ -61,6 +61,11 @@ export {
   createAgentRuntime,
   AgentRuntimeAnalysisResult,
 } from '../agentv2/runtime/agentRuntime';
+export type {
+  AgentRuntimeExtensions,
+  RuntimeModeHandler,
+  RuntimeModeHandlerRegistrationOptions,
+} from '../agentv2/runtime/agentRuntime';
 
 // Domain Agents (领域 Agent)
 export {

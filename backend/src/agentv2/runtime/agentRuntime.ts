@@ -34,8 +34,17 @@ import { RuntimeResultFinalizer } from './runtimeResultFinalizer';
 import { RuntimeModeExecutor } from './runtimeModeExecutor';
 import { RuntimeUpdateBridge } from './runtimeUpdateBridge';
 import { executeGovernedRuntimeAnalysis } from './runtimeGovernancePipeline';
+import type {
+  RuntimeModeHandler,
+  RuntimeModeHandlerRegistrationOptions,
+} from './runtimeModeContracts';
 
 export type AgentRuntimeAnalysisResult = AnalysisResult;
+
+export interface AgentRuntimeExtensions {
+  modeHandlers?: RuntimeModeHandler[];
+  modeHandlerRegistration?: RuntimeModeHandlerRegistrationOptions;
+}
 
 export class AgentRuntime extends EventEmitter {
   private readonly modelRouter: ModelRouter;
@@ -52,7 +61,11 @@ export class AgentRuntime extends EventEmitter {
   private readonly updateBridge: RuntimeUpdateBridge;
   private readonly modeExecutor: RuntimeModeExecutor;
 
-  constructor(modelRouter: ModelRouter, config?: Partial<AgentRuntimeConfig>) {
+  constructor(
+    modelRouter: ModelRouter,
+    config?: Partial<AgentRuntimeConfig>,
+    extensions?: AgentRuntimeExtensions
+  ) {
     super();
 
     this.modelRouter = modelRouter;
@@ -106,6 +119,15 @@ export class AgentRuntime extends EventEmitter {
       strategyRegistry,
       updateBridge: this.updateBridge,
     });
+
+    const extensionHandlers = extensions?.modeHandlers || [];
+    const extensionRegistration = extensions?.modeHandlerRegistration || {};
+    if (extensionHandlers.length > 0) {
+      this.modeExecutor.registerHandlers(
+        extensionHandlers,
+        extensionRegistration
+      );
+    }
   }
 
   async analyze(
@@ -145,6 +167,20 @@ export class AgentRuntime extends EventEmitter {
     return this.interventionController;
   }
 
+  registerModeHandler(
+    handler: RuntimeModeHandler,
+    options: RuntimeModeHandlerRegistrationOptions = {}
+  ): void {
+    this.modeExecutor.registerHandler(handler, options);
+  }
+
+  registerModeHandlers(
+    handlers: RuntimeModeHandler[],
+    options: RuntimeModeHandlerRegistrationOptions = {}
+  ): void {
+    this.modeExecutor.registerHandlers(handlers, options);
+  }
+
   recordUserInteraction(interaction: FocusInteraction): void {
     this.focusStore.recordInteraction(interaction);
 
@@ -179,9 +215,10 @@ export class AgentRuntime extends EventEmitter {
 
 export function createAgentRuntime(
   modelRouter: ModelRouter,
-  config?: Partial<AgentRuntimeConfig>
+  config?: Partial<AgentRuntimeConfig>,
+  extensions?: AgentRuntimeExtensions
 ): AgentRuntime {
-  return new AgentRuntime(modelRouter, config);
+  return new AgentRuntime(modelRouter, config, extensions);
 }
 
 export {
@@ -193,3 +230,4 @@ export {
   deriveRequestedDomainsFromIntent,
   mapFollowUpTypeToMode,
 } from './runtimeContextBuilder';
+export type { RuntimeModeHandler, RuntimeModeHandlerRegistrationOptions } from './runtimeModeContracts';

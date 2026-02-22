@@ -14,10 +14,11 @@ import type { PreparedRuntimeContext } from './runtimeContextBuilder';
 import { RuntimeExecutionFactory } from './runtimeExecutionFactory';
 import { RuntimeResultFinalizer } from './runtimeResultFinalizer';
 import { RuntimeUpdateBridge } from './runtimeUpdateBridge';
-import type { RuntimeModeHandler } from './runtimeModeContracts';
+import type { RuntimeModeHandler, RuntimeModeHandlerRegistrationOptions } from './runtimeModeContracts';
 import { InitialModeHandler } from './modeHandlers/initialModeHandler';
 import { FollowUpModeHandler } from './modeHandlers/followUpModeHandler';
 import { ClarifyModeHandler } from './modeHandlers/clarifyModeHandler';
+import { RuntimeModeHandlerRegistry } from './runtimeModeHandlerRegistry';
 
 interface RuntimeModeExecutorInput {
   runtimeConfig?: AgentRuntimeConfig;
@@ -31,6 +32,7 @@ interface RuntimeModeExecutorInput {
   strategyRegistry?: StrategyRegistry;
   updateBridge?: RuntimeUpdateBridge;
   handlers?: RuntimeModeHandler[];
+  registry?: RuntimeModeHandlerRegistry;
 }
 
 interface RuntimeModeDefaultDeps {
@@ -47,15 +49,20 @@ interface RuntimeModeDefaultDeps {
 }
 
 export class RuntimeModeExecutor {
-  private readonly handlers: RuntimeModeHandler[];
+  private readonly handlerRegistry: RuntimeModeHandlerRegistry;
 
   constructor(input: RuntimeModeExecutorInput) {
-    if (Array.isArray(input.handlers) && input.handlers.length > 0) {
-      this.handlers = input.handlers;
+    if (input.registry) {
+      this.handlerRegistry = input.registry;
       return;
     }
 
-    this.handlers = this.createDefaultHandlers(input);
+    if (Array.isArray(input.handlers) && input.handlers.length > 0) {
+      this.handlerRegistry = new RuntimeModeHandlerRegistry(input.handlers);
+      return;
+    }
+
+    this.handlerRegistry = new RuntimeModeHandlerRegistry(this.createDefaultHandlers(input));
   }
 
   async execute(
@@ -65,8 +72,7 @@ export class RuntimeModeExecutor {
     traceId: string
   ): Promise<AnalysisResult> {
     const mode = runtimeContext.decisionContext.mode;
-    const handler = this.handlers.find(candidate => candidate.supports(mode))
-      || this.handlers.find(candidate => candidate.supports('initial'));
+    const handler = this.handlerRegistry.resolve(mode);
 
     if (!handler) {
       throw new Error(`No runtime mode handler registered for mode: ${mode}`);
@@ -78,6 +84,24 @@ export class RuntimeModeExecutor {
       sessionId,
       traceId,
     });
+  }
+
+  registerHandler(
+    handler: RuntimeModeHandler,
+    options: RuntimeModeHandlerRegistrationOptions = {}
+  ): void {
+    this.handlerRegistry.register(handler, options);
+  }
+
+  registerHandlers(
+    handlers: RuntimeModeHandler[],
+    options: RuntimeModeHandlerRegistrationOptions = {}
+  ): void {
+    this.handlerRegistry.registerMany(handlers, options);
+  }
+
+  listHandlers(): RuntimeModeHandler[] {
+    return this.handlerRegistry.list();
   }
 
   private createDefaultHandlers(input: RuntimeModeExecutorInput): RuntimeModeHandler[] {

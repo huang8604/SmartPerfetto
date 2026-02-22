@@ -132,4 +132,60 @@ describe('RuntimeModeExecutor', () => {
       )
     ).rejects.toThrow('No runtime mode handler registered for mode: unknown_mode');
   });
+
+  it('supports runtime registration with prepend priority', async () => {
+    const calls: string[] = [];
+
+    const initialDefault: RuntimeModeHandler = {
+      supports: mode => mode === 'initial',
+      execute: async () => {
+        calls.push('default');
+        return {
+          sessionId: 's1',
+          success: true,
+          findings: [],
+          hypotheses: [],
+          conclusion: 'default',
+          confidence: 1,
+          rounds: 1,
+          totalDurationMs: 1,
+        };
+      },
+    };
+
+    const initialOverride: RuntimeModeHandler = {
+      supports: mode => mode === 'initial',
+      execute: async () => {
+        calls.push('override');
+        return {
+          sessionId: 's1',
+          success: true,
+          findings: [],
+          hypotheses: [],
+          conclusion: 'override',
+          confidence: 1,
+          rounds: 1,
+          totalDurationMs: 1,
+        };
+      },
+    };
+
+    const executor = new RuntimeModeExecutor({
+      handlers: [initialDefault],
+    });
+    executor.registerHandler(initialOverride, { prepend: true });
+
+    const result = await executor.execute(
+      {
+        ...baseContext,
+        decisionContext: { mode: 'initial' },
+      } as any,
+      'q',
+      's1',
+      't1'
+    );
+
+    expect(result.conclusion).toBe('override');
+    expect(calls).toEqual(['override']);
+  });
 });
