@@ -28,6 +28,7 @@ cp backend/.env.example backend/.env
 Access:
 - **Perfetto UI**: http://localhost:10000
 - **Backend API**: http://localhost:3000
+- **Standalone Web Shell**: http://localhost:3000/assistant-shell
 
 ### Usage
 
@@ -38,6 +39,9 @@ Access:
    - "分析滑动卡顿" (Analyze scroll jank)
    - "启动为什么慢？" (Why is startup slow?)
    - "CPU 调度有没有问题？" (Any CPU scheduling issues?)
+
+For a lightweight independent shell (without Perfetto UI integration), open:
+- `http://localhost:3000/assistant-shell`
 
 ## Architecture
 
@@ -132,11 +136,17 @@ SmartPerfetto/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/agent/analyze` | Start analysis (Strategy match → Agent orchestration) |
-| GET | `/api/agent/:id/stream` | SSE real-time updates |
+| POST | `/api/assistant/v1/analyze` | Start analysis (Assistant API v1) |
+| GET | `/api/assistant/v1/:id/stream` | SSE real-time updates (Assistant API v1) |
+| POST | `/api/agent/analyze` | Start analysis (legacy-compatible path) |
+| GET | `/api/agent/:id/stream` | SSE real-time updates (legacy-compatible path) |
 | GET | `/api/agent/:id/status` | Get analysis status |
 | POST | `/api/agent/:id/respond` | Respond to circuit breaker |
 | POST | `/api/agent/scene-reconstruct` | Scene reconstruction |
+| GET | `/assistant-shell` | Standalone assistant web shell (minimal UI) |
+
+`POST /api/assistant/v1/analyze` and `POST /api/agent/analyze` return `runId`, `requestId`, `runSequence`.  
+SSE events (`connected`, `conversation_step`, `data`, `analysis_completed`, `error`, `end`) carry the same observability fields for end-to-end correlation.
 
 ### Logging
 

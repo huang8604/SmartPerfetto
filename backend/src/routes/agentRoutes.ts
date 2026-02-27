@@ -37,6 +37,16 @@ import {
 import { resolveConclusionScene } from '../agent/core/conclusionSceneTemplates';
 import { DEEP_REASON_LABEL } from '../utils/analysisNarrative';
 import { sanitizeNarrativeForClient } from './narrativeSanitizer';
+import { registerSceneReconstructRoutes } from './agentSceneReconstructRoutes';
+import { registerTeachingRoutes } from './agentTeachingRoutes';
+import { AssistantApplicationService } from '../assistant/application/assistantApplicationService';
+import { StreamProjector } from '../assistant/stream/streamProjector';
+import {
+  AgentAnalyzeSessionService,
+  AnalyzeSessionPreparationError,
+  type AnalyzeSessionRunContext,
+} from '../assistant/application/agentAnalyzeSessionService';
+import { buildAssistantResultContract } from '../assistant/contracts/assistantResultContract';
 // Agent-Driven Architecture v2.0 - Intervention & Focus
 import type { UserDecision, AnalysisDirective } from '../agent/core/interventionController';
 import type { FocusInteraction } from '../agent/context/focusStore';
@@ -44,42 +54,126 @@ import type { FocusInteraction } from '../agent/context/focusStore';
 import {
   createDataEnvelope,
   generateEventId,
-  isDataEvent,
-  isLegacySkillEvent,
   type DataEnvelope,
-  validateDataEnvelope,
 } from '../types/dataContract';
-// Pipeline Teaching Services
-import { getPipelineDocService } from '../services/pipelineDocService';
-import {
-  ensurePipelineSkillsInitialized,
-  pipelineSkillLoader,
-  PinInstruction,
-} from '../services/pipelineSkillLoader';
 import { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skillEngine/skillLoader';
-// Teaching Module Types & Config (v2.0 - centralized)
-import {
-  validateActiveProcesses,
-  validateConfidence,
-  parseCandidates,
-  parseFeatures,
-  transformPinInstruction,
-  transformTeachingContent,
-  type ActiveProcess,
-  type PinInstructionResponse,
-  type RawPinInstruction,
-} from '../types/teaching.types';
-import {
-  TEACHING_CONFIG,
-  TEACHING_DEFAULTS,
-  TEACHING_LIMITS,
-  TEACHING_STEP_IDS,
-  TEACHING_FEATURES,
-} from '../config/teaching.config';
 import type { ConversationTurn, Finding, Intent } from '../agent/types';
 
 const router = express.Router();
+
+interface AgentRequestWithObservability extends express.Request {
+  assistantRequestId?: string;
+}
+
+const REQUEST_ID_HEADER = 'x-request-id';
+const MAX_REQUEST_ID_LENGTH = 128;
+
+function sanitizeRequestId(raw: unknown): string {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const normalized = text.replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, MAX_REQUEST_ID_LENGTH);
+  return normalized;
+}
+
+function generateRequestId(): string {
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function resolveRequestIdFromRequest(req: express.Request): string {
+  const headerId =
+    req.header(REQUEST_ID_HEADER) ||
+    req.header('x-correlation-id') ||
+    req.header('x-amzn-trace-id');
+  const bodyId =
+    req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>).requestId
+      : undefined;
+
+  return sanitizeRequestId(headerId) || sanitizeRequestId(bodyId) || generateRequestId();
+}
+
+function getRequestId(req: express.Request): string {
+  return (req as AgentRequestWithObservability).assistantRequestId || resolveRequestIdFromRequest(req);
+}
+
+function normalizeRunSequence(value: unknown): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(Number(value)));
+}
+
+function buildRunId(sessionId: string, sequence: number): string {
+  return `run-${sessionId}-${sequence}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildSessionObservability(
+  session: AnalysisSession
+): { runId: string; requestId: string; runSequence: number; status: string } | undefined {
+  const run = session.activeRun || session.lastRun;
+  if (!run) return undefined;
+  return {
+    runId: run.runId,
+    requestId: run.requestId,
+    runSequence: normalizeRunSequence(run.sequence),
+    status: run.status,
+  };
+}
+
+function buildStreamObservability(
+  session: AnalysisSession
+): { runId?: string; requestId?: string; runSequence?: number } {
+  const run = session.activeRun || session.lastRun;
+  if (!run) return {};
+  return {
+    runId: run.runId,
+    requestId: run.requestId,
+    runSequence: normalizeRunSequence(run.sequence),
+  };
+}
+
+function startSessionRun(
+  session: AnalysisSession,
+  query: string,
+  requestId: string
+): AnalyzeSessionRunContext {
+  const nextSequence = normalizeRunSequence(session.runSequence) + 1;
+  session.runSequence = nextSequence;
+
+  const run: AnalyzeSessionRunContext = {
+    runId: buildRunId(session.sessionId, nextSequence),
+    requestId: sanitizeRequestId(requestId) || generateRequestId(),
+    sequence: nextSequence,
+    query,
+    startedAt: Date.now(),
+    status: 'pending',
+  };
+  session.activeRun = run;
+  session.lastRun = run;
+  return run;
+}
+
+function markSessionRunStatus(
+  session: AnalysisSession,
+  status: AnalyzeSessionRunContext['status'],
+  error?: string
+): void {
+  if (!session.activeRun) return;
+  session.activeRun.status = status;
+  if (status === 'completed' || status === 'failed') {
+    session.activeRun.completedAt = Date.now();
+  }
+  session.activeRun.error = error;
+  session.lastRun = { ...session.activeRun };
+}
+
+// Attach/echo requestId for all agent endpoints.
+router.use((req, res, next) => {
+  const requestId = resolveRequestIdFromRequest(req);
+  (req as AgentRequestWithObservability).assistantRequestId = requestId;
+  res.setHeader(REQUEST_ID_HEADER, requestId);
+  next();
+});
+
 // Apply API-key auth to all Agent endpoints (dev fallback still applies when key is not configured).
 router.use(authenticate);
 
@@ -110,7 +204,7 @@ interface AnalysisSession {
     content: any;
     timestamp: number;
   }>;
-  dataEnvelopes: any[];
+  dataEnvelopes: DataEnvelope[];
   agentResponses: Array<{
     taskId: string;
     agentId: string;
@@ -127,8 +221,12 @@ interface AnalysisSession {
     timestamp: number;
     sourceEventType?: string;
   }>;
+  runSequence?: number;
+  activeRun?: AnalyzeSessionRunContext;
+  lastRun?: AnalyzeSessionRunContext;
 }
-const sessions = new Map<string, AnalysisSession>();
+const assistantAppService = new AssistantApplicationService<AnalysisSession>();
+const streamProjector = new StreamProjector();
 
 let modelRouterInstance: ModelRouter | null = null;
 
@@ -150,7 +248,7 @@ interface ResolvedSessionContext {
 }
 
 function resolveSessionContextForReview(sessionId: string): ResolvedSessionContext | null {
-  const activeSession = sessions.get(sessionId);
+  const activeSession = assistantAppService.getSession(sessionId);
   if (activeSession) {
     const activeContext =
       sessionContextManager.get(sessionId, activeSession.traceId) ||
@@ -497,6 +595,7 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
  */
 router.post('/analyze', async (req, res) => {
   try {
+    const requestId = getRequestId(req);
     const { traceId, query, sessionId: requestedSessionId, options = {} } = req.body;
 
     if (!traceId) {
@@ -537,170 +636,68 @@ router.post('/analyze', async (req, res) => {
     // Initialize tools
     ensureToolsRegistered();
 
-    // Check if we can reuse an existing session (multi-turn dialogue support)
+    const analyzeSessionService = new AgentAnalyzeSessionService<AnalysisSession>({
+      assistantAppService,
+      getModelRouter,
+      createSessionLogger,
+      sessionPersistenceService: SessionPersistenceService.getInstance(),
+      sessionContextManager,
+      buildRecoveredResultFromContext,
+    });
+
     let sessionId: string;
-    let orchestrator: AgentRuntime;
-    let logger: ReturnType<typeof createSessionLogger>;
+    let preparedSession: AnalysisSession | undefined;
     let isNewSession = true;
-
-    if (requestedSessionId) {
-      const existingSession = sessions.get(requestedSessionId);
-      if (existingSession && existingSession.traceId === traceId) {
-        sessionId = requestedSessionId;
-        orchestrator = existingSession.orchestrator;
-        logger = existingSession.logger;
-        isNewSession = false;
-        logger.info('AgentRoutes', 'Continuing multi-turn dialogue', {
-          turnQuery: query,
-          previousQuery: existingSession.query,
-        });
-        existingSession.query = query;
-        existingSession.status = 'pending';
-        existingSession.lastActivityAt = Date.now();
-        console.log(`[AgentRoutes] Reusing agent session ${sessionId} for multi-turn dialogue`);
-      } else {
-        // Try restoring requested session from persistence before falling back to new session.
-        const persistenceService = SessionPersistenceService.getInstance();
-        const persistedSession = persistenceService.getSession(requestedSessionId);
-
-        if (persistedSession && persistedSession.traceId !== traceId) {
-          return res.status(400).json({
-            success: false,
-            error: 'traceId mismatch for requested session',
-            hint: `This session belongs to traceId=${persistedSession.traceId}. Switch to that trace or start a new chat.`,
-            code: 'TRACE_ID_MISMATCH',
-          });
-        }
-
-        if (persistedSession && persistedSession.traceId === traceId) {
-          const restoredContext = persistenceService.loadSessionContext(requestedSessionId);
-          if (restoredContext) {
-            sessionContextManager.set(requestedSessionId, traceId, restoredContext);
-
-            const restoredOrchestrator = createAgentRuntime(getModelRouter(), {
-              enableLogging: true,
-            });
-
-            const focusSnapshot = persistenceService.loadFocusStore(requestedSessionId);
-            if (focusSnapshot) {
-              restoredOrchestrator.getFocusStore().loadSnapshot(focusSnapshot);
-              restoredOrchestrator.getFocusStore().syncWithEntityStore(restoredContext.getEntityStore());
-            }
-
-            const traceAgentStateSnapshot = persistenceService.loadTraceAgentState(requestedSessionId);
-            if (traceAgentStateSnapshot) {
-              restoredContext.setTraceAgentState(traceAgentStateSnapshot);
-            }
-
-            const restoredTurns = restoredContext.getAllTurns();
-            const latestTurn = restoredTurns.length > 0 ? restoredTurns[restoredTurns.length - 1] : null;
-            const recoveredResult = buildRecoveredResultFromContext(requestedSessionId, restoredContext);
-
-            const restoredLogger = createSessionLogger(requestedSessionId);
-            restoredLogger.setMetadata({
-              traceId,
-              query,
-              architecture: 'agent-driven',
-              resumed: true,
-            });
-            restoredLogger.info('AgentRoutes', 'Session restored from persistence in analyze()', {
-              turnCount: restoredTurns.length,
-              entityStoreStats: restoredContext.getEntityStore().getStats(),
-            });
-
-            sessions.set(requestedSessionId, {
-              orchestrator: restoredOrchestrator,
-              sessionId: requestedSessionId,
-              sseClients: [],
-              result: recoveredResult || undefined,
-              status: 'pending',
-              traceId,
-              query,
-              createdAt: persistedSession.createdAt,
-              lastActivityAt: Date.now(),
-              logger: restoredLogger,
-              hypotheses: [],
-              agentDialogue: [],
-              dataEnvelopes: [],
-              agentResponses: [],
-              conversationOrdinal: 0,
-              conversationSteps: [],
-            });
-
-            sessionId = requestedSessionId;
-            orchestrator = restoredOrchestrator;
-            logger = restoredLogger;
-            isNewSession = false;
-
-            logger.info('AgentRoutes', 'Continuing multi-turn dialogue from persisted context', {
-              turnQuery: query,
-              previousQuery: latestTurn?.query || persistedSession.question,
-              turnCount: restoredTurns.length,
-            });
-            console.log(`[AgentRoutes] Restored agent session ${sessionId} from persistence for multi-turn dialogue`);
-          } else {
-            console.log(`[AgentRoutes] Requested session ${requestedSessionId} has no persisted context, creating new session`);
-            sessionId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
-          }
-        } else {
-          console.log(`[AgentRoutes] Requested session ${requestedSessionId} not found, creating new session`);
-          sessionId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
-        }
-      }
-    } else {
-      sessionId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
-    }
-
-    if (isNewSession) {
-      const modelRouter = getModelRouter();
-      orchestrator = createAgentRuntime(modelRouter, {
-        maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
-        maxConcurrentTasks: options.maxConcurrentTasks || 3,
-        taskTimeoutMs: options.taskTimeoutMs,
-        confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
-        maxNoProgressRounds: options.maxNoProgressRounds ?? 2,
-        maxFailureRounds: options.maxFailureRounds ?? 2,
-        enableLogging: true,
-      });
-
-      logger = createSessionLogger(sessionId);
-      logger.setMetadata({ traceId, query, architecture: 'agent-driven' });
-      logger.info('AgentRoutes', 'Agent-driven analysis session created', { options });
-
-      sessions.set(sessionId, {
-        orchestrator,
-        sessionId,
-        sseClients: [],
-        status: 'pending',
+    try {
+      const prepared = analyzeSessionService.prepareSession({
         traceId,
         query,
-        createdAt: Date.now(),
-        lastActivityAt: Date.now(),
-        logger,
-        hypotheses: [],
-        agentDialogue: [],
-        dataEnvelopes: [],
-        agentResponses: [],
-        conversationOrdinal: 0,
-        conversationSteps: [],
+        requestedSessionId,
+        options,
       });
+      sessionId = prepared.sessionId;
+      preparedSession = prepared.session as AnalysisSession;
+      isNewSession = prepared.isNewSession;
+    } catch (error: any) {
+      if (error instanceof AnalyzeSessionPreparationError) {
+        return res.status(error.httpStatus).json({
+          success: false,
+          error: error.message,
+          code: error.code,
+          ...(error.hint ? { hint: error.hint } : {}),
+        });
+      }
+      throw error;
     }
 
     const blockedStrategyIds = Array.from(new Set([
       ...SCENE_STRATEGY_IDS,
       ...(Array.isArray(options.blockedStrategyIds) ? options.blockedStrategyIds : []),
     ]));
+    const sessionForRun = preparedSession || assistantAppService.getSession(sessionId);
+    if (!sessionForRun) {
+      throw new Error(`Session ${sessionId} not found after preparation`);
+    }
+
+    const runContext = startSessionRun(sessionForRun, query, requestId);
+    sessionForRun.logger.setMetadata({
+      requestId: runContext.requestId,
+      runId: runContext.runId,
+      runSequence: runContext.sequence,
+    });
 
     runAgentDrivenAnalysis(sessionId, query, traceId, {
       ...options,
       blockedStrategyIds,
       traceProcessorService,
+      runContext,
     }).catch((error) => {
-      const session = sessions.get(sessionId);
+      const session = assistantAppService.getSession(sessionId);
       if (session) {
         session.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
         session.status = 'failed';
         session.error = error.message;
+        markSessionRunStatus(session, 'failed', error.message);
         broadcastToAgentDrivenClients(sessionId, {
           type: 'error',
           content: { message: error.message },
@@ -715,6 +712,14 @@ router.post('/analyze', async (req, res) => {
       message: isNewSession ? 'Analysis started' : 'Continuing analysis (multi-turn)',
       isNewSession,
       architecture: 'agent-driven',
+      runId: runContext.runId,
+      requestId: runContext.requestId,
+      runSequence: runContext.sequence,
+      observability: {
+        runId: runContext.runId,
+        requestId: runContext.requestId,
+        runSequence: runContext.sequence,
+      },
     });
   } catch (error: any) {
     console.error('[AgentRoutes] Analyze error:', error);
@@ -746,7 +751,7 @@ router.post('/analyze', async (req, res) => {
 router.get('/:sessionId/stream', (req, res) => {
   const { sessionId } = req.params;
 
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -754,26 +759,19 @@ router.get('/:sessionId/stream', (req, res) => {
     });
   }
 
-  // Set SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  // Send initial connection message
-  res.write(`event: connected\n`);
-  res.write(`data: ${JSON.stringify({
+  streamProjector.setSseHeaders(res);
+  streamProjector.sendConnected(res, {
     sessionId,
     status: session.status,
     traceId: session.traceId,
     query: session.query,
     architecture: 'agent-driven',
     timestamp: Date.now(),
-  })}\n\n`);
+    ...buildStreamObservability(session),
+  });
 
   // Add client to session
-  session.sseClients.push(res);
-  session.lastActivityAt = Date.now();
+  assistantAppService.addSseClient(sessionId, res);
   console.log(`[AgentRoutes] SSE client connected for ${sessionId}`);
 
   // If analysis is already completed, send the result.
@@ -782,8 +780,7 @@ router.get('/:sessionId/stream', (req, res) => {
     recoverResultForSessionIfNeeded(sessionId, session);
     if (session.result) {
       sendAgentDrivenResult(res, session);
-      res.write(`event: end\n`);
-      res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+      streamProjector.sendEnd(res, buildStreamObservability(session));
       res.end();
       return;
     }
@@ -791,10 +788,8 @@ router.get('/:sessionId/stream', (req, res) => {
 
   // If analysis failed, send error
   if (session.status === 'failed') {
-    res.write(`event: error\n`);
-    res.write(`data: ${JSON.stringify({ error: session.error, timestamp: Date.now() })}\n\n`);
-    res.write(`event: end\n`);
-    res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+    streamProjector.sendError(res, session.error, buildStreamObservability(session));
+    streamProjector.sendEnd(res, buildStreamObservability(session));
     res.end();
     return;
   }
@@ -802,25 +797,10 @@ router.get('/:sessionId/stream', (req, res) => {
   // Handle client disconnect
   req.on('close', () => {
     console.log(`[AgentRoutes] SSE client disconnected for ${sessionId}`);
-    const idx = session.sseClients.indexOf(res);
-    if (idx !== -1) {
-      session.sseClients.splice(idx, 1);
-    }
-    session.lastActivityAt = Date.now();
+    assistantAppService.removeSseClient(sessionId, res);
   });
 
-  // Keep-alive ping
-  const keepAlive = setInterval(() => {
-    try {
-      res.write(`: keep-alive\n\n`);
-    } catch {
-      clearInterval(keepAlive);
-    }
-  }, 30000);
-
-  req.on('close', () => {
-    clearInterval(keepAlive);
-  });
+  streamProjector.bindKeepAlive(req, res);
 });
 
 /**
@@ -831,7 +811,7 @@ router.get('/:sessionId/stream', (req, res) => {
 router.get('/:sessionId/status', (req, res) => {
   const { sessionId } = req.params;
 
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -846,12 +826,15 @@ router.get('/:sessionId/status', (req, res) => {
     traceId: session.traceId,
     query: session.query,
     createdAt: session.createdAt,
+    observability: buildSessionObservability(session),
   };
 
   if (session.status === 'completed') {
     const recoveredResult = recoverResultForSessionIfNeeded(sessionId, session);
     if (recoveredResult) {
       const conclusion = normalizeNarrativeForClient(recoveredResult.conclusion);
+      const clientFindings = buildClientFindings(recoveredResult.findings, session.scenes || []);
+      const resultContract = buildSessionResultContract(session, clientFindings);
       const sceneIdHint = resolveConclusionSceneIdHint({
         sessionId,
         query: session.query,
@@ -873,6 +856,7 @@ router.get('/:sessionId/status', (req, res) => {
         rounds: recoveredResult.rounds,
         findings: recoveredResult.findings,
         findingsCount: recoveredResult.findings.length,
+        resultContract,
       };
     }
   }
@@ -1012,7 +996,7 @@ router.get('/:sessionId/turns/:turnId', (req, res) => {
 router.delete('/:sessionId', (req, res) => {
   const { sessionId } = req.params;
 
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -1028,7 +1012,7 @@ router.delete('/:sessionId', (req, res) => {
   });
 
   session.orchestrator.reset();
-  sessions.delete(sessionId);
+  assistantAppService.deleteSession(sessionId);
 
   res.json({ success: true });
 });
@@ -1043,7 +1027,7 @@ router.delete('/:sessionId', (req, res) => {
  */
 router.post('/:sessionId/respond', async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
 
   if (!session) {
     return res.status(404).json({
@@ -1109,7 +1093,7 @@ router.post('/:sessionId/respond', async (req, res) => {
  */
 router.post('/:sessionId/intervene', async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
 
   if (!session) {
     return res.status(404).json({
@@ -1209,7 +1193,7 @@ router.post('/:sessionId/intervene', async (req, res) => {
  */
 router.post('/:sessionId/interaction', async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
 
   if (!session) {
     return res.status(404).json({
@@ -1296,7 +1280,7 @@ router.post('/:sessionId/interaction', async (req, res) => {
  */
 router.get('/:sessionId/focus', (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
 
   if (!session) {
     return res.status(404).json({
@@ -1366,7 +1350,7 @@ router.get('/sessions', async (req, res) => {
     const activeSessions: any[] = [];
     const activeIds = new Set<string>();
 
-    for (const [sessionId, session] of sessions.entries()) {
+    for (const [sessionId, session] of assistantAppService.entries()) {
       if (traceId && session.traceId !== traceId) continue;
 
       const activeContext = sessionContextManager.get(sessionId, session.traceId);
@@ -1380,6 +1364,7 @@ router.get('/sessions', async (req, res) => {
         isActive: true,
         turnCount: activeContext?.getAllTurns().length ?? 0,
         entityStoreStats: null, // Active sessions have live context
+        observability: buildSessionObservability(session),
       });
     }
 
@@ -1467,7 +1452,7 @@ router.post('/resume', async (req, res) => {
   }
 
   // Check if session is already active in memory
-  const existingSession = sessions.get(sessionId);
+  const existingSession = assistantAppService.getSession(sessionId);
   if (existingSession) {
     return res.json({
       success: true,
@@ -1475,6 +1460,7 @@ router.post('/resume', async (req, res) => {
       status: existingSession.status,
       message: 'Session already active',
       restored: false,
+      observability: buildSessionObservability(existingSession),
     });
   }
 
@@ -1573,9 +1559,21 @@ router.post('/resume', async (req, res) => {
     const restoredTurns = restoredContext.getAllTurns();
     const latestTurn = restoredTurns.length > 0 ? restoredTurns[restoredTurns.length - 1] : null;
     const recoveredResult = buildRecoveredResultFromContext(sessionId, restoredContext);
+    const restoredRunSequence = Math.max(0, restoredTurns.length);
+    const restoredRun: AnalyzeSessionRunContext | undefined = restoredRunSequence > 0
+      ? {
+          runId: `run-${sessionId}-${restoredRunSequence}-recovered`,
+          requestId: `recovered-${sessionId}-${restoredRunSequence}`,
+          sequence: restoredRunSequence,
+          query: latestTurn?.query || persistedSession.question,
+          startedAt: latestTurn?.timestamp || persistedSession.createdAt,
+          completedAt: persistedSession.updatedAt,
+          status: 'completed',
+        }
+      : undefined;
 
     // Create the session record
-    sessions.set(sessionId, {
+    assistantAppService.setSession(sessionId, {
       orchestrator,
       sessionId,
       sseClients: [],
@@ -1592,6 +1590,9 @@ router.post('/resume', async (req, res) => {
       agentResponses: [],
       conversationOrdinal: 0,
       conversationSteps: [],
+      runSequence: restoredRunSequence,
+      activeRun: restoredRun,
+      lastRun: restoredRun,
     });
 
     return res.json({
@@ -1601,6 +1602,14 @@ router.post('/resume', async (req, res) => {
       status: 'completed',
       message: 'Session restored from persistence',
       restored: true,
+      observability: restoredRun
+        ? {
+            runId: restoredRun.runId,
+            requestId: restoredRun.requestId,
+            runSequence: restoredRun.sequence,
+            status: restoredRun.status,
+          }
+        : undefined,
       historyEndpoints: {
         turns: `/api/agent/${sessionId}/turns`,
         latestTurn: `/api/agent/${sessionId}/turns/latest`,
@@ -1633,319 +1642,17 @@ router.post('/resume', async (req, res) => {
 // Scene Reconstruction Endpoints
 // ============================================================================
 
-router.use('/scene-reconstruct', (_req, res, next) => {
-  if (!featureFlagsConfig.enableAgentSceneReconstruct) {
-    return res.status(503).json({
-      success: false,
-      error: 'Scene reconstruction feature is disabled by FEATURE_AGENT_SCENE_RECONSTRUCT',
-      code: 'FEATURE_DISABLED',
-    });
-  }
-  next();
-});
-
-/**
- * POST /api/agent/scene-reconstruct
- *
- * Start Agent-driven scene reconstruction
- *
- * Body:
- * {
- *   "traceId": "uuid-of-trace",
- *   "options": {
- *     "deepAnalysis": false, // Deprecated: scene-reconstruct is replay-only now
- *     "generateTracks": true
- *   }
- * }
- */
-router.post('/scene-reconstruct', async (req, res) => {
-  try {
-    const { traceId, options = {} } = req.body;
-
-    if (!traceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'traceId is required',
-      });
-    }
-
-    // Verify trace exists
-    const traceProcessorService = getTraceProcessorService();
-    const trace = traceProcessorService.getTrace(traceId);
-    if (!trace) {
-      return res.status(404).json({
-        success: false,
-        error: 'Trace not found in backend',
-        hint: 'Please upload the trace to the backend first',
-        code: 'TRACE_NOT_UPLOADED',
-      });
-    }
-
-    // Initialize tools
-    ensureToolsRegistered();
-
-    // `scene-reconstruct` is a dedicated replay feature.
-    // Keep accepting deepAnalysis for backward compatibility, but force replay-only behavior.
-    const deepAnalysis = false;
-    const generateTracks = options.generateTracks ?? true;
-
-    // Use quick scene reconstruction query to avoid mixing with diagnosis workflows.
-    const query = deepAnalysis ? '场景还原' : '场景还原 仅检测';
-
-    // Generate analysis ID (also used as agent-driven sessionId for compatibility)
-    const analysisId = `scene-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-    const modelRouter = getModelRouter();
-    const orchestrator = createAgentRuntime(modelRouter, {
-      maxRounds: options.maxRounds ?? options.maxIterations ?? 5,
-      maxConcurrentTasks: options.maxConcurrentTasks || 3,
-      confidenceThreshold: options.confidenceThreshold ?? options.qualityThreshold ?? 0.7,
-      maxNoProgressRounds: options.maxNoProgressRounds ?? 2,
-      maxFailureRounds: options.maxFailureRounds ?? 2,
-      enableLogging: true,
-    });
-
-    const logger = createSessionLogger(analysisId);
-    logger.setMetadata({ traceId, query, architecture: 'agent-driven', feature: 'scene-reconstruct' });
-    logger.info('AgentRoutes', 'Scene reconstruction session created (agent-driven)', { options });
-
-    sessions.set(analysisId, {
-      orchestrator,
-      sessionId: analysisId,
-      sseClients: [],
-      status: 'pending',
-      traceId,
-      query,
-      createdAt: Date.now(),
-      lastActivityAt: Date.now(),
-      logger,
-      hypotheses: [],
-      agentDialogue: [],
-      dataEnvelopes: [],
-      agentResponses: [],
-      scenes: [],
-      trackEvents: [],
-      conversationOrdinal: 0,
-      conversationSteps: [],
-    });
-
-    // Start analysis in background
-    runAgentDrivenAnalysis(analysisId, query, traceId, {
-      ...options,
-      generateTracks,
-      traceProcessorService,
-    }).catch((error) => {
-      console.error(`[AgentRoutes] Scene reconstruction (agent-driven) error for ${analysisId}:`, error);
-      const session = sessions.get(analysisId);
-      if (session) {
-        session.logger.error('AgentRoutes', 'Scene reconstruction failed', error);
-        session.status = 'failed';
-        session.error = error.message;
-        broadcastToAgentDrivenClients(analysisId, {
-          type: 'error',
-          content: { message: error.message },
-          timestamp: Date.now(),
-        });
-      }
-    });
-
-    res.json({
-      success: true,
-      analysisId,
-      sessionId: analysisId,
-      architecture: 'agent-driven',
-    });
-  } catch (error: any) {
-    console.error('[AgentRoutes] Scene reconstruction start error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to start scene reconstruction',
-    });
-  }
-});
-
-/**
- * GET /api/agent/scene-reconstruct/:analysisId/stream
- *
- * SSE endpoint for real-time scene reconstruction updates
- */
-router.get('/scene-reconstruct/:analysisId/stream', (req, res) => {
-  const { analysisId } = req.params;
-
-  const session = sessions.get(analysisId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Scene reconstruction session not found',
-    });
-  }
-
-  // Set SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  // Send initial connection message
-  res.write(`event: connected\n`);
-  res.write(`data: ${JSON.stringify({
-    analysisId,
-    sessionId: analysisId,
-    status: session.status,
-    traceId: session.traceId,
-    query: session.query,
-    architecture: 'agent-driven',
-    timestamp: Date.now(),
-  })}\n\n`);
-
-  // Add client to session
-  session.sseClients.push(res);
-  session.lastActivityAt = Date.now();
-  console.log(`[AgentRoutes] Scene SSE client connected for ${analysisId}`);
-
-  // If analysis is already completed, send the result
-  if (session.status === 'completed' && session.result) {
-    sendAgentDrivenResult(res, session);
-    res.write(`event: end\n`);
-    res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
-    res.end();
-    return;
-  }
-
-  // If analysis failed, send error
-  if (session.status === 'failed') {
-    res.write(`event: error\n`);
-    res.write(`data: ${JSON.stringify({ error: session.error, timestamp: Date.now() })}\n\n`);
-    res.write(`event: end\n`);
-    res.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
-    res.end();
-    return;
-  }
-
-  // Handle client disconnect
-  req.on('close', () => {
-    console.log(`[AgentRoutes] Scene SSE client disconnected for ${analysisId}`);
-    const idx = session.sseClients.indexOf(res);
-    if (idx !== -1) {
-      session.sseClients.splice(idx, 1);
-    }
-    session.lastActivityAt = Date.now();
-  });
-
-  // Keep-alive ping
-  const keepAlive = setInterval(() => {
-    try {
-      res.write(`: keep-alive\n\n`);
-    } catch {
-      clearInterval(keepAlive);
-    }
-  }, 30000);
-
-  req.on('close', () => {
-    clearInterval(keepAlive);
-  });
-});
-
-/**
- * GET /api/agent/scene-reconstruct/:analysisId/tracks
- *
- * Get track events for Perfetto timeline
- */
-router.get('/scene-reconstruct/:analysisId/tracks', (req, res) => {
-  const { analysisId } = req.params;
-
-  const session = sessions.get(analysisId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Scene reconstruction session not found',
-    });
-  }
-
-  if (session.status !== 'completed') {
-    return res.status(400).json({
-      success: false,
-      error: 'Analysis not yet completed',
-      status: session.status,
-    });
-  }
-
-  res.json({
-    success: true,
-    tracks: session.trackEvents || [],
-    scenes: session.scenes || [],
-  });
-});
-
-/**
- * GET /api/agent/scene-reconstruct/:analysisId/status
- *
- * Get scene reconstruction status
- */
-router.get('/scene-reconstruct/:analysisId/status', (req, res) => {
-  const { analysisId } = req.params;
-
-  const session = sessions.get(analysisId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Scene reconstruction session not found',
-    });
-  }
-
-  const response: any = {
-    success: true,
-    analysisId,
-    status: session.status,
-  };
-
-  if (session.status === 'completed' && session.result) {
-    const narrative = isSceneReplayOnlyQuery(session.query)
-      ? buildSceneReplayNarrative(session.scenes || [])
-      : normalizeNarrativeForClient(session.result.conclusion);
-    response.result = {
-      narrative,
-      confidence: session.result.confidence,
-      executionTimeMs: session.result.totalDurationMs,
-      scenesCount: session.scenes?.length || 0,
-      tracksCount: session.trackEvents?.length || 0,
-    };
-  }
-
-  if (session.status === 'failed') {
-    response.error = session.error;
-  }
-
-  res.json(response);
-});
-
-/**
- * DELETE /api/agent/scene-reconstruct/:analysisId
- *
- * Clean up a scene reconstruction session
- */
-router.delete('/scene-reconstruct/:analysisId', (req, res) => {
-  const { analysisId } = req.params;
-
-  const session = sessions.get(analysisId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      error: 'Scene reconstruction session not found',
-    });
-  }
-
-  // Close all SSE connections
-  session.sseClients.forEach((client) => {
-    try {
-      client.end();
-    } catch {}
-  });
-
-  session.orchestrator.reset();
-  sessions.delete(analysisId);
-
-  res.json({ success: true });
+registerSceneReconstructRoutes(router, {
+  assistantAppService,
+  streamProjector,
+  ensureToolsRegistered,
+  getModelRouter,
+  runAgentDrivenAnalysis,
+  broadcastToAgentDrivenClients,
+  sendAgentDrivenResult,
+  isSceneReplayOnlyQuery,
+  buildSceneReplayNarrative,
+  normalizeNarrativeForClient,
 });
 
 // ============================================================================
@@ -2397,336 +2104,7 @@ async function detectScenesQuick(
 // Teaching Pipeline Endpoints
 // ============================================================================
 
-/**
- * POST /api/agent/teaching/pipeline
- *
- * Teaching: Rendering Pipeline Detection and Education
- *
- * Detects the rendering pipeline type of the current trace and returns:
- * - Pipeline type detection results
- * - Teaching content (Mermaid diagrams, thread roles, key slices)
- * - Track pinning instructions
- *
- * Body:
- * {
- *   "traceId": "uuid-of-trace",
- *   "packageName": "com.example.app"  // optional
- * }
- */
-router.post('/teaching/pipeline', async (req, res) => {
-  try {
-    const { traceId, packageName } = req.body;
-
-    if (!traceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'traceId is required',
-      });
-    }
-
-    // Verify trace exists
-    const traceProcessorService = getTraceProcessorService();
-    const trace = traceProcessorService.getTrace(traceId);
-    if (!trace) {
-      return res.status(404).json({
-        success: false,
-        error: 'Trace not found in backend',
-        hint: 'Please upload the trace to the backend first',
-        code: 'TRACE_NOT_UPLOADED',
-      });
-    }
-
-    console.log(`[AgentRoutes] Teaching pipeline request for trace: ${traceId}`);
-
-    // Ensure skills are loaded
-    console.log('[AgentRoutes] Step 1: Initializing skill registry...');
-    await ensureSkillRegistryInitialized();
-    console.log('[AgentRoutes] Step 2: Skill registry initialized, skills count:', skillRegistry.getAllSkills().length);
-
-    // Execute the rendering_pipeline_detection skill
-    console.log('[AgentRoutes] Step 3: Creating SkillExecutor...');
-    const skillExecutor = new SkillExecutor(traceProcessorService);
-    skillExecutor.registerSkills(skillRegistry.getAllSkills());
-    console.log('[AgentRoutes] Step 4: Skills registered');
-
-    console.log('[AgentRoutes] Step 5: Executing rendering_pipeline_detection skill...');
-    const detectionResult = await skillExecutor.execute(
-      'rendering_pipeline_detection',
-      traceId,
-      { package: packageName || '' }
-    );
-    console.log('[AgentRoutes] Step 6: Skill execution complete, success:', detectionResult.success);
-
-    if (!detectionResult.success) {
-      console.error('[AgentRoutes] Skill execution failed:', detectionResult.error);
-      return res.status(500).json({
-        success: false,
-        error: 'Pipeline detection failed',
-        details: detectionResult.error,
-      });
-    }
-
-    // Extract detection results from skill output via rawResults keyed by step ID
-    const rawResults = detectionResult.rawResults || {};
-
-    // Get pipeline determination result (from 'determine_pipeline' step)
-    const pipelineStepResult = rawResults['determine_pipeline'];
-    const pipelineRow =
-      Array.isArray(pipelineStepResult?.data) && pipelineStepResult.data.length > 0
-        ? (pipelineStepResult.data[0] as Record<string, any>)
-        : null;
-    const pipelineResult = pipelineRow
-      ? {
-          primary_pipeline_id: String(pipelineRow.primary_pipeline_id ?? ''),
-          primary_confidence: pipelineRow.primary_confidence,
-          candidates_list: pipelineRow.candidates_list,
-          features_list: pipelineRow.features_list,
-          doc_path: pipelineRow.doc_path,
-        }
-      : null;
-
-    // Get subvariants (from 'subvariants' step)
-    // SQL returns: buffer_mode, flutter_engine, webview_mode, game_engine
-    const subvariantsStepResult = rawResults['subvariants'];
-    const subvariantsRow =
-      Array.isArray(subvariantsStepResult?.data) && subvariantsStepResult.data.length > 0
-        ? (subvariantsStepResult.data[0] as Record<string, any>)
-        : null;
-    const subvariants = subvariantsRow
-      ? {
-          buffer_mode: String(subvariantsRow.buffer_mode ?? 'UNKNOWN'),
-          flutter_engine: String(subvariantsRow.flutter_engine ?? 'N/A'),
-          webview_mode: String(subvariantsRow.webview_mode ?? 'N/A'),
-          game_engine: String(subvariantsRow.game_engine ?? 'N/A'),
-        }
-      : null;
-
-    // Get pin instructions (from 'pin_instructions' step)
-    const pinInstructionsStepResult = rawResults['pin_instructions'];
-    const pinInstructionsData = Array.isArray(pinInstructionsStepResult?.data) ? pinInstructionsStepResult.data : [];
-
-    // Get trace requirements (from 'trace_requirements' step)
-    const traceReqStepResult = rawResults['trace_requirements'];
-    const traceReqRow =
-      Array.isArray(traceReqStepResult?.data) && traceReqStepResult.data.length > 0
-        ? (traceReqStepResult.data[0] as Record<string, any>)
-        : null;
-    const traceRequirementsMissing = traceReqRow
-      ? Object.values(traceReqRow).filter((v: any) => typeof v === 'string' && v.trim())
-      : [];
-
-    // Get active rendering processes (from 'active_rendering_processes' step - v3 smart pin)
-    // v2.0: Use validated extraction with column name mapping instead of positional access
-    const activeProcessesStepResult = rawResults[TEACHING_STEP_IDS.activeProcesses];
-    const activeRenderingProcesses: ActiveProcess[] = TEACHING_FEATURES.useSqlValidation
-      ? validateActiveProcesses(activeProcessesStepResult)
-      : (Array.isArray(activeProcessesStepResult?.data)
-          ? activeProcessesStepResult.data
-              .map((row: any) => ({
-                upid: typeof row?.upid === 'number' ? row.upid : parseInt(String(row?.upid ?? ''), 10) || 0,
-                processName: String(row?.process_name ?? row?.processName ?? row?.name ?? ''),
-                frameCount:
-                  typeof row?.frame_count === 'number'
-                    ? row.frame_count
-                    : parseInt(String(row?.frame_count ?? row?.frameCount ?? row?.count ?? ''), 10) || 0,
-                renderThreadTid:
-                  typeof row?.render_thread_tid === 'number'
-                    ? row.render_thread_tid
-                    : parseInt(String(row?.render_thread_tid ?? row?.renderThreadTid ?? row?.tid ?? ''), 10) || 0,
-              }))
-              .filter((p) => p.processName)
-          : (activeProcessesStepResult?.data?.rows?.map((row: unknown[]) => ({
-              upid: row[0] as number,
-              processName: row[1] as string,
-              frameCount: row[2] as number,
-              renderThreadTid: row[3] as number,
-            })) || []));
-
-    if (TEACHING_FEATURES.debugLogging) {
-      console.log('[AgentRoutes] Active rendering processes:', activeRenderingProcesses.map((p) => `${p.processName} (${p.frameCount} frames)`));
-    }
-
-    // Default values from centralized config if skill output is incomplete
-    const primaryPipelineId = pipelineResult?.primary_pipeline_id || TEACHING_DEFAULTS.pipelineId;
-    const primaryConfidence = validateConfidence(pipelineResult?.primary_confidence, TEACHING_DEFAULTS.confidence);
-    const candidatesList = pipelineResult?.candidates_list || '';
-    const featuresList = pipelineResult?.features_list || '';
-    const docPath = pipelineResult?.doc_path || TEACHING_DEFAULTS.docPath;
-
-    // Parse candidates and features using validated utilities
-    const candidates = candidatesList
-      ? parseCandidates(candidatesList, TEACHING_LIMITS.maxCandidates)
-      : [{ id: primaryPipelineId, confidence: primaryConfidence }];
-
-    const features = parseFeatures(featuresList);
-
-    // Get base pin instructions from PipelineSkillLoader (new data-driven approach)
-    // Ensure pipeline skills are loaded
-    await ensurePipelineSkillsInitialized();
-
-    // Unified Teaching Content: prioritize YAML skill, fallback to .md documentation
-    // YAML provides structured data; .md provides richer content from full documentation
-    const yamlTeaching = pipelineSkillLoader.getTeachingContent(primaryPipelineId);
-    const pipelineDocService = getPipelineDocService();
-    const mdTeaching = pipelineDocService.getTeachingContent(primaryPipelineId);
-
-    // Transform teaching content to frontend-compatible format (camelCase)
-    // Priority: YAML > .md > default fallback
-    const teachingContent = yamlTeaching
-      ? {
-          title: yamlTeaching.title,
-          summary: yamlTeaching.summary,
-          // YAML uses single 'mermaid' string, convert to array for frontend
-          mermaidBlocks: yamlTeaching.mermaid ? [yamlTeaching.mermaid] : [],
-          // YAML uses snake_case with different structure, convert to frontend format
-          threadRoles: yamlTeaching.thread_roles.map(role => ({
-            thread: role.thread,
-            responsibility: role.role + (role.description ? `: ${role.description}` : ''),
-            traceTag: role.trace_tags,
-          })),
-          // YAML key_slices has name/thread/description, extract names for simple display
-          keySlices: yamlTeaching.key_slices.map(slice => slice.name),
-          docPath: pipelineSkillLoader.getPipelineMeta(primaryPipelineId)?.doc_path || '',
-        }
-      : mdTeaching;
-
-    // Get pin instructions from pipeline skill YAML
-    const basePinInstructions = pipelineSkillLoader.getAutoPinInstructions(primaryPipelineId);
-
-    // Get smart filter configurations from pipeline skill
-    const smartFilterConfigs = pipelineSkillLoader.getSmartFilterConfigs(primaryPipelineId);
-
-    // v4 Smart Pin Enhancement: YAML-driven smart pin based on pipeline skill configuration
-    // Each pin instruction can enable smart_filter to request process-filtered pinning.
-    // Today SmartPerfetto uses a centralized "active_rendering_processes" query (from
-    // rendering_pipeline_detection) and does NOT execute per-instruction detection_sql.
-    // If smart_filter.enabled is true, we attach activeProcessNames for frontend filtering.
-    //
-    // Decision logic per instruction:
-    // 1. Check if instruction has smart_filter.enabled = true
-    // 2. If smart filter enabled and activeRenderingProcesses has data → smartPin
-    // 3. If smart filter enabled and activeRenderingProcesses is empty → skipPin
-    // 4. If smart filter not enabled → normal pin
-
-    // v2.0: Use centralized transformation function with type safety
-    // Transform pin instructions: convert snake_case to camelCase for frontend compatibility
-    const smartPinInstructions: PinInstructionResponse[] = TEACHING_FEATURES.useTypeTransforms
-      ? basePinInstructions.map((inst: PinInstruction) => {
-          // Check if this instruction has smart_filter enabled (from YAML config)
-          // Use single source of truth: smart_filter property on instruction
-          const hasSmartFilter = inst.smart_filter?.enabled ?? smartFilterConfigs.has(inst.pattern);
-
-          // Convert to RawPinInstruction format for transformation
-          const rawInst: RawPinInstruction = {
-            pattern: inst.pattern,
-            match_by: inst.match_by,
-            priority: inst.priority,
-            reason: inst.reason,
-            expand: inst.expand,
-            main_thread_only: inst.main_thread_only,
-            smart_filter: hasSmartFilter ? inst.smart_filter : undefined,
-          };
-
-          // Use centralized transformation
-          const transformed = transformPinInstruction(rawInst, activeRenderingProcesses);
-
-          // Add active process count to reason for smart pins
-          if (transformed.smartPin && !transformed.skipPin) {
-            transformed.reason = `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`;
-          }
-
-          return transformed;
-        })
-      : basePinInstructions.map((inst: PinInstruction): PinInstructionResponse => {
-          // Legacy transformation (fallback when feature flag is disabled)
-          const hasSmartFilter = smartFilterConfigs.has(inst.pattern) || inst.smart_filter?.enabled;
-          const hasActiveRenderingData = activeRenderingProcesses.length > 0;
-          const activeProcessNames = new Set(activeRenderingProcesses.map((p) => p.processName));
-
-          const baseInstruction: PinInstructionResponse = {
-            pattern: inst.pattern,
-            matchBy: inst.match_by,
-            priority: inst.priority,
-            reason: inst.reason,
-            expand: inst.expand,
-            mainThreadOnly: inst.main_thread_only,
-          };
-
-          if (hasSmartFilter) {
-            if (hasActiveRenderingData) {
-              return {
-                ...baseInstruction,
-                activeProcessNames: Array.from(activeProcessNames),
-                smartPin: true,
-                reason: `${inst.reason} (${activeRenderingProcesses.length} 活跃进程)`,
-              };
-            } else {
-              return {
-                ...baseInstruction,
-                reason: `${inst.reason} (未检测到活跃渲染进程，使用默认 Pin)`,
-              };
-            }
-          }
-          return baseInstruction;
-        });
-
-    // Build response
-    const response = {
-      success: true,
-      detection: {
-        primary_pipeline: {
-          id: primaryPipelineId,
-          confidence: primaryConfidence,
-        },
-        candidates,
-        features,
-        subvariants: subvariants || {
-          buffer_mode: 'UNKNOWN',
-          flutter_engine: 'N/A',
-          webview_mode: 'N/A',
-          game_engine: 'N/A',
-        },
-        trace_requirements_missing: traceRequirementsMissing,
-      },
-      teaching: teachingContent
-        ? {
-            title: teachingContent.title,
-            summary: teachingContent.summary,
-            mermaidBlocks: teachingContent.mermaidBlocks,
-            threadRoles: teachingContent.threadRoles,
-            keySlices: teachingContent.keySlices,
-            docPath: teachingContent.docPath,
-          }
-        : {
-            title: `渲染管线: ${primaryPipelineId}`,
-            summary: '未找到对应的文档内容。',
-            mermaidBlocks: [],
-            threadRoles: [],
-            keySlices: [],
-            docPath,
-          },
-      pinInstructions: smartPinInstructions,
-      // v3: Active rendering processes for smart pin filtering
-      activeRenderingProcesses: activeRenderingProcesses.map((p: any) => ({
-        processName: p.processName,
-        frameCount: p.frameCount,
-        renderThreadTid: p.renderThreadTid,
-      })),
-    };
-
-    console.log(`[AgentRoutes] Teaching pipeline detected: ${primaryPipelineId} (${(primaryConfidence * 100).toFixed(1)}%)`);
-    console.log(`[AgentRoutes] Smart pin: ${activeRenderingProcesses.length} active rendering processes`);
-    res.json(response);
-  } catch (error: any) {
-    console.error('[AgentRoutes] Teaching pipeline error:', error);
-    console.error('[AgentRoutes] Stack trace:', error.stack);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to detect pipeline',
-      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
-    });
-  }
-});
+registerTeachingRoutes(router);
 
 // ============================================================================
 // Report Generation (simplified for new architecture)
@@ -2740,7 +2118,7 @@ router.post('/teaching/pipeline', async (req, res) => {
 router.get('/:sessionId/report', (req, res) => {
   const { sessionId } = req.params;
 
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) {
     return res.status(404).json({
       success: false,
@@ -2766,6 +2144,8 @@ router.get('/:sessionId/report', (req, res) => {
   }
 
   const conclusion = normalizeNarrativeForClient(result.conclusion);
+  const clientFindings = buildClientFindings(result.findings, session.scenes || []);
+  const resultContract = buildSessionResultContract(session, clientFindings);
   // Generate simplified report data
   const report = {
     sessionId,
@@ -2805,6 +2185,7 @@ router.get('/:sessionId/report', (req, res) => {
       timestamp: step.timestamp,
       sourceEventType: step.sourceEventType,
     })),
+    resultContract,
 
     // Log file path for debugging
     logFile: session.logger.getLogFilePath(),
@@ -2826,13 +2207,48 @@ async function runAgentDrivenAnalysis(
   traceId: string,
   options: any = {}
 ) {
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) return;
+
+  const inputRun = options.runContext as AnalyzeSessionRunContext | undefined;
+  if (inputRun) {
+    session.activeRun = {
+      ...inputRun,
+      query,
+      status: 'running',
+      startedAt: inputRun.startedAt || Date.now(),
+    };
+    session.lastRun = { ...session.activeRun };
+    session.runSequence = Math.max(
+      normalizeRunSequence(session.runSequence),
+      normalizeRunSequence(inputRun.sequence)
+    );
+  } else if (!session.activeRun) {
+    const fallback = startSessionRun(session, query, generateRequestId());
+    session.activeRun = {
+      ...fallback,
+      status: 'running',
+    };
+    session.lastRun = { ...session.activeRun };
+  } else {
+    session.activeRun.query = query;
+    session.activeRun.status = 'running';
+    if (!session.activeRun.startedAt) {
+      session.activeRun.startedAt = Date.now();
+    }
+    session.lastRun = { ...session.activeRun };
+  }
 
   const { logger } = session;
   session.status = 'running';
   session.lastActivityAt = Date.now();
-  logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', { query, traceId });
+  logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', {
+    query,
+    traceId,
+    runId: session.activeRun?.runId,
+    requestId: session.activeRun?.requestId,
+    runSequence: session.activeRun?.sequence,
+  });
 
   // Track generation is a lightweight derivation step from DataEnvelopes.
   // Enable by default (unless explicitly disabled) so `/api/agent/analyze` can
@@ -2932,6 +2348,7 @@ async function runAgentDrivenAnalysis(
     session.result = result;
     session.hypotheses = result.hypotheses;
     session.status = result.success ? 'completed' : 'failed';
+    markSessionRunStatus(session, result.success ? 'completed' : 'failed');
 
     // Ensure trackEvents/scenes are computed for completed sessions (even without SSE clients)
     if (shouldGenerateTracks) {
@@ -2944,6 +2361,9 @@ async function runAgentDrivenAnalysis(
       rounds: result.rounds,
       findingsCount: result.findings.length,
       hypothesesCount: result.hypotheses.length,
+      runId: session.activeRun?.runId,
+      requestId: session.activeRun?.requestId,
+      runSequence: session.activeRun?.sequence,
     });
 
     // Persist session context (including EntityStore) for cross-restart recovery
@@ -3013,8 +2433,7 @@ async function runAgentDrivenAnalysis(
       try {
         logger.info('AgentRoutes', `Sending agent-driven result to client ${index + 1}/${clientCount}`);
         sendAgentDrivenResult(client, session);
-        client.write(`event: end\n`);
-        client.write(`data: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+        streamProjector.sendEnd(client, buildStreamObservability(session));
       } catch (e: any) {
         logger.error('AgentRoutes', `Error sending agent-driven result to client ${index + 1}`, e);
       }
@@ -3024,6 +2443,7 @@ async function runAgentDrivenAnalysis(
   } catch (error: any) {
     session.status = 'failed';
     session.error = error.message;
+    markSessionRunStatus(session, 'failed', error.message);
     logger.error('AgentDrivenAnalysis', 'Agent-driven analysis failed', error);
 
     broadcastToAgentDrivenClients(sessionId, {
@@ -3232,6 +2652,15 @@ function buildConversationStepUpdate(
   if (typeof contentRecord.strategyId === 'string' && contentRecord.strategyId.trim()) {
     metadata.strategyId = contentRecord.strategyId.trim();
   }
+  if (session.activeRun?.runId) {
+    metadata.runId = session.activeRun.runId;
+  }
+  if (session.activeRun?.requestId) {
+    metadata.requestId = session.activeRun.requestId;
+  }
+  if (typeof session.activeRun?.sequence === 'number' && Number.isFinite(session.activeRun.sequence)) {
+    metadata.runSequence = session.activeRun.sequence;
+  }
 
   return {
     type: 'conversation_step',
@@ -3353,69 +2782,32 @@ function mapToAgentDrivenEventType(update: StreamingUpdate): StreamingUpdate['ty
  * Broadcast update to all SSE clients for an agent-driven session
  */
 function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdate) {
-  const session = sessions.get(sessionId);
+  const session = assistantAppService.getSession(sessionId);
   if (!session) return;
   session.lastActivityAt = Date.now();
 
-  const eventType = update.type;
-  let eventData: string;
-
-  if (isDataEvent(eventType)) {
-    const envelopes = Array.isArray(update.content) ? update.content : [update.content];
-    for (let i = 0; i < envelopes.length; i++) {
-      const envelope = envelopes[i];
-      const validationErrors = validateDataEnvelope(envelope);
-      if (validationErrors.length > 0) {
-        console.warn(`[AgentRoutes.broadcastToAgentDrivenClients] DataEnvelope validation warning (envelope ${i}):`, {
-          sessionId,
-          errors: validationErrors.slice(0, 5),
-          totalErrors: validationErrors.length,
-          envelope: {
-            metaType: envelope?.meta?.type,
-            metaSource: envelope?.meta?.source,
-            displayLayer: envelope?.display?.layer,
-            displayFormat: envelope?.display?.format,
-          },
-        });
+  streamProjector.broadcastStreamingUpdate(sessionId, session.sseClients, update, {
+    observability: buildStreamObservability(session),
+    onDataEnvelopeValidationWarning: (payload) => {
+      console.warn(
+        `[AgentRoutes.broadcastToAgentDrivenClients] DataEnvelope validation warning (envelope ${payload.envelopeIndex}):`,
+        {
+          sessionId: payload.sessionId,
+          errors: payload.errors.slice(0, 5),
+          totalErrors: payload.errors.length,
+          envelope: payload.envelope,
+        }
+      );
+    },
+    onValidDataEnvelopes: (validEnvelopes) => {
+      if (validEnvelopes.length > 0) {
+        console.log(
+          `[AgentRoutes.broadcastToAgentDrivenClients] Sending ${validEnvelopes.length} DataEnvelope(s) for session ${sessionId}`
+        );
+        session.dataEnvelopes.push(...validEnvelopes);
+        trimSessionArray(session.dataEnvelopes, MAX_SESSION_DATA_ENVELOPES);
       }
-    }
-
-    console.log(`[AgentRoutes.broadcastToAgentDrivenClients] Sending ${envelopes.length} DataEnvelope(s) for session ${sessionId}`);
-
-    // Collect DataEnvelopes for HTML report generation with bounded memory.
-    const validEnvelopes = envelopes.filter((envelope) => envelope && envelope.data);
-    if (validEnvelopes.length > 0) {
-      session.dataEnvelopes.push(...validEnvelopes);
-      trimSessionArray(session.dataEnvelopes, MAX_SESSION_DATA_ENVELOPES);
-    }
-
-    eventData = JSON.stringify({
-      type: 'data',  // Fallback type for SSE chunk boundary resilience
-      id: update.id || generateEventId('sse', sessionId),
-      envelope: update.content,
-      timestamp: update.timestamp,
-    });
-  } else if (isLegacySkillEvent(eventType)) {
-    eventData = JSON.stringify({
-      type: update.type,
-      id: update.id || generateEventId('sse', sessionId),
-      data: update.content,
-      timestamp: update.timestamp,
-    });
-  } else {
-    eventData = JSON.stringify({
-      type: update.type,
-      id: update.id || generateEventId('sse', sessionId),
-      data: update.content,
-      timestamp: update.timestamp,
-    });
-  }
-
-  session.sseClients.forEach((client) => {
-    try {
-      client.write(`event: ${eventType}\n`);
-      client.write(`data: ${eventData}\n\n`);
-    } catch {}
+    },
   });
 }
 
@@ -4066,6 +3458,16 @@ function buildClientFindings(
   return Array.from(dedup.values());
 }
 
+function buildSessionResultContract(
+  session: AnalysisSession,
+  findings: ClientFindingPayload[]
+) {
+  return buildAssistantResultContract({
+    dataEnvelopes: session.dataEnvelopes,
+    findings,
+  });
+}
+
 function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload[] {
   if (!Array.isArray(scenes) || scenes.length === 0) return [];
   const scrollScenes = scenes.filter((s) => s.type === 'scroll');
@@ -4266,6 +3668,7 @@ function normalizeNarrativeForClient(narrative: string): string {
 function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) {
   const result = session.result;
   if (!result) return;
+  const observability = buildStreamObservability(session);
   const replayOnlyScene = isSceneReplayOnlyQuery(session.query);
   const normalizedConclusion = replayOnlyScene
     ? buildSceneReplayNarrative(session.scenes || [])
@@ -4295,6 +3698,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       ? result
       : { ...result, conclusion: normalizedConclusion, conclusionContract: normalizedConclusionContract };
   const clientFindings = replayOnlyScene ? [] : buildClientFindings(result.findings, session.scenes || []);
+  const resultContract = buildSessionResultContract(session, clientFindings);
 
   // Generate HTML report
   let reportUrl: string | undefined;
@@ -4353,6 +3757,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
   res.write(`data: ${JSON.stringify({
     type: 'analysis_completed',
     architecture: 'agent-driven',
+    ...observability,
     data: {
       conclusion: normalizedConclusion,
       conclusionContract: normalizedConclusionContract,
@@ -4360,6 +3765,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       rounds: result.rounds,
       totalDurationMs: result.totalDurationMs,
       findings: clientFindings,
+      resultContract,
       hypotheses: result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
         id: h.id,
         description: h.description,
@@ -4373,6 +3779,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       conversationTimeline: session.conversationSteps,
       reportUrl,
       reportError,
+      observability,
     },
     timestamp: Date.now(),
   })}\n\n`);
@@ -4382,6 +3789,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     res.write(`event: scene_reconstruction_completed\n`);
     res.write(`data: ${JSON.stringify({
       type: 'scene_reconstruction_completed',
+      ...observability,
       data: {
         narrative: normalizedConclusion,
         confidence: result.confidence,
@@ -4404,6 +3812,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
           timestampsNs: f.timestampsNs,
         })),
         suggestions: [],
+        observability,
       },
       timestamp: Date.now(),
     })}\n\n`);
@@ -4553,30 +3962,21 @@ router.post('/logs/cleanup', (req, res) => {
 
 // Cleanup old sessions every 30 minutes
 const sessionCleanupInterval = setInterval(() => {
-  const now = Date.now();
-
-  // Clean up stale sessions (agent-driven)
-  for (const [id, session] of sessions.entries()) {
-    const idle = now - (session.lastActivityAt || session.createdAt);
-    const isTerminal = session.status === 'completed' || session.status === 'failed';
-    const isAbandonedNonTerminal =
-      (session.status === 'pending' || session.status === 'running') &&
-      session.sseClients.length === 0;
-
-    if (
-      (isTerminal && idle > TERMINAL_SESSION_MAX_IDLE_MS) ||
-      (isAbandonedNonTerminal && idle > NON_TERMINAL_SESSION_MAX_IDLE_MS)
-    ) {
-      console.log(`[AgentRoutes] Cleaning up stale session: ${id}`);
+  assistantAppService.cleanupIdleSessions({
+    terminalMaxIdleMs: TERMINAL_SESSION_MAX_IDLE_MS,
+    nonTerminalMaxIdleMs: NON_TERMINAL_SESSION_MAX_IDLE_MS,
+    onCleanup: (sessionId, session) => {
+      console.log(`[AgentRoutes] Cleaning up stale session: ${sessionId}`);
       session.sseClients.forEach((client) => {
         try {
           client.end();
-        } catch {}
+        } catch {
+          // Ignore closed sockets during cleanup.
+        }
       });
       session.orchestrator.reset();
-      sessions.delete(id);
-    }
-  }
+    },
+  });
 }, 30 * 60 * 1000);
 sessionCleanupInterval.unref?.();
 

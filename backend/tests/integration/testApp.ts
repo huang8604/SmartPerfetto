@@ -39,9 +39,16 @@ export function createTestApp() {
   });
 
   // API routes (only the ones we need for testing)
+  app.use('/api/assistant/v1', agentRoutes);
   app.use('/api/agent', agentRoutes);
   app.use('/api/trace-processor', traceProcessorRoutes);
   app.use('/api/skills', skillRoutes);
+
+  const assistantShellDir = path.resolve(process.cwd(), 'public/assistant-shell');
+  app.get('/assistant-shell', (_req, res) => {
+    res.sendFile(path.join(assistantShellDir, 'index.html'));
+  });
+  app.use('/assistant-shell', express.static(assistantShellDir));
 
   // 404 handler
   app.use((req, res) => {

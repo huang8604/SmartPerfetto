@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartPerfetto Assistant Web Shell</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #22d3ee;
+      --ok: #34d399;
+      --warn: #f59e0b;
+      --err: #f87171;
+      --border: #1f2937;
+      --input: #0b1220;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #0f172a 0%, #020617 100%);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      color: var(--accent);
+    }
+    .subtitle {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    input, textarea, button {
+      font: inherit;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--input);
+      color: var(--text);
+    }
+    textarea {
+      min-height: 84px;
+      resize: vertical;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #111827;
+      color: var(--text);
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: #164e63;
+      background: #083344;
+      color: #67e8f9;
+    }
+    button:hover { opacity: 0.9; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .badge.connected { color: var(--ok); border-color: #065f46; }
+    .badge.error { color: var(--err); border-color: #7f1d1d; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .log {
+      white-space: pre-wrap;
+      line-height: 1.35;
+      max-height: 260px;
+      overflow: auto;
+      font-size: 12px;
+      background: #020617;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .table th, .table td {
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      padding: 6px 4px;
+      vertical-align: top;
+    }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>SmartPerfetto Assistant Web Shell</h1>
+    <p class="subtitle">Independent shell using Assistant API v1 (<code>/api/assistant/v1</code>) and the same SSE event contract as Perfetto plugin.</p>
+
+    <div class="panel">
+      <div class="row">
+        <div class="field" style="grid-column: span 4;">
+          <label for="backendUrl">Backend URL</label>
+          <input id="backendUrl" />
+        </div>
+        <div class="field" style="grid-column: span 4;">
+          <label for="apiKey">API Key (optional)</label>
+          <input id="apiKey" placeholder="SMARTPERFETTO_API_KEY" />
+        </div>
+        <div class="field" style="grid-column: span 4;">
+          <label for="traceId">Trace ID</label>
+          <input id="traceId" placeholder="trace-xxxxx" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field" style="grid-column: span 8;">
+          <label for="query">Query</label>
+          <textarea id="query" placeholder="Analyze scroll jank and summarize the root cause."></textarea>
+        </div>
+        <div class="field" style="grid-column: span 4;">
+          <label for="sessionId">Session ID (auto-filled)</label>
+          <input id="sessionId" readonly />
+          <div class="actions">
+            <button id="analyzeBtn" class="primary">Analyze / Continue</button>
+            <button id="streamBtn">Connect Stream</button>
+            <button id="clearBtn">Clear Session</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="small">
+        SSE: <span id="sseState" class="badge">disconnected</span>
+        <span class="muted">Events: connected / conversation_step / data / analysis_completed / error / end</span>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h3>Conversation Timeline</h3>
+        <div id="timelineLog" class="log"></div>
+      </div>
+      <div class="panel">
+        <h3>Event Log</h3>
+        <div id="eventLog" class="log"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Data Envelopes</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Source</th>
+            <th>Step</th>
+            <th>Layer</th>
+            <th>Format</th>
+            <th>Rows</th>
+          </tr>
+        </thead>
+        <tbody id="envelopeRows"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h3>Final Result</h3>
+      <div id="finalSummary" class="log"></div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

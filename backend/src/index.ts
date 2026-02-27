@@ -88,7 +88,14 @@ app.use('/api/template-analysis', templateAnalysisRoutes);
 app.use('/api/skills', skillRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/assistant/v1', agentRoutes);
 app.use('/api/agent', agentRoutes);
+
+const assistantShellDir = path.resolve(__dirname, '../public/assistant-shell');
+app.get('/assistant-shell', (_req, res) => {
+  res.sendFile(path.join(assistantShellDir, 'index.html'));
+});
+app.use('/assistant-shell', express.static(assistantShellDir));
 
 // Serve uploaded files in development
 if (NODE_ENV === 'development') {

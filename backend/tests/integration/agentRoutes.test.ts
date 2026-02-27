@@ -13,6 +13,49 @@ import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import request from 'supertest';
 import { createTestApp, loadTestTrace, cleanupTrace, wait } from './testApp';
 
+type ParsedSSEEvent = { event: string; data: any };
+
+function parseSSEText(text: string): ParsedSSEEvent[] {
+  const events: ParsedSSEEvent[] = [];
+  const chunks = String(text || '').split('\n\n');
+  for (const chunk of chunks) {
+    const lines = chunk.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0) continue;
+    const eventLine = lines.find((line) => line.startsWith('event:'));
+    const dataLine = lines.find((line) => line.startsWith('data:'));
+    if (!eventLine || !dataLine) continue;
+    const event = eventLine.slice('event:'.length).trim();
+    const rawData = dataLine.slice('data:'.length).trim();
+    let data: any = rawData;
+    try {
+      data = JSON.parse(rawData);
+    } catch {
+      // Keep raw string when payload is non-JSON.
+    }
+    events.push({ event, data });
+  }
+  return events;
+}
+
+async function waitForTerminalStatus(
+  app: ReturnType<typeof createTestApp>,
+  sessionId: string,
+  timeoutMs = 30000
+): Promise<{ status: string; payload: any }> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const response = await request(app).get(`/api/agent/${sessionId}/status`);
+    if (response.status === 200) {
+      const status = String(response.body?.status || '');
+      if (status === 'completed' || status === 'failed') {
+        return { status, payload: response.body };
+      }
+    }
+    await wait(300);
+  }
+  throw new Error(`Timed out waiting for terminal status of session ${sessionId}`);
+}
+
 // =============================================================================
 // Fast Validation Tests (no trace needed)
 // =============================================================================
@@ -71,6 +114,36 @@ describe('Agent Routes - Input Validation', () => {
       } finally {
         restoreApiKey(previousApiKey);
       }
+    });
+  });
+
+  describe('Assistant API v1 Alias', () => {
+    it('should expose sessions endpoint via /api/assistant/v1', async () => {
+      const response = await request(app).get('/api/assistant/v1/sessions');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(Array.isArray(response.body.activeSessions)).toBe(true);
+    });
+
+    it('should keep analyze validation behavior on /api/assistant/v1/analyze', async () => {
+      const response = await request(app)
+        .post('/api/assistant/v1/analyze')
+        .send({ query: 'Test query' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.success).toBe(false);
+      expect(response.body.error).toContain('traceId');
+    });
+  });
+
+  describe('Assistant Web Shell', () => {
+    it('should serve standalone assistant shell page', async () => {
+      const response = await request(app).get('/assistant-shell');
+
+      expect(response.status).toBe(200);
+      expect(response.text).toContain('SmartPerfetto Assistant Web Shell');
+      expect(response.text).toContain('/api/assistant/v1');
     });
   });
 
@@ -338,6 +411,10 @@ describe('Agent Routes - Session Lifecycle', () => {
     expect(createResponse.status).toBe(200);
     expect(createResponse.body.success).toBe(true);
     expect(createResponse.body.sessionId).toBeDefined();
+    expect(typeof createResponse.body.runId).toBe('string');
+    expect(typeof createResponse.body.requestId).toBe('string');
+    expect(typeof createResponse.body.runSequence).toBe('number');
+    expect(createResponse.headers['x-request-id']).toBe(createResponse.body.requestId);
 
     const sessionId = createResponse.body.sessionId;
 
@@ -351,6 +428,9 @@ describe('Agent Routes - Session Lifecycle', () => {
     expect(statusResponse.body.success).toBe(true);
     expect(statusResponse.body.sessionId).toBe(sessionId);
     expect(statusResponse.body.traceId).toBe(traceId);
+    expect(statusResponse.body.observability?.runId).toBe(createResponse.body.runId);
+    expect(statusResponse.body.observability?.requestId).toBe(createResponse.body.requestId);
+    expect(statusResponse.body.observability?.runSequence).toBe(createResponse.body.runSequence);
     expect(['pending', 'running', 'awaiting_user', 'completed', 'failed'])
       .toContain(statusResponse.body.status);
 
@@ -415,4 +495,85 @@ describe('Agent Routes - Session Lifecycle', () => {
     // Cleanup
     await request(app).delete(`/api/agent/${sessionId}`);
   }, 30000);
+
+  it('should satisfy SSE contract for analysis_completed event', async () => {
+    if (!traceId) {
+      console.warn('Skipping test: no trace loaded');
+      return;
+    }
+
+    const createResponse = await request(app)
+      .post('/api/agent/analyze')
+      .send({
+        traceId,
+        query: '分析性能',
+        options: { maxIterations: 1 },
+      });
+
+    expect(createResponse.status).toBe(200);
+    expect(createResponse.body.success).toBe(true);
+    const sessionId = createResponse.body.sessionId as string;
+    const runId = createResponse.body.runId as string;
+    const requestId = createResponse.body.requestId as string;
+    const runSequence = createResponse.body.runSequence as number;
+    expect(sessionId).toBeTruthy();
+    expect(runId).toBeTruthy();
+    expect(requestId).toBeTruthy();
+    expect(Number.isFinite(runSequence)).toBe(true);
+
+    const terminal = await waitForTerminalStatus(app, sessionId, 45000);
+    expect(terminal.status).toBe('completed');
+
+    const streamResponse = await request(app)
+      .get(`/api/agent/${sessionId}/stream`)
+      .buffer(true);
+
+    expect(streamResponse.status).toBe(200);
+    const sseEvents = parseSSEText(streamResponse.text);
+    expect(sseEvents.length).toBeGreaterThan(0);
+
+    const eventNames = sseEvents.map((e) => e.event);
+    expect(eventNames).toContain('connected');
+    expect(eventNames).toContain('end');
+
+    const connectedEvent = sseEvents.find((e) => e.event === 'connected');
+    expect(connectedEvent).toBeDefined();
+    expect(connectedEvent?.data?.runId).toBe(runId);
+    expect(connectedEvent?.data?.requestId).toBe(requestId);
+    expect(connectedEvent?.data?.runSequence).toBe(runSequence);
+
+    const completedEvent = sseEvents.find((e) => e.event === 'analysis_completed');
+    expect(completedEvent).toBeDefined();
+    expect(completedEvent?.data?.type).toBe('analysis_completed');
+    expect(completedEvent?.data?.architecture).toBe('agent-driven');
+    expect(completedEvent?.data?.runId).toBe(runId);
+    expect(completedEvent?.data?.requestId).toBe(requestId);
+    expect(completedEvent?.data?.runSequence).toBe(runSequence);
+    expect(completedEvent?.data?.data).toBeDefined();
+    expect(typeof completedEvent?.data?.data?.conclusion).toBe('string');
+    expect(typeof completedEvent?.data?.data?.confidence).toBe('number');
+    expect(typeof completedEvent?.data?.data?.rounds).toBe('number');
+    expect(typeof completedEvent?.data?.data?.totalDurationMs).toBe('number');
+    expect(Array.isArray(completedEvent?.data?.data?.findings)).toBe(true);
+    expect(completedEvent?.data?.data?.resultContract?.version).toBe('1.0.0');
+    expect(Array.isArray(completedEvent?.data?.data?.resultContract?.dataEnvelopes)).toBe(true);
+    expect(Array.isArray(completedEvent?.data?.data?.resultContract?.diagnostics)).toBe(true);
+    expect(Array.isArray(completedEvent?.data?.data?.resultContract?.actions)).toBe(true);
+    expect(completedEvent?.data?.data?.observability?.runId).toBe(runId);
+    expect(completedEvent?.data?.data?.observability?.requestId).toBe(requestId);
+    expect(completedEvent?.data?.data?.observability?.runSequence).toBe(runSequence);
+
+    const statusResponse = await request(app).get(`/api/agent/${sessionId}/status`);
+    expect(statusResponse.status).toBe(200);
+    expect(statusResponse.body?.status).toBe('completed');
+    expect(statusResponse.body?.observability?.runId).toBe(runId);
+    expect(statusResponse.body?.observability?.requestId).toBe(requestId);
+    expect(statusResponse.body?.observability?.runSequence).toBe(runSequence);
+    expect(statusResponse.body?.result?.resultContract?.version).toBe('1.0.0');
+    expect(Array.isArray(statusResponse.body?.result?.resultContract?.dataEnvelopes)).toBe(true);
+    expect(Array.isArray(statusResponse.body?.result?.resultContract?.diagnostics)).toBe(true);
+    expect(Array.isArray(statusResponse.body?.result?.resultContract?.actions)).toBe(true);
+
+    await request(app).delete(`/api/agent/${sessionId}`);
+  }, 90000);
 });
