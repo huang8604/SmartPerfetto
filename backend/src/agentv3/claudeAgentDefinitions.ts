@@ -13,22 +13,38 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { SceneType } from './sceneClassifier';
 import type { ArchitectureInfo } from '../agent/detectors/types';
+import { MCP_NAME_PREFIX } from './claudeMcpServer';
 
-/** MCP tools available to all sub-agents (same toolset — shared MCP server). */
-const SUB_AGENT_TOOLS = [
-  'mcp__smartperfetto__execute_sql',
-  'mcp__smartperfetto__invoke_skill',
-  'mcp__smartperfetto__list_skills',
-  'mcp__smartperfetto__detect_architecture',
-  'mcp__smartperfetto__lookup_sql_schema',
-  'mcp__smartperfetto__fetch_artifact',
-  'mcp__smartperfetto__query_perfetto_source',
-];
+/** Tools that are orchestrator-only — sub-agents collect evidence, not plan/hypothesize.
+ * These are excluded when deriving sub-agent tools from the full allowedTools list. */
+const ORCHESTRATOR_ONLY_TOOLS = new Set([
+  'submit_plan',
+  'update_plan_phase',
+  'revise_plan',
+  'submit_hypothesis',
+  'resolve_hypothesis',
+  'flag_uncertainty',
+  'recall_patterns',
+]);
+
+/**
+ * Derive sub-agent tools from the orchestrator's allowedTools.
+ * This ensures adding a new MCP tool automatically propagates to sub-agents
+ * unless it is explicitly listed in ORCHESTRATOR_ONLY_TOOLS.
+ */
+function deriveSubAgentTools(allowedTools: string[]): string[] {
+  return allowedTools.filter(t => {
+    const shortName = t.replace(MCP_NAME_PREFIX, '');
+    return !ORCHESTRATOR_ONLY_TOOLS.has(shortName);
+  });
+}
 
 /** Context injected dynamically into sub-agent prompts at runtime. */
 export interface SubAgentContext {
   architecture?: ArchitectureInfo;
   packageName?: string;
+  /** Full allowedTools from createClaudeMcpServer — sub-agent tools are derived from this. */
+  allowedTools?: string[];
 }
 
 /**
@@ -66,7 +82,7 @@ function buildArchitectureGuidance(ctx?: SubAgentContext): string {
   return `\n## 当前 Trace 架构\n${lines.join('\n')}`;
 }
 
-function buildFrameExpert(ctx?: SubAgentContext): AgentDefinition {
+function buildFrameExpert(subAgentTools: string[], ctx?: SubAgentContext): AgentDefinition {
   const archGuidance = buildArchitectureGuidance(ctx);
 
   return {
@@ -98,13 +114,13 @@ ${archGuidance}
 - 返回结构化数据：帧列表、根因分类、关键指标
 - 使用中文输出
 - 每个发现标注严重程度 [CRITICAL]/[HIGH]/[MEDIUM]/[LOW]/[INFO]`,
-    tools: SUB_AGENT_TOOLS,
+    tools: subAgentTools,
     model: 'sonnet',
     maxTurns: 8,
   };
 }
 
-function buildSystemExpert(ctx?: SubAgentContext): AgentDefinition {
+function buildSystemExpert(subAgentTools: string[], ctx?: SubAgentContext): AgentDefinition {
   const archGuidance = buildArchitectureGuidance(ctx);
 
   return {
@@ -134,13 +150,13 @@ ${archGuidance}
 - 返回结构化数据：CPU 频率时序、内存波动、Binder 延迟分布
 - 使用中文输出
 - 每个发现标注严重程度 [CRITICAL]/[HIGH]/[MEDIUM]/[LOW]/[INFO]`,
-    tools: SUB_AGENT_TOOLS,
+    tools: subAgentTools,
     model: 'sonnet',
     maxTurns: 8,
   };
 }
 
-function buildStartupExpert(ctx?: SubAgentContext): AgentDefinition {
+function buildStartupExpert(subAgentTools: string[], ctx?: SubAgentContext): AgentDefinition {
   const archGuidance = buildArchitectureGuidance(ctx);
 
   return {
@@ -167,7 +183,7 @@ ${archGuidance}
 - 返回：各阶段耗时、阻塞因素、关键 Slice 列表
 - 使用中文输出
 - 每个发现标注严重程度 [CRITICAL]/[HIGH]/[MEDIUM]/[LOW]/[INFO]`,
-    tools: SUB_AGENT_TOOLS,
+    tools: subAgentTools,
     model: 'sonnet',
     maxTurns: 8,
   };
@@ -194,17 +210,20 @@ export function buildAgentDefinitions(
   sceneType: SceneType,
   ctx?: SubAgentContext,
 ): Record<string, AgentDefinition> {
+  // Auto-derive sub-agent tools from orchestrator's allowedTools, excluding orchestrator-only tools.
+  // Falls back to empty array if allowedTools not provided (sub-agents will have no tools — safe failure).
+  const subAgentTools = ctx?.allowedTools ? deriveSubAgentTools(ctx.allowedTools) : [];
   const agents: Record<string, AgentDefinition> = {};
 
   switch (sceneType) {
     case 'scrolling':
-      agents['frame-expert'] = buildFrameExpert(ctx);
-      agents['system-expert'] = buildSystemExpert(ctx);
+      agents['frame-expert'] = buildFrameExpert(subAgentTools, ctx);
+      agents['system-expert'] = buildSystemExpert(subAgentTools, ctx);
       break;
 
     case 'startup':
-      agents['startup-expert'] = buildStartupExpert(ctx);
-      agents['system-expert'] = buildSystemExpert(ctx);
+      agents['startup-expert'] = buildStartupExpert(subAgentTools, ctx);
+      agents['system-expert'] = buildSystemExpert(subAgentTools, ctx);
       break;
 
     case 'anr':
@@ -216,8 +235,8 @@ export function buildAgentDefinitions(
       // For general queries, frame-expert + system-expert provide broad coverage.
       // startup-expert is omitted to avoid duplicating system-expert's CPU/Binder/Memory skills.
       // The orchestrator can still call startup_analysis directly if needed.
-      agents['frame-expert'] = buildFrameExpert(ctx);
-      agents['system-expert'] = buildSystemExpert(ctx);
+      agents['frame-expert'] = buildFrameExpert(subAgentTools, ctx);
+      agents['system-expert'] = buildSystemExpert(subAgentTools, ctx);
       break;
   }
 

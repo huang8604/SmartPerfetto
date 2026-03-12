@@ -346,7 +346,7 @@ export interface StreamingUpdate {
     // Claude Agent SDK (agentv3) sub-agent events
     | 'sub_agent_started' | 'sub_agent_completed'
     // Claude Agent SDK (agentv3) planning events
-    | 'plan_submitted' | 'plan_phase_updated'
+    | 'plan_submitted' | 'plan_phase_updated' | 'plan_revised'
     /** @deprecated Use 'skill_layered_result' instead. Will be removed in v3.0 */
     | 'skill_data';
   content: any;

@@ -1,12 +1,17 @@
 /**
- * Loads scene analysis strategies from external Markdown files with YAML frontmatter.
+ * Loads external prompt content from `backend/strategies/`:
  *
- * Strategy files live in `backend/strategies/*.strategy.md` and contain:
- * - YAML frontmatter: scene name, priority, effort, keywords, compound_patterns
- * - Markdown body: analysis methodology text injected into the system prompt
+ * 1. **Scene strategies** (`*.strategy.md`): YAML frontmatter + Markdown body.
+ *    Used by `sceneClassifier.ts` for matching and `claudeSystemPrompt.ts` for injection.
+ *    Adding a new scene requires only a new `.strategy.md` file, no code changes.
  *
- * This decouples strategy content from TypeScript code — adding a new scene
- * requires only a new `.strategy.md` file, no code changes.
+ * 2. **Prompt templates** (`*.template.md`): Markdown with optional `{{variable}}`
+ *    placeholders, substituted at runtime by `renderTemplate()`.
+ *    Used by `claudeSystemPrompt.ts` for role, methodology, output format,
+ *    architecture guidance, and selection context sections.
+ *    Adding/editing prompt content requires only template changes, no code changes.
+ *
+ * Both categories are cached on first load and cleared together via `invalidateStrategyCache()`.
  */
 
 import * as fs from 'fs';
@@ -24,6 +29,8 @@ export interface StrategyDefinition {
 
 const STRATEGIES_DIR = path.resolve(__dirname, '../../strategies');
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
+/** In dev mode, skip caching so .strategy.md / .template.md edits take effect without restart. */
+const DEV_MODE = process.env.NODE_ENV !== 'production';
 
 let cache: Map<string, StrategyDefinition> | null = null;
 
@@ -49,7 +56,7 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
 }
 
 export function loadStrategies(): Map<string, StrategyDefinition> {
-  if (cache) return cache;
+  if (cache && !DEV_MODE) return cache;
 
   cache = new Map();
   const files = fs.readdirSync(STRATEGIES_DIR)
@@ -73,7 +80,50 @@ export function getRegisteredScenes(): StrategyDefinition[] {
   return Array.from(loadStrategies().values());
 }
 
-/** Clear cached strategies — useful for dev/test reloads. */
+/** Clear cached strategies and templates — useful for dev/test reloads. */
 export function invalidateStrategyCache(): void {
   cache = null;
+  templateCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Prompt & selection context templates ({{variable}} substitution)
+// ---------------------------------------------------------------------------
+
+const templateCache = new Map<string, string>();
+
+/**
+ * Load a prompt template from `backend/strategies/<name>.template.md`.
+ * Templates use `{{variable}}` placeholders that callers substitute at runtime via `renderTemplate()`.
+ * Static templates (no variables) can be used directly as-is.
+ *
+ * Results are cached in `templateCache` and cleared by `invalidateStrategyCache()`.
+ */
+export function loadPromptTemplate(name: string): string | undefined {
+  if (templateCache.has(name) && !DEV_MODE) return templateCache.get(name);
+
+  const filePath = path.join(STRATEGIES_DIR, `${name}.template.md`);
+  if (!fs.existsSync(filePath)) return undefined;
+
+  const content = fs.readFileSync(filePath, 'utf-8').trim();
+  templateCache.set(name, content);
+  return content;
+}
+
+/**
+ * Load a selection context template from `backend/strategies/selection-<kind>.template.md`.
+ * Delegates to `loadPromptTemplate()` with the `selection-` prefix.
+ */
+export function loadSelectionTemplate(kind: string): string | undefined {
+  return loadPromptTemplate(`selection-${kind}`);
+}
+
+/**
+ * Substitute `{{key}}` placeholders in a template string with provided values.
+ */
+export function renderTemplate(template: string, vars: Record<string, string | number | undefined>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
+    const val = vars[key];
+    return val !== undefined ? String(val) : `{{${key}}}`;
+  });
 }

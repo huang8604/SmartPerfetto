@@ -601,7 +601,7 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
 router.post('/analyze', async (req, res) => {
   try {
     const requestId = getRequestId(req);
-    const { traceId, query, sessionId: requestedSessionId, options = {} } = req.body;
+    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext } = req.body;
 
     if (!traceId) {
       return res.status(400).json({
@@ -624,6 +624,18 @@ router.post('/analyze', async (req, res) => {
         error: '场景还原已独立为专用功能',
         hint: '请使用 /scene 命令（前端）或 POST /api/agent/v1/scene-reconstruct（后端）',
       });
+    }
+
+    // Validate selectionContext — strip invalid payloads silently instead of rejecting
+    let selectionContext: typeof rawSelectionContext | undefined;
+    if (rawSelectionContext && typeof rawSelectionContext === 'object') {
+      const sc = rawSelectionContext;
+      if (sc.kind === 'area' && typeof sc.startNs === 'number' && typeof sc.endNs === 'number') {
+        selectionContext = sc;
+      } else if (sc.kind === 'track_event' && typeof sc.eventId === 'number' && typeof sc.ts === 'number') {
+        selectionContext = sc;
+      }
+      // Otherwise: invalid kind or missing required fields — selectionContext stays undefined
     }
 
     // Verify trace exists
@@ -693,6 +705,7 @@ router.post('/analyze', async (req, res) => {
 
     runAgentDrivenAnalysis(sessionId, query, traceId, {
       ...options,
+      selectionContext,
       blockedStrategyIds,
       traceProcessorService,
       runContext,
@@ -1969,6 +1982,7 @@ async function runAgentDrivenAnalysis(
         taskTimeoutMs: options.taskTimeoutMs,
         blockedStrategyIds: options.blockedStrategyIds,
         adb: options.adb,
+        selectionContext: options.selectionContext,
       });
     });
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);

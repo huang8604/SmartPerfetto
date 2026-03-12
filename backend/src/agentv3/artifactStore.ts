@@ -118,15 +118,6 @@ export class ArtifactStore {
   }
 
   /**
-   * Generate summaries for all stored artifacts.
-   */
-  generateAllSummaries(): ArtifactSummary[] {
-    return [...this.artifacts.keys()]
-      .map(id => this.generateSummary(id))
-      .filter((s): s is ArtifactSummary => s !== undefined);
-  }
-
-  /**
    * Fetch artifact data at the requested detail level.
    * For 'rows' detail, supports pagination via offset/limit to prevent token overflow.
    * Returns totalRows and hasMore so the caller knows whether to fetch more.

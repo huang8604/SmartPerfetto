@@ -385,9 +385,6 @@ if [ ! -f "$PROJECT_ROOT/backend/.env" ]; then
   echo "=============================================="
 fi
 
-# 【S4 Fix】Ensure data directories exist
-mkdir -p "$PROJECT_ROOT/backend/data/sessions"
-
 # Trap Ctrl+C and other termination signals
 trap on_exit EXIT
 trap 'cleanup 130' SIGINT SIGTERM

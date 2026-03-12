@@ -1,11 +1,6 @@
-export { ClaudeRuntime } from './claudeRuntime';
-export { isClaudeCodeEnabled, loadClaudeConfig } from './claudeConfig';
-export type { ClaudeAgentConfig } from './claudeConfig';
-export type { ClaudeSessionMapping, ClaudeAnalysisContext, McpToolResult, AnalysisPlanV3, PlanPhase, ToolCallRecord, AnalysisPatternEntry } from './types';
-export { extractTraceFeatures, matchPatterns, saveAnalysisPattern, buildPatternContextSection } from './analysisPatternMemory';
-export { verifyConclusion, verifyHeuristic, verifyPlanAdherence, generateCorrectionPrompt } from './claudeVerifier';
-export { detectFocusApps } from './focusAppDetector';
-export type { DetectedFocusApp, FocusAppDetectionResult } from './focusAppDetector';
+// Public API surface — only export what external consumers actually import.
+// Internal agentv3 modules import directly from their source files.
+export { isClaudeCodeEnabled } from './claudeConfig';
 
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import type { ClaudeAgentConfig } from './claudeConfig';

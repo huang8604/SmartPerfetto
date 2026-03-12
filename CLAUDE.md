@@ -45,7 +45,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 - Frontend/backend share `trace_processor_shell` via HTTP RPC
 - **Primary Runtime: agentv3** — Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) as orchestrator
 - **Deprecated Fallback: agentv2** — governance pipeline + agent/core executors (activated by `AI_SERVICE=deepseek`)
-- Claude orchestrates via MCP tools: execute_sql, invoke_skill, detect_architecture, etc.
+- Claude orchestrates via 15 MCP tools: execute_sql, invoke_skill, submit_plan, submit_hypothesis, recall_patterns, etc.
 - Scene Classifier routes queries to scene-specific system prompts (scrolling/startup/anr/general)
 - Analysis logic in YAML Skills (`backend/skills/`)
 - Results layered: L1 (overview) → L2 (list) → L3 (diagnosis) → L4 (deep)
@@ -64,35 +64,40 @@ The primary execution path uses Claude Agent SDK as the orchestrator. Claude rec
 | Component | Purpose |
 |-----------|---------|
 | claudeRuntime.ts | 主编排器 — implements `IOrchestrator`, wraps `sdkQuery()` |
-| claudeMcpServer.ts | 8 MCP tools for Claude to access trace data |
-| claudeSystemPrompt.ts | 动态 system prompt — 按 SceneType 注入分析策略 |
+| claudeMcpServer.ts | 15 MCP tools for Claude to access trace data |
+| claudeSystemPrompt.ts | 动态 system prompt — 按 SceneType 注入分析策略 + 上轮计划上下文 |
 | claudeSseBridge.ts | SDK stream → SSE events 桥接 (text buffering, tool tracking) |
 | claudeConfig.ts | 配置 + `isClaudeCodeEnabled()` 路由判断 |
 | sceneClassifier.ts | 关键词场景分类 (scrolling/startup/anr/general, <1ms) |
 | focusAppDetector.ts | 焦点应用检测 (battery_stats/oom_adj/frame_timeline) |
 | claudeAgentDefinitions.ts | Sub-agent 定义 (feature-flagged: `CLAUDE_ENABLE_SUB_AGENTS=true`) |
-| claudeVerifier.ts | 结论验证 (heuristic + plan adherence + LLM) + 修正提示生成. 默认开启 |
+| claudeVerifier.ts | 4 层验证 (heuristic + plan adherence + hypothesis + scene completeness + LLM) + 可学习误诊模式. 默认开启 |
 | artifactStore.ts | Skill 结果引用存储 — 3 级获取 (summary/rows/full) |
 | sqlSummarizer.ts | SQL 结果摘要 — `summary=true` 时返回列统计+采样行，节省 ~85% tokens |
 | claudeFindingExtractor.ts | 从 SDK 响应和 Skill 结果中提取 Findings |
-| analysisPatternMemory.ts | 跨会话分析模式记忆 — 持久化 trace 特征→insights (200 条, 60 天 TTL) |
-| types.ts | ClaudeAnalysisContext, AnalysisNote, AnalysisPlanV3, VerificationResult |
+| analysisPatternMemory.ts | 跨会话分析模式记忆 — 持久化 trace 特征→insights (200 条, 频率加权, 60 天 TTL) |
+| types.ts | ClaudeAnalysisContext, AnalysisNote, AnalysisPlanV3, Hypothesis, UncertaintyFlag, VerificationResult |
 | index.ts | 导出 + `createClaudeRuntime()` 工厂 |
 
-**MCP Tools (10):**
+**MCP Tools (15):**
 
 | Tool | Purpose |
 |------|---------|
-| execute_sql | 执行 Perfetto SQL 查询 (支持 summary 模式) |
-| invoke_skill | 调用 YAML Skill (参数传递, 结果存入 ArtifactStore) |
+| execute_sql | 执行 Perfetto SQL 查询 (支持 summary 模式, 需先 submit_plan) |
+| invoke_skill | 调用 YAML Skill (参数传递, 结果存入 ArtifactStore, 需先 submit_plan) |
 | list_skills | 列出可用 Skills (按类型过滤) |
 | detect_architecture | 检测渲染架构 (Standard/Flutter/Compose/WebView) |
-| lookup_sql_schema | 查询 Perfetto SQL 表/视图/函数 schema |
-| write_analysis_note | 写入结构化分析笔记 (跨轮次持久化, 20 条上限) |
+| lookup_sql_schema | 查询 Perfetto SQL 表/视图/函数 schema (模糊匹配) |
+| write_analysis_note | 写入结构化分析笔记 (跨轮次持久化, 磁盘备份, 20 条上限) |
 | fetch_artifact | 分页获取 Skill 结果详情 (summary/rows/full) |
 | query_perfetto_source | 搜索 Perfetto 源码 (异步 fs) |
-| submit_plan | 提交结构化分析计划 (必须首先调用) |
-| update_plan_phase | 更新计划阶段状态 (in_progress/completed/skipped) |
+| submit_plan | 提交结构化分析计划 (必须首先调用, 场景模板验证) |
+| update_plan_phase | 更新计划阶段状态 (in_progress/completed/skipped, 需推理摘要) |
+| revise_plan | 修改分析计划 (保留已完成阶段, 记录修改历史) |
+| submit_hypothesis | 提交可检验假设 (formed → confirmed/rejected) |
+| resolve_hypothesis | 解决假设 (提供证据, 结论前必须全部解决) |
+| flag_uncertainty | 标记不确定性 (非阻塞, SSE 通知用户, 分析继续) |
+| recall_patterns | 查询跨会话分析经验 (按架构/场景/关键词检索) |
 
 **Sub-Agents (Optional, feature-flagged):**
 
@@ -187,22 +192,25 @@ User Query → POST /api/agent/v1/analyze → AgentAnalyzeSessionService
     │   ├─ detectFocusApps() → 焦点应用 + 包名
     │   ├─ detectArchitecture() → 渲染架构 (缓存 per traceId)
     │   ├─ loadLearnedSqlFixPairs() → 跨会话 SQL 纠错上下文
+    │   ├─ previousPlan → 上一轮分析计划 (跨轮次)
+    │   ├─ loadPersistedNotes() → 磁盘持久化笔记 (跨重启)
     │   └─ buildSystemPrompt(context, sceneType) → 场景化 system prompt
     │
-    ├─ Phase 2: SDK Orchestration
+    ├─ Phase 2: SDK Orchestration (15 MCP tools)
     │   ├─ sdkQuery({ prompt, systemPrompt, mcpServers, model, effort })
-    │   ├─ Claude 通过 MCP tools 自主决策:
-    │   │   ├─ execute_sql → 查询 trace 数据
-    │   │   ├─ invoke_skill → 调用 YAML 分析技能
-    │   │   ├─ detect_architecture → 检测渲染管线
-    │   │   ├─ write_analysis_note → 记录分析笔记
-    │   │   └─ fetch_artifact → 分页获取大型结果
+    │   ├─ Claude 必须先 submit_plan → 然后通过 MCP tools 自主决策:
+    │   │   ├─ submit_plan → 提交分析计划 (场景模板验证)
+    │   │   ├─ execute_sql / invoke_skill → 查询数据 (需先 submit_plan)
+    │   │   ├─ submit_hypothesis / resolve_hypothesis → 假设驱动分析
+    │   │   ├─ flag_uncertainty → 标记不确定性 (非阻塞)
+    │   │   ├─ recall_patterns → 查询跨会话分析经验
+    │   │   └─ write_analysis_note / fetch_artifact / etc.
     │   └─ claudeSseBridge → SDK messages → SSE events → 前端实时展示
     │
-    ├─ Phase 3: Result Extraction
+    ├─ Phase 3: Result Extraction + Verification
     │   ├─ extractFindingsFromText() + extractFindingsFromSkillResult()
     │   ├─ captureEntitiesFromResponses() → entityStore (跨轮次追踪)
-    │   └─ verifyConclusion() (optional, feature-flagged)
+    │   └─ verifyConclusion() (4 层: heuristic + plan + hypothesis + scene + LLM)
     │
     └─ Phase 4: conclusion → analysis_completed → SSE
 ```

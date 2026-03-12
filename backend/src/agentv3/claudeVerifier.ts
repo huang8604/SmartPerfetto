@@ -11,12 +11,15 @@
  * Enabled by default. Set CLAUDE_ENABLE_VERIFICATION=false to disable.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { Finding, StreamingUpdate } from '../agent/types';
-import type { VerificationResult, VerificationIssue, AnalysisPlanV3 } from './types';
+import type { VerificationResult, VerificationIssue, AnalysisPlanV3, Hypothesis } from './types';
+import type { SceneType } from './sceneClassifier';
 
-/** Known misdiagnosis patterns — common false positives in performance analysis. */
-const KNOWN_MISDIAGNOSIS_PATTERNS: Array<{
+/** Hardcoded known misdiagnosis patterns — common false positives in performance analysis. */
+const HARDCODED_MISDIAGNOSIS_PATTERNS: Array<{
   pattern: RegExp;
   type: VerificationIssue['type'];
   message: string;
@@ -37,6 +40,123 @@ const KNOWN_MISDIAGNOSIS_PATTERNS: Array<{
     message: '单帧异常不应标记为 CRITICAL — 需确认是否有模式性重复',
   },
 ];
+
+// P2-G14: Learned misdiagnosis patterns — auto-extracted from verification results
+interface LearnedMisdiagnosisPattern {
+  /** Keywords that triggered the false positive (from the finding title/description) */
+  keywords: string[];
+  message: string;
+  /** How many times this pattern has been confirmed as a false positive */
+  occurrences: number;
+  createdAt: number;
+}
+
+const LEARNED_PATTERNS_FILE = path.resolve(__dirname, '../../logs/learned_misdiagnosis_patterns.json');
+const MAX_LEARNED_PATTERNS = 30;
+const LEARNED_PATTERN_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
+function loadLearnedPatterns(): LearnedMisdiagnosisPattern[] {
+  try {
+    if (!fs.existsSync(LEARNED_PATTERNS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(LEARNED_PATTERNS_FILE, 'utf-8'));
+  } catch { return []; }
+}
+
+function saveLearnedPatterns(patterns: LearnedMisdiagnosisPattern[]): void {
+  try {
+    const dir = path.dirname(LEARNED_PATTERNS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmpFile = LEARNED_PATTERNS_FILE + '.tmp';
+    fs.writeFileSync(tmpFile, JSON.stringify(patterns, null, 2));
+    fs.renameSync(tmpFile, LEARNED_PATTERNS_FILE);
+  } catch (err) {
+    console.warn('[ClaudeVerifier] Failed to save learned patterns:', (err as Error).message);
+  }
+}
+
+/**
+ * Build combined misdiagnosis patterns from hardcoded + learned.
+ * Learned patterns are converted to regex on-the-fly from stored keywords.
+ */
+function getKnownMisdiagnosisPatterns(): Array<{ pattern: RegExp; type: VerificationIssue['type']; message: string }> {
+  const learned = loadLearnedPatterns();
+  const cutoff = Date.now() - LEARNED_PATTERN_TTL_MS;
+
+  const learnedAsPatterns = learned
+    .filter(p => p.createdAt >= cutoff && p.occurrences >= 2) // Only use patterns seen ≥2 times
+    .map(p => ({
+      pattern: new RegExp(p.keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i'),
+      type: 'known_misdiagnosis' as VerificationIssue['type'],
+      message: `(学习) ${p.message}`,
+    }));
+
+  return [...HARDCODED_MISDIAGNOSIS_PATTERNS, ...learnedAsPatterns];
+}
+
+/**
+ * P2-G14: Extract potential misdiagnosis patterns from LLM verification results.
+ * When LLM verification flags a `known_misdiagnosis` or `severity_mismatch` issue,
+ * extract the relevant keywords and save as a learned pattern.
+ */
+export function learnFromVerificationResults(
+  llmIssues: VerificationIssue[],
+  findings: Finding[],
+): void {
+  const relevantIssues = llmIssues.filter(i =>
+    i.type === 'known_misdiagnosis' || i.type === 'severity_mismatch'
+  );
+  if (relevantIssues.length === 0) return;
+
+  const patterns = loadLearnedPatterns();
+
+  for (const issue of relevantIssues) {
+    // Extract keywords from the issue message
+    let keywords = issue.message
+      .replace(/[^\w\u4e00-\u9fff\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 2)
+      .slice(0, 5);
+
+    // P2-G7: Enrich with keywords from the finding that triggered this issue
+    // Provides richer semantic context for more reliable future pattern matching
+    const matchedFinding = findings.find(f =>
+      issue.message.includes(f.title.substring(0, 20)) ||
+      (f.description && issue.message.includes(f.description.substring(0, 30)))
+    );
+    if (matchedFinding) {
+      const findingKeywords = matchedFinding.title
+        .replace(/[^\w\u4e00-\u9fff\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length >= 2)
+        .slice(0, 3);
+      keywords = [...new Set([...keywords, ...findingKeywords])].slice(0, 8);
+    }
+
+    if (keywords.length < 2) continue;
+
+    const keyStr = [...keywords].sort().join('|');
+    const existing = patterns.find(p => [...p.keywords].sort().join('|') === keyStr);
+    if (existing) {
+      existing.occurrences++;
+      existing.createdAt = Date.now();
+    } else {
+      patterns.push({
+        keywords,
+        message: issue.message.substring(0, 150),
+        occurrences: 1,
+        createdAt: Date.now(),
+      });
+    }
+  }
+
+  // Prune and save
+  const cutoff = Date.now() - LEARNED_PATTERN_TTL_MS;
+  const active = patterns
+    .filter(p => p.createdAt >= cutoff)
+    .sort((a, b) => b.occurrences - a.occurrences)
+    .slice(0, MAX_LEARNED_PATTERNS);
+  saveLearnedPatterns(active);
+}
 
 /**
  * Run heuristic verification on analysis findings and conclusion.
@@ -69,9 +189,9 @@ export function verifyHeuristic(
     });
   }
 
-  // Check 3: Known misdiagnosis pattern matching
+  // Check 3: Known misdiagnosis pattern matching (hardcoded + learned, P2-G14)
   const fullText = conclusion + ' ' + findings.map(f => `${f.title} ${f.description}`).join(' ');
-  for (const pattern of KNOWN_MISDIAGNOSIS_PATTERNS) {
+  for (const pattern of getKnownMisdiagnosisPatterns()) {
     if (pattern.pattern.test(fullText)) {
       issues.push({
         type: pattern.type,
@@ -99,18 +219,63 @@ export function verifyHeuristic(
     });
   }
 
-  // Check 6: CRITICAL/HIGH findings must have causal reasoning (not just "耗时 XXms")
+  // Check 6: CRITICAL/HIGH findings must have causal reasoning (P0-G2: enhanced reasoning checks)
   const highSeverity = findings.filter(f => f.severity === 'critical' || f.severity === 'high');
   for (const f of highSeverity) {
     const desc = f.description || '';
-    // Check if description only contains duration without causal analysis
+    // 6a: Duration data without causal analysis — removed desc.length < 100 limit
+    // (long descriptions without causal reasoning are still a problem)
     const hasDuration = /\d+(\.\d+)?\s*ms/i.test(desc);
-    const hasCausalKeywords = /因为|导致|由于|caused|because|blocked|阻塞|锁|频率|CPU|IO|GC|Binder|等待|竞争|饥饿/i.test(desc);
-    if (hasDuration && !hasCausalKeywords && desc.length < 100) {
+    const hasCausalKeywords = /因为|导致|由于|caused|because|blocked|阻塞|锁|频率|CPU|IO|GC|Binder|等待|竞争|饥饿|调度|抢占|延迟|回收|编译|内存|泄漏|瓶颈/i.test(desc);
+    if (hasDuration && !hasCausalKeywords) {
       issues.push({
         type: 'missing_reasoning',
         severity: 'warning',
         message: `[${f.severity.toUpperCase()}] "${f.title}" 只报告了耗时但缺少根因分析（WHY）`,
+      });
+    }
+
+    // 6b: CRITICAL findings with quantitative data but no comparison baseline
+    // (e.g., "50ms" without saying compared to what threshold/normal value)
+    if (f.severity === 'critical') {
+      const hasQuantitative = /\d+(\.\d+)?\s*(ms|%|MB|KB|次|帧|fps)/i.test(desc);
+      const hasBaseline = /预期|正常|阈值|expected|threshold|baseline|对比|应该|超过|低于|高于|compared|vs|相比/i.test(desc);
+      if (hasQuantitative && !hasBaseline) {
+        issues.push({
+          type: 'missing_reasoning',
+          severity: 'warning',
+          message: `[CRITICAL] "${f.title}" 引用了量化数据但缺少对比基准（与正常值/阈值的比较）`,
+        });
+      }
+    }
+
+    // 6d (P1-G3): Long descriptions with multiple metrics but shallow causal reasoning
+    // (listing symptoms without connecting them via causal chain)
+    if (desc.length > 200) {
+      const metricCount = (desc.match(/\d+(\.\d+)?\s*(ms|%|MB|KB|次|帧|fps)/gi) || []).length;
+      const causalConnectors = (desc.match(/因为|导致|由于|caused|because|所以|因此|根因|进而|从而|bottleneck|瓶颈/gi) || []).length;
+      if (metricCount >= 3 && causalConnectors <= 1) {
+        issues.push({
+          type: 'missing_reasoning',
+          severity: 'warning',
+          message: `[${f.severity.toUpperCase()}] "${f.title}" 描述了 ${metricCount} 个量化指标但缺少充分的因果连接 (仅 ${causalConnectors} 个因果连词)`,
+        });
+      }
+    }
+  }
+
+  // Check 6c: Overall reasoning density — flag when most HIGH+ findings lack causal analysis
+  if (highSeverity.length >= 3) {
+    const withCausal = highSeverity.filter(f => {
+      const desc = f.description || '';
+      return /因为|导致|由于|caused|because|blocked|阻塞|瓶颈|bottleneck/i.test(desc);
+    }).length;
+    const causalRatio = withCausal / highSeverity.length;
+    if (causalRatio < 0.5) {
+      issues.push({
+        type: 'missing_reasoning',
+        severity: 'warning',
+        message: `整体推理密度不足 — ${highSeverity.length} 个高严重度发现中仅 ${withCausal} 个包含因果分析 (${(causalRatio * 100).toFixed(0)}%)`,
       });
     }
   }
@@ -124,11 +289,11 @@ export function verifyHeuristic(
  */
 export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIssue[] {
   if (!plan) {
-    // No plan submitted — this is a plan_deviation since planning is mandatory
+    // No plan submitted — planning is mandatory, trigger reflection retry
     return [{
       type: 'plan_deviation',
-      severity: 'warning',
-      message: '未提交分析计划 — Claude 跳过了 submit_plan 步骤',
+      severity: 'error',
+      message: '未提交分析计划 — Claude 跳过了 submit_plan 步骤。必须先调用 submit_plan 提交结构化计划。',
     }];
   }
 
@@ -137,11 +302,108 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
 
   if (pendingPhases.length > 0) {
     const phaseNames = pendingPhases.map(p => `"${p.name}" (${p.id})`).join(', ');
+    // Pending phases = Claude forgot to call update_plan_phase — this is a
+    // governance/bookkeeping issue, not an analysis quality problem. If the
+    // analysis produced tool calls (meaning work was done), treat as WARNING
+    // to avoid triggering a full correction retry that duplicates the report.
+    const hasToolCalls = plan.toolCallLog.length > 0;
     issues.push({
       type: 'plan_deviation',
-      severity: pendingPhases.length >= 2 ? 'error' : 'warning',
+      severity: hasToolCalls ? 'warning' : 'error',
       message: `${pendingPhases.length} 个计划阶段未完成: ${phaseNames}`,
     });
+  }
+
+  // Check tool-to-phase matching: completed phases should have at least one matched tool call
+  const completedPhases = plan.phases.filter(p => p.status === 'completed');
+  for (const phase of completedPhases) {
+    const matchedCalls = plan.toolCallLog.filter(t => t.matchedPhaseId === phase.id);
+    if (matchedCalls.length === 0 && phase.expectedTools.length > 0) {
+      issues.push({
+        type: 'plan_deviation',
+        severity: 'warning',
+        message: `阶段 "${phase.name}" 标记为完成但无匹配的工具调用 (预期: ${phase.expectedTools.join(', ')})`,
+      });
+    }
+  }
+
+  // P2-1: Check reasoning quality — completed phases should have meaningful summaries
+  const finishedPhases = plan.phases.filter(p => p.status === 'completed' || p.status === 'skipped');
+  const phasesWithoutSummary = finishedPhases.filter(p => !p.summary || p.summary.length < 15);
+  if (phasesWithoutSummary.length > 0 && finishedPhases.length > 1) {
+    // Only warn if multiple phases exist (single-phase plans may be trivial)
+    issues.push({
+      type: 'missing_reasoning',
+      severity: 'warning',
+      message: `${phasesWithoutSummary.length} 个已完成阶段缺少推理摘要: ${phasesWithoutSummary.map(p => `"${p.name}"`).join(', ')}`,
+    });
+  }
+
+  return issues;
+}
+
+/**
+ * P0-G4: Verify hypothesis resolution — all formed hypotheses must be resolved before concluding.
+ * Returns error-level issues for any hypotheses still in 'formed' state.
+ */
+export function verifyHypotheses(hypotheses: Hypothesis[]): VerificationIssue[] {
+  const unresolved = hypotheses.filter(h => h.status === 'formed');
+  if (unresolved.length === 0) return [];
+
+  return [{
+    type: 'unresolved_hypothesis',
+    severity: 'error',
+    message: `${unresolved.length} 个假设未解决: ${unresolved.map(h => `"${h.statement.substring(0, 80)}" (${h.id})`).join('; ')}。所有假设必须在结论前调用 resolve_hypothesis 标记为 confirmed 或 rejected。`,
+  }];
+}
+
+/**
+ * P1-G15: Scene-aware completeness verification.
+ * Checks that the analysis output is topically relevant to the detected scene.
+ * Returns warnings if mandatory scene-specific data is missing from findings/conclusion.
+ */
+export function verifySceneCompleteness(
+  sceneType: SceneType,
+  findings: Finding[],
+  conclusion: string,
+): VerificationIssue[] {
+  const issues: VerificationIssue[] = [];
+  const allText = (
+    findings.map(f => `${f.title} ${f.description} ${f.category}`).join(' ') +
+    ' ' + conclusion
+  ).toLowerCase();
+
+  switch (sceneType) {
+    case 'scrolling': {
+      if (!/帧|frame|jank|卡顿|掉帧|vsync|滑动/.test(allText)) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: '滑动场景分析缺少帧/卡顿相关内容 — 应包含帧渲染分析和 VSync 数据',
+        });
+      }
+      break;
+    }
+    case 'startup': {
+      if (!/ttid|ttfd|启动|startup|launch|冷启动|温启动|热启动/.test(allText)) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: '启动场景分析缺少 TTID/TTFD 数据 — 应包含启动耗时测量',
+        });
+      }
+      break;
+    }
+    case 'anr': {
+      if (!/anr|死锁|deadlock|阻塞|blocked|not responding|binder/.test(allText)) {
+        issues.push({
+          type: 'missing_check',
+          severity: 'warning',
+          message: 'ANR 场景分析缺少阻塞/死锁相关内容 — 应包含 ANR 原因定位',
+        });
+      }
+      break;
+    }
   }
 
   return issues;
@@ -243,6 +505,7 @@ ${issueList}${warningList}
    - **missing_evidence**: 为 CRITICAL/HIGH 发现补充具体数据证据（时间戳、数值、工具调用结果）
    - **plan_deviation**: 执行未完成的计划阶段，或明确说明跳过原因
    - **missing_reasoning**: 补充完整的分析结论
+   - **unresolved_hypothesis**: 调用 resolve_hypothesis 将所有未解决假设标记为 confirmed 或 rejected
 3. 输出修正后的完整结论
 
 ### 原始结论（需修正）
@@ -263,10 +526,12 @@ export async function verifyConclusion(
     emitUpdate?: (update: StreamingUpdate) => void;
     enableLLM?: boolean;
     plan?: AnalysisPlanV3 | null;
+    hypotheses?: Hypothesis[];
+    sceneType?: SceneType;
   } = {},
 ): Promise<VerificationResult> {
   const startTime = Date.now();
-  const { emitUpdate, enableLLM = true, plan } = options;
+  const { emitUpdate, enableLLM = true, plan, hypotheses, sceneType } = options;
 
   // Layer 1: Heuristic checks
   const heuristicIssues = verifyHeuristic(findings, conclusion);
@@ -274,6 +539,18 @@ export async function verifyConclusion(
   // Layer 2: Plan adherence check
   const planIssues = verifyPlanAdherence(plan ?? null);
   heuristicIssues.push(...planIssues);
+
+  // Layer 2.5: Hypothesis resolution check (P0-G4)
+  if (hypotheses && hypotheses.length > 0) {
+    const hypothesisIssues = verifyHypotheses(hypotheses);
+    heuristicIssues.push(...hypothesisIssues);
+  }
+
+  // Layer 2.7: Scene completeness check (P1-G15)
+  if (sceneType && sceneType !== 'general') {
+    const sceneIssues = verifySceneCompleteness(sceneType, findings, conclusion);
+    heuristicIssues.push(...sceneIssues);
+  }
 
   // Layer 3: LLM verification (optional)
   let llmIssues: VerificationIssue[] | undefined;
@@ -283,6 +560,11 @@ export async function verifyConclusion(
 
   const allIssues = [...heuristicIssues, ...(llmIssues || [])];
   const passed = allIssues.filter(i => i.severity === 'error').length === 0;
+
+  // P2-G14: Learn from LLM verification results (fire-and-forget)
+  if (llmIssues && llmIssues.length > 0) {
+    try { learnFromVerificationResults(llmIssues, findings); } catch { /* non-fatal */ }
+  }
 
   // Emit SSE warnings for issues
   if (emitUpdate && allIssues.length > 0) {

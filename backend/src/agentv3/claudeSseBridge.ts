@@ -92,7 +92,10 @@ export function createSseBridge(emit: UpdateEmitter) {
   // Buffer window: trade-off between streaming responsiveness and classification
   // accuracy. Shorter = more responsive but higher risk of misclassifying thought
   // as answer_token when tool_use arrives with network jitter.
-  const BUFFER_DELAY_MS = 100;
+  // P2-G4: Increased from 100ms to 200ms — reduces risk of misclassifying
+  // pre-tool reasoning as answer_token when tool_use arrives with network jitter.
+  // 200ms is well below human perception threshold for streaming text.
+  const BUFFER_DELAY_MS = 200;
 
   function cancelBufferTimer(): void {
     if (bufferFlushTimer !== null) {

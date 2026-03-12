@@ -10,9 +10,15 @@ import { createArchitectureDetector } from '../agent/detectors/architectureDetec
 import { displayResultToEnvelope } from '../types/dataContract';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
 import type { StreamingUpdate } from '../agent/types';
-import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanPhase } from './types';
+import type { SqlSchemaIndex, AnalysisNote, AnalysisPlanV3, PlanRevision, Hypothesis, UncertaintyFlag } from './types';
+import type { SceneType } from './sceneClassifier';
 import { summarizeSqlResult } from './sqlSummarizer';
+import { matchPatterns, matchNegativePatterns, extractTraceFeatures } from './analysisPatternMemory';
 import type { ArtifactStore } from './artifactStore';
+
+/** MCP tool name prefix — derived from the server name 'smartperfetto'.
+ * Shared constant to avoid duplication across runtime, MCP server, and agent definitions. */
+export const MCP_NAME_PREFIX = 'mcp__smartperfetto__';
 
 let sqlSchemaCache: SqlSchemaIndex | null = null;
 
@@ -66,6 +72,13 @@ interface SqlErrorFixPair {
  */
 /** TTL for error-fix pairs: 30 days. Older pairs may reference outdated schemas. */
 const ERROR_FIX_PAIR_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * P0-G2: ReAct reasoning nudge — appended to successful data tool results.
+ * Prompts Claude to explicitly reason about observations before next action.
+ * Cost: ~20 tokens per data tool call, ~200-300 total per analysis.
+ */
+const REASONING_NUDGE = '\n\n[REFLECT] 在执行下一步之前：这个数据的关键发现是什么？是否支持/反驳你的假设？如有重要推断，请用 submit_hypothesis 或 write_analysis_note 记录。';
 
 export function loadLearnedSqlFixPairs(maxPairs = 10): SqlErrorFixPair[] {
   try {
@@ -216,6 +229,14 @@ export interface ClaudeMcpServerOptions {
   recentSqlErrors?: SqlErrorFixPair[];
   /** Mutable analysis plan — passed by reference from analyze() scope */
   analysisPlan?: { current: AnalysisPlanV3 | null };
+  /** Mutable watchdog warning — set by runtime when repetitive failures detected, consumed by next tool call */
+  watchdogWarning?: { current: string | null };
+  /** Mutable hypotheses array for hypothesis-verify cycle (P0-G4) */
+  hypotheses?: Hypothesis[];
+  /** Scene type for plan template validation (P1-G11) */
+  sceneType?: SceneType;
+  /** Mutable uncertainty flags array (P1-G1) */
+  uncertaintyFlags?: UncertaintyFlag[];
 }
 
 /**
@@ -227,6 +248,39 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const { traceId, traceProcessorService, skillExecutor, packageName, emitUpdate, onSkillResult, analysisNotes, artifactStore } = options;
   const recentSqlErrors: SqlErrorFixPair[] = options.recentSqlErrors || [];
   const skillAdapter = getSkillAnalysisAdapter(traceProcessorService);
+  const watchdogRef = options.watchdogWarning;
+
+  /**
+   * Consume and prepend any watchdog warning to a tool result.
+   * This is the feedback channel from runtime watchdog → Claude's execution context.
+   * When the watchdog detects repetitive tool failures, the warning appears
+   * in the NEXT tool result, which Claude reads and can act upon.
+   */
+  function consumeWatchdogWarning(resultText: string): string {
+    if (watchdogRef?.current) {
+      const warning = watchdogRef.current;
+      watchdogRef.current = null; // consume once
+      return `⚠️ SYSTEM WARNING: ${warning}\n\n${resultText}`;
+    }
+    return resultText;
+  }
+
+  /**
+   * P0-G10: Enforce planning before analysis.
+   * Returns error JSON if plan is required but not yet submitted, null if OK.
+   * Only action tools (execute_sql, invoke_skill) are gated — informational
+   * and planning tools are exempt to allow plan formation.
+   */
+  const analysisPlanRef = options.analysisPlan;
+  function requirePlan(toolName: string): string | null {
+    if (!analysisPlanRef) return null; // Planning feature not enabled
+    if (analysisPlanRef.current) return null; // Plan already submitted
+    return JSON.stringify({
+      success: false,
+      error: `必须先调用 submit_plan 提交分析计划，然后才能使用 ${toolName}。请先制定你的分析计划，包含分析阶段、目标和预期工具。`,
+      action_required: 'submit_plan',
+    });
+  }
 
   const executeSql = tool(
     'execute_sql',
@@ -243,6 +297,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       ),
     },
     async ({ sql, summary }) => {
+      // P0-G10: Block analysis tools until plan is submitted
+      const planError = requirePlan('execute_sql');
+      if (planError) {
+        return { content: [{ type: 'text' as const, text: planError }] };
+      }
       try {
         const sqlStart = Date.now();
         const result = await traceProcessorService.query(traceId, sql);
@@ -309,7 +368,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({
+              text: consumeWatchdogWarning(JSON.stringify({
                 success: true,
                 mode: 'summary',
                 totalRows: summaryResult.totalRows,
@@ -317,7 +376,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 columnStats: summaryResult.columnStats,
                 sampleRows: summaryResult.sampleRows,
                 durationMs: result.durationMs,
-              }),
+              })) + REASONING_NUDGE,
             }],
           };
         }
@@ -325,7 +384,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({
+            text: consumeWatchdogWarning(JSON.stringify({
               success,
               columns: result.columns,
               rows,
@@ -333,7 +392,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               truncated,
               durationMs: result.durationMs,
               ...(result.error ? { error: result.error } : {}),
-            }),
+            })) + (success ? REASONING_NUDGE : ''),
           }],
         };
       } catch (err) {
@@ -364,6 +423,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       ),
     },
     async ({ skillId, params }) => {
+      // P0-G10: Block analysis tools until plan is submitted
+      const skillPlanError = requirePlan('invoke_skill');
+      if (skillPlanError) {
+        return { content: [{ type: 'text' as const, text: skillPlanError }] };
+      }
       try {
         const effectiveParams = { ...params };
         if (packageName && !effectiveParams.process_name) {
@@ -477,7 +541,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({
+              text: consumeWatchdogWarning(JSON.stringify({
                 success: result.success,
                 skillId: result.skillId,
                 skillName: result.skillName,
@@ -488,7 +552,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                   ? { synthesizeArtifacts }
                   : {}),
                 hint: 'Use fetch_artifact(artifactId, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
-              }),
+              })) + (result.success ? REASONING_NUDGE : ''),
             }],
           };
         }
@@ -497,7 +561,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({
+            text: consumeWatchdogWarning(JSON.stringify({
               success: result.success,
               skillId: result.skillId,
               skillName: result.skillName,
@@ -510,7 +574,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               })),
               diagnostics: result.diagnostics,
               synthesizeData: result.synthesizeData,
-            }),
+            })) + (result.success ? REASONING_NUDGE : ''),
           }],
         };
       } catch (err) {
@@ -633,15 +697,44 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     async ({ keyword }) => {
       const schema = loadSqlSchema();
       const lower = keyword.toLowerCase();
-      const matches = schema.templates
-        .filter(t => t.name.toLowerCase().includes(lower) || t.category.toLowerCase().includes(lower) || t.description.toLowerCase().includes(lower))
+
+      // P2-G8: Token-based fuzzy matching — split keyword into tokens and match independently
+      const tokens = lower.split(/[\s_]+/).filter(t => t.length >= 2);
+
+      // Scoring function: exact substring match scores highest, token prefix matches next
+      function scoreEntry(t: { name: string; category: string; description: string }): number {
+        const name = t.name.toLowerCase();
+        const cat = t.category.toLowerCase();
+        const desc = t.description.toLowerCase();
+        const searchable = `${name} ${cat} ${desc}`;
+
+        // Exact substring match (original behavior)
+        if (name.includes(lower) || cat.includes(lower) || desc.includes(lower)) return 10;
+
+        // Token-based matching: count how many query tokens match
+        if (tokens.length <= 1) return 0;
+        let matchedTokens = 0;
+        for (const tok of tokens) {
+          if (searchable.includes(tok)) matchedTokens++;
+          // Prefix match on name segments (e.g., "frame_time" matches "frame_timeline")
+          else if (name.split('_').some(seg => seg.startsWith(tok))) matchedTokens += 0.5;
+        }
+        return matchedTokens >= tokens.length * 0.5 ? matchedTokens : 0;
+      }
+
+      const scored = schema.templates
+        .map(t => ({ entry: t, score: scoreEntry(t) }))
+        .filter(s => s.score > 0)
+        .sort((a, b) => b.score - a.score)
         .slice(0, 30);
+
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            totalMatches: matches.length,
-            entries: matches.map(m => {
+            totalMatches: scored.length,
+            entries: scored.map(s => {
+              const m = s.entry;
               const entry: Record<string, unknown> = { name: m.name, type: m.type, category: m.category, description: m.description };
               if (m.columns?.length) entry.columns = m.columns;
               if (m.params?.length) entry.params = m.params;
@@ -822,8 +915,34 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     }
   );
 
+  // P1-G11: Scene plan templates — mandatory aspects per scene type
+  const SCENE_PLAN_TEMPLATES: Partial<Record<string, { mandatoryAspects: Array<{ matchKeywords: string[]; suggestion: string }> }>> = {
+    scrolling: {
+      mandatoryAspects: [
+        { matchKeywords: ['frame', 'jank', 'scroll', '帧', '卡顿', '滑动', 'scrolling_analysis', 'consumer_jank'],
+          suggestion: '滑动场景建议包含帧渲染/卡顿分析阶段 (scrolling_analysis, consumer_jank_detection)' },
+        { matchKeywords: ['root', 'cause', 'diagnos', '根因', '诊断', '深入', 'deep', 'jank_frame_detail'],
+          suggestion: '滑动场景建议包含卡顿帧根因分析阶段 (jank_frame_detail)' },
+      ],
+    },
+    startup: {
+      mandatoryAspects: [
+        { matchKeywords: ['startup', 'ttid', 'ttfd', 'launch', '启动', 'startup_analysis'],
+          suggestion: '启动场景建议包含启动耗时测量阶段 (startup_analysis)' },
+        { matchKeywords: ['phase', 'breakdown', 'block', '阶段', '分解', '阻塞', 'startup_detail'],
+          suggestion: '启动场景建议包含启动阶段分解和阻塞因素分析' },
+      ],
+    },
+    anr: {
+      mandatoryAspects: [
+        { matchKeywords: ['anr', 'deadlock', 'block', '死锁', '阻塞', 'not_responding', 'anr_analysis'],
+          suggestion: 'ANR 场景建议包含 ANR 原因定位阶段 (anr_analysis)' },
+      ],
+    },
+  };
+
   // Planning tools: submit_plan + update_plan_phase (P0-1: Explicit planning capability)
-  const analysisPlanRef = options.analysisPlan;
+  // analysisPlanRef is declared above (P0-G10) and shared with planning tools
   const submitPlan = analysisPlanRef ? tool(
     'submit_plan',
     'Submit your structured analysis plan BEFORE starting any analysis. ' +
@@ -850,6 +969,19 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       };
       analysisPlanRef.current = plan;
 
+      // P1-G11: Validate plan against scene template
+      const planWarnings: string[] = [];
+      if (options.sceneType && SCENE_PLAN_TEMPLATES[options.sceneType]) {
+        const template = SCENE_PLAN_TEMPLATES[options.sceneType]!;
+        const planText = phases.map(p => `${p.name} ${p.goal} ${p.expectedTools.join(' ')}`).join(' ').toLowerCase();
+        for (const aspect of template.mandatoryAspects) {
+          const covered = aspect.matchKeywords.some(kw => planText.includes(kw.toLowerCase()));
+          if (!covered) {
+            planWarnings.push(aspect.suggestion);
+          }
+        }
+      }
+
       emitUpdate?.({
         type: 'plan_submitted',
         content: {
@@ -866,6 +998,10 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             success: true,
             message: `Plan accepted: ${phases.length} phases. Now proceed with phase "${phases[0]?.id}".`,
             phases: phases.map(p => p.id),
+            ...(planWarnings.length > 0 ? {
+              sceneWarnings: planWarnings,
+              hint: `检测到 ${options.sceneType} 场景，建议补充以下分析阶段。可使用 revise_plan 调整计划。`,
+            } : {}),
           }),
         }],
       };
@@ -875,11 +1011,13 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const updatePlanPhase = analysisPlanRef ? tool(
     'update_plan_phase',
     'Update the status of a plan phase. Call this when transitioning between phases or when skipping a phase. ' +
-    'This helps track analysis progress and enables plan adherence verification.',
+    'This helps track analysis progress and enables plan adherence verification. ' +
+    'When completing a phase, you MUST provide a summary with key evidence collected (e.g. "发现 5 帧卡顿，主因是 RenderThread 阻塞，最长耗时 45ms"). ' +
+    'When skipping, explain why (e.g. "trace 中无启动数据，跳过启动分析").',
     {
       phaseId: z.string().describe('Phase ID to update (e.g. "p1")'),
       status: z.enum(['in_progress', 'completed', 'skipped']).describe('New phase status'),
-      summary: z.string().optional().describe('Brief summary of what was accomplished or why skipped'),
+      summary: z.string().optional().describe('REQUIRED for completed/skipped: key evidence or reason. Must include specific data (numbers, names, findings).'),
     },
     async ({ phaseId, status, summary }) => {
       const plan = analysisPlanRef.current;
@@ -901,6 +1039,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       phase.status = status;
       if (status === 'completed' || status === 'skipped') {
         phase.completedAt = Date.now();
+        phase.summary = summary;
       }
 
       emitUpdate?.({
@@ -913,6 +1052,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       const completed = plan.phases.filter(p => p.status === 'completed' || p.status === 'skipped').length;
       const nextPhase = plan.phases.find(p => p.status === 'pending');
 
+      // P2-1: Feedback on summary quality for completed/skipped phases
+      let summaryFeedback: string | undefined;
+      if ((status === 'completed' || status === 'skipped') && (!summary || summary.length < 15)) {
+        summaryFeedback = 'Warning: phase summary is too brief. Include specific evidence (数据、数值、发现) for plan adherence verification.';
+      }
+
       return {
         content: [{
           type: 'text' as const,
@@ -920,23 +1065,342 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             success: true,
             progress: `${completed}/${plan.phases.length} phases done`,
             ...(nextPhase ? { nextPhase: nextPhase.id, nextGoal: nextPhase.name } : { allPhasesComplete: true }),
+            ...(summaryFeedback ? { summaryFeedback } : {}),
           }),
         }],
       };
     }
   ) : null;
 
-  const tools: any[] = [executeSql, invokeSkill, listSkills, detectArchitecture, lookupSqlSchema, queryPerfettoSource];
-  if (writeAnalysisNote) tools.push(writeAnalysisNote);
-  if (fetchArtifact) tools.push(fetchArtifact);
-  if (submitPlan) tools.push(submitPlan);
-  if (updatePlanPhase) tools.push(updatePlanPhase);
+  // P1-3: Dynamic replan — allows Claude to revise the plan mid-analysis when new information emerges
+  const revisePlan = analysisPlanRef ? tool(
+    'revise_plan',
+    'Revise your analysis plan mid-execution when new information changes priorities. ' +
+    'Use this when initial data reveals unexpected conditions (e.g., discovered Flutter architecture but planned for Standard, ' +
+    'or found ANR signals in a scrolling query). Preserves completed phases and audit trail.',
+    {
+      reason: z.string().describe('Why the plan needs revision (what new information triggered this)'),
+      updatedPhases: z.array(z.object({
+        id: z.string().describe('Phase identifier (keep existing IDs for unchanged phases, use new IDs for added phases)'),
+        name: z.string().describe('Phase name'),
+        goal: z.string().describe('What this phase aims to achieve'),
+        expectedTools: z.array(z.string()).describe('Tool names this phase will use'),
+        status: z.enum(['pending', 'in_progress', 'completed', 'skipped']).optional()
+          .describe('Phase status. Omit for new/pending phases. Completed/skipped phases from original plan are preserved.'),
+      })).describe('The revised phase list. Must include all completed/in-progress phases from original plan.'),
+      updatedSuccessCriteria: z.string().optional().describe('Updated success criteria (only if the goal changed)'),
+    },
+    async ({ reason, updatedPhases, updatedSuccessCriteria }) => {
+      const plan = analysisPlanRef.current;
+      if (!plan) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'No plan submitted yet. Call submit_plan first.' }) }],
+          isError: true,
+        };
+      }
 
-  return createSdkMcpServer({
+      // Validate: completed phases from original plan must be preserved
+      const originalCompleted = plan.phases.filter(p => p.status === 'completed' || p.status === 'skipped');
+      const preservedIds = new Set(updatedPhases.map(p => p.id));
+      const missingCompleted = originalCompleted.filter(p => !preservedIds.has(p.id));
+      if (missingCompleted.length > 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Completed phases must be preserved: ${missingCompleted.map(p => p.id).join(', ')}. Include them in updatedPhases.`,
+            }),
+          }],
+          isError: true,
+        };
+      }
+
+      // Save revision history for audit trail
+      const revision: PlanRevision = {
+        revisedAt: Date.now(),
+        reason,
+        previousPhases: plan.phases.map(p => ({ ...p })),
+      };
+      if (!plan.revisionHistory) plan.revisionHistory = [];
+      plan.revisionHistory.push(revision);
+
+      // Apply revision: merge completed phase data (summary, completedAt) with updated structure
+      plan.phases = updatedPhases.map(up => {
+        const original = plan.phases.find(p => p.id === up.id);
+        if (original && (original.status === 'completed' || original.status === 'skipped')) {
+          // Preserve completed phase data
+          return { ...original };
+        }
+        return {
+          id: up.id,
+          name: up.name,
+          goal: up.goal,
+          expectedTools: up.expectedTools,
+          status: (up.status || 'pending') as any,
+        };
+      });
+
+      if (updatedSuccessCriteria) {
+        plan.successCriteria = updatedSuccessCriteria;
+      }
+
+      emitUpdate?.({
+        type: 'plan_revised',
+        content: {
+          reason,
+          phases: plan.phases.map(p => ({ id: p.id, name: p.name, goal: p.goal, status: p.status })),
+          revisionCount: plan.revisionHistory.length,
+        },
+        timestamp: Date.now(),
+      });
+
+      const pending = plan.phases.filter(p => p.status === 'pending');
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            message: `Plan revised (revision #${plan.revisionHistory.length}): ${reason}`,
+            totalPhases: plan.phases.length,
+            pendingPhases: pending.length,
+            nextPhase: pending[0]?.id,
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  // P0-G4: Hypothesis-verify cycle tools
+  const hypothesesRef = options.hypotheses;
+  let hypothesisCounter = 0;
+
+  const submitHypothesis = hypothesesRef ? tool(
+    'submit_hypothesis',
+    'Record a formal hypothesis that needs verification through data. ' +
+    'Use this when you form a testable theory about the root cause of a performance issue. ' +
+    'Every hypothesis MUST be resolved (confirmed/rejected with evidence) before concluding.',
+    {
+      statement: z.string().describe(
+        'The hypothesis statement (e.g., "RenderThread is blocked by Binder transactions causing jank frames")'
+      ),
+      basis: z.string().optional().describe(
+        'What observation prompted this hypothesis (e.g., "Observed 3 frames with RenderThread in sleeping state")'
+      ),
+    },
+    async ({ statement, basis }) => {
+      hypothesisCounter++;
+      const hypothesis: Hypothesis = {
+        id: `h${hypothesisCounter}`,
+        statement,
+        status: 'formed',
+        basis,
+        formedAt: Date.now(),
+      };
+      hypothesesRef.push(hypothesis);
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            hypothesisId: hypothesis.id,
+            message: `Hypothesis ${hypothesis.id} recorded. Now collect evidence to confirm or reject it.`,
+            totalHypotheses: hypothesesRef.length,
+            unresolvedCount: hypothesesRef.filter(h => h.status === 'formed').length,
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  const resolveHypothesis = hypothesesRef ? tool(
+    'resolve_hypothesis',
+    'Resolve a previously submitted hypothesis as confirmed or rejected. ' +
+    'Provide the evidence that supports your conclusion. ' +
+    'All hypotheses MUST be resolved before writing your final conclusion.',
+    {
+      hypothesisId: z.string().describe('Hypothesis ID to resolve (e.g., "h1")'),
+      status: z.enum(['confirmed', 'rejected']).describe(
+        'Resolution: confirmed (evidence supports) or rejected (evidence contradicts)'
+      ),
+      evidence: z.string().describe(
+        'The evidence supporting this resolution (specific data, timestamps, tool results)'
+      ),
+    },
+    async ({ hypothesisId, status, evidence }) => {
+      const hypothesis = hypothesesRef.find(h => h.id === hypothesisId);
+      if (!hypothesis) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Hypothesis "${hypothesisId}" not found` }) }],
+          isError: true,
+        };
+      }
+      if (hypothesis.status !== 'formed') {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Hypothesis "${hypothesisId}" already resolved as ${hypothesis.status}` }) }],
+          isError: true,
+        };
+      }
+
+      hypothesis.status = status;
+      hypothesis.evidence = evidence;
+      hypothesis.resolvedAt = Date.now();
+
+      const unresolvedCount = hypothesesRef.filter(h => h.status === 'formed').length;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            hypothesisId,
+            status,
+            message: unresolvedCount === 0
+              ? `Hypothesis ${hypothesisId} ${status}. All hypotheses resolved — ready to conclude.`
+              : `Hypothesis ${hypothesisId} ${status}. ${unresolvedCount} hypothesis(es) still unresolved.`,
+            unresolvedCount,
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  // ── P1-G1: flag_uncertainty — non-blocking human interaction ──
+  const uncertaintyFlagsRef = options.uncertaintyFlags;
+  const flagUncertainty = uncertaintyFlagsRef ? tool(
+    'flag_uncertainty',
+    'Signal that you are uncertain about an aspect and making an assumption to proceed. ' +
+    'Use this when you encounter ambiguity (e.g., unclear which process is the focus app, ' +
+    'multiple possible root causes, unclear user intent). Analysis continues without blocking — ' +
+    'the user sees your flag and can provide clarification in the next turn.',
+    {
+      topic: z.string().describe('What aspect you are uncertain about'),
+      assumption: z.string().describe('What assumption you are making to proceed'),
+      question: z.string().describe('What you would ask the user if you could'),
+    },
+    async ({ topic, assumption, question }) => {
+      const flag: UncertaintyFlag = { topic, assumption, question, timestamp: Date.now() };
+      uncertaintyFlagsRef.push(flag);
+
+      // Emit as SSE event so the user sees it in real-time
+      emitUpdate?.({
+        type: 'progress',
+        content: {
+          phase: 'analyzing',
+          message: `⚠️ 不确定性标记: ${topic}\n假设: ${assumption}\n建议确认: ${question}`,
+        },
+        timestamp: Date.now(),
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            message: `Uncertainty flagged. Proceeding with assumption: "${assumption}". User will see this flag and can correct in next turn.`,
+            flagCount: uncertaintyFlagsRef.length,
+          }),
+        }],
+      };
+    }
+  ) : null;
+
+  // ── P1-G19: recall_patterns — agent-queryable long-term memory ──
+  const recallPatterns = tool(
+    'recall_patterns',
+    'Query long-term analysis pattern memory for insights from past sessions with similar traces. ' +
+    'Use this when you want to check if similar traces have been analyzed before and what was discovered. ' +
+    'Provide trace characteristics like architecture type, scene type, and domain keywords.',
+    {
+      architectureType: z.string().optional().describe('Architecture type (e.g., "standard", "flutter_surfaceview", "compose")'),
+      sceneType: z.string().optional().describe('Scene type (e.g., "scrolling", "startup", "anr")'),
+      keywords: z.array(z.string()).optional().describe('Domain keywords (e.g., ["jank", "binder", "gpu"])'),
+    },
+    async ({ architectureType, sceneType: querySceneType, keywords }) => {
+      const features = extractTraceFeatures({
+        architectureType,
+        sceneType: querySceneType,
+        packageName,
+      });
+      // Add extra keyword features if provided
+      if (keywords) {
+        for (const kw of keywords) {
+          features.push(`domain:${kw.toLowerCase()}`);
+        }
+      }
+
+      const positiveMatches = matchPatterns(features);
+      const negativeMatches = matchNegativePatterns(features);
+
+      if (positiveMatches.length === 0 && negativeMatches.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            success: true,
+            message: 'No matching patterns found in memory. This may be a novel trace configuration.',
+            positivePatterns: [],
+            negativePatterns: [],
+          }) }],
+        };
+      }
+
+      const positive = positiveMatches.map(m => ({
+        sceneType: m.sceneType,
+        architectureType: m.architectureType,
+        score: Math.round(m.score * 100),
+        insights: m.keyInsights.slice(0, 3),
+        matchCount: m.matchCount,
+      }));
+
+      const negative = negativeMatches.flatMap(m =>
+        m.failedApproaches.slice(0, 3).map(a => ({
+          type: a.type,
+          approach: a.approach,
+          reason: a.reason,
+          workaround: a.workaround,
+        }))
+      );
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          success: true,
+          positivePatterns: positive,
+          negativePatterns: negative,
+          message: `Found ${positive.length} positive and ${negative.length} negative patterns from past sessions.`,
+        }) }],
+      };
+    }
+  );
+
+  // P2-G1: Co-locate tool objects with their names — auto-derives allowedTools
+  // so adding a new MCP tool automatically makes it available to the SDK.
+  const toolEntries: Array<{ tool: any; name: string }> = [
+    { tool: executeSql, name: 'execute_sql' },
+    { tool: invokeSkill, name: 'invoke_skill' },
+    { tool: listSkills, name: 'list_skills' },
+    { tool: detectArchitecture, name: 'detect_architecture' },
+    { tool: lookupSqlSchema, name: 'lookup_sql_schema' },
+    { tool: queryPerfettoSource, name: 'query_perfetto_source' },
+  ];
+  if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
+  if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });
+  if (submitPlan) toolEntries.push({ tool: submitPlan, name: 'submit_plan' });
+  if (updatePlanPhase) toolEntries.push({ tool: updatePlanPhase, name: 'update_plan_phase' });
+  if (revisePlan) toolEntries.push({ tool: revisePlan, name: 'revise_plan' });
+  if (submitHypothesis) toolEntries.push({ tool: submitHypothesis, name: 'submit_hypothesis' });
+  if (resolveHypothesis) toolEntries.push({ tool: resolveHypothesis, name: 'resolve_hypothesis' });
+  if (flagUncertainty) toolEntries.push({ tool: flagUncertainty, name: 'flag_uncertainty' });
+  toolEntries.push({ tool: recallPatterns, name: 'recall_patterns' });
+
+  const server = createSdkMcpServer({
     name: 'smartperfetto',
     version: '1.0.0',
-    tools,
+    tools: toolEntries.map(e => e.tool),
   });
+
+  return {
+    server,
+    allowedTools: toolEntries.map(e => `${MCP_NAME_PREFIX}${e.name}`),
+  };
 }
 
 /** Emit a DataEnvelope for SQL query results. */

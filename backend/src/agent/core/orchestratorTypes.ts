@@ -245,6 +245,12 @@ export interface AnalysisOptions {
    * routed to non-strategy executors.
    */
   blockedStrategyIds?: string[];
+
+  /**
+   * User's Perfetto UI selection context (area range or single slice).
+   * Passed from the frontend so the analysis can be scoped to the selected region.
+   */
+  selectionContext?: import('../../agentv3/types').SelectionContext;
 }
 
 // =============================================================================
