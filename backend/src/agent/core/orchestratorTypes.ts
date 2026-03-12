@@ -172,6 +172,10 @@ export interface IOrchestrator {
   /** Only available on ClaudeRuntime (agentv3). */
   getSdkSessionId?(sessionId: string): string | undefined;
   restoreSessionMapping?(sessionId: string, sdkSessionId: string): void;
+  /** Restore a cached architecture result from persistence (agentv3). */
+  restoreArchitectureCache?(traceId: string, architecture: any): void;
+  /** Get cached architecture for persistence (agentv3). */
+  getCachedArchitecture?(traceId: string): any;
 }
 
 // =============================================================================

@@ -4,7 +4,7 @@
  */
 
 import { Router } from 'express';
-import { ResultExportService } from '../services/resultExportService';
+import { ResultExportService, AnalysisSessionExport } from '../services/resultExportService';
 
 const router = Router();
 
@@ -88,6 +88,33 @@ router.post('/session', async (req, res) => {
 
     const exportService = ResultExportService.getInstance();
     const exportResult = exportService.exportSession(results, { format, ...options });
+
+    res.setHeader('Content-Type', exportResult.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${exportResult.filename}"`);
+    res.send(exportResult.data);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'An unknown error occurred' });
+  }
+});
+
+/**
+ * POST /api/export/analysis
+ * Export agentv3 analysis session (findings, plan, hypotheses, notes, conclusion)
+ */
+router.post('/analysis', async (req, res) => {
+  try {
+    const { sessionId, format = 'json', options = {}, ...analysisData } = req.body;
+
+    if (format !== 'csv' && format !== 'json') {
+      return res.status(400).json({ success: false, error: 'Invalid format. Must be "csv" or "json"' });
+    }
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId is required' });
+    }
+
+    const exportData: AnalysisSessionExport = { sessionId, ...analysisData };
+    const exportService = ResultExportService.getInstance();
+    const exportResult = exportService.exportAnalysisSession(exportData, { format, ...options });
 
     res.setHeader('Content-Type', exportResult.mimeType);
     res.setHeader('Content-Disposition', `attachment; filename="${exportResult.filename}"`);

@@ -453,24 +453,32 @@ class SessionLoggerManager {
       return this.filterLogs(activeLogger.readLogs(), query);
     }
 
-    // Otherwise, find the log file
+    // Otherwise, find log files on disk.
+    // P1-12: Merge ALL log files for this session (not just the latest).
+    // Restored sessions create new log files, so reading only the latest loses prior logs.
     try {
-      const files = fs.readdirSync(this.logDir).filter((f) => f.startsWith(`session_${sessionId}`));
+      const files = fs.readdirSync(this.logDir)
+        .filter((f) => f.startsWith(`session_${sessionId}`))
+        .sort(); // chronological order
       if (files.length === 0) {
         return [];
       }
 
-      // Read the most recent file for this session
-      const file = files.sort().reverse()[0];
-      const filePath = path.join(this.logDir, file);
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const logs = content
-        .trim()
-        .split('\n')
-        .filter((l) => l)
-        .map((l) => JSON.parse(l));
+      const allLogs: any[] = [];
+      for (const file of files) {
+        try {
+          const filePath = path.join(this.logDir, file);
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const logs = content
+            .trim()
+            .split('\n')
+            .filter((l) => l)
+            .map((l) => JSON.parse(l));
+          allLogs.push(...logs);
+        } catch { /* skip individual file parse errors */ }
+      }
 
-      return this.filterLogs(logs, query);
+      return this.filterLogs(allLogs, query);
     } catch (err) {
       console.error('[SessionLoggerManager] Failed to read session logs:', err);
       return [];

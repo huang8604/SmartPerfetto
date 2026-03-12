@@ -22,6 +22,7 @@
     "test:all": "npm run test:gate",
     "skill:validate": "tsx src/cli/index.ts validate",
     "validate:skills": "tsx src/cli/index.ts validate --contracts --all",
+    "validate:strategies": "tsx src/cli/index.ts validate --strategies",
     "skill:test": "tsx src/cli/index.ts test",
     "skill:smoke": "tsx src/cli/index.ts smoke",
     "skill:list": "tsx src/cli/index.ts list",

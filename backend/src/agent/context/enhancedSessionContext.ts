@@ -585,6 +585,25 @@ export class EnhancedSessionContext {
     };
 
     this.turns.push(turn);
+
+    // P1-4: Cap turns array to prevent unbounded memory growth in long sessions.
+    // Keep last 30 turns; evict oldest turns and their orphaned findings.
+    const MAX_TURNS = 30;
+    if (this.turns.length > MAX_TURNS) {
+      const evicted = this.turns.splice(0, this.turns.length - MAX_TURNS);
+      // Clean up findings from evicted turns to prevent findings Map unbounded growth
+      for (const evictedTurn of evicted) {
+        for (const finding of evictedTurn.findings) {
+          // Only remove if not referenced by a surviving turn
+          const stillReferenced = this.turns.some(t => t.findings.some(f => f.id === finding.id));
+          if (!stillReferenced) {
+            this.findings.delete(finding.id);
+            this.findingTurnMap.delete(finding.id);
+          }
+        }
+      }
+    }
+
     return turn;
   }
 
@@ -883,7 +902,10 @@ export class EnhancedSessionContext {
 
     // Semantic-aware truncation: drop least-important sections (front) first,
     // preserving recent turns/findings (back) which are most actionable.
-    const charBudget = maxTokens * 3; // ~3 chars per token (conservative for CJK/ASCII mix)
+    // CJK chars ≈ 1.5 tokens each, ASCII ≈ 0.25 tokens per char.
+    // Using multiplier of 1.8 (biased toward CJK-heavy content, which is typical for this project).
+    // Previous value of 3 overestimated chars-per-token for CJK, causing 2-3x budget overshoot.
+    const charBudget = maxTokens * 1.8;
     let result = parts.join('\n');
 
     if (result.length > charBudget) {
@@ -1834,8 +1856,10 @@ export class SessionContextManager {
   }
 }
 
-// Singleton instance with reasonable defaults
+// Singleton instance with reasonable defaults.
+// P1-6: TTL aligned with session idle timeout (2 hours) in agentRoutes.ts.
+// Previous 30-minute TTL caused silent context loss when users returned after 35 minutes.
 export const sessionContextManager = new SessionContextManager({
   maxSessions: 100,
-  maxAgeMs: 30 * 60 * 1000, // 30 minutes
+  maxAgeMs: 2 * 60 * 60 * 1000, // 2 hours — matches non-terminal session idle timeout
 });

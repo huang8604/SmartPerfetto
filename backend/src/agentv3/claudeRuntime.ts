@@ -5,6 +5,7 @@ import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import { createSkillExecutor } from '../services/skillEngine/skillExecutor';
 import { ensureSkillRegistryInitialized, skillRegistry } from '../services/skillEngine/skillLoader';
+import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import type { StreamingUpdate, Finding } from '../agent/types';
@@ -66,16 +67,20 @@ function loadPersistedSessionMap(): Map<string, SessionMapEntry> {
   return new Map();
 }
 
-/** Debounce timer for session map persistence — avoids blocking event loop on every SDK message. */
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Debounce timer for session map persistence — avoids blocking event loop on every SDK message.
+ * P2-1: Use a Map keyed by the Map reference to support multiple ClaudeRuntime instances.
+ */
+const saveTimers = new WeakMap<Map<string, SessionMapEntry>, ReturnType<typeof setTimeout>>();
 const SAVE_DEBOUNCE_MS = 2000;
 
 function savePersistedSessionMap(map: Map<string, SessionMapEntry>): void {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
+  const existing = saveTimers.get(map);
+  if (existing) clearTimeout(existing);
+  saveTimers.set(map, setTimeout(() => {
+    saveTimers.delete(map);
     savePersistedSessionMapSync(map);
-  }, SAVE_DEBOUNCE_MS);
+  }, SAVE_DEBOUNCE_MS));
 }
 
 /** Immediate save — used by debounce timer and for critical operations (session removal). */
@@ -207,6 +212,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   private sessionMap: Map<string, SessionMapEntry>;
   /** Cache architecture detection results per traceId (deterministic per trace). */
   private architectureCache: Map<string, ArchitectureInfo> = new Map();
+  /** Cache vendor detection results per traceId (deterministic per trace). */
+  private vendorCache: Map<string, string> = new Map();
   /** Per-session artifact stores — persist across turns within a session. */
   private artifactStores: Map<string, ArtifactStore> = new Map();
   /** Per-session analysis notes — persist across turns within a session. */
@@ -232,6 +239,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   /** Restore a previously persisted SDK session mapping (e.g., after server restart). */
   restoreSessionMapping(smartPerfettoSessionId: string, sdkSessionId: string): void {
     this.sessionMap.set(smartPerfettoSessionId, { sdkSessionId, updatedAt: Date.now() });
+  }
+
+  /** Restore a cached architecture detection result (e.g., from session persistence). */
+  restoreArchitectureCache(traceId: string, architecture: ArchitectureInfo): void {
+    this.architectureCache.set(traceId, architecture);
+  }
+
+  /** Get cached architecture for a traceId (used for persistence). */
+  getCachedArchitecture(traceId: string): ArchitectureInfo | undefined {
+    return this.architectureCache.get(traceId);
   }
 
   /** Get SDK session ID for persistence. */
@@ -331,9 +348,21 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       // P1: Negative memory — collect failed approaches for cross-session learning
       const failedApproaches: FailedApproach[] = [];
 
+      /** Track whether SDK auto-compact has fired during this turn.
+       *  When true, the SDK has summarized prior conversation history,
+       *  potentially losing early-turn details. We log this for diagnostics. */
+      let sdkCompactDetected = false;
+
       const processStream = async () => {
         for await (const msg of stream) {
           if (timedOut) break; // P0-1: Actually cancel stream on timeout
+
+          // Detect SDK auto-compact boundary — conversation history was summarized
+          if ((msg as any).type === 'system' && (msg as any).subtype === 'compact_boundary') {
+            sdkCompactDetected = true;
+            console.warn(`[ClaudeRuntime] SDK auto-compact detected for session ${sessionId} — prior turns summarized`);
+          }
+
           if (msg.session_id && !sdkSessionId) {
             sdkSessionId = msg.session_id;
             this.sessionMap.set(sessionId, { sdkSessionId, updatedAt: Date.now() });
@@ -461,6 +490,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 timestamp: Date.now(),
                 matchedPhaseId,
               });
+              // P2-8: Cap toolCallLog to prevent unbounded growth within a turn
+              if (plan.toolCallLog.length > 100) {
+                plan.toolCallLog.splice(0, plan.toolCallLog.length - 100);
+              }
             }
 
             // P0-G16: Circuit breaker — overall failure rate monitoring
@@ -555,6 +588,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       conclusionText = finalResult || '';
       allFindings.push(extractFindingsFromText(conclusionText));
       let mergedFindings = mergeFindings(allFindings);
+
+      // Log compaction for diagnostics — helps debug cases where Claude seems to lose context
+      if (sdkCompactDetected) {
+        console.warn(`[ClaudeRuntime] Session ${sessionId}: analysis completed after SDK auto-compact. Findings count: ${mergedFindings.length}`);
+      }
 
       // Verification + reflection-driven retry (P0-2 + P2-2)
       // Default ON. Up to 2 correction retries, but second only if new/different errors.
@@ -755,11 +793,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           .catch(err => console.warn('[ClaudeRuntime] Negative pattern save failed:', (err as Error).message));
       }
 
-      // P2-G21: Persist notes to disk after each successful analysis
-      const sessionNotes = this.sessionNotes.get(sessionId);
-      if (sessionNotes && sessionNotes.length > 0) {
-        savePersistedNotes(sessionId, sessionNotes);
-      }
+      // Notes persistence moved to finally block (P1-5) — saves on both success and failure.
 
       return {
         sessionId,
@@ -812,14 +846,24 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       };
     } finally {
       this.activeAnalyses.delete(sessionId);
+      // P1-5: Always persist notes regardless of success/failure.
+      // Notes may have been written via MCP during the turn; saving only on success
+      // creates inconsistency between disk notes and SQLite context on failure.
+      try {
+        const sessionNotes = this.sessionNotes.get(sessionId);
+        if (sessionNotes && sessionNotes.length > 0) {
+          savePersistedNotes(sessionId, sessionNotes);
+        }
+      } catch { /* non-fatal */ }
     }
   }
 
   removeSession(sessionId: string): void {
     // Cancel any pending debounced save to prevent stale write after sync save
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
+    const pendingTimer = saveTimers.get(this.sessionMap);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      saveTimers.delete(this.sessionMap);
     }
     this.sessionMap.delete(sessionId);
     this.artifactStores.delete(sessionId);
@@ -841,6 +885,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
   reset(): void {
     this.architectureCache.clear();
+    this.vendorCache.clear();
     // Also clear all session-scoped stores to prevent unbounded growth
     this.artifactStores.clear();
     this.sessionNotes.clear();
@@ -987,14 +1032,39 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
     }
 
+    // Phase 2.5: Vendor detection (LRU cached per traceId, reuses SkillAnalysisAdapter.detectVendor)
+    let detectedVendor = this.vendorCache.get(traceId) ?? null;
+    if (!detectedVendor) {
+      try {
+        const adapter = getSkillAnalysisAdapter(this.traceProcessorService);
+        await adapter.ensureInitialized();
+        const vendorResult = await adapter.detectVendor(traceId);
+        detectedVendor = vendorResult.vendor;
+        if (detectedVendor && detectedVendor !== 'aosp') {
+          this.vendorCache.set(traceId, detectedVendor);
+          // LRU eviction: match architectureCache limit
+          if (this.vendorCache.size > 50) {
+            const firstKey = this.vendorCache.keys().next().value;
+            if (firstKey) this.vendorCache.delete(firstKey);
+          }
+        }
+      } catch (err) {
+        console.warn('[ClaudeRuntime] Vendor detection failed:', (err as Error).message);
+      }
+    }
+
     // Phase 3: Session context + conversation history
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = sessionContext.getAllTurns?.() || [];
-    // Always include previous context regardless of SDK resume status.
-    // When SDK resume succeeds, these add ~200-500 redundant tokens (harmless).
-    // When SDK session has expired and resume fails silently, they prevent context loss.
-    const previousFindings = this.collectPreviousFindings(sessionContext);
-    const conversationSummary = previousTurns.length > 0
+    const existingSdkSession = this.sessionMap.get(sessionId)?.sdkSessionId;
+    // P1-2: When SDK resume is active, the SDK already has full conversation history.
+    // Only inject a minimal context summary to avoid 1000-3000 token redundancy.
+    // When SDK session has expired (no resume), inject full context as fallback.
+    const hasActiveResume = !!existingSdkSession;
+    const previousFindings = hasActiveResume
+      ? [] // SDK already has these in conversation history
+      : this.collectPreviousFindings(sessionContext);
+    const conversationSummary = previousTurns.length > 0 && !hasActiveResume
       ? sessionContext.generatePromptContext(2000)
       : undefined;
 
@@ -1078,6 +1148,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       analysisNotes: notes,
       artifactStore,
       cachedArchitecture: architecture,
+      cachedVendor: detectedVendor,
       recentSqlErrors: sqlErrors,
       analysisPlan,
       watchdogWarning,

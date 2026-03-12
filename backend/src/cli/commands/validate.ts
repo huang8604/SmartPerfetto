@@ -29,6 +29,7 @@ interface ValidationResult {
 }
 
 const SKILLS_DIR = path.join(__dirname, '../../../skills');
+const STRATEGIES_DIR = path.join(__dirname, '../../../strategies');
 
 /**
  * Validate a skill definition
@@ -415,15 +416,101 @@ function findSkillFiles(dir: string, pattern: string | RegExp): string[] {
 }
 
 /**
+ * Validate strategy files: check that all invoke_skill("xxx") references
+ * point to skills that exist in the skill registry.
+ *
+ * Returns the number of missing skill references (0 = all good).
+ */
+function validateStrategySkillReferences(): number {
+  if (!fs.existsSync(STRATEGIES_DIR)) {
+    console.log(colors.yellow('No strategies directory found.'));
+    return 0;
+  }
+
+  // Build skill name set from YAML files on disk (no runtime loader needed)
+  const skillNames = new Set<string>();
+  const skillDirs = ['atomic', 'composite', 'deep', 'system', 'modules', 'pipelines'];
+  for (const dir of skillDirs) {
+    const dirPath = path.join(SKILLS_DIR, dir);
+    if (!fs.existsSync(dirPath)) continue;
+    const skillFiles = findSkillFiles(dirPath, /\.skill\.ya?ml$/);
+    for (const file of skillFiles) {
+      try {
+        const content = fs.readFileSync(file, 'utf-8');
+        const skill = yaml.load(content) as any;
+        if (skill?.name) skillNames.add(skill.name);
+      } catch { /* skip unparseable files */ }
+    }
+  }
+
+  console.log(colors.bold('\nStrategy → Skill Reference Validation\n'));
+  console.log(`Skill registry: ${skillNames.size} skills loaded from YAML.\n`);
+
+  // Parse strategy files for invoke_skill("xxx") references
+  const strategyFiles = fs.readdirSync(STRATEGIES_DIR)
+    .filter(f => f.endsWith('.strategy.md'));
+
+  if (strategyFiles.length === 0) {
+    console.log(colors.yellow('No strategy files found.'));
+    return 0;
+  }
+
+  let totalMissing = 0;
+
+  for (const file of strategyFiles) {
+    const filePath = path.join(STRATEGIES_DIR, file);
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    // Extract all unique skill names referenced
+    const referencedSkills = new Set<string>();
+    const invokeSkillPattern = /invoke_skill\("([^"]+)"/g;
+    let match: RegExpExecArray | null;
+    while ((match = invokeSkillPattern.exec(content)) !== null) {
+      referencedSkills.add(match[1]);
+    }
+
+    if (referencedSkills.size === 0) {
+      console.log(`${colors.gray('SKIP')} ${file} (no invoke_skill references)`);
+      continue;
+    }
+
+    const missing = [...referencedSkills].filter(name => !skillNames.has(name));
+    if (missing.length === 0) {
+      console.log(`${colors.green('PASS')} ${file} (${referencedSkills.size} skill refs OK)`);
+    } else {
+      console.log(`${colors.red('FAIL')} ${file}`);
+      for (const name of missing) {
+        console.log(`  ${colors.red('ERROR:')} invoke_skill("${name}") — skill not found in registry`);
+      }
+      totalMissing += missing.length;
+    }
+  }
+
+  console.log(colors.bold('\nStrategy Validation Summary:'));
+  console.log(`  Strategy files: ${strategyFiles.length}`);
+  console.log(`  Missing skills: ${totalMissing > 0 ? colors.red(String(totalMissing)) : colors.green('0')}`);
+
+  return totalMissing;
+}
+
+/**
  * Validate command
  */
 export const validateCommand = new Command('validate')
-  .description('Validate skill YAML files')
+  .description('Validate skill YAML files and strategy references')
   .argument('[skillId]', 'Specific skill ID to validate (optional)')
   .option('-a, --all', 'Validate all skills including vendor overrides')
   .option('-c, --contracts', 'Run contract checks (input types, condition refs, iterator sources)')
+  .option('-s, --strategies', 'Validate strategy files: check invoke_skill references exist in skill registry')
   .option('-v, --verbose', 'Show detailed validation output')
-  .action((skillId: string | undefined, options: { all?: boolean; contracts?: boolean; verbose?: boolean }) => {
+  .action((skillId: string | undefined, options: { all?: boolean; contracts?: boolean; strategies?: boolean; verbose?: boolean }) => {
+    // Strategy-only mode: just validate strategy → skill references
+    if (options.strategies && !skillId && !options.contracts) {
+      console.log(colors.bold('\nSmartPerfetto Strategy Validator\n'));
+      const missing = validateStrategySkillReferences();
+      process.exit(missing > 0 ? 1 : 0);
+    }
+
     console.log(colors.bold('\nSmartPerfetto Skill Validator\n'));
 
     let files: string[] = [];
@@ -511,6 +598,11 @@ export const validateCommand = new Command('validate')
       if (result.errors.length > 0 || result.warnings.length > 0) {
         console.log('');
       }
+    }
+
+    // Run strategy validation when --strategies is specified (combined with skill validation)
+    if (options.strategies) {
+      totalErrors += validateStrategySkillReferences();
     }
 
     // Summary

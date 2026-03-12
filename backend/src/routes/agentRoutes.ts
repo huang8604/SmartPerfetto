@@ -13,7 +13,7 @@ import {
   SessionLogger,
 } from '../services/sessionLogger';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
-import { reportStore } from './reportRoutes';
+import { reportStore, persistReport } from './reportRoutes';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import { authenticate } from '../middleware/auth';
 import {
@@ -154,6 +154,22 @@ function startSessionRun(
   };
   session.activeRun = run;
   session.lastRun = run;
+
+  // Inject turn boundary marker for multi-turn conversations
+  if (nextSequence > 1) {
+    session.conversationOrdinal = (Number.isFinite(session.conversationOrdinal) ? session.conversationOrdinal : 0) + 1;
+    const boundaryOrdinal = session.conversationOrdinal;
+    session.conversationSteps.push({
+      eventId: `turn-boundary-${session.sessionId}-${nextSequence}`,
+      ordinal: boundaryOrdinal,
+      phase: 'progress',
+      role: 'system',
+      text: `── 第 ${nextSequence} 轮对话开始 ──`,
+      timestamp: Date.now(),
+      sourceEventType: 'turn_boundary',
+    });
+  }
+
   return run;
 }
 
@@ -2038,6 +2054,15 @@ async function runAgentDrivenAnalysis(
 	          });
 	        }
 
+	        // P0-2: Persist architecture cache for cross-restart recovery.
+	        // Without this, restored sessions re-detect architecture, which fails if trace_processor unloaded the trace.
+	        if (typeof session.orchestrator.getCachedArchitecture === 'function') {
+	          const cachedArch = session.orchestrator.getCachedArchitecture(traceId);
+	          if (cachedArch) {
+	            persistenceService.saveArchitectureSnapshot(sessionId, cachedArch);
+	          }
+	        }
+
 	        // Persist FocusStore so focus-aware incremental planning can survive restarts
 	        // ClaudeRuntime (agentv3) doesn't implement getFocusStore — skip gracefully.
 	        if (typeof session.orchestrator.getFocusStore === 'function') {
@@ -2048,6 +2073,20 @@ async function runAgentDrivenAnalysis(
 	              focusStats: session.orchestrator.getFocusStore().getStats(),
 	            });
 	          }
+	        }
+
+	        // P0-4: Persist turn messages to SQLite messages table.
+	        // Without this, the messages table remains empty for agentv3 sessions.
+	        try {
+	          const turnIndex = session.runSequence || 1;
+	          const userMsgId = `msg-${sessionId}-turn${turnIndex}-user`;
+	          const assistantMsgId = `msg-${sessionId}-turn${turnIndex}-assistant`;
+	          persistenceService.appendMessages(sessionId, [
+	            { id: userMsgId, role: 'user', content: query, timestamp: Date.now() - (result.totalDurationMs || 0) },
+	            { id: assistantMsgId, role: 'assistant', content: result.conclusion.substring(0, 10000), timestamp: Date.now() },
+	          ]);
+	        } catch (msgErr: any) {
+	          logger.warn('AgentDrivenAnalysis', 'Failed to persist turn messages', { error: msgErr.message });
 	        }
 
 	        // Persist TraceAgentState (goal-driven agent scaffold) for cross-restart continuity.
@@ -3355,17 +3394,41 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     const traceStartNs = traceInfo?.metadata?.startTime;
 
     const generator = getHTMLReportGenerator();
+    // P1-10: Aggregate findings from all turns (not just current turn).
+    // session.result only has current turn's findings, creating inconsistency
+    // where timeline shows all turns but findings only show the latest.
+    let cumulativeResult = resultForClient;
+    try {
+      const ctx = sessionContextManager.get(session.sessionId, session.traceId);
+      if (ctx) {
+        const allTurns = ctx.getAllTurns();
+        if (allTurns.length > 1) {
+          const allFindings = allTurns.flatMap(t => t.findings || []);
+          // Deduplicate by finding ID
+          const seen = new Set<string>();
+          const deduped = allFindings.filter(f => {
+            if (seen.has(f.id)) return false;
+            seen.add(f.id);
+            return true;
+          });
+          cumulativeResult = { ...resultForClient, findings: deduped };
+        }
+      }
+    } catch { /* fallback to current turn only */ }
+
     const reportData = {
       traceId: session.traceId,
       query: session.query,
       traceStartNs: traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
-      result: resultForClient,
+      result: cumulativeResult,
       hypotheses: session.hypotheses,
       dialogue: session.agentDialogue,
       conversationTimeline: session.conversationSteps,
       dataEnvelopes: session.dataEnvelopes,
       agentResponses: session.agentResponses,
       timestamp: Date.now(),
+      // P1-11: Pass actual user conversation turn count (not SDK internal rounds)
+      conversationTurns: session.runSequence || 1,
     };
     console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
       hasResult: !!result,
@@ -3383,7 +3446,7 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
 
     // Store report
     const reportId = `agent-report-${session.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    reportStore.set(reportId, {
+    persistReport(reportId, {
       html,
       generatedAt: Date.now(),
       sessionId: session.sessionId,

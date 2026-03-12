@@ -518,6 +518,25 @@ function validateStepDisplay(
 }
 
 // =============================================================================
+// Vendor Override Types
+// =============================================================================
+
+export interface VendorOverrideSignature {
+  pattern: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+export interface VendorOverride {
+  vendor: string;
+  extends: string;
+  displayName?: string;
+  description?: string;
+  detection: { signatures: VendorOverrideSignature[] };
+  additionalSteps: any[];
+  overrideParams?: Record<string, any>;
+}
+
+// =============================================================================
 // Skill Registry
 // =============================================================================
 
@@ -525,6 +544,8 @@ class SkillRegistry {
   private skills: Map<string, SkillDefinition> = new Map();
   private moduleSkills: Map<string, SkillDefinition> = new Map();  // Skills with module metadata
   private fragmentCache: Map<string, string> = new Map();  // SQL fragment path → content
+  /** Vendor overrides keyed by base skill ID (from `extends` field) */
+  private vendorOverrides: Map<string, VendorOverride[]> = new Map();
   private initialized = false;
 
   /**
@@ -576,8 +597,14 @@ class SkillRegistry {
       await this.loadPipelineSkills(pipelinesDir);
     }
 
+    // 加载 vendor overrides (厂商适配覆盖)
+    const vendorsDir = path.join(skillsDir, 'vendors');
+    if (fs.existsSync(vendorsDir)) {
+      this.loadVendorOverrides(vendorsDir);
+    }
+
     this.initialized = true;
-    logger.info('SkillLoader', `Loaded ${this.skills.size} skills (${this.moduleSkills.size} module experts)`);
+    logger.info('SkillLoader', `Loaded ${this.skills.size} skills (${this.moduleSkills.size} module experts, ${this.vendorOverrides.size} vendor-overridden skills)`);
   }
 
   /**
@@ -709,6 +736,107 @@ class SkillRegistry {
         logger.error('SkillLoader', `Failed to load pipeline ${file}:`, error.message);
       }
     }
+  }
+
+  /**
+   * 加载 vendor overrides
+   * vendors/ 下每个厂商子目录包含 *.override.yaml 文件
+   * 每个 override 声明 `extends: <base_skill_id>` 和 `additional_steps`
+   */
+  private loadVendorOverrides(dir: string): void {
+    const vendorDirs = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of vendorDirs) {
+      if (!entry.isDirectory()) continue;
+      const vendorName = entry.name;
+      const vendorDir = path.join(dir, vendorName);
+
+      const files = fs.readdirSync(vendorDir);
+      for (const file of files) {
+        if (!file.endsWith('.override.yaml') && !file.endsWith('.override.yml')) continue;
+
+        const filePath = path.join(vendorDir, file);
+        try {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const raw = yaml.load(content) as any;
+
+          if (!raw || typeof raw !== 'object' || !raw.extends) {
+            logger.warn('SkillLoader', `Vendor override ${filePath} missing 'extends' field, skipping`);
+            continue;
+          }
+
+          // Normalize the base skill ID: "composite/startup_analysis" → "startup_analysis"
+          const baseSkillId = String(raw.extends).includes('/')
+            ? String(raw.extends).split('/').pop()!
+            : String(raw.extends);
+
+          const override: VendorOverride = {
+            vendor: raw.meta?.vendor || vendorName,
+            extends: baseSkillId,
+            displayName: raw.meta?.display_name,
+            description: raw.meta?.description,
+            detection: {
+              signatures: Array.isArray(raw.vendor_detection?.signatures)
+                ? raw.vendor_detection.signatures.map((s: any) => ({
+                    pattern: String(s.pattern || ''),
+                    confidence: s.confidence || 'medium',
+                  }))
+                : [],
+            },
+            additionalSteps: Array.isArray(raw.additional_steps) ? raw.additional_steps : [],
+            overrideParams: raw.override_params,
+          };
+
+          // Store keyed by base skill ID
+          const existing = this.vendorOverrides.get(baseSkillId) || [];
+          existing.push(override);
+          this.vendorOverrides.set(baseSkillId, existing);
+
+          logger.debug('SkillLoader', `Loaded vendor override: ${vendorName}/${file} → extends ${baseSkillId}`);
+        } catch (error: any) {
+          logger.error('SkillLoader', `Failed to load vendor override ${filePath}: ${error.message}`);
+        }
+      }
+    }
+
+    // Log summary
+    let totalOverrides = 0;
+    for (const overrides of this.vendorOverrides.values()) {
+      totalOverrides += overrides.length;
+    }
+    logger.info('SkillLoader', `Loaded ${totalOverrides} vendor overrides across ${this.vendorOverrides.size} base skills`);
+  }
+
+  /**
+   * 获取指定 skill 的特定厂商覆盖
+   * @param skillId 基础 skill ID (e.g. "startup_analysis")
+   * @param vendor 厂商标识 (e.g. "xiaomi", "pixel")
+   * @returns 匹配的 VendorOverride，不存在则返回 undefined
+   */
+  getVendorOverride(skillId: string, vendor: string): VendorOverride | undefined {
+    const overrides = this.vendorOverrides.get(skillId);
+    if (!overrides) return undefined;
+    return overrides.find(o => o.vendor.toLowerCase() === vendor.toLowerCase());
+  }
+
+  /**
+   * 获取指定 skill 的所有厂商覆盖
+   * @param skillId 基础 skill ID
+   * @returns 所有匹配的 VendorOverride 列表
+   */
+  getVendorOverridesForSkill(skillId: string): VendorOverride[] {
+    return this.vendorOverrides.get(skillId) || [];
+  }
+
+  /**
+   * 获取所有已加载的 vendor override 数量
+   */
+  getVendorOverrideCount(): number {
+    let count = 0;
+    for (const overrides of this.vendorOverrides.values()) {
+      count += overrides.length;
+    }
+    return count;
   }
 
   /**
@@ -898,6 +1026,7 @@ class SkillRegistry {
    */
   async reload(): Promise<void> {
     this.skills.clear();
+    this.vendorOverrides.clear();
     this.initialized = false;
     const skillsDir = path.resolve(__dirname, '../../../skills');
     await this.loadSkills(skillsDir);

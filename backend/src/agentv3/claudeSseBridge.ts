@@ -333,6 +333,22 @@ export function createSseBridge(emit: UpdateEmitter) {
       return;
     }
 
+    // SDK auto-compact: fires when conversation history exceeds context window.
+    // The SDK summarizes prior turns, potentially losing early-turn details.
+    // Notify frontend so user is aware of context compression.
+    if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+      console.warn('[SSEBridge] SDK auto-compact triggered — prior conversation history has been summarized');
+      emit({
+        type: 'progress',
+        content: {
+          phase: 'analyzing',
+          message: '⚠ 对话历史已被自动压缩（上下文窗口接近上限），早期分析细节可能丢失',
+        },
+        timestamp: now,
+      });
+      return;
+    }
+
     // Catch-all for unhandled message types
     console.log(`[SSEBridge] Unhandled SDK message type: ${msg.type}`, JSON.stringify(msg).substring(0, 200));
   };

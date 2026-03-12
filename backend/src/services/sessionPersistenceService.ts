@@ -519,6 +519,70 @@ export class SessionPersistenceService {
     }
   }
 
+  // ==========================================================================
+  // Turn Messages Persistence (P0-4)
+  // ==========================================================================
+
+  /**
+   * Append messages to an existing session without deleting prior messages.
+   * Used by agentv3 to populate the messages table after each turn.
+   */
+  appendMessages(sessionId: string, messages: Array<{ id: string; role: string; content: string; timestamp: number; sqlResult?: any }>): void {
+    const msgStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, sql_result)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = this.db.transaction(() => {
+      for (const msg of messages) {
+        const sqlResultJson = msg.sqlResult ? JSON.stringify(msg.sqlResult) : null;
+        msgStmt.run(msg.id, sessionId, msg.role, msg.content, msg.timestamp, sqlResultJson);
+      }
+      // Update session timestamp
+      this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(Date.now(), sessionId);
+    });
+
+    insertAll();
+  }
+
+  // ==========================================================================
+  // Architecture Snapshot Persistence (P0-2)
+  // ==========================================================================
+
+  /**
+   * Save architecture detection result for a session.
+   * Prevents re-detection failures when trace_processor has unloaded the trace after idle.
+   */
+  saveArchitectureSnapshot(sessionId: string, architecture: any): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) return false;
+
+      const metadata: SessionMetadata = session.metadata || {};
+      metadata.architectureSnapshot = architecture;
+
+      const metadataJson = JSON.stringify(metadata);
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(metadataJson, Date.now(), sessionId);
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to save architecture snapshot:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Load architecture detection result for a session.
+   */
+  loadArchitectureSnapshot(sessionId: string): any | null {
+    try {
+      const session = this.getSession(sessionId);
+      return session?.metadata?.architectureSnapshot ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Get EntityStore statistics for a session without full deserialization.
    * Useful for dashboard displays.

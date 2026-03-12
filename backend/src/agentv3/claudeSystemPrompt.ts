@@ -223,10 +223,16 @@ ${parallelGuidance}`);
       const sectionLabels: Record<string, string> = {
         hypothesis: '假设', finding: '发现', observation: '观察', next_step: '下一步',
       };
-      const noteLines = context.analysisNotes
+      // P1-3: Limit injected notes to 10 (sorted by priority) to cap token usage at ~650 tokens.
+      // Full 20 notes would consume ~1300 tokens, crowding the 4500-token budget.
+      const sortedNotes = [...context.analysisNotes]
+        .sort((a, b) => (a.priority === 'high' ? 0 : 1) - (b.priority === 'high' ? 0 : 1))
+        .slice(0, 10);
+      const noteLines = sortedNotes
         .map(n => `- [${sectionLabels[n.section] || n.section}] ${n.priority === 'high' ? '⚠️ ' : ''}${n.content}`)
         .join('\n');
-      contextParts.push(`### 分析笔记
+      const omitted = context.analysisNotes.length - sortedNotes.length;
+      contextParts.push(`### 分析笔记${omitted > 0 ? ` (显示 ${sortedNotes.length}/${context.analysisNotes.length})` : ''}
 ${noteLines}
 
 以上是你之前记录的分析笔记。利用这些笔记继续分析，避免重复工作。`);

@@ -118,6 +118,8 @@ export interface AgentDrivenReportData {
     timestamp: number;
   }>;
   timestamp: number;
+  /** P1-11: User conversation turn count (distinct from SDK internal rounds). */
+  conversationTurns?: number;
 }
 
 export class HTMLReportGenerator {
@@ -4215,8 +4217,8 @@ export class HTMLReportGenerator {
           <div class="label">置信度</div>
         </div>
         <div class="metric-card">
-          <div class="value">${result.rounds}</div>
-          <div class="label">分析轮次</div>
+          <div class="value">${data.conversationTurns ?? result.rounds}</div>
+          <div class="label">对话轮次</div>
         </div>
         <div class="metric-card">
           <div class="value">${result.findings.length}</div>

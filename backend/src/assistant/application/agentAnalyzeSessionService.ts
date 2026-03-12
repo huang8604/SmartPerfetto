@@ -184,6 +184,12 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
             restoredOrchestrator.getFocusStore().syncWithEntityStore(restoredContext.getEntityStore());
           }
 
+          // P0-2: Restore cached architecture to prevent re-detection failure after trace unload
+          const archSnapshot = this.sessionPersistenceService.loadArchitectureSnapshot(requestedSessionId);
+          if (archSnapshot && typeof restoredOrchestrator.restoreArchitectureCache === 'function') {
+            restoredOrchestrator.restoreArchitectureCache(traceId, archSnapshot);
+          }
+
           const traceAgentStateSnapshot =
             this.sessionPersistenceService.loadTraceAgentState(requestedSessionId);
           if (traceAgentStateSnapshot) {

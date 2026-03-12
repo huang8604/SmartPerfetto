@@ -6,6 +6,7 @@ import * as path from 'path';
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import type { SkillExecutor } from '../services/skillEngine/skillExecutor';
 import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
+import { skillRegistry } from '../services/skillEngine/skillLoader';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { displayResultToEnvelope } from '../types/dataContract';
 import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
@@ -237,6 +238,8 @@ export interface ClaudeMcpServerOptions {
   sceneType?: SceneType;
   /** Mutable uncertainty flags array (P1-G1) */
   uncertaintyFlags?: UncertaintyFlag[];
+  /** Cached vendor detection result (e.g. "xiaomi", "pixel", "aosp") — avoids redundant re-detection */
+  cachedVendor?: string | null;
 }
 
 /**
@@ -428,6 +431,23 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       if (skillPlanError) {
         return { content: [{ type: 'text' as const, text: skillPlanError }] };
       }
+
+      // Guard: pipeline_definition skills are not executable analysis skills
+      const skillDef = skillRegistry.getSkill(skillId);
+      if (skillDef?.type === 'pipeline_definition') {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Skill "${skillId}" is a rendering pipeline definition used by \`detect_architecture\`. ` +
+                'It cannot be used for analysis. Use `detect_architecture` to detect the rendering pipeline, ' +
+                'or call a composite analysis skill like `scrolling_analysis`, `gpu_analysis`, etc.',
+            }),
+          }],
+        };
+      }
+
       try {
         const effectiveParams = { ...params };
         if (packageName && !effectiveParams.process_name) {
@@ -482,6 +502,23 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
         if (onSkillResult && result.success && result.displayResults?.length) {
           onSkillResult({ skillId: result.skillId || skillId, displayResults: result.displayResults });
+        }
+
+        // Vendor override hint: if a vendor is detected and overrides exist for this skill,
+        // include a hint in the result so Claude can consider vendor-specific analysis steps.
+        let vendorOverrideHint: { vendor: string; displayName?: string; additionalStepIds: string[] } | undefined;
+        const detectedVendor = options.cachedVendor;
+        if (detectedVendor && detectedVendor !== 'aosp' && result.success) {
+          const vendorOverride = skillRegistry.getVendorOverride(skillId, detectedVendor);
+          if (vendorOverride && vendorOverride.additionalSteps.length > 0) {
+            vendorOverrideHint = {
+              vendor: vendorOverride.vendor,
+              displayName: vendorOverride.displayName,
+              additionalStepIds: vendorOverride.additionalSteps
+                .map((s: any) => s.id || s.name)
+                .filter(Boolean),
+            };
+          }
         }
 
         // Artifact mode: store displayResults AND synthesizeData as artifacts, return compact references
@@ -551,6 +588,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 ...(synthesizeArtifacts && synthesizeArtifacts.length > 0
                   ? { synthesizeArtifacts }
                   : {}),
+                ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
                 hint: 'Use fetch_artifact(artifactId, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
               })) + (result.success ? REASONING_NUDGE : ''),
             }],
@@ -566,6 +604,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               skillId: result.skillId,
               skillName: result.skillName,
               ...(result.error ? { error: result.error } : {}),
+              ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
               displayResults: result.displayResults?.map(dr => ({
                 stepId: dr.stepId,
                 title: dr.title,
@@ -931,6 +970,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           suggestion: '启动场景建议包含启动耗时测量阶段 (startup_analysis)' },
         { matchKeywords: ['phase', 'breakdown', 'block', '阶段', '分解', '阻塞', 'startup_detail'],
           suggestion: '启动场景建议包含启动阶段分解和阻塞因素分析' },
+        { matchKeywords: ['type', 'cold', 'warm', 'hot', 'bindApplication', '类型', '冷启动', '温启动', '热启动', '判定'],
+          suggestion: '启动场景建议验证启动类型 (cold/warm/hot)：bindApplication 存在→冷启动，仅 performCreate→温启动' },
       ],
     },
     anr: {

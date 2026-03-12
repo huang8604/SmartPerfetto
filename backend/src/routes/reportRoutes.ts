@@ -1,43 +1,112 @@
 /**
  * Report Routes
  *
- * API endpoints for generating and serving HTML analysis reports
+ * API endpoints for generating and serving HTML analysis reports.
+ * Reports are persisted to disk (`logs/reports/`) and cached in memory.
  */
 
 import express from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const router = express.Router();
 
-// Store generated reports in memory (in production, use persistent storage)
+const REPORTS_DIR = path.resolve(__dirname, '../../logs/reports');
+
+// Ensure reports directory exists
+if (!fs.existsSync(REPORTS_DIR)) {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+}
+
+// In-memory cache backed by disk persistence
 export const reportStore = new Map<string, {
   html: string;
   generatedAt: number;
   sessionId: string;
 }>();
 
-// Clean up old reports every 30 minutes
+/** Save a report to disk. Called externally when reports are generated. */
+export function persistReport(reportId: string, entry: { html: string; generatedAt: number; sessionId: string }): void {
+  reportStore.set(reportId, entry);
+  try {
+    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
+    fs.writeFileSync(filePath, entry.html, 'utf-8');
+    // Write metadata alongside
+    const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
+    fs.writeFileSync(metaPath, JSON.stringify({ generatedAt: entry.generatedAt, sessionId: entry.sessionId }));
+  } catch (err) {
+    console.warn('[ReportRoutes] Failed to persist report to disk:', (err as Error).message);
+  }
+}
+
+/** Load a report from disk if not in memory cache. */
+function loadReportFromDisk(reportId: string): { html: string; generatedAt: number; sessionId: string } | null {
+  try {
+    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
+    if (!fs.existsSync(filePath)) return null;
+
+    const html = fs.readFileSync(filePath, 'utf-8');
+    const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
+    let generatedAt = Date.now();
+    let sessionId = '';
+    if (fs.existsSync(metaPath)) {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      generatedAt = meta.generatedAt || generatedAt;
+      sessionId = meta.sessionId || '';
+    }
+
+    const entry = { html, generatedAt, sessionId };
+    // Cache in memory for subsequent access
+    reportStore.set(reportId, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+// Clean up old reports every 30 minutes (both memory and disk)
 const reportCleanupInterval = setInterval(() => {
   const now = Date.now();
   const maxAge = 24 * 60 * 60 * 1000; // 24 hours
 
+  // Clean memory cache
   for (const [reportId, report] of reportStore.entries()) {
     if (now - report.generatedAt > maxAge) {
       reportStore.delete(reportId);
     }
   }
+
+  // Clean disk files
+  try {
+    const files = fs.readdirSync(REPORTS_DIR);
+    for (const file of files) {
+      if (!file.endsWith('.meta.json')) continue;
+      const metaPath = path.join(REPORTS_DIR, file);
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        if (meta.generatedAt && now - meta.generatedAt > maxAge) {
+          const reportId = file.replace('.meta.json', '');
+          fs.unlinkSync(metaPath);
+          const htmlPath = path.join(REPORTS_DIR, `${reportId}.html`);
+          if (fs.existsSync(htmlPath)) fs.unlinkSync(htmlPath);
+        }
+      } catch { /* skip individual file errors */ }
+    }
+  } catch { /* non-fatal */ }
 }, 30 * 60 * 1000);
 reportCleanupInterval.unref?.();
 
 /**
  * GET /api/reports/:reportId
  *
- * Get HTML report by ID
+ * Get HTML report by ID (memory cache → disk fallback)
  */
 router.get('/:reportId', (req, res) => {
   try {
     const { reportId } = req.params;
 
-    const report = reportStore.get(reportId);
+    // Try memory cache first, then disk
+    let report = reportStore.get(reportId) || loadReportFromDisk(reportId);
     if (!report) {
       return res.status(404).send(`
         <!DOCTYPE html>
@@ -81,13 +150,21 @@ router.get('/:reportId', (req, res) => {
 /**
  * DELETE /api/reports/:reportId
  *
- * Delete a report from memory
+ * Delete a report from memory and disk
  */
 router.delete('/:reportId', (req, res) => {
   try {
     const { reportId } = req.params;
 
     const deleted = reportStore.delete(reportId);
+
+    // Also clean disk files
+    try {
+      const htmlPath = path.join(REPORTS_DIR, `${reportId}.html`);
+      const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
+      if (fs.existsSync(htmlPath)) fs.unlinkSync(htmlPath);
+      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+    } catch { /* non-fatal */ }
 
     res.json({
       success: deleted,

@@ -351,9 +351,15 @@ export class LaunchExpert extends BaseExpert {
    * Determine launch type from data
    */
   private determineLaunchType(data: any): 'cold' | 'warm' | 'hot' {
-    if (data.launch_type) return data.launch_type;
+    // 1. Trust reclassified startup_type from skill YAML (highest priority)
+    const reclassified = data.startup_type || data.launch_type;
+    if (reclassified === 'cold' || reclassified === 'warm' || reclassified === 'hot') return reclassified;
+    // 2. bindApplication → cold (aligned with startup_events_in_range.skill.yaml)
+    if (data.has_bind_app || data.has_bind_application) return 'cold';
+    // 3. performCreate without bindApplication → warm
+    if (data.has_perform_create || data.has_activity_restart) return 'warm';
+    // 4. Legacy fallback: has_process_start (backward compat for older data)
     if (data.has_process_start || data.process_start_time > 0) return 'cold';
-    if (data.has_activity_restart) return 'warm';
     return 'hot';
   }
 

@@ -59,6 +59,12 @@ export interface SessionMetadata {
    * Single-source-of-truth state for hypotheses/evidence/experiments (iteratively built).
    */
   traceAgentStateSnapshot?: import('../agent/state/traceAgentState').TraceAgentState;
+
+  /**
+   * Cached architecture detection result for cross-restart restoration.
+   * Prevents re-detection failures when trace_processor has unloaded the trace.
+   */
+  architectureSnapshot?: import('../agent/detectors/types').ArchitectureInfo;
 }
 
 export interface SessionFilter {

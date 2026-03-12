@@ -4,6 +4,8 @@
  */
 
 import { SqlQueryResult } from '../models/sessionSchema';
+import type { Finding } from '../agent/types';
+import type { AnalysisPlanV3, AnalysisNote, Hypothesis, UncertaintyFlag } from '../agentv3/types';
 
 export interface ExportOptions {
   format: 'csv' | 'json';
@@ -169,6 +171,60 @@ export class ResultExportService {
       rowCount: results.reduce((sum, r) => sum + r.result.rowCount, 0),
     };
   }
+  /**
+   * Export agentv3 analysis session data (findings, plan, hypotheses, notes, conclusion)
+   */
+  exportAnalysisSession(data: AnalysisSessionExport, options: ExportOptions = { format: 'json' }): ExportResult {
+    if (options.format === 'csv') {
+      // Flatten findings into CSV rows
+      const columns = ['id', 'severity', 'category', 'title', 'description', 'source'];
+      const rows = (data.findings || []).map(f => [
+        f.id, f.severity, f.category || '', f.title, f.description, f.source || '',
+      ]);
+      return this.exportToCSV({ columns, rows, rowCount: rows.length }, options);
+    }
+
+    const jsonData = {
+      exportedAt: new Date().toISOString(),
+      sessionId: data.sessionId,
+      traceId: data.traceId,
+      sceneType: data.sceneType,
+      turnCount: data.turnCount,
+      conclusion: data.conclusion,
+      findings: data.findings,
+      plan: data.plan ? {
+        phases: data.plan.phases.map(p => ({
+          id: p.id, name: p.name, goal: p.goal, status: p.status, summary: p.summary,
+        })),
+        successCriteria: data.plan.successCriteria,
+        submittedAt: data.plan.submittedAt,
+      } : undefined,
+      hypotheses: data.hypotheses,
+      notes: data.notes,
+      uncertaintyFlags: data.uncertaintyFlags,
+    };
+
+    const pretty = options.prettyPrint !== false;
+    return {
+      data: JSON.stringify(jsonData, null, pretty ? 2 : 0),
+      mimeType: 'application/json',
+      filename: `analysis-${data.sessionId}-${Date.now()}.json`,
+      rowCount: (data.findings || []).length,
+    };
+  }
+}
+
+export interface AnalysisSessionExport {
+  sessionId: string;
+  traceId?: string;
+  sceneType?: string;
+  turnCount?: number;
+  conclusion?: string;
+  findings?: Finding[];
+  plan?: AnalysisPlanV3;
+  hypotheses?: Hypothesis[];
+  notes?: AnalysisNote[];
+  uncertaintyFlags?: UncertaintyFlag[];
 }
 
 export default ResultExportService;

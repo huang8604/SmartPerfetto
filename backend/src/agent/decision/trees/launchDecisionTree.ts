@@ -591,9 +591,12 @@ function extractLaunchType(data: any, context?: DecisionContext): 'cold' | 'warm
   if (startupType === 'cold' || startupType === 'warm' || startupType === 'hot') {
     return startupType;
   }
-  // Heuristic fallback
+  // Heuristic fallback: bindApplication → cold (aligned with startup_events_in_range.skill.yaml)
+  if (source.has_bind_app || source.has_bind_application) return 'cold';
+  // performCreate without bindApplication → warm
+  if (source.has_perform_create || source.has_activity_restart) return 'warm';
+  // Legacy fallback: has_process_start (backward compat)
   if (source.has_process_start || source.process_start_time > 0) return 'cold';
-  if (source.has_activity_restart) return 'warm';
   return 'hot';
 }
 
