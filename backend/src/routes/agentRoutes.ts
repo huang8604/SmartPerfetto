@@ -2119,6 +2119,12 @@ async function runAgentDrivenAnalysis(
           })
         : null;
 
+      // Stash snapshot on session EARLY — before any persistence I/O that could throw.
+      // sendAgentDrivenResult uses _lastSnapshot for report data (notes/plan/flags).
+      if (snapshot) {
+        (session as any)._lastSnapshot = snapshot;
+      }
+
       if (snapshot && sessionContext) {
         // Gather optional extras for agentv2-compat fields
         const focusStoreSnapshot = typeof session.orchestrator.getFocusStore === 'function'
@@ -2181,17 +2187,13 @@ async function runAgentDrivenAnalysis(
           const assistantMsgId = `msg-${sessionId}-turn${turnIndex}-assistant`;
           persistenceService.appendMessages(sessionId, [
             { id: userMsgId, role: 'user', content: query, timestamp: Date.now() - (result.totalDurationMs || 0) },
-            { id: assistantMsgId, role: 'assistant', content: result.conclusion.substring(0, 10000), timestamp: Date.now() },
+            { id: assistantMsgId, role: 'assistant', content: (result.conclusion || '').substring(0, 10000), timestamp: Date.now() },
           ]);
         } catch (msgErr: any) {
           logger.warn('AgentDrivenAnalysis', 'Failed to persist turn messages', { error: msgErr.message });
         }
       }
 
-      // Stash snapshot on session for immediate use by sendAgentDrivenResult
-      if (snapshot) {
-        (session as any)._lastSnapshot = snapshot;
-      }
     } catch (persistError: any) {
       // Don't fail the analysis if persistence fails - just log the error
       logger.warn('AgentDrivenAnalysis', 'Failed to persist session state', {
@@ -3574,6 +3576,19 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       }
     } catch { /* fallback to current turn only */ }
 
+    // Guard: ensure cumulativeResult.conclusion is never empty in the report.
+    // If the SDK result.result was empty (rare: streaming tokens showed text but
+    // result message lacked it), fall back to latest conclusionHistory entry.
+    if (!cumulativeResult.conclusion || !cumulativeResult.conclusion.trim()) {
+      const lastCH = session.conclusionHistory?.length
+        ? session.conclusionHistory[session.conclusionHistory.length - 1]
+        : null;
+      if (lastCH?.conclusion) {
+        console.warn('[AgentRoutes] Report conclusion was empty — recovered from conclusionHistory');
+        cumulativeResult = { ...cumulativeResult, conclusion: lastCH.conclusion };
+      }
+    }
+
     const reportData = {
       traceId: session.traceId,
       query: session.query,
@@ -3604,7 +3619,8 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     };
     console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
       hasResult: !!result,
-      conclusionLength: normalizedConclusion.length || 0,
+      conclusionLength: normalizedConclusion?.length || 0,
+      conclusionPreview: (normalizedConclusion || '').substring(0, 100),
       hasConclusionContract: !!normalizedConclusionContract,
       findingsCount: result.findings?.length || 0,
       hypothesesCount: session.hypotheses?.length || 0,
@@ -3612,6 +3628,11 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
       conversationStepCount: session.conversationSteps?.length || 0,
       dataEnvelopesCount: session.dataEnvelopes?.length || 0,
       agentResponsesCount: session.agentResponses?.length || 0,
+      conclusionHistoryCount: session.conclusionHistory?.length || 0,
+      hasSnapshot: !!(session as any)._lastSnapshot,
+      snapshotNotes: (session as any)._lastSnapshot?.analysisNotes?.length ?? 'n/a',
+      snapshotPlan: !!(session as any)._lastSnapshot?.analysisPlan,
+      snapshotFlags: (session as any)._lastSnapshot?.uncertaintyFlags?.length ?? 'n/a',
     });
 
     const html = generator.generateAgentDrivenHTML(reportData);
@@ -3630,7 +3651,10 @@ function sendAgentDrivenResult(res: express.Response, session: AnalysisSession) 
     reportError = error.message || 'Unknown error';
     console.error('[AgentRoutes] Failed to generate agent-driven HTML report:', {
       error: reportError,
-      stack: error.stack?.split('\n').slice(0, 3).join('\n'),
+      stack: error.stack?.split('\n').slice(0, 5).join('\n'),
+      resultConclusion: result?.conclusion ? `${result.conclusion.length} chars` : 'EMPTY/NULL',
+      resultConfidence: result?.confidence,
+      resultRounds: result?.rounds,
     });
   }
 
