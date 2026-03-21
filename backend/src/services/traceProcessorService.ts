@@ -46,6 +46,8 @@ export class TraceProcessorService extends EventEmitter {
   private processors: Map<string, TraceProcessor> = new Map();
   private uploads: Map<string, any> = new Map();
   private uploadDir: string;
+  /** Guards against concurrent auto-recovery for the same trace. */
+  private recoveryInProgress: Map<string, Promise<TraceProcessor>> = new Map();
 
   constructor(uploadDir = './uploads/traces') {
     super();
@@ -240,6 +242,7 @@ export class TraceProcessorService extends EventEmitter {
    * Execute a SQL query on a trace.
    * If the processor has died (status=error), attempts to auto-recover once
    * by re-creating the processor from the on-disk trace file.
+   * Concurrent callers share the same recovery promise to avoid thundering herd.
    */
   public async query(traceId: string, sql: string): Promise<QueryResult> {
     let processor = this.processors.get(traceId);
@@ -250,14 +253,32 @@ export class TraceProcessorService extends EventEmitter {
     // Update last access time for smart cleanup
     this.touchTrace(traceId);
 
-    // Auto-recover dead processor (one attempt)
+    // Auto-recover dead processor
     if (processor.status === 'error') {
-      console.log(`[TraceProcessorService] Processor for ${traceId} is dead, attempting auto-recovery...`);
+      // Serialize concurrent recovery attempts for the same trace
+      let recovery = this.recoveryInProgress.get(traceId);
+      if (!recovery) {
+        console.log(`[TraceProcessorService] Processor for ${traceId} is dead, attempting auto-recovery...`);
+        recovery = this.createProcessor(traceId).then(
+          (p) => {
+            console.log(`[TraceProcessorService] Auto-recovery succeeded for ${traceId}`);
+            this.recoveryInProgress.delete(traceId);
+            return p;
+          },
+          (err) => {
+            console.error(`[TraceProcessorService] Auto-recovery failed for ${traceId}:`, err.message);
+            this.recoveryInProgress.delete(traceId);
+            throw err;
+          },
+        );
+        this.recoveryInProgress.set(traceId, recovery);
+      } else {
+        console.log(`[TraceProcessorService] Waiting for in-progress recovery of ${traceId}...`);
+      }
+
       try {
-        processor = await this.createProcessor(traceId);
-        console.log(`[TraceProcessorService] Auto-recovery succeeded for ${traceId}`);
+        processor = await recovery;
       } catch (err: any) {
-        console.error(`[TraceProcessorService] Auto-recovery failed for ${traceId}:`, err.message);
         throw new Error(`HTTP server not ready (auto-recovery failed: ${err.message})`);
       }
     }
