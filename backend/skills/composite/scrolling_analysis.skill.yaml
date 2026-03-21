@@ -1848,34 +1848,29 @@ steps:
           ELSE CAST(${max_frames_per_session} AS INTEGER)
         END
       ),
-      -- ========== 3. Dynamic per-frame thread detection ==========
-      -- Instead of hardcoding thread names for each pipeline type,
-      -- dynamically find the top-2 busiest threads per frame by Running time.
-      -- rank=1 = producer thread (most CPU), rank=2 = renderer thread (second most CPU)
-      per_frame_top_threads AS (
+      -- ========== 3. Explicit role-based thread identification ==========
+      -- Main thread:   t.tid = p.pid (standard Android) OR t.name GLOB '*.ui' (Flutter)
+      -- RenderThread:  t.name = 'RenderThread' (standard Android) OR t.name GLOB '*.raster' (Flutter)
+      -- Aligned with the jank_frame_detail.skill.yaml proven approach.
+      per_frame_thread_roles AS (
         SELECT
           fl.frame_start,
           t.utid,
           t.tid,
           t.name as thread_name,
-          SUM(CASE WHEN tst.state = 'Running'
-              THEN MAX(MIN(tst.ts + tst.dur, fl.frame_end) - MAX(tst.ts, fl.frame_start), 0)
-              ELSE 0 END) as running_ns,
-          ROW_NUMBER() OVER (
-            PARTITION BY fl.frame_start
-            ORDER BY SUM(CASE WHEN tst.state = 'Running'
-                THEN MAX(MIN(tst.ts + tst.dur, fl.frame_end) - MAX(tst.ts, fl.frame_start), 0)
-                ELSE 0 END) DESC
-          ) as rank
+          CASE
+            WHEN t.tid = p.pid THEN 'main'
+            WHEN t.name GLOB '[0-9]*.ui' THEN 'main'
+            WHEN t.name = 'RenderThread' THEN 'render'
+            WHEN t.name GLOB '[0-9]*.raster' THEN 'render'
+          END as role
         FROM jank_frame_list fl
+        JOIN process p ON fl.upid = p.upid
         JOIN thread t ON t.upid = fl.upid
-        JOIN thread_state tst ON tst.utid = t.utid
-          AND tst.ts < fl.frame_end
-          AND tst.ts + tst.dur > fl.frame_start
-        WHERE t.name IS NOT NULL
-          AND t.name NOT LIKE 'Binder:%'  -- Binder threads are analyzed separately in per_frame_binder
-        GROUP BY fl.frame_start, t.utid
-        HAVING running_ns > 1000000  -- >1ms Running time threshold, naturally filters idle daemons
+        WHERE t.tid = p.pid
+          OR t.name = 'RenderThread'
+          OR t.name GLOB '[0-9]*.ui'
+          OR t.name GLOB '[0-9]*.raster'
       ),
       -- ========== 4. Per-frame: 最耗时 producer 线程 slice ==========
       frame_slices AS (
@@ -1888,8 +1883,8 @@ steps:
           ROUND((s.ts - fl.frame_start) / 1e6, 2) as slice_offset_ms,
           ROW_NUMBER() OVER (PARTITION BY fl.frame_start ORDER BY s.dur DESC) as rn
         FROM jank_frame_list fl
-        JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 1
-        JOIN thread_track tt ON tt.utid = ptft.utid
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+        JOIN thread_track tt ON tt.utid = ptr.utid
         JOIN slice s ON s.track_id = tt.id
           AND s.ts >= fl.frame_start - 5000000
           AND s.ts < fl.frame_end
@@ -1906,8 +1901,8 @@ steps:
           COALESCE(ct.core_type, 'little') as core_type,
           (MIN(tst.ts + tst.dur, ts_top.slice_ts + ts_top.slice_dur_ns) - MAX(tst.ts, ts_top.slice_ts)) as overlap_ns
         FROM top_slices ts_top
-        JOIN per_frame_top_threads ptft ON ptft.frame_start = ts_top.frame_start AND ptft.rank = 1
-        JOIN thread_state tst ON tst.utid = ptft.utid
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = ts_top.frame_start AND ptr.role = 'main'
+        JOIN thread_state tst ON tst.utid = ptr.utid
           AND tst.ts < ts_top.slice_ts + ts_top.slice_dur_ns
           AND tst.ts + tst.dur > ts_top.slice_ts
         LEFT JOIN _cpu_topology ct ON tst.cpu = ct.cpu_id
@@ -1924,7 +1919,7 @@ steps:
         FROM top_slice_states
         GROUP BY frame_start
       ),
-      -- ========== 6. Per-frame: 生产线程四象限 ==========
+      -- ========== 6. Per-frame: 主线程四象限 ==========
       frame_thread_states AS (
         SELECT
           fl.frame_start,
@@ -1932,8 +1927,8 @@ steps:
           COALESCE(ct.core_type, 'little') as core_type,
           (MIN(tst.ts + tst.dur, fl.frame_end) - MAX(tst.ts, fl.frame_start)) as overlap_ns
         FROM jank_frame_list fl
-        JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 1
-        JOIN thread_state tst ON tst.utid = ptft.utid
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+        JOIN thread_state tst ON tst.utid = ptr.utid
           AND tst.ts < fl.frame_end
           AND tst.ts + tst.dur > fl.frame_start
         LEFT JOIN _cpu_topology ct ON tst.cpu = ct.cpu_id
@@ -1954,7 +1949,7 @@ steps:
         FROM frame_thread_states
         GROUP BY frame_start
       ),
-      -- ========== 6b. Per-frame: 渲染线程四象限（动态检测 rank=2 线程）==========
+      -- ========== 6b. Per-frame: 渲染线程四象限 ==========
       render_thread_states AS (
         SELECT
           fl.frame_start,
@@ -1962,8 +1957,8 @@ steps:
           COALESCE(ct.core_type, 'little') as core_type,
           (MIN(tst.ts + tst.dur, fl.frame_end) - MAX(tst.ts, fl.frame_start)) as overlap_ns
         FROM jank_frame_list fl
-        JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 2
-        JOIN thread_state tst ON tst.utid = ptft.utid
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'render'
+        JOIN thread_state tst ON tst.utid = ptr.utid
           AND tst.ts < fl.frame_end
           AND tst.ts + tst.dur > fl.frame_start
         LEFT JOIN _cpu_topology ct ON tst.cpu = ct.cpu_id
@@ -1984,25 +1979,39 @@ steps:
         FROM render_thread_states
         GROUP BY frame_start
       ),
-      -- ========== 7. Per-frame: 大核频率 ==========
+      -- ========== 7. Per-frame: 大核频率（含 carry-forward） ==========
       per_frame_freq AS (
         SELECT
           fl.frame_start,
           ROUND(AVG(c.value) / 1000, 0) as big_avg_freq_mhz,
           ROUND(MAX(c.value) / 1000, 0) as big_max_freq_mhz
         FROM jank_frame_list fl
-        JOIN counter c ON c.ts >= fl.frame_start AND c.ts < fl.frame_end
-        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        JOIN cpu_counter_track cct ON cct.name = 'cpufreq'
+        JOIN counter c ON c.track_id = cct.id
+          AND (
+            (c.ts >= fl.frame_start AND c.ts < fl.frame_end)
+            OR c.ts = (
+              SELECT MAX(c2.ts) FROM counter c2
+              WHERE c2.track_id = cct.id AND c2.ts < fl.frame_start
+            )
+          )
         LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
         WHERE ct.core_type IN ('prime', 'big')
         GROUP BY fl.frame_start
       ),
-      -- ========== 8. Per-frame: 频率爬升延迟 ==========
+      -- ========== 8. Per-frame: 频率爬升延迟（含 carry-forward） ==========
       frame_peak_freq AS (
         SELECT fl.frame_start, MAX(c.value) as peak_khz
         FROM jank_frame_list fl
-        JOIN counter c ON c.ts >= fl.frame_start AND c.ts < fl.frame_end
-        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        JOIN cpu_counter_track cct ON cct.name = 'cpufreq'
+        JOIN counter c ON c.track_id = cct.id
+          AND (
+            (c.ts >= fl.frame_start AND c.ts < fl.frame_end)
+            OR c.ts = (
+              SELECT MAX(c2.ts) FROM counter c2
+              WHERE c2.track_id = cct.id AND c2.ts < fl.frame_start
+            )
+          )
         LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
         WHERE ct.core_type IN ('prime', 'big')
         GROUP BY fl.frame_start
@@ -2018,8 +2027,15 @@ steps:
           ) as ramp_to_high_ms
         FROM jank_frame_list fl
         JOIN frame_peak_freq fpf ON fpf.frame_start = fl.frame_start
-        JOIN counter c ON c.ts >= fl.frame_start AND c.ts < fl.frame_end
-        JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+        JOIN cpu_counter_track cct ON cct.name = 'cpufreq'
+        JOIN counter c ON c.track_id = cct.id
+          AND (
+            (c.ts >= fl.frame_start AND c.ts < fl.frame_end)
+            OR c.ts = (
+              SELECT MAX(c2.ts) FROM counter c2
+              WHERE c2.track_id = cct.id AND c2.ts < fl.frame_start
+            )
+          )
         LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
         WHERE ct.core_type IN ('prime', 'big')
         GROUP BY fl.frame_start
@@ -2040,8 +2056,8 @@ steps:
             END
           ), 0) / 1e6, 2) as binder_overlap_ms
         FROM top_slices ts_top
-        JOIN per_frame_top_threads ptft ON ptft.frame_start = ts_top.frame_start AND ptft.rank = 1
-        LEFT JOIN android_binder_txns bt ON bt.client_tid = ptft.tid
+        JOIN per_frame_thread_roles ptr ON ptr.frame_start = ts_top.frame_start AND ptr.role = 'main'
+        LEFT JOIN android_binder_txns bt ON bt.client_tid = ptr.tid
           AND bt.is_sync = 1
           AND bt.client_ts < ts_top.slice_ts + ts_top.slice_dur_ns
           AND bt.client_ts + bt.client_dur > ts_top.slice_ts
@@ -2095,7 +2111,7 @@ steps:
         GROUP BY fl.frame_start
       ),
       -- ========== 10. 批量详情 JSON 列（覆盖全部掉帧，避免 N+1 查询） ==========
-      -- 10a. 全簇 CPU 频率 (prime/big/little)
+      -- 10a. 全簇 CPU 频率 (prime/big/little)（含 carry-forward）
       per_frame_cpu_clusters AS (
         SELECT frame_start,
           json_group_array(json_object(
@@ -2112,14 +2128,21 @@ steps:
             CAST(ROUND(MAX(c.value) / 1000, 0) AS INTEGER) as max_mhz,
             CAST(ROUND(MIN(c.value) / 1000, 0) AS INTEGER) as min_mhz
           FROM jank_frame_list fl
-          JOIN counter c ON c.ts >= fl.frame_start AND c.ts < fl.frame_end
-          JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+          JOIN cpu_counter_track cct ON cct.name = 'cpufreq'
+          JOIN counter c ON c.track_id = cct.id
+            AND (
+              (c.ts >= fl.frame_start AND c.ts < fl.frame_end)
+              OR c.ts = (
+                SELECT MAX(c2.ts) FROM counter c2
+                WHERE c2.track_id = cct.id AND c2.ts < fl.frame_start
+              )
+            )
           LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
           GROUP BY fl.frame_start, COALESCE(ct.core_type, 'little')
         )
         GROUP BY frame_start
       ),
-      -- 10b. 各 CPU 频率变化时间线（含初始状态 + 所有变化事件，频率单位 GHz）
+      -- 10b. 各 CPU 频率变化时间线（含 carry-forward 初始状态 + 变化事件，频率单位 GHz）
       per_frame_freq_changes AS (
         SELECT frame_start,
           json_group_array(json_object(
@@ -2147,8 +2170,15 @@ steps:
                 ELSE 'stable'
               END as change_dir
             FROM jank_frame_list fl
-            JOIN counter c ON c.ts >= fl.frame_start AND c.ts < fl.frame_end
-            JOIN cpu_counter_track cct ON c.track_id = cct.id AND cct.name = 'cpufreq'
+            JOIN cpu_counter_track cct ON cct.name = 'cpufreq'
+            JOIN counter c ON c.track_id = cct.id
+              AND (
+                (c.ts >= fl.frame_start AND c.ts < fl.frame_end)
+                OR c.ts = (
+                  SELECT MAX(c2.ts) FROM counter c2
+                  WHERE c2.track_id = cct.id AND c2.ts < fl.frame_start
+                )
+              )
             LEFT JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
           )
           WHERE freq_khz != COALESCE(prev_freq_khz, 0)
@@ -2176,8 +2206,8 @@ steps:
             printf('%d', MIN(s.ts)) as ts_str,
             ROW_NUMBER() OVER (PARTITION BY fl.frame_start ORDER BY SUM(s.dur) DESC) as rn
           FROM jank_frame_list fl
-          JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 1
-          JOIN thread_track tt ON tt.utid = ptft.utid
+          JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+          JOIN thread_track tt ON tt.utid = ptr.utid
           JOIN slice s ON s.track_id = tt.id
             AND s.ts >= fl.frame_start - 5000000
             AND s.ts < fl.frame_end
@@ -2208,8 +2238,8 @@ steps:
             printf('%d', MIN(s.ts)) as ts_str,
             ROW_NUMBER() OVER (PARTITION BY fl.frame_start ORDER BY SUM(s.dur) DESC) as rn
           FROM jank_frame_list fl
-          JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 2
-          JOIN thread_track tt ON tt.utid = ptft.utid
+          JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'render'
+          JOIN thread_track tt ON tt.utid = ptr.utid
           JOIN slice s ON s.track_id = tt.id
             AND s.ts >= fl.frame_start - 5000000
             AND s.ts < fl.frame_end
@@ -2238,8 +2268,8 @@ steps:
             ROUND(MAX(bt.client_dur) / 1e6, 2) as max_ms,
             ROW_NUMBER() OVER (PARTITION BY fl.frame_start ORDER BY SUM(bt.client_dur) DESC) as rn
           FROM jank_frame_list fl
-          JOIN per_frame_top_threads ptft ON ptft.frame_start = fl.frame_start AND ptft.rank = 1
-          LEFT JOIN android_binder_txns bt ON bt.client_tid = ptft.tid
+          JOIN per_frame_thread_roles ptr ON ptr.frame_start = fl.frame_start AND ptr.role = 'main'
+          LEFT JOIN android_binder_txns bt ON bt.client_tid = ptr.tid
             AND bt.client_ts >= fl.frame_start
             AND bt.client_ts < fl.frame_end
           WHERE bt.server_process IS NOT NULL
@@ -2512,6 +2542,211 @@ steps:
       ORDER BY session_id, frame_start
     save_as: batch_root_cause
     condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && environment?.data?.[0]?.has_data === 1 && ((perf_summary?.data?.[0]?.janky_frames || 0) > 0 || (jank_stats?.data?.[0]?.real_jank_count || 0) > 0)"
+
+  # ==========================================================================
+  # L2: Session-Level Quadrant Distribution (MainThread + RenderThread)
+  # 滑动过程整体四象限，非逐帧
+  # ==========================================================================
+  - id: session_quadrant_summary
+    type: atomic
+    name: "滑动过程四象限分布"
+    optional: true
+    display:
+      level: summary
+      layer: overview
+      title: "滑动过程四象限分布"
+      columns:
+        - name: thread
+          label: "线程"
+          type: string
+        - name: q1_big_pct
+          label: "Q1 大核运行%"
+          type: percentage
+          format: percentage
+        - name: q2_little_pct
+          label: "Q2 小核运行%"
+          type: percentage
+          format: percentage
+        - name: q3_runnable_pct
+          label: "Q3 调度等待%"
+          type: percentage
+          format: percentage
+        - name: q4a_io_pct
+          label: "Q4a IO阻塞%"
+          type: percentage
+          format: percentage
+        - name: q4b_sleep_pct
+          label: "Q4b 休眠等待%"
+          type: percentage
+          format: percentage
+        - name: total_ms
+          label: "总时间(ms)"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH main_quadrant AS (
+        SELECT
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN ts.dur ELSE 0 END) as q1_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN ts.dur ELSE 0 END) as q2_ns,
+          SUM(CASE WHEN ts.state = 'R' THEN ts.dur ELSE 0 END) as q3_ns,
+          SUM(CASE WHEN ts.state IN ('D', 'DK') THEN ts.dur ELSE 0 END) as q4a_ns,
+          SUM(CASE WHEN ts.state IN ('S', 'I') THEN ts.dur ELSE 0 END) as q4b_ns,
+          SUM(ts.dur) as total_ns
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND p.name NOT LIKE '/system/%'
+          AND t.tid = p.pid
+          AND (${start_ts} IS NULL OR ts.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+      ),
+      render_quadrant AS (
+        SELECT
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('prime', 'big') THEN ts.dur ELSE 0 END) as q1_ns,
+          SUM(CASE WHEN ts.state = 'Running' AND COALESCE(ct.core_type, 'little') IN ('medium', 'little') THEN ts.dur ELSE 0 END) as q2_ns,
+          SUM(CASE WHEN ts.state = 'R' THEN ts.dur ELSE 0 END) as q3_ns,
+          SUM(CASE WHEN ts.state IN ('D', 'DK') THEN ts.dur ELSE 0 END) as q4a_ns,
+          SUM(CASE WHEN ts.state IN ('S', 'I') THEN ts.dur ELSE 0 END) as q4b_ns,
+          SUM(ts.dur) as total_ns
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND p.name NOT LIKE '/system/%'
+          AND t.name = 'RenderThread'
+          AND (${start_ts} IS NULL OR ts.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+      )
+      SELECT 'MainThread' as thread,
+        ROUND(100.0 * q1_ns / NULLIF(total_ns, 0), 1) as q1_big_pct,
+        ROUND(100.0 * q2_ns / NULLIF(total_ns, 0), 1) as q2_little_pct,
+        ROUND(100.0 * q3_ns / NULLIF(total_ns, 0), 1) as q3_runnable_pct,
+        ROUND(100.0 * q4a_ns / NULLIF(total_ns, 0), 1) as q4a_io_pct,
+        ROUND(100.0 * q4b_ns / NULLIF(total_ns, 0), 1) as q4b_sleep_pct,
+        ROUND(total_ns / 1e6, 2) as total_ms
+      FROM main_quadrant
+      UNION ALL
+      SELECT 'RenderThread' as thread,
+        ROUND(100.0 * q1_ns / NULLIF(total_ns, 0), 1) as q1_big_pct,
+        ROUND(100.0 * q2_ns / NULLIF(total_ns, 0), 1) as q2_little_pct,
+        ROUND(100.0 * q3_ns / NULLIF(total_ns, 0), 1) as q3_runnable_pct,
+        ROUND(100.0 * q4a_ns / NULLIF(total_ns, 0), 1) as q4a_io_pct,
+        ROUND(100.0 * q4b_ns / NULLIF(total_ns, 0), 1) as q4b_sleep_pct,
+        ROUND(total_ns / 1e6, 2) as total_ms
+      FROM render_quadrant
+    save_as: session_quadrant
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && (perf_summary?.data?.[0]?.total_frames || 0) > 0"
+
+  # ==========================================================================
+  # L2: Session-Level CPU Frequency Distribution
+  # 滑动过程整体 CPU 频率，按核心类型分组
+  # ==========================================================================
+  - id: session_cpu_freq
+    type: atomic
+    name: "滑动过程 CPU 频率"
+    optional: true
+    display:
+      level: summary
+      layer: overview
+      title: "滑动过程 CPU 频率"
+      columns:
+        - name: core_type
+          label: "核心类型"
+          type: string
+        - name: num_cores
+          label: "核心数"
+          type: number
+        - name: avg_freq_mhz
+          label: "均频(MHz)"
+          type: number
+        - name: max_freq_mhz
+          label: "最高频(MHz)"
+          type: number
+        - name: min_freq_mhz
+          label: "最低频(MHz)"
+          type: number
+    sql: |
+      SELECT
+        ct.core_type,
+        COUNT(DISTINCT cct.cpu) as num_cores,
+        ROUND(AVG(c.value) / 1000, 0) as avg_freq_mhz,
+        ROUND(MAX(c.value) / 1000, 0) as max_freq_mhz,
+        ROUND(MIN(c.value) / 1000, 0) as min_freq_mhz
+      FROM counter c
+      JOIN cpu_counter_track cct ON c.track_id = cct.id
+      JOIN _cpu_topology ct ON cct.cpu = ct.cpu_id
+      WHERE cct.name = 'cpufreq'
+        AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+      GROUP BY ct.core_type
+      ORDER BY max_freq_mhz DESC
+    save_as: session_freq
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && (perf_summary?.data?.[0]?.total_frames || 0) > 0"
+
+  # ==========================================================================
+  # L2: Session-Level Thread Core Affinity (Rendering-Related Threads)
+  # 出图关键线程在各核心类型上的运行时间占比
+  # ==========================================================================
+  - id: session_thread_core_affinity
+    type: atomic
+    name: "关键线程大小核分布"
+    optional: true
+    display:
+      level: summary
+      layer: overview
+      title: "关键线程（出图相关）大小核分布"
+      columns:
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: core_type
+          label: "核心类型"
+          type: string
+        - name: run_ms
+          label: "运行时间(ms)"
+          type: duration
+          format: duration_ms
+        - name: pct
+          label: "占比%"
+          type: percentage
+          format: percentage
+    sql: |
+      WITH thread_runs AS (
+        SELECT
+          CASE WHEN t.tid = p.pid THEN 'MainThread' ELSE t.name END as thread_name,
+          COALESCE(ct.core_type, 'unknown') as core_type,
+          SUM(ts.dur) as run_dur_ns
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        LEFT JOIN _cpu_topology ct ON ts.cpu = ct.cpu_id
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND p.name NOT LIKE '/system/%'
+          AND ts.state = 'Running'
+          AND (${start_ts} IS NULL OR ts.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR ts.ts < ${end_ts})
+          AND (t.tid = p.pid OR t.name IN ('RenderThread', 'GPU completion', 'hwuiTask0', 'hwuiTask1'))
+        GROUP BY thread_name, core_type
+      )
+      SELECT
+        thread_name,
+        core_type,
+        ROUND(run_dur_ns / 1e6, 2) as run_ms,
+        ROUND(100.0 * run_dur_ns / NULLIF(SUM(run_dur_ns) OVER (PARTITION BY thread_name), 0), 1) as pct
+      FROM thread_runs
+      ORDER BY
+        CASE thread_name
+          WHEN 'MainThread' THEN 1
+          WHEN 'RenderThread' THEN 2
+          WHEN 'GPU completion' THEN 3
+          ELSE 4
+        END,
+        run_dur_ns DESC
+    save_as: session_core_affinity
+    condition: "frame_timeline.data[0]?.has_frame_timeline === 1 && (perf_summary?.data?.[0]?.total_frames || 0) > 0"
 
   # ==========================================================================
   # Root Cause Classification - Aggregate analysis for final conclusion

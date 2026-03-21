@@ -2,6 +2,10 @@
 
 AI-driven Perfetto analysis platform for Android performance data.
 
+## Language
+
+用中英文思考，用中文回答。Insight 内容必须使用中文。
+
 ## Compact Instructions
 
 ```

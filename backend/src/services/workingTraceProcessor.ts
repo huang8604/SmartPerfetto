@@ -145,6 +145,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   }
   private isDestroyed = false;
   private serverReady = false;
+  private _activeQueries = 0;
+
+  /** Number of in-flight queries. Factory uses this to avoid evicting busy processors. */
+  public get activeQueries(): number {
+    return this._activeQueries;
+  }
 
   constructor(traceId: string, tracePath: string) {
     super();
@@ -334,7 +340,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     const startTime = Date.now();
     logger.debug('TraceProcessor', `Executing HTTP query: ${sql.substring(0, 100)}...`);
 
-    return this.executeHttpQuery(sql);
+    this._activeQueries++;
+    try {
+      return await this.executeHttpQuery(sql);
+    } finally {
+      this._activeQueries--;
+    }
   }
 
   /**
@@ -588,13 +599,18 @@ export class TraceProcessorFactory {
       this.processors.delete(traceId);
     }
 
-    // Clean up oldest processors if too many
+    // Clean up oldest idle processors if too many (skip busy ones)
     while (this.processors.size >= this.maxProcessors) {
-      const oldest = Array.from(this.processors.entries())[0];
-      if (oldest) {
-        console.log(`[TraceProcessorFactory] Cleaning up oldest processor: ${oldest[0]}`);
-        oldest[1].destroy();
-        this.processors.delete(oldest[0]);
+      const idle = Array.from(this.processors.entries())
+        .find(([, p]) => p.activeQueries === 0);
+      if (idle) {
+        console.log(`[TraceProcessorFactory] Cleaning up idle processor: ${idle[0]}`);
+        idle[1].destroy();
+        this.processors.delete(idle[0]);
+      } else {
+        // All processors are busy — allow temporary over-limit rather than killing active work
+        console.warn(`[TraceProcessorFactory] All ${this.processors.size} processors are busy, allowing temporary over-limit`);
+        break;
       }
     }
 
@@ -709,6 +725,7 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
   public id: string;
   public traceId: string;
   public status: 'initializing' | 'ready' | 'busy' | 'error' = 'ready';
+  public activeQueries = 0;
 
   private _httpPort: number;
 

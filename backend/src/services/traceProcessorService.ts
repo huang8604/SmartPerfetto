@@ -32,6 +32,8 @@ export interface TraceProcessor {
   id: string;
   traceId: string;
   status: 'initializing' | 'ready' | 'busy' | 'error';
+  /** Number of in-flight queries. Used by factory to avoid evicting busy processors. */
+  activeQueries: number;
   query(sql: string): Promise<QueryResult>;
   destroy(): void;
 }
@@ -235,16 +237,30 @@ export class TraceProcessorService extends EventEmitter {
   }
 
   /**
-   * Execute a SQL query on a trace
+   * Execute a SQL query on a trace.
+   * If the processor has died (status=error), attempts to auto-recover once
+   * by re-creating the processor from the on-disk trace file.
    */
   public async query(traceId: string, sql: string): Promise<QueryResult> {
-    const processor = this.processors.get(traceId);
+    let processor = this.processors.get(traceId);
     if (!processor) {
       throw new Error(`No processor for trace ${traceId}`);
     }
 
     // Update last access time for smart cleanup
     this.touchTrace(traceId);
+
+    // Auto-recover dead processor (one attempt)
+    if (processor.status === 'error') {
+      console.log(`[TraceProcessorService] Processor for ${traceId} is dead, attempting auto-recovery...`);
+      try {
+        processor = await this.createProcessor(traceId);
+        console.log(`[TraceProcessorService] Auto-recovery succeeded for ${traceId}`);
+      } catch (err: any) {
+        console.error(`[TraceProcessorService] Auto-recovery failed for ${traceId}:`, err.message);
+        throw new Error(`HTTP server not ready (auto-recovery failed: ${err.message})`);
+      }
+    }
 
     return await processor.query(sql);
   }
