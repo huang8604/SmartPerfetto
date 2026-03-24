@@ -14,10 +14,15 @@ on:
       - "test-traces/**"
       - ".github/workflows/backend-agent-regression-gate.yml"
 
+# Pin to the Perfetto upstream release matching the submodule version.
+# Update this when perfetto/ submodule is upgraded.
+env:
+  PERFETTO_VERSION: "v54.0"
+
 jobs:
   gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -38,5 +43,22 @@ jobs:
       - name: Validate skills
         run: npm run validate:skills || echo "::warning::Skill validation has failures (vendor stubs are expected)"
 
-      - name: Run core tests
-        run: npm run test:core
+      - name: Validate strategies
+        run: npm run validate:strategies
+
+      # Download pre-built trace_processor_shell from Google's LUCI artifacts.
+      # This avoids building Perfetto from source (~5-10 min) in CI.
+      - name: Download trace_processor_shell
+        working-directory: .
+        run: |
+          curl -fL -o trace_processor_shell \
+            "https://commondatastorage.googleapis.com/perfetto-luci-artifacts/${PERFETTO_VERSION}/linux-amd64/trace_processor_shell"
+          chmod +x trace_processor_shell
+          echo "trace_processor_shell downloaded ($(du -h trace_processor_shell | cut -f1))"
+
+      - name: Run gate tests (core + skill-eval + 6-trace regression)
+        env:
+          TRACE_PROCESSOR_PATH: ${{ github.workspace }}/trace_processor_shell
+          TP_PORT_MIN: 9800
+          TP_PORT_MAX: 9899
+        run: npm run test:gate

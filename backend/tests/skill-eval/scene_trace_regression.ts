@@ -26,39 +26,34 @@ type TraceCase = {
 };
 
 const TRACE_CASES: TraceCase[] = [
+  // ── Launch traces (2) ──
   {
-    file: 'app_aosp_scrolling_heavy_jank.pftrace',
-    label: '重度滑动卡顿',
+    file: 'lacunh_heavy.pftrace',
+    label: '重度启动',
     minCounts: {
-      user_gestures: 1,
-      inertial_scrolls: 1,
-      jank_events: 1,
-    },
-    maxUnlockEvents: 0,
-    minMaxDurationMs: {
-      user_gestures: 2500,
-      inertial_scrolls: 2500,
-    },
-  },
-  {
-    file: 'app_aosp_scrolling_light.pftrace',
-    label: '轻度滑动',
-    minCounts: {
-      user_gestures: 1,
-      inertial_scrolls: 1,
+      app_launches: 1,
     },
     maxUnlockEvents: 0,
   },
   {
-    file: 'app_scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
+    file: 'launch_light.pftrace',
+    label: '轻度启动',
+    minCounts: {
+      app_launches: 1,
+    },
+    maxUnlockEvents: 0,
+  },
+  // ── Scroll traces (4) ──
+  {
+    file: 'scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
     label: '标准滑动',
     maxUnlockEvents: 0,
   },
   {
-    file: 'app_start_heavy.pftrace',
-    label: 'App 启动',
+    file: 'scroll-demo-customer-scroll.pftrace',
+    label: '客户场景滑动',
     minCounts: {
-      app_launches: 1,
+      user_gestures: 1,
     },
     maxUnlockEvents: 0,
   },

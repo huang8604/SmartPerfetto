@@ -9,14 +9,14 @@ cd backend && npm run test:scene-trace-regression
 
 ## Canonical test traces
 
-These 6 traces in `test-traces/` must all pass:
+These 6 traces in `test-traces/` must all pass (2 launch + 4 scroll):
 
 | Scene | Trace File |
 |-------|-----------|
-| Heavy scrolling jank | `app_aosp_scrolling_heavy_jank.pftrace` |
-| Light scrolling | `app_aosp_scrolling_light.pftrace` |
-| Standard scrolling | `app_scroll_Standard-AOSP-App-Without-PreAnimation.pftrace` |
-| App startup | `app_start_heavy.pftrace` |
+| Heavy launch | `lacunh_heavy.pftrace` |
+| Light launch | `launch_light.pftrace` |
+| Standard scrolling | `scroll_Standard-AOSP-App-Without-PreAnimation.pftrace` |
+| Customer scrolling | `scroll-demo-customer-scroll.pftrace` |
 | Flutter TextureView | `Scroll-Flutter-327-TextureView.pftrace` |
 | Flutter SurfaceView | `Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace` |
 
@@ -27,7 +27,7 @@ After **significant** changes to startup or scrolling analysis code (strategy fi
 **Startup (strategy/skill/verifier changes affecting startup):**
 ```bash
 cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace ../test-traces/app_start_heavy.pftrace \
+  --trace ../test-traces/lacunh_heavy.pftrace \
   --query "分析启动性能" \
   --output test-output/e2e-startup.json \
   --keep-session
@@ -47,6 +47,32 @@ After the test completes:
 2. Read session logs (`logs/sessions/session_*.jsonl`) — check Agent reasoning quality, phase transitions
 3. Verify the conclusion covers all mandatory checks from the strategy (e.g., for startup: Phase 2.6/2.7, JIT, class loading)
 4. Report a brief summary to the user
+
+**Flutter (changes to Flutter detection, flutter_scrolling_analysis skill, pipeline skills, or arch-flutter template):**
+
+TextureView（双出图）和 SurfaceView（单出图）的渲染管线完全不同，必须分别验证。
+
+```bash
+# Flutter TextureView — 双出图：1.ui → texture → RenderThread updateTexImage → composite
+cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
+  --trace "../test-traces/Scroll-Flutter-327-TextureView.pftrace" \
+  --query "分析 Flutter 滑动性能" \
+  --output test-output/e2e-flutter-textureview.json \
+  --keep-session
+
+# Flutter SurfaceView — 单出图：1.ui → 1.raster → BufferQueue → SurfaceFlinger
+cd backend && npx tsx src/scripts/verifyAgentSseScrolling.ts \
+  --trace "../test-traces/Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace" \
+  --query "分析 Flutter 滑动性能" \
+  --output test-output/e2e-flutter-surfaceview.json \
+  --keep-session
+```
+
+After the test completes, additionally verify:
+1. Agent correctly detects Flutter architecture type (TextureView vs SurfaceView Impeller/Skia)
+2. Agent invokes `flutter_scrolling_analysis` (not standard `scrolling_analysis`)
+3. For TextureView: identifies dual-pipeline (1.ui + RenderThread updateTexImage) as jank source
+4. For SurfaceView: identifies 1.ui/1.raster thread as jank source (not RenderThread)
 
 This is separate from the basic regression test — regression tests verify skills produce data; e2e tests verify the Agent reasons correctly over that data.
 

@@ -8,7 +8,7 @@
  * - debug: All logs including verbose SQL queries
  */
 
-type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
 const LOG_LEVELS: Record<LogLevel, number> = {
   error: 0,
@@ -17,9 +17,29 @@ const LOG_LEVELS: Record<LogLevel, number> = {
   debug: 3,
 };
 
+let runtimeLevel: LogLevel | null = null;
+const envLevel: LogLevel = parseLevel(process.env.LOG_LEVEL);
+
+function parseLevel(raw?: string | null): LogLevel {
+  const level = (raw || 'info').toLowerCase();
+  return (level in LOG_LEVELS) ? level as LogLevel : 'info';
+}
+
+/** Get the current effective log level. */
+export function getLogLevel(): LogLevel {
+  return runtimeLevel ?? envLevel;
+}
+
 function getCurrentLevel(): number {
-  const level = (process.env.LOG_LEVEL || 'info').toLowerCase() as LogLevel;
-  return LOG_LEVELS[level] ?? LOG_LEVELS.info;
+  return LOG_LEVELS[getLogLevel()];
+}
+
+/** Set log level at runtime. Pass null to revert to env var default. */
+export function setLogLevel(level: LogLevel | null): void {
+  if (level !== null && !(level in LOG_LEVELS)) {
+    throw new Error(`Invalid log level: ${level}. Valid: ${Object.keys(LOG_LEVELS).join(', ')}`);
+  }
+  runtimeLevel = level;
 }
 
 export const logger = {

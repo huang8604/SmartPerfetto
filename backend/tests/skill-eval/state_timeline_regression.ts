@@ -23,27 +23,29 @@ type TimelineCase = {
 };
 
 const TRACE_CASES: TimelineCase[] = [
+  // ── Launch traces (2) ──
   {
-    file: 'app_aosp_scrolling_heavy_jank.pftrace',
-    label: '重度滑动 — 状态时间线',
+    file: 'lacunh_heavy.pftrace',
+    label: '重度启动 — 状态时间线',
     expectedInputPath: 'either',
     expectedLanes: ['system_state_lane'],
   },
   {
-    file: 'app_aosp_scrolling_light.pftrace',
-    label: '轻度滑动 — 状态时间线',
+    file: 'launch_light.pftrace',
+    label: '轻度启动 — 状态时间线',
     expectedInputPath: 'either',
     expectedLanes: ['system_state_lane'],
   },
+  // ── Scroll traces (4) ──
   {
-    file: 'app_scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
+    file: 'scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
     label: '标准滑动 — 状态时间线',
     expectedInputPath: 'either',
     expectedLanes: ['system_state_lane'],
   },
   {
-    file: 'app_start_heavy.pftrace',
-    label: 'App 启动 — 状态时间线',
+    file: 'scroll-demo-customer-scroll.pftrace',
+    label: '客户场景滑动 — 状态时间线',
     expectedInputPath: 'either',
     expectedLanes: ['system_state_lane'],
   },
