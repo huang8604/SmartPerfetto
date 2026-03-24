@@ -395,7 +395,8 @@ steps:
 
           -- WEBVIEW_SURFACEVIEW_WRAPPER: Full-screen video
           CASE
-            WHEN (SELECT webview_slice_count + webview_core_count FROM slice_data) > 0
+            WHEN (SELECT webview_slice_count FROM slice_data) > 0
+                 OR (SELECT webview_core_count FROM thread_data) > 0
                  AND (SELECT surfaceview_count FROM slice_data) > 0
                  AND (SELECT video_slice_count FROM slice_data) > 0
             THEN 0.65

@@ -603,10 +603,40 @@ function substituteVariables(sql: string, context: SkillExecutionContext): strin
       return value.replace(/'/g, '\'\'');
     }
 
+    // save_as 存储的是行数组 [{col: val, ...}, ...]。
+    // 当下游 SQL 用 SELECT * FROM ${variable} 引用时，需要转为 inline CTE。
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+      return arrayToInlineCte(value);
+    }
+
     return String(value);
   });
 
   return result;
+}
+
+/**
+ * Convert a save_as row array to an inline SQLite CTE.
+ * [{a: 1, b: 'x'}, {a: 2, b: 'y'}]  →  (SELECT 1 as a, 'x' as b UNION ALL SELECT 2, 'y')
+ */
+function arrayToInlineCte(rows: Record<string, unknown>[]): string {
+  if (rows.length === 0) return '(SELECT NULL LIMIT 0)';
+  const columns = Object.keys(rows[0]);
+  const selects = rows.map((row, i) => {
+    const values = columns.map((col) => {
+      const v = row[col];
+      if (v === null || v === undefined) return 'NULL';
+      if (typeof v === 'number' || typeof v === 'bigint') return String(v);
+      // String values: escape single quotes for SQL
+      return `'${String(v).replace(/'/g, "''")}'`;
+    });
+    // First row includes column aliases; subsequent rows omit them
+    if (i === 0) {
+      return `SELECT ${values.map((v, j) => `${v} as ${columns[j]}`).join(', ')}`;
+    }
+    return `SELECT ${values.join(', ')}`;
+  });
+  return `(${selects.join(' UNION ALL ')})`;
 }
 
 // =============================================================================
