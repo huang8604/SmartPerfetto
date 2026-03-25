@@ -25,6 +25,10 @@ const ORCHESTRATOR_ONLY_TOOLS = new Set([
   'resolve_hypothesis',
   'flag_uncertainty',
   'recall_patterns',
+  // Comparison tools — orchestrator-only to prevent sub-agents from breaking comparison protocol
+  'compare_skill',
+  'execute_sql_on',
+  'get_comparison_context',
 ]);
 
 /**

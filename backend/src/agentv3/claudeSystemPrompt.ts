@@ -1,4 +1,4 @@
-import type { ClaudeAnalysisContext, SelectionContext, SelectionTrackInfo } from './types';
+import type { ClaudeAnalysisContext, ComparisonContext, SelectionContext, SelectionTrackInfo } from './types';
 import type { SceneType } from './sceneClassifier';
 import { formatDurationNs } from './focusAppDetector';
 import { getStrategyContent, loadPromptTemplate, loadSelectionTemplate, renderTemplate } from './strategyLoader';
@@ -109,6 +109,66 @@ function buildSelectionContextSection(sel: SelectionContext): string {
  *   Use a lower value (e.g., 3000) during correction retries to leave
  *   more room for SDK conversation history after auto-compact.
  */
+/**
+ * Build comparison context section for dual-trace analysis.
+ * Injected into system prompt when comparison mode is active (orthogonal to scene type).
+ */
+function buildComparisonContextSection(ctx: ComparisonContext, currentPackageName?: string): string {
+  const lines: string[] = ['## 对比模式\n'];
+  lines.push('你正在进行**双 Trace 对比分析**。两个 Trace 已加载，你可以同时查询两侧数据。\n');
+
+  // Trace identity
+  lines.push('### Trace 身份');
+  lines.push(`- **当前 Trace**: ${currentPackageName || '未知包名'}`);
+  lines.push(`- **参考 Trace**: ${ctx.referencePackageName || '未知包名'}`);
+
+  // Package alignment warning
+  if (currentPackageName && ctx.referencePackageName) {
+    if (currentPackageName === ctx.referencePackageName) {
+      lines.push(`- **包名对齐**: ✅ 相同 (${currentPackageName})`);
+    } else {
+      lines.push(`- **包名对齐**: ⚠️ 不同 — 当前=${currentPackageName}, 参考=${ctx.referencePackageName}`);
+      lines.push('  - 注意：对比不同应用的 Trace 时，部分指标可能不具可比性');
+    }
+  }
+
+  // Architecture comparison
+  if (ctx.referenceArchitecture) {
+    lines.push(`- **参考 Trace 架构**: ${ctx.referenceArchitecture.type}`);
+  }
+
+  // Capability alignment
+  if (ctx.commonCapabilities.length > 0) {
+    lines.push(`\n### 能力对齐`);
+    lines.push(`- **共有表/视图**: ${ctx.commonCapabilities.length} 个 — 可安全对比`);
+    if (ctx.capabilityDiff) {
+      if (ctx.capabilityDiff.currentOnly.length > 0) {
+        lines.push(`- **仅当前 Trace 有**: ${ctx.capabilityDiff.currentOnly.slice(0, 5).join(', ')}${ctx.capabilityDiff.currentOnly.length > 5 ? '...' : ''}`);
+      }
+      if (ctx.capabilityDiff.referenceOnly.length > 0) {
+        lines.push(`- **仅参考 Trace 有**: ${ctx.capabilityDiff.referenceOnly.slice(0, 5).join(', ')}${ctx.capabilityDiff.referenceOnly.length > 5 ? '...' : ''}`);
+      }
+    }
+  }
+
+  // Available tools
+  lines.push(`\n### 对比工具`);
+  lines.push('- `compare_skill(skillId, params)` — 在两个 Trace 上并行运行同一 Skill，返回对比结果 + schema 对齐信息');
+  lines.push('- `execute_sql_on(trace, sql)` — 在指定 Trace 上执行 SQL（"current" 或 "reference"）');
+  lines.push('- `get_comparison_context()` — 获取两个 Trace 的元数据和能力对齐信息');
+  lines.push('- 默认 `execute_sql` 和 `invoke_skill` 仍然作用于**当前 Trace**\n');
+
+  // Analysis rules
+  lines.push('### 对比分析规则');
+  lines.push('1. **首先调用 `get_comparison_context()`** 确认两个 Trace 的可比性');
+  lines.push('2. 数值对比必须标注**归一化方式**（绝对值 / 百分比 / 相对于总时长）');
+  lines.push('3. 只在共有能力（commonCapabilities）范围内做定量对比');
+  lines.push('4. 所有数据引用必须标注来源：[当前 Trace] 或 [参考 Trace]');
+  lines.push('5. 结论格式：先列 delta 表（指标 | 当前值 | 参考值 | 变化），再分析根因');
+
+  return lines.join('\n');
+}
+
 export function buildSystemPrompt(context: ClaudeAnalysisContext, maxTokens?: number): string {
   const effectiveMaxTokens = maxTokens ?? MAX_PROMPT_TOKENS;
   const sections: string[] = [];
@@ -172,6 +232,17 @@ ${appLines.join('\n')}
   // Intentionally NOT in droppableSections: selection is user's explicit intent and must never be dropped.
   if (context.selectionContext) {
     sections.push(buildSelectionContextSection(context.selectionContext));
+  }
+
+  // Comparison mode context — orthogonal to scene type, injected when referenceTraceId is present
+  if (context.comparison) {
+    sections.push(buildComparisonContextSection(context.comparison, context.packageName));
+
+    // Load comparison methodology template (additive to scene strategy)
+    const compMethodology = loadPromptTemplate('comparison-methodology');
+    if (compMethodology) {
+      sections.push(compMethodology);
+    }
   }
 
   // Scene-specific strategy injection (progressive disclosure)

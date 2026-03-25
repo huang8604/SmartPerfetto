@@ -242,6 +242,10 @@ export interface ClaudeMcpServerOptions {
   uncertaintyFlags?: UncertaintyFlag[];
   /** Cached vendor detection result (e.g. "xiaomi", "pixel", "aosp") — avoids redundant re-detection */
   cachedVendor?: string | null;
+  /** Reference trace ID for comparison mode — enables dual-trace MCP tools */
+  referenceTraceId?: string;
+  /** Pre-computed comparison context (capabilities, metadata) for get_comparison_context tool */
+  comparisonContext?: import('./types').ComparisonContext;
 }
 
 /**
@@ -254,6 +258,15 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const recentSqlErrors: SqlErrorFixPair[] = options.recentSqlErrors || [];
   const skillAdapter = getSkillAnalysisAdapter(traceProcessorService);
   const watchdogRef = options.watchdogWarning;
+
+  /** Normalize skill params: ensure process_name ↔ package are both set. */
+  function normalizeSkillParams(params: Record<string, any> | undefined, defaultPackage?: string): Record<string, any> {
+    const p = { ...params };
+    if (defaultPackage && !p.process_name) p.process_name = defaultPackage;
+    if (p.process_name && !p.package) p.package = p.process_name;
+    if (p.package && !p.process_name) p.process_name = p.package;
+    return p;
+  }
 
   /**
    * Consume and prepend any watchdog warning to a tool result.
@@ -460,18 +473,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       }
 
       try {
-        const effectiveParams = { ...params };
-        if (packageName && !effectiveParams.process_name) {
-          effectiveParams.process_name = packageName;
-        }
-        // YAML skills may use ${package} or ${process_name} — provide both.
-        // Keeping both ensures skills using either variable name work correctly.
-        if (effectiveParams.process_name && !effectiveParams.package) {
-          effectiveParams.package = effectiveParams.process_name;
-        }
-        if (effectiveParams.package && !effectiveParams.process_name) {
-          effectiveParams.process_name = effectiveParams.package;
-        }
+        const effectiveParams = normalizeSkillParams(params, packageName);
 
         emitUpdate?.({
           type: 'progress',
@@ -1584,6 +1586,203 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     }
   );
 
+  // ---------------------------------------------------------------------------
+  // Comparison mode tools — conditional on referenceTraceId
+  // ---------------------------------------------------------------------------
+  const { referenceTraceId, comparisonContext } = options;
+
+  const executeSqlOn = referenceTraceId ? tool(
+    'execute_sql_on',
+    'Execute a SQL query against a specific trace in comparison mode. ' +
+    'Use "current" for the primary trace, "reference" for the comparison trace.\n\n' +
+    'Use when: you need to drill into a specific trace during comparison analysis, ' +
+    'or verify a finding from compare_skill with more targeted SQL.\n\n' +
+    'Examples:\n' +
+    '1. Check reference trace jank: trace="reference", sql="SELECT COUNT(*) FROM actual_frame_timeline_slice WHERE jank_type != \'None\'"\n' +
+    '2. Compare CPU freq: trace="current", sql="SELECT cpu, AVG(value) as avg_freq FROM counter JOIN counter_track ON counter.track_id=counter_track.id WHERE counter_track.name GLOB \'cpu*freq\' GROUP BY cpu"',
+    {
+      trace: z.enum(['current', 'reference']).describe(
+        'Which trace to query: "current" = primary trace loaded in Perfetto, "reference" = comparison trace.'
+      ),
+      sql: z.string().describe('The SQL query to execute against the specified trace.'),
+      summary: z.boolean().optional().describe(
+        'When true, returns column statistics + sample rows instead of full results. Default: false.'
+      ),
+    },
+    async ({ trace, sql, summary }) => {
+      const planError = requirePlan('execute_sql_on');
+      if (planError) {
+        return { content: [{ type: 'text' as const, text: planError }] };
+      }
+      const targetTraceId = trace === 'reference' ? referenceTraceId : traceId;
+      const traceLabel = trace === 'reference' ? '[参考 Trace]' : '[当前 Trace]';
+      try {
+        const sqlStart = Date.now();
+        const result = await traceProcessorService.query(targetTraceId, sql);
+        const truncated = result.rows.length > 200;
+        const rows = truncated ? result.rows.slice(0, 200) : result.rows;
+        const success = !result.error;
+
+        if (success && summary && result.rows.length > 0) {
+          const summaryResult = summarizeSqlResult(result.columns, result.rows);
+          const durationMs = Date.now() - sqlStart;
+          const text = JSON.stringify({
+            success: true,
+            trace: traceLabel,
+            summary: summaryResult,
+            totalRows: result.rows.length,
+            durationMs,
+          });
+          return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + REASONING_NUDGE) }] };
+        }
+
+        const durationMs = Date.now() - sqlStart;
+        const text = JSON.stringify({
+          success,
+          trace: traceLabel,
+          columns: result.columns,
+          rows,
+          totalRows: result.rows.length,
+          truncated,
+          durationMs,
+          error: result.error,
+        });
+        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + REASONING_NUDGE : text) }] };
+      } catch (e: any) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, trace: traceLabel, error: e.message }) }] };
+      }
+    }
+  ) : null;
+
+  const compareSkill = referenceTraceId ? tool(
+    'compare_skill',
+    'Run the same skill on both current and reference traces in parallel, returning side-by-side results with schema alignment info.\n\n' +
+    'Use when: you want to compare the same analysis dimension across both traces (e.g., scrolling_analysis, cpu_analysis).\n' +
+    'Don\'t use when: you need different skills on each trace, or ad-hoc SQL queries (use execute_sql_on instead).\n\n' +
+    'Examples:\n' +
+    '1. Compare scrolling: skillId="scrolling_analysis", params={process_name: "com.example.app"}\n' +
+    '2. Compare CPU: skillId="cpu_analysis"',
+    {
+      skillId: z.string().describe('Skill identifier to run on both traces'),
+      params: z.record(z.string(), z.any()).optional().describe(
+        'Parameters passed to both skill executions. Common: { process_name, start_ts, end_ts }'
+      ),
+    },
+    async ({ skillId, params }) => {
+      const planError = requirePlan('compare_skill');
+      if (planError) {
+        return { content: [{ type: 'text' as const, text: planError }] };
+      }
+      try {
+        const effectiveParams = normalizeSkillParams(params, packageName);
+        // For reference trace: use its own package name if detected, otherwise
+        // omit process_name filter entirely (safer than silently using current's package)
+        const refParams = comparisonContext?.referencePackageName
+          ? normalizeSkillParams(params, comparisonContext.referencePackageName)
+          : normalizeSkillParams(params); // No default package — skill runs unfiltered
+
+        emitUpdate?.({
+          type: 'progress',
+          content: { phase: 'analyzing', message: `对比技能 ${skillId}：在两个 Trace 上并行执行...` },
+          timestamp: Date.now(),
+        });
+
+        const compareStart = Date.now();
+        const [currentResult, refResult] = await Promise.all([
+          skillExecutor.execute(skillId, traceId, effectiveParams),
+          skillExecutor.execute(skillId, referenceTraceId, refParams),
+        ]);
+        const compareDuration = Date.now() - compareStart;
+
+        // Schema alignment: check which steps are comparable
+        const currentStepIds = new Set((currentResult.displayResults || []).map(r => r.stepId));
+        const refStepIds = new Set((refResult.displayResults || []).map(r => r.stepId));
+        const comparableSteps = [...currentStepIds].filter(id => refStepIds.has(id));
+        const incompatibleSteps = [
+          ...[...currentStepIds].filter(id => !refStepIds.has(id)).map(id => `${id} (仅当前 Trace)`),
+          ...[...refStepIds].filter(id => !currentStepIds.has(id)).map(id => `${id} (仅参考 Trace)`),
+        ];
+
+        // Emit data envelopes for both sides (labeled)
+        if (emitUpdate && currentResult.displayResults?.length) {
+          emitSkillDataEnvelopes(currentResult.displayResults as SkillDisplayResult[], `${skillId}[当前]`, emitUpdate);
+        }
+        if (emitUpdate && refResult.displayResults?.length) {
+          emitSkillDataEnvelopes(refResult.displayResults as SkillDisplayResult[], `${skillId}[参考]`, emitUpdate);
+        }
+
+        // Build compact comparison summary for Claude
+        const buildStepSummary = (results: any[]) =>
+          results.map(r => ({
+            stepId: r.stepId,
+            title: r.title,
+            rowCount: r.data?.rows?.length || 0,
+            columns: r.data?.columns || [],
+          }));
+
+        const text = JSON.stringify({
+          success: true,
+          durationMs: compareDuration,
+          current: {
+            success: currentResult.success,
+            stepCount: currentResult.displayResults?.length || 0,
+            steps: buildStepSummary(currentResult.displayResults || []),
+            diagnosticCount: currentResult.diagnostics?.length || 0,
+            error: currentResult.error,
+          },
+          reference: {
+            success: refResult.success,
+            stepCount: refResult.displayResults?.length || 0,
+            steps: buildStepSummary(refResult.displayResults || []),
+            diagnosticCount: refResult.diagnostics?.length || 0,
+            error: refResult.error,
+          },
+          alignment: {
+            comparableSteps,
+            incompatibleSteps: incompatibleSteps.length > 0 ? incompatibleSteps : undefined,
+          },
+          hint: '使用 execute_sql_on 深钻具体差异指标，或使用 fetch_artifact 获取详细数据。',
+        });
+
+        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + REASONING_NUDGE) }] };
+      } catch (e: any) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: e.message }) }] };
+      }
+    }
+  ) : null;
+
+  const getComparisonContext = (referenceTraceId && comparisonContext) ? tool(
+    'get_comparison_context',
+    'Get metadata comparison between the current trace and the reference trace. ' +
+    'Returns device info, focus app, architecture, and capability alignment for both traces.\n\n' +
+    'ALWAYS call this first in comparison mode to understand what you are comparing ' +
+    'and confirm the traces are comparable (same app, compatible capabilities).',
+    {},
+    async () => {
+      const ctx = comparisonContext!;
+      const text = JSON.stringify({
+        success: true,
+        current: {
+          traceId,
+          packageName: packageName || 'unknown',
+          architecture: options.cachedArchitecture?.type || 'unknown',
+          focusApps: options.cachedArchitecture ? undefined : 'detect with detect_architecture',
+        },
+        reference: {
+          traceId: referenceTraceId,
+          packageName: ctx.referencePackageName || 'unknown',
+          architecture: ctx.referenceArchitecture?.type || 'unknown',
+        },
+        packageAlignment: packageName && ctx.referencePackageName
+          ? (packageName === ctx.referencePackageName ? 'same' : 'different')
+          : 'unknown',
+        commonCapabilities: ctx.commonCapabilities,
+        capabilityDiff: ctx.capabilityDiff,
+      });
+      return { content: [{ type: 'text' as const, text }] };
+    }
+  ) : null;
+
   // P2-G1: Co-locate tool objects with their names — auto-derives allowedTools
   // so adding a new MCP tool automatically makes it available to the SDK.
   const toolEntries: Array<{ tool: any; name: string }> = [
@@ -1605,6 +1804,10 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   if (resolveHypothesis) toolEntries.push({ tool: resolveHypothesis, name: 'resolve_hypothesis' });
   if (flagUncertainty) toolEntries.push({ tool: flagUncertainty, name: 'flag_uncertainty' });
   toolEntries.push({ tool: recallPatterns, name: 'recall_patterns' });
+  // Comparison mode tools — only when referenceTraceId is provided
+  if (compareSkill) toolEntries.push({ tool: compareSkill, name: 'compare_skill' });
+  if (executeSqlOn) toolEntries.push({ tool: executeSqlOn, name: 'execute_sql_on' });
+  if (getComparisonContext) toolEntries.push({ tool: getComparisonContext, name: 'get_comparison_context' });
 
   const server = createSdkMcpServer({
     name: 'smartperfetto',

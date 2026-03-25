@@ -276,7 +276,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
-      const existingSdkSessionId = this.sessionMap.get(sessionId)?.sdkSessionId;
+      // Reuse composite key from prepareAnalysisContext for comparison mode session identity isolation
+      const existingSdkSessionId = this.sessionMap.get(ctx.sessionMapKey)?.sdkSessionId;
 
       const sdkEnv = createSdkEnv();
 
@@ -348,7 +349,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
           if (msg.session_id && !sdkSessionId) {
             sdkSessionId = msg.session_id;
-            this.sessionMap.set(sessionId, { sdkSessionId, updatedAt: Date.now() });
+            this.sessionMap.set(ctx.sessionMapKey, { sdkSessionId, updatedAt: Date.now() });
             savePersistedSessionMap(this.sessionMap);
           }
 
@@ -1222,10 +1223,79 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
     }
 
+    // Phase 2.8: Comparison context (dual-trace mode)
+    let comparisonContext: import('./types').ComparisonContext | undefined;
+    const referenceTraceId = options.referenceTraceId;
+    if (referenceTraceId) {
+      console.log(`[ClaudeRuntime] Comparison mode: current=${traceId}, reference=${referenceTraceId}`);
+      this.emitUpdate({
+        type: 'progress',
+        content: { phase: 'starting', message: '对比模式：正在检测参考 Trace...' },
+        timestamp: Date.now(),
+      });
+
+      // Detect reference trace focus app, architecture, AND capability handshake in parallel
+      const capSql = "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND (name LIKE 'android_%' OR name LIKE 'linux_%' OR name LIKE 'sched_%' OR name LIKE 'slices_%')";
+      const [refFocusResult, refArchitecture, currentTables, refTables] = await Promise.all([
+        detectFocusApps(this.traceProcessorService, referenceTraceId).catch(() => ({ apps: [], method: 'none' as const, primaryApp: undefined })),
+        (async () => {
+          let refArch = this.architectureCache.get(referenceTraceId);
+          if (!refArch) {
+            try {
+              const detector = createArchitectureDetector();
+              refArch = await detector.detect({
+                traceId: referenceTraceId,
+                traceProcessorService: this.traceProcessorService,
+                packageName: undefined,
+              }) ?? undefined;
+              if (refArch) this.architectureCache.set(referenceTraceId, refArch);
+            } catch { /* non-fatal */ }
+          }
+          return refArch;
+        })(),
+        this.traceProcessorService.query(traceId, capSql).catch((e) => { console.warn('[ClaudeRuntime] Capability query failed for current trace:', e.message); return null; }),
+        this.traceProcessorService.query(referenceTraceId, capSql).catch((e) => { console.warn('[ClaudeRuntime] Capability query failed for reference trace:', e.message); return null; }),
+      ]);
+
+      // Capability handshake: compute intersection of available tables on both trace processors
+      // null = query failed (unhealthy processor), non-null = actual result
+      let commonCapabilities: string[] = [];
+      let capabilityDiff: { currentOnly: string[]; referenceOnly: string[] } | undefined;
+      if (currentTables && refTables) {
+        const currentSet = new Set(currentTables.rows.map((r: any[]) => r[0] as string));
+        const refSet = new Set(refTables.rows.map((r: any[]) => r[0] as string));
+        commonCapabilities = [...currentSet].filter(t => refSet.has(t));
+        const currentOnly = [...currentSet].filter(t => !refSet.has(t));
+        const referenceOnly = [...refSet].filter(t => !currentSet.has(t));
+        if (currentOnly.length > 0 || referenceOnly.length > 0) {
+          capabilityDiff = { currentOnly, referenceOnly };
+        }
+      } else {
+        console.warn('[ClaudeRuntime] Capability handshake incomplete — one or both trace processors unhealthy');
+      }
+
+      comparisonContext = {
+        referenceTraceId,
+        referencePackageName: refFocusResult.primaryApp,
+        referenceFocusApps: refFocusResult.apps.length > 0 ? refFocusResult.apps : undefined,
+        referenceArchitecture: refArchitecture,
+        commonCapabilities,
+        capabilityDiff,
+      };
+
+      console.log(`[ClaudeRuntime] Comparison context built: refApp=${refFocusResult.primaryApp || 'unknown'}, ` +
+        `refArch=${refArchitecture?.type || 'unknown'}, commonCaps=${commonCapabilities.length}, ` +
+        `capDiff=${capabilityDiff ? `cur=${capabilityDiff.currentOnly.length}/ref=${capabilityDiff.referenceOnly.length}` : 'none'}`);
+    }
+
     // Phase 3: Session context + conversation history
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = sessionContext.getAllTurns?.() || [];
-    const sessionMapEntry = this.sessionMap.get(sessionId);
+    // Composite key for comparison mode session identity isolation
+    const sessionMapKey = referenceTraceId
+      ? `${sessionId}:ref:${referenceTraceId}`
+      : sessionId;
+    const sessionMapEntry = this.sessionMap.get(sessionMapKey);
     const existingSdkSession = sessionMapEntry?.sdkSessionId;
     // P0-3: SDK sessions on Anthropic's side expire after ~4 hours.
     // If the local sessionMap entry is stale, treat it as expired and inject full manual context.
@@ -1332,6 +1402,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       hypotheses,
       sceneType,
       uncertaintyFlags,
+      referenceTraceId,
+      comparisonContext,
     });
 
     // Phase 9: (removed — skillCatalog was populated but never used in prompt;
@@ -1382,6 +1454,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       previousPlan,
       planHistory: analysisPlan.history.length > 0 ? analysisPlan.history : undefined,
       selectionContext: options.selectionContext,
+      comparison: comparisonContext,
     };
     const systemPrompt = buildSystemPrompt(analysisContextForRebuild);
 
@@ -1400,6 +1473,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sceneType,
       allowedTools, // P2-G1: auto-derived from MCP server registration
       analysisContextForRebuild, // Used by correction retry to rebuild prompt with reduced budget
+      sessionMapKey, // Composite key for comparison mode session identity isolation
     };
   }
 

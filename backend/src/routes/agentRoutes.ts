@@ -215,6 +215,8 @@ interface AnalysisSession {
   status: 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed';
   error?: string;
   traceId: string;
+  /** Reference trace ID for comparison mode (dual-trace analysis) */
+  referenceTraceId?: string;
   query: string;
   createdAt: number;
   lastActivityAt: number;
@@ -632,7 +634,7 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
 router.post('/analyze', async (req, res) => {
   try {
     const requestId = getRequestId(req);
-    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext } = req.body;
+    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext, referenceTraceId } = req.body;
 
     if (!traceId) {
       return res.status(400).json({
@@ -679,6 +681,27 @@ router.post('/analyze', async (req, res) => {
         hint: 'Please upload the trace to the backend first',
         code: 'TRACE_NOT_UPLOADED',
       });
+    }
+
+    // Comparison mode: validate reference trace if provided
+    if (referenceTraceId) {
+      if (referenceTraceId === traceId) {
+        return res.status(400).json({
+          success: false,
+          error: 'referenceTraceId must be different from traceId',
+          code: 'SAME_TRACE_COMPARISON',
+        });
+      }
+      const refTrace = await traceProcessorService.getOrLoadTrace(referenceTraceId);
+      if (!refTrace) {
+        return res.status(404).json({
+          success: false,
+          error: 'Reference trace not found in backend',
+          hint: 'Please upload the reference trace to the backend first',
+          code: 'REFERENCE_TRACE_NOT_UPLOADED',
+        });
+      }
+      console.log(`[AgentRoutes] Comparison mode: current=${traceId}, reference=${referenceTraceId}`);
     }
 
     // Initialize tools
@@ -740,6 +763,7 @@ router.post('/analyze', async (req, res) => {
       blockedStrategyIds,
       traceProcessorService,
       runContext,
+      referenceTraceId,
     }).catch((error) => {
       const session = assistantAppService.getSession(sessionId);
       if (session) {

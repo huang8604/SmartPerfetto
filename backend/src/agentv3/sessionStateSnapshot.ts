@@ -86,6 +86,8 @@ export interface SessionStateSnapshot {
   snapshotTimestamp: number;
   sessionId: string;
   traceId: string;
+  /** Reference trace ID for comparison mode — enables session restoration in dual-trace context */
+  referenceTraceId?: string;
 
   // --- Timeline & History ---
   conversationSteps: ConversationStep[];

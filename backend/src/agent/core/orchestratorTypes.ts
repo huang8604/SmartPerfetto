@@ -269,6 +269,12 @@ export interface AnalysisOptions {
    * Passed from the frontend so the analysis can be scoped to the selected region.
    */
   selectionContext?: import('../../agentv3/types').SelectionContext;
+
+  /**
+   * Reference trace ID for comparison mode.
+   * When provided, enables dual-trace analysis with comparison-specific MCP tools.
+   */
+  referenceTraceId?: string;
 }
 
 // =============================================================================

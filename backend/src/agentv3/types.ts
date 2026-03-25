@@ -53,6 +53,37 @@ export interface ClaudeAnalysisContext {
   planHistory?: AnalysisPlanV3[];
   /** User's Perfetto UI selection context — scopes analysis to a time range or single slice */
   selectionContext?: SelectionContext;
+  /** Comparison mode — when present, a reference trace is available for dual-trace analysis */
+  comparison?: ComparisonContext;
+}
+
+// =============================================================================
+// Comparison Context (dual-trace analysis)
+// =============================================================================
+
+/** Discriminator for which trace data belongs to in comparison mode. */
+export type TraceSource = 'current' | 'reference';
+
+/** Context for dual-trace comparison mode. Orthogonal to scene type. */
+export interface ComparisonContext {
+  referenceTraceId: string;
+  referencePackageName?: string;
+  referenceFocusApps?: DetectedFocusApp[];
+  referenceArchitecture?: ArchitectureInfo;
+  /** Intersection of stdlib capabilities available on both trace processors */
+  commonCapabilities: string[];
+  /** Capabilities available on only one side — informs Claude about analysis limitations */
+  capabilityDiff?: { currentOnly: string[]; referenceOnly: string[] };
+  /** Alignment anchor for cross-trace time normalization */
+  compareAnchor?: CompareAnchor;
+}
+
+/** How to align time ranges between two traces for meaningful comparison. */
+export interface CompareAnchor {
+  /** Alignment strategy: by analysis phase, by user interaction window, or by relative time */
+  type: 'phase' | 'interaction_window' | 'relative_time';
+  currentRange?: { startNs: number; endNs: number };
+  referenceRange?: { startNs: number; endNs: number };
 }
 
 // =============================================================================
@@ -100,6 +131,8 @@ export interface AnalysisNote {
   content: string;
   priority: 'high' | 'medium' | 'low';
   timestamp: number;
+  /** In comparison mode, which trace this note pertains to (provenance tracking) */
+  sourceTrace?: TraceSource;
 }
 
 // =============================================================================

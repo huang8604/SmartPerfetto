@@ -22,6 +22,8 @@ export interface StoredArtifact {
   diagnostics?: any;
   storedAt: number;
   lastAccessedAt: number;
+  /** In comparison mode, which trace this artifact came from (provenance tracking) */
+  sourceTrace?: import('./types').TraceSource;
 }
 
 export interface ArtifactSummary {
