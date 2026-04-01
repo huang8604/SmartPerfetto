@@ -305,7 +305,9 @@ WebView 冷启动包含 Chromium 渲染引擎的初始化：
 execute_sql("SELECT name, dur/1e6 as dur_ms FROM slice s JOIN thread_track tt ON s.track_id = tt.id JOIN thread t ON tt.utid = t.utid JOIN process p ON t.upid = p.upid WHERE s.ts >= <startup_ts> AND s.ts < <startup_end_ts> AND (s.name GLOB '*WebViewChromium*' OR s.name GLOB '*v8.*' OR t.name = 'CrRendererMain' OR s.name GLOB '*ParseHTML*' OR s.name GLOB '*Layout*') ORDER BY dur DESC LIMIT 20")
 ```
 
-**Phase 3 — 综合结论（基于根因诊断决策树）：**
+**Phase 3 — 综合结论（基于根因诊断决策树，⚠️ 必须输出完整结构化报告）：**
+
+⚠️ **结论是用户看到的最终输出，必须是完整的结构化报告**（概览表格 + 关键发现 + 根因分析树 + 优化建议）。严禁用 1-2 段简短摘要代替。如果分析轮次紧张，优先保证结论完整，可以跳过前面的可选分析步骤（Phase 2.7/2.8/2.9/2.10）。
 
 ### 预检查：识别测试/基准应用
 
@@ -457,7 +459,9 @@ TTID 和 TTFD 是两个不同的指标，必须区分：
 - **厂商特定 Slice**：部分 OEM 有专有 trace 标记（如 OPPO `HyperBoost*`、vivo `TurboX*`、Xiaomi `MiBoost*`），可作为辅助分析信号
 - **Zygote fork 阶段**：冷启动的 pre-`bindApplication` 阶段（进程 fork ~50ms）通常不是瓶颈，但极端情况下（系统负载高）可能贡献显著延迟
 
-**输出结构必须遵循：**
+**⚠️ 输出结构必须完整遵循（禁止简短总结替代）：**
+
+以下输出结构是**硬性要求**，不允许用 1-2 段简短摘要代替。即使分析轮次接近上限，也必须输出完整结构。如果时间紧迫，宁可减少中间分析步骤（跳过 Phase 2.7/2.8 等可选步骤），也要保证结论输出完整。结论不完整将被验证器标记为 ERROR。
 
 1. **概览**：应用名、启动类型、总耗时、**TTID**、**TTFD**（如有）、**分析边界**、评级、数据质量提示
    - **分析边界**必须明确写出，格式示例：
