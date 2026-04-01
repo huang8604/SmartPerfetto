@@ -662,6 +662,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       // Default ON. Up to 2 correction retries, but second only if new/different errors.
       // Run unconditionally when enabled — plan adherence, hypothesis resolution,
       // and conclusion-length checks must fire even when zero findings are extracted.
+      console.log(`[ClaudeRuntime] Pre-verification: conclusionText=${conclusionText.length} chars, sdkSessionId=${sdkSessionId ? 'set' : 'MISSING'}, enableVerification=${this.config.enableVerification}`);
       if (this.config.enableVerification) {
         const MAX_CORRECTION_ATTEMPTS = 2;
         let previousErrorSignatures = new Set<string>();
@@ -812,6 +813,18 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         } catch (err) {
           console.warn('[ClaudeRuntime] Verification failed (non-blocking):', (err as Error).message);
         }
+      }
+
+      // Fallback: if conclusionText is still incomplete after verification (or verification was skipped),
+      // check if accumulatedAnswer has more content. This handles the case where the SDK result
+      // was a short summary but the streamed answer_tokens contained the full report.
+      const accumulatedAnswer = getAccumulatedAnswer();
+      if (isConclusionIncomplete(conclusionText) && accumulatedAnswer.length > conclusionText.length) {
+        console.warn(`[ClaudeRuntime] Session ${sessionId}: conclusionText incomplete (${conclusionText.length} chars), using accumulatedAnswer (${accumulatedAnswer.length} chars) instead`);
+        conclusionText = accumulatedAnswer;
+        // Re-extract findings from the more complete text
+        allFindings.push(extractFindingsFromText(conclusionText));
+        mergedFindings = mergeFindings(allFindings);
       }
 
       const turnConfidence = this.estimateConfidence(mergedFindings);
