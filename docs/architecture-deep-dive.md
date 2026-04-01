@@ -87,11 +87,33 @@ Agent 的分析结果同时落地到 Perfetto UI 上：
 - **点击跳转**：结论中的时间戳和帧 ID 支持点击跳转到 Perfetto 对应位置
 - **数据表格**：18 帧的完整性能数据以结构化格式渲染为可排序、可筛选的表格
 
-<!-- TODO: 贴真实截图 -->
-<!-- 截图 1: Perfetto UI 全景 — 左侧 trace 时间线 + 右侧 AI 分析面板，展示分析结论和数据表格并存 -->
-<!-- 截图 2: Auto-Pin 效果 — 时间线上被 Agent 标记的 jank 帧位置 -->
-<!-- 截图 3: 数据表格 — DataEnvelope 渲染的帧数据表格（可排序/筛选） -->
-<!-- 截图 4: 点击跳转 — 用户点击结论中的帧 ID 后 Perfetto 跳转到对应位置 -->
+**运行截图：以 SmartPerfetto 前端以 Perfetto 插件的形式存在**
+
+![all.png](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/images/image-20260330000546934.png)
+
+**运行截图：滑动分析的时候详细分析每一个掉帧的地方， 点击最左边那个剪头可以展开**
+
+![image-20260330000715805](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/images/jank.png)
+
+**运行截图：滑动分析结论**
+
+![image-20260330000947622](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/desi.png)
+
+**运行截图：滑动分析结论，代表帧分析**
+
+![image-20260330001146212](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/jank1.png)
+
+**运行截图：滑动分析结论，代表帧分析**
+
+![image-20260330001228021](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/jank2.png)
+
+**运行截图：每一轮分析都有单独的分析 report，内容与前端显示的一致（更详细一些）**
+
+![image-20260330001618627](/Users/chris/SynologyDrive/blog-cn-en/Blog/source/images/image-20260330001618627.png)
+
+![image-20260330001821679](/Users/chris/Code/SmartPerfetto/SmartPerfetto/docs/分析结论.png)
+
+
 
 分析结论、数据表格和 Perfetto 时间线在同一个界面上。Agent 完成批量数据收集和初步归因后，工程师在 Perfetto UI 上确认关键发现。
 
@@ -173,7 +195,89 @@ LLM 做推理和表达，工具做查询和计算。连接两者的是 MCP（Mod
 
 ---
 
-## 第二部分：三个关键的工程决策
+## 第二部分：从 Workflow 到 Agent
+
+### Workflow 和 Agent 的区别
+
+Anthropic 在 2024 年 12 月发表的[《Building Effective Agents》](https://www.anthropic.com/research/building-effective-agents)（作者 Erik Schluntz、Barry Zhang）中，将 AI 系统分为两类：
+
+- **Workflow（工作流）**：LLM 和工具通过预定义的代码路径进行编排。每一步做什么、下一步走哪里，都由开发者事先定义好。
+- **Agent（智能体）**：LLM 动态主导自身流程和工具使用，自主决定如何完成任务。
+
+这个区分的实际意义在于灵活性和可控性的权衡。Workflow 提供可预测性，适合步骤固定的任务；Agent 提供灵活性，适合需要根据中间数据调整方向的开放式问题。Andrew Ng 的描述很准确：不需要二元地判断一个系统是不是 Agent，而是把它看作不同程度的 Agent 化。SmartPerfetto 的 agentv2 和 agentv3 分别对应这个光谱的两端。
+
+### 为什么性能分析需要 Agent 而不是 Pipeline
+
+性能分析不是一个「给输入得输出」的固定流程，它是一个探索性的推理过程。以一个实际的滑动分析为例：
+
+```
+1. 先看总览 → 发现 47 帧卡顿，P90 = 23.5ms
+2. 根据总览决定方向 → 40% 卡在 APP 阶段，优先看 APP 侧
+3. 选代表帧深钻 → Frame #234 的 RenderThread 被 Binder 阻塞 23ms
+4. 形成假设 → "可能是 system_server 的 Binder 响应慢"
+5. 验证假设 → 查 Binder 对端的 thread_state，发现 system_server CPU 调度延迟
+6. 假设如果不成立 → 回退，换方向（比如改查 GPU 或 GC）
+7. 综合所有发现，形成结论
+```
+
+每一步决策都依赖前一步的结果——无法在分析开始前就确定所有步骤。Pipeline 无法处理「这个 trace 的问题可能在 GPU，也可能在 GC，需要根据中间数据动态选择下钻方向」这种需求。
+
+SmartPerfetto 的设计是确定性和灵活性的混合：已知场景（滑动、启动、ANR 等）用 Strategy 文件约束必检项，保证不遗漏；但每个阶段内的具体查询和深钻方向由 Claude 自主决定。未匹配的场景则完全交给 Claude 自主探索。
+
+### agentv2：一个典型的 Workflow
+
+agentv2 使用 DeepSeek 作为后端，采用 Governance Pipeline 架构——通过 planner / executor / synthesizer 三阶段编排，本质上是预定义的多步骤工作流（历史 commit `6d80aefb`: "Replace the 13-step agentv2 governance pipeline with Claude-as-orchestrator"）。
+
+这个架构在标准 Android 应用的滑动分析上工作得不错，但遇到非标准情况就出问题了。比如 Flutter 应用的 trace 里没有标准的 frame_timeline 数据，管线拿到空结果后继续执行后续步骤，最终输出基于空数据的结论。
+
+### agentv3：迁移到 Agent 架构
+
+2026 年 3 月 2 日（commit `6d80aefb`），我切换到 Claude Agent SDK。Claude 接收工具定义和策略后，自主决定调用什么工具、按什么顺序、查什么数据。
+
+一个 AI Agent 通常具备以下特征，agentv3 的实现对照如下：
+
+| 特征 | SmartPerfetto 中的实现 | 代码位置 |
+|------|----------------------|---------|
+| 自主性 | Agent 自主决定调用哪个工具、按什么顺序 | `claudeRuntime.ts` |
+| 推理能力 | 每次工具调用后追加 REASONING_NUDGE 触发显式反思 | `claudeMcpServer.ts:84` |
+| 工具使用 | 最多 20 个 MCP 工具调用 trace_processor | 9 常驻 + 11 条件 |
+| 规划能力 | submit_plan + requirePlan() 门控 | 轻量模式关闭 |
+| 反思能力 | 3 层 Verifier + Correction Prompt (max 2 轮) | `claudeVerifier.ts` |
+| 错误恢复 | SQL 纠错学习 + 跨会话误判模式学习 | 跨文件 |
+| 记忆 | 短期: Analysis Notes / Artifact Store；长期: Pattern Memory / SQL Fix Pairs | 7 层记忆 |
+
+```
+agentv2 (Workflow): 固定管线 → 每步预定义 → 意外数据 = 错误结论
+agentv3 (Agent):    动态计划 → 自主调用工具 → 意外数据 = 调整计划
+```
+
+### 迁移后的 9 轮审查
+
+从 3 月 2 日到 3 月 20 日，经历了 9 轮架构审查。其中影响最大的几轮：
+
+| 轮次 | 日期 | 主要发现 |
+|------|------|---------|
+| Round 1 | 3/2 | 初始 SDK 集成后 12 个修复——SQL 知识库没接入 System Prompt，jank_frame_detail 中 CPU 核数硬编码为 4 |
+| Round 3 | 3/12 | 架构接线审计——12 处「实现了但没接上」的断连，比如验证管线在 0 findings 时被跳过 |
+| Round 7 | 3/15 | Perfetto Stdlib 集成——预加载模块 4→22，Schema Index 708→761 |
+| Round 9 | 3/20 | 18 天真实 trace 后的生产质量审查——3 P0 + 4 P1 + 5 P2，催生了三层验证系统 |
+
+### 冷启动 4 层联动 Bug
+
+2026 年 3 月 19 日（commit `d5a1d7b3`），发现冷启动被错误分类为热启动。追踪后发现这是一个跨 4 层的联动问题：
+
+```
+Layer A (Perfetto Stdlib): bindApplication 的 ts 比 launchingActivity 早 ~98ms → 被过滤器排除
+Layer B (Skill 逻辑):      startup_events_in_range 的时间过滤与 Layer A 不兼容
+Layer C (10 个下游 Skill):  冗余的 startup_type 过滤条件 → 重分类后返回 0 行
+Layer D (质量门禁):         startup_analysis 的过滤规则和重分类逻辑不同步
+```
+
+修复规模：重写 10 个下游 Skill，新增 4 个启动分析 Skill。这个问题说明在 Skill 依赖链中，上游的一个字段语义错误会逐层放大。
+
+---
+
+## 第三部分：三个关键的工程决策
 
 ### 决策 1：Scene Classification — 从全量注入到按需加载
 
@@ -307,7 +411,7 @@ Layer 3: 独立模型审查 (使用 Haiku)
 
 ---
 
-## 第三部分：为什么不用标准的 Skill 系统？
+## 第四部分：为什么不用标准的 Skill 系统？
 
 ### 从 SOP 到 YAML Skill 的设计选择
 
@@ -466,7 +570,7 @@ Flutter 的两种渲染模式涉及不同的线程，分析时需要看不同的
 
 ---
 
-## 第四部分：SQL 工程
+## 第五部分：SQL 工程
 
 前面讨论的 Skill 系统最终都落到 SQL 查询上——每个 Skill 的 step 执行的是预定义的 SQL。SQL 是 SmartPerfetto 的核心——所有性能数据的获取最终都通过 SQL 查询 trace_processor 完成。这部分展开讨论 SQL 层面的几个工程问题：查询模式设计、官方 stdlib 复用、Schema 索引、结果压缩和纠错学习。
 
@@ -631,159 +735,7 @@ SELECT AVG(c.value) FROM counter c WHERE ...
 
 ---
 
-## 第五部分：从 Workflow 到 Agent
-
-### Workflow 和 Agent 的区别
-
-在讨论 SmartPerfetto 的架构迁移之前，需要先说明一个概念区分。Anthropic 在 2024 年 12 月发表的[《Building Effective Agents》](https://www.anthropic.com/research/building-effective-agents)（作者 Erik Schluntz、Barry Zhang）中，将 AI 系统分为两类：
-
-- **Workflow（工作流）**：LLM 和工具通过预定义的代码路径进行编排。每一步做什么、下一步走哪里，都由开发者事先定义好。
-- **Agent（智能体）**：LLM 动态主导自身流程和工具使用，自主决定如何完成任务。
-
-这个区分的实际意义在于 **灵活性和可控性的权衡**。Workflow 提供可预测性和一致性，适合定义明确、步骤固定的任务；Agent 提供灵活性和自主决策能力，适合需要根据中间数据调整分析方向的开放式问题。
-
-Andrew Ng 对此有一个有用的描述：不需要二元地判断一个系统是不是 Agent，而是把它看作「不同程度的 Agent 化」。大多数生产系统都处于这个光谱上——SmartPerfetto 的 agentv2 和 agentv3 分别对应这个光谱的两端。
-
-一个 AI Agent 通常具备以下特征：
-
-| 特征 | 含义 | SmartPerfetto 中的实现 | 代码位置 / 启用条件 |
-|------|------|----------------------|---------------------|
-| 自主性 | 独立运行，无需持续人工指导 | Agent 自主决定调用哪个工具、按什么顺序 | `claudeRuntime.ts` — 全量模式始终启用 |
-| 推理能力 | CoT / ReAct 模式分析问题 | 每次工具调用后追加 REASONING_NUDGE 触发显式反思 | `claudeMcpServer.ts:84` — 始终启用 |
-| 工具使用 | 调用外部 API、数据库等 | 最多 20 个 MCP 工具调用 trace_processor | `claudeMcpServer.ts` — 9 常驻 + 11 条件 |
-| 规划能力 | 将目标分解为子任务 | submit_plan + requirePlan() 门控 | `claudeMcpServer.ts:297` — **轻量模式关闭** |
-| 反思能力 | 评估自身输出，自我修正 | 3 层 Verifier + Correction Prompt (max 2 轮) | `claudeVerifier.ts` — 可通过环境变量关闭 |
-| 错误恢复 | 根据反馈调整方案 | SQL 纠错学习 + 跨会话误判模式学习 | `claudeMcpServer.ts` + `claudeVerifier.ts` |
-| 记忆 | 短期上下文 + 长期记忆 | 短期: Analysis Notes / Artifact Store / Session Resume；长期: Pattern Memory / SQL Fix Pairs / Misdiagnosis Patterns | 7 层记忆分布在不同文件 |
-
-这个框架有助于理解 SmartPerfetto 从 v2 到 v3 的架构变化——本质上是从 Workflow 向 Agent 的迁移。
-
-### 为什么性能分析需要 Agent 而不是 Pipeline
-
-性能分析不是一个「给输入得输出」的固定流程，它是一个探索性的推理过程。以一个实际的滑动分析为例：
-
-```
-1. 先看总览 → 发现 47 帧卡顿，P90 = 23.5ms
-2. 根据总览决定方向 → 40% 卡在 APP 阶段，优先看 APP 侧
-3. 选代表帧深钻 → Frame #234 的 RenderThread 被 Binder 阻塞 23ms
-4. 形成假设 → "可能是 system_server 的 Binder 响应慢"
-5. 验证假设 → 查 Binder 对端的 thread_state，发现 system_server CPU 调度延迟
-6. 假设如果不成立 → 回退，换方向（比如改查 GPU 或 GC）
-7. 综合所有发现，形成结论
-```
-
-步骤 2 的方向选择取决于步骤 1 的数据；步骤 6 可能需要回退到步骤 3 换一个方向。这个过程中的每一步决策都依赖前一步的结果——无法在分析开始前就确定所有步骤。如果用 Pipeline 硬编码所有步骤，它无法处理「这个 trace 的问题可能在 GPU，也可能在 GC，需要根据中间数据动态选择下钻方向」这种需求。
-
-在 SmartPerfetto 的设计中，这个动态决策能力和确定性保障是混合使用的：
-
-```
-用户问题 → 场景分类 (12 种场景)
-  ├─ 匹配到已知场景 → 确定性多阶段分析
-  │   Strategy 文件约束每个阶段的必检项（保证不遗漏）
-  │   但阶段内的具体查询和深钻方向由 Claude 自主决定
-  └─ 未匹配 (general) → 完全自主的假设驱动推理
-      Claude 自行制定计划、选择工具、验证假设
-```
-
-已知场景用 Strategy 文件保底（确保关键步骤不被跳过），同时在每个步骤内保留 Claude 的自主决策空间。这是确定性和灵活性的混合。
-
-### agentv2：一个典型的 Workflow
-
-agentv2 使用 DeepSeek 作为后端，采用的是 Governance Pipeline 架构——通过 planner / executor / synthesizer 三阶段编排，本质上是预定义的多步骤工作流。每个阶段做什么、下一步走哪里都由代码预先定义好（历史 commit `6d80aefb` 的描述是 "Replace the 13-step agentv2 governance pipeline with Claude-as-orchestrator"）。
-
-```
-Planner:     场景检测 → 制定分析步骤
-Executor:    按步骤依次执行 SQL/Skill（帧列表 → 掉帧分类 → 根因分析 → ...）
-Synthesizer: 汇总执行结果 → 生成结论
-```
-
-这个架构在标准 Android 应用的滑动分析上工作得不错，但遇到非标准情况就出问题了。比如 Flutter 应用的 trace 里没有标准的 frame_timeline 数据，Step 4 拿到的是空结果，但管线继续执行 Step 5-13，最终输出一个基于空数据的结论。管线没有能力根据中间数据调整后续策略。
-
-### agentv3：迁移到 Agent 架构
-
-2026 年 3 月 2 日（commit `6d80aefb`），我决定切换到 Claude Agent SDK。
-
-对照上面的表格，agentv3 补齐了 agentv2 缺失的 Agent 特征：Claude 接收工具定义和策略后，自主决定调用什么工具、按什么顺序、查什么数据（自主性）；Planning Gate 要求它先提交分析计划再执行（规划能力），但计划本身是根据具体 trace 的数据动态生成的；每步工具调用后通过 REASONING_NUDGE 进行反思（推理能力）；三层验证发现问题时触发 Correction Prompt（反思 + 错误恢复）；SQL 纠错对和 Pattern Memory 提供跨会话学习（记忆）。
-
-```
-agentv2 (Workflow): 固定管线 → 每步预定义 → 意外数据 = 错误结论
-agentv3 (Agent):    动态计划 → 自主调用工具 → 意外数据 = 调整计划
-```
-
-### 迁移后的 9 轮审查
-
-从 3 月 2 日到 3 月 20 日，经历了 9 轮架构审查。其中影响最大的几轮：
-
-| 轮次 | 日期 | 主要发现 |
-|------|------|---------|
-| Round 1 | 3/2 | 初始 SDK 集成后 12 个修复——最典型的是 SQL 知识库没接入 System Prompt（Claude 不知道有哪些表可查），jank_frame_detail 中 CPU 核数硬编码为 4（不同 SoC 核数不同） |
-| Round 3 | 3/12 | 架构接线审计——发现 12 处「实现了但没接上」的断连，比如验证管线在提取到 0 个 finding 时被跳过（应该验证「为什么没有 finding」是否正常） |
-| Round 7 | 3/15 | Perfetto Stdlib 集成——预加载模块从 4 个扩展到 22 个，Schema Index 从 708 条扩展到 761 条 |
-| Round 9 | 3/20 | 18 天真实 trace 后的生产质量审查——3 个 P0 + 4 个 P1 + 5 个 P2，这轮审查直接催生了三层验证系统 |
-
-### 冷启动 4 层联动 Bug
-
-2026 年 3 月 19 日（commit `d5a1d7b3`），发现冷启动被错误分类为热启动。追踪后发现这是一个跨 4 层的联动问题：
-
-```
-Layer A (Perfetto Stdlib):
-  bindApplication 事件的 ts 比 launchingActivity 早 ~98ms
-  → stdlib 的 BETWEEN 过滤器的时间窗口排除了 bindApplication
-
-Layer B (Skill 逻辑):
-  startup_events_in_range 的时间过滤逻辑与 Layer A 不兼容
-
-Layer C (10 个下游 Skill):
-  冗余的 startup_type 过滤条件 → 重分类后返回 0 行数据
-
-Layer D (质量门禁):
-  startup_analysis 的过滤规则和重分类逻辑不同步
-```
-
-修复规模：重写 10 个下游 Skill，新增 4 个启动分析 Skill（binder_pool_analysis、cpu_placement_timeline、freq_rampup、jit_analysis）。
-
-这个问题说明：在 Skill 依赖链中，上游的一个字段语义错误会逐层放大。修复不能只改一个 Skill，需要理解从 Perfetto stdlib 到最终结论的完整数据流。
-
----
-
-## 第六部分：与通用 Agentic CLI 的架构对比
-
-前面五个部分聚焦在 SmartPerfetto 自身的设计决策。这一部分换个视角——把它和通用的 AI Agent 架构做对比，看看哪些是所有 Agent 应用都要解决的共性问题，哪些是领域特定的。
-
-参考小八的[「从零构建 Claude Code」](https://x.com/icebearminer/status/2037888800341610684)一文，两个系统在 Harness 层有很多共性，但 SmartPerfetto 多出了一整层领域工程。
-
-![架构对比](images/04-comparison.png)
-
-### 共享的基础设施
-
-| 维度 | Claude Code (CLI) | SmartPerfetto (Web) |
-|------|-------------------|---------------------|
-| Agent Loop | while 循环, max 25 轮 | SDK 管理, max 30 轮 |
-| 流式输出 | 原生 fetch + ReadableStream | Express SSE + 200ms 缓冲 |
-| System Prompt | cache_control 分段缓存 | 4-Tier 前缀排序 (auto-caching) |
-| 工具系统 | 21 内置 + MCP 动态注入 | 最多 20 MCP 工具 (进程内，9 常驻 + 11 条件) |
-| 上下文压缩 | 自动 Compact (85% 阈值) | SDK Auto-Compact + 恢复笔记 |
-| 多 Agent | Sub-Agent + Background Agent | 3 专家 Sub-Agent + 超时管理 |
-
-### SmartPerfetto 的领域工程层
-
-| 维度 | 设计 | 解决的问题 |
-|------|------|-----------|
-| Scene Classification | <1ms 关键词路由, 12 场景 | 全量策略注入导致术语混淆 |
-| Artifact Store | LRU + 3 级 fetch | 全量数据导致 LLM 输出流水账 |
-| 3 层验证 | 启发式 + Plan 遵从 + Haiku | ~30% 的 Agent 结论包含误判 |
-| YAML Skill 系统 | 158+ 声明式技能 + L1-L4 分层 | LLM 生成的 SQL 有方差 |
-| 架构感知分析 | 24+ 渲染管线检测 | Flutter/Compose/WebView 分析逻辑不同 |
-| 厂商覆写 | .override.yaml × 8 平台 | 高通/联发科/Tensor 字段名不同 |
-| SQL 纠错学习 | Jaccard 匹配 + 30 天 TTL | 相同的 SQL 错误反复出现 |
-
----
-
-下图汇总了 SmartPerfetto 的 Harness Engineering 全景——从输入路由到跨会话学习的 11 个工程层：
-
-![Harness Engineering 全景](images/03-eleven-layers.png)
-
-## 第七部分：开发过程本身的 Harness 演进
+## 第六部分：开发过程本身的 Harness 演进
 
 最后一个部分稍微跳出产品本身，聊一下开发过程。SmartPerfetto 是用 AI 辅助开发的——从第一行代码到现在，Claude Code 是主要的编程工具。回顾这三个月，我使用 AI 辅助开发的方式本身也经历了几次迭代，和 SmartPerfetto 从 agentv2 到 agentv3 的演进有相似的逻辑。
 
@@ -791,13 +743,13 @@ Layer D (质量门禁):
 
 先简要说明涉及的工具和概念：
 
-- **Claude Code**：Anthropic 的 CLI 工具，可以在终端中与 Claude 对话，Claude 能直接读写文件、执行命令
-- **Plan Mode**：Claude Code 的规划模式，AI 先输出实施方案，人确认后再执行代码修改
-- **Codex**：OpenAI 的代码推理模型，在 SmartPerfetto 的开发流程中用作独立的 code review 角色
+- **Claude Code**：Anthropic 的 CLI 工具，可以在终端中与 Claude 对话，Claude 能直接读写文件、执行命令。我在开发中一直开启 `--dangerously-skip-permissions`（危险模式）和 bypass permissions，让 Claude 无需逐次确认即可自主执行文件编辑、命令运行、Git 操作等。这大幅提升了迭代速度——Claude 可以连续执行「改代码 → 跑测试 → 看结果 → 修复 → 再跑」的完整循环而不被权限弹窗打断，代价是需要开发者对 Claude 的操作有足够信任和事后审查
+- **Claude Agent SDK**：Anthropic 提供的 Agent 开发框架，SmartPerfetto 的 agentv3 后端基于它构建。SDK 封装了多轮对话管理、MCP 工具调用循环、上下文自动压缩（auto-compact）等能力，开发者定义工具集和 System Prompt，SDK 驱动 Claude 自主完成多轮分析
+- **Plan Mode**：Claude Code 的规划模式，AI 先输出结构化实施方案（要改哪些文件、改什么、依赖关系），人审查确认后再执行代码修改
+- **SuperPower**：Claude Code 的第三方插件生态，通过 MCP Server 为 Claude Code 注入额外能力。SmartPerfetto 开发中使用了 Chrome DevTools Protocol 插件（直接操控浏览器截图、调试前端）、Playwright 插件（自动化 UI 测试和截图）等。这些插件让 Claude Code 的能力从代码编辑扩展到了浏览器交互和可视化验证
+- **Codex + Codex MCP**：Codex 是 OpenAI 的代码推理模型。通过 Codex MCP Server 集成到 Claude Code 中后，Claude 可以在对话过程中直接调用 Codex 做独立审查——把实施方案发给 Codex，Codex 以只读方式访问代码库，从架构合理性、边界情况、遗漏风险三个角度给出反馈，整个过程不需要离开 Claude Code 的工作流
 - **Agent Team**：Claude Code 支持启动多个子 Agent 并行工作，每个 Agent 可以有独立的工具集和角色定义
-- **Skills / Hooks**：Claude Code 的扩展机制，Skills 是可复用的任务模板，Hooks 是在特定事件（如工具调用前后）自动执行的脚本
-
-![AI 辅助开发流程演进](images/05-dev-workflow-evolution.png)
+- **Skills / Hooks**：Claude Code 的扩展机制，Skills 是可复用的任务模板（如 `/commit`、`/simplify`），Hooks 是在特定事件（如工具调用前后）自动执行的脚本
 
 ### 我的实际演进过程
 
@@ -805,17 +757,17 @@ Layer D (质量门禁):
 
 最早期的开发方式是在 Claude Code 中直接描述需求，让 AI 修改代码。类似于结对编程中一个人说、一个人写。这个阶段人需要逐行审查每次修改，因为 AI 对项目上下文的理解有限，经常做出不符合整体架构的局部修改。
 
-**阶段 2：Plan Mode**
+**阶段 2：Plan Mode（SuperPower）**
 
 开始使用 Plan Mode 后，工作流变成：我描述需求 → AI 输出结构化的实施方案（要改哪些文件、每个文件改什么、改动顺序和依赖关系）→ 我审查方案 → 确认后 AI 执行。这把 review 的重心从「逐行看代码」转移到了「审查架构方案」，效率明显提升。
 
-**阶段 3：引入同行 Review（Codex）**
+**阶段 3：Plan Mode（SuperPower） + 引入同行 Review（Codex）**
 
 单靠一个 AI 生成方案，容易出现盲区。我开始在 Plan Mode 的方案确定后，把方案发给 Codex 做独立审查。Codex 以只读方式访问代码库，从架构合理性、边界情况、遗漏风险三个角度给反馈。这相当于在 AI 开发流程中引入了 code review 环节。
 
 文章前面提到的 9 轮架构审查，大部分都经过了这个流程。以 Perfetto Stdlib 集成为例（Round 7，3 月 15 日），Codex 审查了 3 轮，累计提出 36 条反馈，其中涉及 stdlib 模块预加载策略、Schema Index 的缓存失效机制等我在方案中遗漏的问题。
 
-**阶段 4：完整工程流水线**
+**阶段 4：Harness 化的工程流水线**
 
 到后期，开发流程变成了：
 
@@ -864,6 +816,10 @@ Layer D (质量门禁):
 
 这不是偶然——Harness Engineering 的核心就是构建足够的工程基础设施（测试、验证、review），使得人可以信任 AI 的执行结果，把注意力放在更高层的决策上。
 
+下图汇总了 SmartPerfetto 的 Harness Engineering 全景——从输入路由到跨会话学习：
+
+![Harness Engineering 全景](images/03-eleven-layers.png)
+
 ## 结语
 
 回顾这三个月的迭代，从 agentv2 的 13 步固定管线到 agentv3 的自主推理，从约 30% 误判率到三层验证，从 15000 tokens 的 System Prompt 到 4500 tokens 的按需加载——每一步变化都有具体的失败经历在推动。
@@ -889,13 +845,14 @@ Layer D (质量门禁):
 
 ### 后续方向
 
-当前的 SmartPerfetto 是一个交互式分析工具。后续的工程方向包括：
+当前的 SmartPerfetto 是一个交互式分析工具，还远远没有达到可以发布的程度，所以目前还是**闭源**的，由我个人在负责开发。后续的工程方向包括：
 
 - **厂商深度接入** — 当前 8 个厂商的 `.override.yaml` 只覆盖了核心 Skill。更多厂商专属指标（高通 Snapdragon Profiler 数据、联发科 MAGT 信号、三星 GameOptimizing 服务）需要逐一对接
 - **CI 集成 + 批处理** — 从交互式分析到 CI Pipeline 中自动分析每次构建的性能回归。包括无人值守模式、结果对比基线、自动标记 regression
 - **E2E 验证框架** — 当前的 6 条 trace 回归测试验证 Skill 产出数据的正确性，但不验证 Agent 的结论质量。需要建立 E2E 验证：给定 trace + 已知根因 → 检查 Agent 是否正确定位
 - **代码库接入** — 将 trace 中的 slice/function 映射回源码位置，结合 git blame 定位变更引入点
 
+**在合适的时候本工具会开源处理（因为各个大厂内部都在做了，所以开源出来大家集思广益，共同开发），对进度感兴的同学可以加我微信进群聊或者私聊。**
+
 ---
 
-> **项目数据：** 158+ YAML Skills | 20 MCP Tools (max) | 12 场景策略 | 6 知识模板 | 24+ 渲染管线 | 8 厂商覆写 | 34 个跨会话学习模式 | 6 条 trace 回归测试

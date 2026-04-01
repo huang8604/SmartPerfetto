@@ -909,8 +909,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'list_stdlib_modules',
     'List available Perfetto SQL stdlib modules by namespace. Use this to discover what pre-built tables, views, and functions ' +
     'are available before writing custom SQL. Modules can be loaded via INCLUDE PERFETTO MODULE <name> in SQL queries. ' +
-    'Critical modules (android.frames.*, android.binder*, android.startup.*, sched.*, android.surfaceflinger, android.gpu.frequency) ' +
-    'are pre-loaded at trace startup.',
+    'Core modules (android.frames.timeline, android.startup.startups, android.binder) are pre-loaded; ' +
+    'others load on-demand via skill prerequisites or INCLUDE PERFETTO MODULE in your SQL.',
     {
       namespace: z.string().optional().describe(
         'Filter by namespace prefix (e.g., "android", "android.frames", "sched", "chrome", "wattson"). Omit to list all.'

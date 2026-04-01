@@ -19,40 +19,14 @@ const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_I
 const TRACE_PROCESSOR_PATH = process.env.TRACE_PROCESSOR_PATH ||
   path.resolve(__dirname, '../../../perfetto/out/ui/trace_processor_shell');
 
-// Critical stdlib modules preloaded at startup to make key views/tables available.
-// These cover the most common analysis paths; additional modules can be loaded on demand
-// via INCLUDE PERFETTO MODULE in SQL queries or skill prerequisites.
+// Tier 0: absolute minimum stdlib modules needed for any analysis to start.
+// Only the 3 most heavily referenced modules (19-32 skill/TS usages each).
+// All other modules load on-demand via skill YAML prerequisites or explicit
+// INCLUDE PERFETTO MODULE in SQL queries — no need to preload them here.
 const CRITICAL_STDLIB_MODULES = [
-  // Frame analysis
-  'android.frames.timeline',
-  'android.frames.per_frame_metrics',
-  'android.frames.jank_type',
-  // IPC & blocking
-  'android.binder',
-  'android.binder_breakdown',
-  'android.monitor_contention',
-  'android.critical_blocking_calls',
-  // App lifecycle
-  'android.startup.startups',
-  'android.startup.startup_breakdowns',
-  'android.startup.time_to_display',
-  // Input & display
-  'android.input',
-  'android.surfaceflinger',
-  // GPU
-  'android.gpu.frequency',
-  // Scheduling & CPU (core: states + latency; utilization loaded on demand or via background prewarm)
-  'sched.states',
-  'sched.latency',
-  'linux.cpu.utilization.system',
-  'linux.cpu.utilization.process',
-  'linux.cpu.utilization.thread',
-  // Memory & GC
-  'android.garbage_collection',
-  'android.oom_adjuster',
-  // Slice analysis
-  'slices.self_dur',
-  'slices.with_context',
+  'android.frames.timeline',    // 19 skills, 19 TS refs — frame/jank analysis foundation
+  'android.startup.startups',   // 16 skills, 32 TS refs — startup analysis foundation
+  'android.binder',             // 22 skills,  6 TS refs — IPC/blocking analysis foundation
 ];
 
 /**
@@ -146,6 +120,10 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
   private isDestroyed = false;
   private serverReady = false;
   private _activeQueries = 0;
+  private _criticalModulesLoaded = false;
+  private _criticalModulesLoadPromise: Promise<void> | null = null;
+  private _criticalModulesLoadFailures = 0;
+  private static readonly MAX_STDLIB_LOAD_RETRIES = 3;
 
   /** Number of in-flight queries. Factory uses this to avoid evicting busy processors. */
   public get activeQueries(): number {
@@ -192,21 +170,16 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         throw new Error(`Server verification failed: ${testResult.error}`);
       }
 
-      // Preload a small critical module set first to keep startup latency low.
-      if (traceProcessorConfig.preloadCriticalStdlibModules) {
-        await this.preloadCriticalPerfettoModules();
-      }
-
       this.status = 'ready';
       console.log(`[TraceProcessor] Processor ${this.id} ready (HTTP mode) for trace ${this.traceId}`);
       this.emit('ready');
 
-      // Optional full prewarm runs in background so upload response is not blocked.
-      if (traceProcessorConfig.preloadAllStdlibModules) {
-        void this.preloadAllPerfettoModules().catch((error: any) => {
-          console.warn('[TraceProcessor] Background stdlib preload failed:', error?.message || error);
-        });
-      }
+      // Stdlib modules are loaded on demand:
+      // - Skills handle their own prerequisites via INCLUDE PERFETTO MODULE
+      // - execute_sql auto-injects critical INCLUDEs before every raw SQL query
+      // Background preload was removed because it competes with Agent queries
+      // for the single-threaded trace_processor_shell, causing socket hang ups
+      // on large traces (200MB+).
     } catch (error: any) {
       console.error(`[TraceProcessor] Initialization failed:`, error.message);
       this.status = 'error';
@@ -338,6 +311,18 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       throw new Error('HTTP server not ready');
     }
 
+    // Non-blocking sequential stdlib loading on first query.
+    // Each module gets its own HTTP request (never exceeds the 60s query timeout),
+    // unlike the previous bulk approach that concatenated all 22 INCLUDEs into one
+    // request which timed out on large (200MB+) traces.
+    // Fire-and-forget: queries proceed immediately; skills have their own INCLUDE
+    // prerequisites, and stdlib views become available as loading progresses.
+    if (!this._criticalModulesLoaded
+        && this._criticalModulesLoadFailures < WorkingTraceProcessor.MAX_STDLIB_LOAD_RETRIES
+        && !this._criticalModulesLoadPromise) {
+      this._criticalModulesLoadPromise = this._loadCriticalModulesSequentially();
+    }
+
     const startTime = Date.now();
     logger.debug('TraceProcessor', `Executing HTTP query: ${sql.substring(0, 100)}...`);
 
@@ -346,6 +331,45 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       return await this.executeHttpQuery(sql);
     } finally {
       this._activeQueries--;
+    }
+  }
+
+  /**
+   * Load critical stdlib modules one at a time in the background.
+   * With only 3 Tier-0 modules this completes in a few seconds,
+   * well within the default 60s query timeout per module.
+   */
+  private async _loadCriticalModulesSequentially(): Promise<void> {
+    this._activeQueries++;
+    const startTime = Date.now();
+    let loaded = 0;
+    let failed = 0;
+    try {
+      for (const m of CRITICAL_STDLIB_MODULES) {
+        if (this.isDestroyed) break;
+        const result = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${m};`);
+        if (result.error) {
+          failed++;
+          if (!result.error.includes('not found') && !result.error.includes('no such')) {
+            console.warn(`[TraceProcessor] Failed to load stdlib module ${m}: ${result.error}`);
+          }
+        } else {
+          loaded++;
+        }
+      }
+      // Only mark as loaded if the loop ran to completion (not interrupted by destroy).
+      // Partial module failures are expected (e.g., GPU modules on traces without GPU data).
+      if (!this.isDestroyed) {
+        this._criticalModulesLoaded = true;
+      }
+      const elapsed = Date.now() - startTime;
+      console.log(`[TraceProcessor] Critical stdlib modules loaded for trace ${this.traceId}: ${loaded}/${CRITICAL_STDLIB_MODULES.length} in ${elapsed}ms (${failed} failed)`);
+    } catch (err) {
+      this._criticalModulesLoadFailures++;
+      console.warn(`[TraceProcessor] Stdlib sequential load attempt ${this._criticalModulesLoadFailures}/${WorkingTraceProcessor.MAX_STDLIB_LOAD_RETRIES} failed for trace ${this.traceId}:`, err);
+    } finally {
+      this._activeQueries--;
+      this._criticalModulesLoadPromise = null;
     }
   }
 
@@ -463,24 +487,24 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       );
     }
 
-    // Load modules in parallel batches for efficiency
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < modules.length; i += BATCH_SIZE) {
-      const batch = modules.slice(i, i + BATCH_SIZE);
+    // Load modules sequentially to avoid overwhelming the single-threaded
+    // trace_processor_shell. Parallel batches cause "socket hang up" on large traces
+    // because queued HTTP connections time out while TP processes earlier queries.
+    for (const moduleName of modules) {
+      let result: { status: 'fulfilled' | 'rejected'; value?: string; reason?: Error };
+      try {
+        const queryResult = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${moduleName};`);
+        if (queryResult.error) {
+          result = { status: 'rejected', reason: new Error(queryResult.error) };
+        } else {
+          result = { status: 'fulfilled', value: moduleName };
+        }
+      } catch (err: any) {
+        result = { status: 'rejected', reason: err };
+      }
 
-      const results = await Promise.allSettled(
-        batch.map(async (moduleName) => {
-          const result = await this.executeHttpQuery(`INCLUDE PERFETTO MODULE ${moduleName};`);
-          if (result.error) {
-            throw new Error(result.error);
-          }
-          return moduleName;
-        })
-      );
-
-      // Classify results as loaded or failed
-      results.forEach((result, idx) => {
-        const moduleName = batch[idx];
+      {
+        // Classify result as loaded or failed
         if (result.status === 'fulfilled') {
           loaded.push(moduleName);
         } else {
@@ -492,7 +516,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
             logger.debug('TraceProcessor', `Failed to load module ${moduleName}: ${errorMsg}`);
           }
         }
-      });
+      }
     }
 
     const elapsed = Date.now() - startTime;
@@ -704,9 +728,9 @@ export class TraceProcessorFactory {
 
     const processor = new ExternalRpcProcessor(traceId, port);
 
-    // Verify connection by running a simple query
+    // Verify connection with raw query — avoid triggering lazy stdlib load at registration time
     try {
-      await processor.query('SELECT 1');
+      await processor._execRaw('SELECT 1');
       console.log(`[TraceProcessorFactory] External RPC connection verified on port ${port}`);
     } catch (error) {
       console.error(`[TraceProcessorFactory] Failed to verify external RPC connection:`, error);
@@ -729,6 +753,12 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
   public activeQueries = 0;
 
   private _httpPort: number;
+  private _criticalModulesLoaded = false;
+  private _criticalModulesLoadPromise: Promise<void> | null = null;
+  private _criticalModulesLoadFailures = 0;
+  // TODO: If external TP restarts on the same port, _criticalModulesLoaded stays true
+  // but modules are gone. Detect connection errors and reset flag to force reload.
+  private static readonly MAX_STDLIB_LOAD_RETRIES = 3;
 
   public get httpPort(): number {
     return this._httpPort;
@@ -743,6 +773,49 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
   }
 
   async query(sql: string): Promise<QueryResult> {
+    // Non-blocking sequential stdlib loading on first query (same pattern as WorkingTraceProcessor).
+    if (!this._criticalModulesLoaded
+        && this._criticalModulesLoadFailures < ExternalRpcProcessor.MAX_STDLIB_LOAD_RETRIES
+        && !this._criticalModulesLoadPromise) {
+      this._criticalModulesLoadPromise = this._loadCriticalModulesSequentially();
+    }
+
+    return this._execRaw(sql);
+  }
+
+  /**
+   * Load critical stdlib modules one at a time in the background.
+   * With only 3 Tier-0 modules this completes in a few seconds.
+   */
+  private async _loadCriticalModulesSequentially(): Promise<void> {
+    const startTime = Date.now();
+    let loaded = 0;
+    let failed = 0;
+    try {
+      for (const m of CRITICAL_STDLIB_MODULES) {
+        const result = await this._execRaw(`INCLUDE PERFETTO MODULE ${m};`);
+        if (result.error) {
+          failed++;
+          if (!result.error.includes('not found') && !result.error.includes('no such')) {
+            console.warn(`[ExternalRpcProcessor] Failed to load stdlib module ${m}: ${result.error}`);
+          }
+        } else {
+          loaded++;
+        }
+      }
+      this._criticalModulesLoaded = true;
+      const elapsed = Date.now() - startTime;
+      console.log(`[ExternalRpcProcessor] Critical stdlib modules loaded for trace ${this.traceId}: ${loaded}/${CRITICAL_STDLIB_MODULES.length} in ${elapsed}ms (${failed} failed)`);
+    } catch (err) {
+      this._criticalModulesLoadFailures++;
+      console.warn(`[ExternalRpcProcessor] Stdlib sequential load attempt ${this._criticalModulesLoadFailures}/${ExternalRpcProcessor.MAX_STDLIB_LOAD_RETRIES} failed:`, err);
+    } finally {
+      this._criticalModulesLoadPromise = null;
+    }
+  }
+
+  /** Low-level query without stdlib lazy-load. Used by factory for connectivity checks. */
+  _execRaw(sql: string): Promise<QueryResult> {
     const startTime = Date.now();
 
     try {
@@ -791,12 +864,12 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
         req.end();
       });
     } catch (error: any) {
-      return {
+      return Promise.resolve({
         columns: [],
         rows: [],
         durationMs: Date.now() - startTime,
         error: error.message,
-      };
+      });
     }
   }
 
