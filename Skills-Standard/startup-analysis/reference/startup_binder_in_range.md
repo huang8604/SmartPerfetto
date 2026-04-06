@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动 Binder 总览 (startup_binder_in_range)
 
 统计启动阶段所有 Binder 调用分布（不限于主线程），包含主线程调用次数统计。

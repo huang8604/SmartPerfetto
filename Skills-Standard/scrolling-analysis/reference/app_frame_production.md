@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 应用帧生产分析 (app_frame_production)
 
 分析应用主线程的帧生产情况，统计生产侧的帧率、掉帧率和帧耗时分布。

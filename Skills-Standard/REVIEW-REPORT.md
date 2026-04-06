@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Skills-Standard 专家团队 Review 报告
 
 日期: 2026-04-04

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动调度延迟 (startup_sched_latency_in_range)
 
 统计启动阶段主线程 Runnable (R/R+) 等待时延，反映 CPU 资源争抢程度。

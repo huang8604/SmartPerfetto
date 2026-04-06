@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 渲染流水线时延 (render_pipeline_latency)
 
 分解帧渲染全链路各阶段耗时，分析从 App 画图到屏幕显示的全链路耗时，分解主线程和 RenderThread 各阶段占比。

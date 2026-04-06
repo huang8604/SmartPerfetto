@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # SurfaceFlinger 分析 (surfaceflinger_analysis) - Composite Skill v3.0
 
 分析 SurfaceFlinger 帧合成性能，包括 GPU/HWC 合成比例、慢合成检测和 Fence 等待。

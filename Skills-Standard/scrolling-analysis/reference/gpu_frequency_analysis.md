@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # GPU 频率/利用率分析 (gpu_frequency_analysis)
 
 GPU 性能分析不能只看 slice 名称匹配（Fence Wait 等），还需要关联 GPU 频率和利用率。

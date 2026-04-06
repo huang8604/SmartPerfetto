@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动事件列表 (startup_events_in_range)
 
 查询启动事件及 TTID/TTFD 指标，支持多信号启动类型校验（bindApplication/performCreate/handleRelaunchActivity/进程创建时间）。

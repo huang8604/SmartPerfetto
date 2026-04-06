@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Scrolling Performance Analysis — SQL Pattern Catalog
 
 > Comprehensive reference of all SQL patterns used in SmartPerfetto's scrolling/jank analysis skills.

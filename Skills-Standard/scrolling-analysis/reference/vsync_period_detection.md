@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # VSync Period Detection (vsync_period_detection)
 
 Detect VSync period from trace data using median of VSYNC-sf intervals. Returns detected period, refresh rate (computed dynamically), and confidence score.

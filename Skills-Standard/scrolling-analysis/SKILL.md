@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 ---
 name: scrolling-analysis
 description: Android 滑动/卡顿性能分析。基于 Perfetto FrameTimeline 数据，通过逐帧根因诊断定位滑动卡顿瓶颈。支持标准 HWUI、Flutter（TextureView/SurfaceView）、WebView、Compose 架构。覆盖 21 种根因分类码、双信号卡顿检测（present_type + present_ts interval）、缺帧检测、全帧根因分布统计。触发词：滑动、卡顿、掉帧、丢帧、jank、scroll、fps、帧、frame、流畅、fling、stuttering。

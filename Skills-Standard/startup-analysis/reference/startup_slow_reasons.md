@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动慢原因（官方分类） (startup_slow_reasons)
 
 基于 Perfetto stdlib 的 android.startup 模块，检测 20+ 种已知的启动慢原因。v3.0 新增 SR09-SR20 扩展检测，覆盖 ContentProvider、SharedPreferences、sleep、SDK init、native lib、WebView、inflate、thermal、后台干扰、system_server 锁、并发启动、数据库 IO。

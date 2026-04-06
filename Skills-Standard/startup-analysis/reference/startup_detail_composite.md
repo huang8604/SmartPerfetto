@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动详情分析 (startup_detail) — 组合 Skill
 
 深入分析单个启动过程的性能瓶颈。由 startup_analysis 的 iterator 步骤逐个调用，包含大小核分析、频率分析、四象限分析、摆核时序、主线程 Slice、文件 IO、Binder、调度延迟、状态分布、关键任务发现、线程阻塞关系图、JIT 分析、热点 Slice 状态分布和诊断规则。

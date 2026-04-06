@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动主线程 Binder 阻塞 (startup_main_thread_binder_blocking_in_range)
 
 分析启动阶段主线程同步 Binder 阻塞明细，关联 thread_state 提供阻塞状态和阻塞函数信息。

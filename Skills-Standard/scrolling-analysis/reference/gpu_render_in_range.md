@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # GPU 渲染分析 (gpu_render_in_range)
 
 分析指定时间范围内 GPU 侧的工作负载，检测 GPU 渲染、Fence 等待等是否是性能瓶颈。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # SurfaceFlinger 帧消费分析 (sf_frame_consumption)
 
 分析 SurfaceFlinger 消费帧的情况，从显示侧统计实际 FPS、掉帧率和帧间隔分布。

@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # SmartPerfetto - 一键推送两个仓库
 # 此脚本会推送主项目和 perfetto 子模块的更新
 

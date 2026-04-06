@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 滚动响应延迟 (scroll_response_latency) v2.0
 
 基于 Perfetto stdlib `android_input_events` 测量滚动手势从输入到首帧渲染的响应延迟。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Consumer Jank 检测 (consumer_jank_detection)
 
 从 SurfaceFlinger 消费端角度检测真正的掉帧。使用同 layer 的"实际呈现时间间隔"判断是否错过 VSync，而非仅依赖 jank_type 标记。

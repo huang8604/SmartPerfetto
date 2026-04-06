@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动 CPU 频率爬升 (startup_freq_rampup)
 
 分析冷启动初期 CPU 频率从低到高的爬升过程。冷启动前 50ms CPU 可能还在低频（idle 被唤醒），影响前期性能。输出每个核类型在启动初期 vs 稳态的频率对比。

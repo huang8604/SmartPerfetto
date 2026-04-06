@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # Quick backend-only restart (no frontend rebuild)
 # Use this when you need to force-restart the backend without touching the frontend.
 #

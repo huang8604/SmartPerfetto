@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 热点 Slice 线程状态分布 (startup_hot_slice_states)
 
 分析启动区间内 Top N 热点 Slice 各自的线程状态分布（Running/S/D/R）及 blocked_functions。用于定位每个耗时切片的具体瓶颈是 CPU 运行、IO 阻塞还是锁等待。

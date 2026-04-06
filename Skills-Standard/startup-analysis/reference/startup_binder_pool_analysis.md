@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Binder 线程池分析 (startup_binder_pool_analysis)
 
 分析启动期间 Binder 线程池的利用率和饱和度。如果所有 Binder 线程都在忙，新的 Binder reply 会排队等待。

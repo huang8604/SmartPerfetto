@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Perfetto 文档对照差距报告
 
 基于 perfetto/docs/ 全部 105 个文档与 Skills-Standard 的交叉对比。

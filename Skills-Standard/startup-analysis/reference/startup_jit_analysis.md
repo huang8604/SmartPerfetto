@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动 JIT 影响分析 (startup_jit_analysis)
 
 分析 JIT 编译线程对启动速度的影响：CPU 竞争、Code Cache GC、Baseline Profile 缺失信号。

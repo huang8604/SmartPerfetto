@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 渲染线程 Slice 分析 (render_thread_slices)
 
 分析渲染线程的时间片分布，找出 RenderThread 上的耗时操作。

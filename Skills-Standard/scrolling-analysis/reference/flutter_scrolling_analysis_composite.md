@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Flutter 滑动分析 (flutter_scrolling_analysis) - Composite Skill v1.0
 
 Flutter 应用帧渲染分析：UI 线程 + Raster 线程 + 帧时序。处理 Flutter 应用中标准 Android 帧检测 (Choreographer#doFrame, DrawFrame) 不适用的场景。

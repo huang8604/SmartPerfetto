@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 逐帧 Input-to-Display 延迟 (input_to_frame_latency) v2.0
 
 基于 Perfetto stdlib `android_input_events` 表的 5 维延迟分解，测量每个 MotionEvent 到对应帧 present 的延迟，用于跟手度分析。

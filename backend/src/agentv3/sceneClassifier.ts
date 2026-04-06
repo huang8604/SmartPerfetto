@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 /**
  * Keyword-based scene classifier for progressive prompt disclosure.
  * Classifies user queries into scene types to inject only relevant

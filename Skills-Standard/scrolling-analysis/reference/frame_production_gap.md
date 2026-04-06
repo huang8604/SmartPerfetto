@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 帧生产 Gap 分析 (frame_production_gap)
 
 检测帧生产间隙（缺帧）：连续帧之间的 gap 超过 1.5x VSync 周期。分析 gap 期间 UI Thread 和 RenderThread 的活动状态，区分缺帧类型。

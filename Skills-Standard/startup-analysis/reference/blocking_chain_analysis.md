@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 阻塞链分析 (blocking_chain_analysis) — 组合 Skill
 
 分析指定时间范围内主线程的阻塞链：线程状态分布、唤醒链、阻塞函数分布。与 anr_main_thread_blocking 不同，此技能不依赖 ANR 时间戳，可用于任意时间范围的阻塞根因分析。典型使用场景：滚动卡顿、启动慢某阶段、任意用户选定时间范围的诊断。

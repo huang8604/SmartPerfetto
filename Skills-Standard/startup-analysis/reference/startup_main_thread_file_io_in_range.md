@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动主线程文件 IO (startup_main_thread_file_io_in_range)
 
 统计启动阶段主线程文件 IO 相关切片，通过 GLOB 模式匹配 IO 操作名。

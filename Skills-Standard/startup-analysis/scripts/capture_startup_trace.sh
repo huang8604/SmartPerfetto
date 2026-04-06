@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # capture_startup_trace.sh — 使用 adb 抓取 Android 启动性能 trace
 #
 # 使用方式:

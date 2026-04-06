@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 内存压力分析 (memory_pressure_in_range)
 
 分析指定时间范围内的内存压力指标。检测 PSI 指标、kswapd 活动、直接回收（direct reclaim）、内存碎片整理（compaction）、LMK 事件和分配阻塞，用于判断内存压力是否对性能产生影响。

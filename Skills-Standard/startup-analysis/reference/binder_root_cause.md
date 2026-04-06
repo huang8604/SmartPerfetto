@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Binder 根因归因 (binder_root_cause) — 组合 Skill
 
 使用 Perfetto stdlib 的 `android_binder_client_server_breakdown` 表对慢 Binder 事务进行服务端/客户端阻塞原因归因。Breakdown 原因类型包括：GC、lock_contention、binder（嵌套）、monitor_contention、IO、CPU scheduling 等系统级根因分类。

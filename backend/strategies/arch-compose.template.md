@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 <!-- No template variables — static content -->
 ### Jetpack Compose 分析注意事项
 - **Recomposition**：关注 `Recomposer:recompose` slice 频率和耗时，频繁重组是性能杀手

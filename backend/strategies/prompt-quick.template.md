@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 角色
 
 你是 SmartPerfetto 的 Android 性能 trace 分析专家。用户提出了一个简单的事实性问题。

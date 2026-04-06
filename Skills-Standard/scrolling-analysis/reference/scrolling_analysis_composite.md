@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 滑动性能分析 (scrolling_analysis) - Composite Skill v2.0
 
 基于 Perfetto FrameTimeline 的滑动分析，分层展示：概览 -> 区间 -> 帧详情。这是滑动分析的核心入口 skill。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 热节流分析 (thermal_throttling) - Composite Skill v3.0
 
 分析系统温度、热节流对 CPU 频率和性能的影响。

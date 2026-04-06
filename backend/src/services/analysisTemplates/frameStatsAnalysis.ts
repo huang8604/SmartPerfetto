@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 /**
  * 帧率统计分析模板
  * 分析应用的帧率性能：FPS、掉帧、P95/P99延迟等

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 <!-- Template variables (substituted by claudeSystemPrompt.ts):
   {{eventId}}     - Slice ID (number)
   {{ts}}          - Slice start timestamp in ns (number)

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 应用启动分析 (startup_analysis) — 组合 Skill
 
 全方位的应用启动性能分析，是启动分析的顶层入口。包含启动事件定位、数据质量门禁、延迟归因、主线程分析、Binder 分析、状态分析、类加载、GC、调度延迟、逐事件详情迭代、诊断规则和证据矩阵。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # VSync 配置分析 (vsync_config)
 
 从 trace 中解析实际的 Vsync 周期和刷新率设置。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 滑动分析知识参考
 
 本文档为滑动/卡顿性能分析提供系统性知识参考，涵盖渲染管线机制、卡顿根因分类、以及相关子系统（Binder、GC、CPU 调度、温控、锁竞争）对帧渲染的影响。

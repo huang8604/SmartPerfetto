@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动线程阻塞关系图 (startup_thread_blocking_graph)
 
 利用 thread_state.waker_utid 构建线程间的 block/wakeup 关系图。回答核心问题："主线程被谁阻塞？唤醒者当时在做什么？" 让 Agent 可以构建因果链，例如：`MainThread[S: binder_wait] <- Binder:1234_5 <- system_server/PackageManager`。

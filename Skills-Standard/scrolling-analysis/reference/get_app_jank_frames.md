@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 获取应用掉帧帧列表 (get_app_jank_frames)
 
 此技能不作为独立的 atomic skill 存在，而是内嵌在 `scrolling_analysis` composite skill 的 Step `get_app_jank_frames` 中。

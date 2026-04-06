@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动主线程切片热点 (startup_main_thread_slices_in_range)
 
 统计启动阶段主线程切片热点，含 wall time 和 self time（扣除子切片）。

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 <!-- No template variables — static content -->
 ### Flutter 分析注意事项
 - **线程模型**：Flutter 使用 `N.ui` (UI/Dart)  和 `N.raster` (GPU raster) 线程替代标准 Android MainThread/RenderThread

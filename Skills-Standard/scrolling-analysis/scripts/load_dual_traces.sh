@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # load_dual_traces.sh — 同时加载问题机和对比机 trace 到两个 trace_processor 实例
 #
 # 使用方式:

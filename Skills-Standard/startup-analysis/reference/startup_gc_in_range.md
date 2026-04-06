@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动 GC 分析 (startup_gc_in_range)
 
 统计启动阶段 GC 相关切片及主线程占比。

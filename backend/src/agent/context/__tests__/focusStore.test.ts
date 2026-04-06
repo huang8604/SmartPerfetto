@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 /**
  * FocusStore Unit Tests
  * v2.0: Incremental scope primary focus should reflect latest interaction.
@@ -41,4 +45,3 @@ describe('FocusStore', () => {
     expect(ctx.focusedEntities.some(e => e.type === 'frame' && e.id === '1436069')).toBe(true);
   });
 });
-

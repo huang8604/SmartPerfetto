@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Binder 根因归因 (binder_root_cause) - Composite Skill v1.0
 
 分析慢 Binder 事务的服务端/客户端阻塞原因（GC/锁/IO/内存回收）。使用 Perfetto stdlib 的 `android_binder_client_server_breakdown` 表对慢 Binder 事务进行服务端/客户端阻塞原因归因。

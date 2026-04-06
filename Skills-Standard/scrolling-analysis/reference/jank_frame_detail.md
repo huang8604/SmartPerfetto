@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 掉帧详情分析 (jank_frame_detail)
 
 分析特定掉帧帧的详细原因，包括四象限分析（大核运行/小核运行/等待调度/IO阻塞/休眠等待）、Binder 调用、CPU 频率、主线程耗时操作、RenderThread 操作、锁竞争、GC 影响等。

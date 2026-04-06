@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 阻塞链分析 (blocking_chain_analysis) - Composite Skill v1.0
 
 分析指定时间范围内主线程的阻塞链：谁阻塞了主线程？唤醒者是谁？唤醒者在做什么？

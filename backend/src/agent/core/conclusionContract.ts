@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
 export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
 export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';

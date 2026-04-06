@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 ---
 name: startup-analysis
 description: Android 应用启动性能分析（冷启动/温启动/热启动）。基于 Perfetto trace 数据，通过多阶段 SQL 查询和诊断决策树，定位启动瓶颈根因（CPU/IO/Binder/GC/锁/调度/内存压力等），输出完整结构化分析报告。覆盖 TTID/TTFD、四象限分析、根因推理链、平台策略审计（Boost/频率地板/摆核）、App层+平台调度层双视角优化建议。触发词：启动、冷启动、热启动、launch、startup、TTID、TTFD、app start。

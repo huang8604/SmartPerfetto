@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 <!-- Template variables (substituted by claudeSystemPrompt.ts):
   {{sceneStrategy}} - Scene-specific strategy section (from *.strategy.md files)
 -->

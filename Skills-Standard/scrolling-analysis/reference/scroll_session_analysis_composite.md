@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 滑动会话分析 (scroll_session_analysis) - Composite Skill v1.0
 
 分析单个完整滑动区间的性能。一次完整滑动 = 按压滑动阶段(Touch) + Fling 阶段，分别统计两个阶段的 FPS 和掉帧情况。

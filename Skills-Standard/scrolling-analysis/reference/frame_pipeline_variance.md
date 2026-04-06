@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 帧管线方差分析 (frame_pipeline_variance)
 
 检测帧时长抖动与高方差区间，测量帧间 jitter。

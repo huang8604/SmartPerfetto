@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动分析 SQL 模板参考
 
 > 本文档汇编了 SmartPerfetto 启动性能分析中使用的全部 SQL 查询模板。所有 SQL 均针对 Perfetto trace_processor 执行，依赖 Perfetto stdlib 的 `android.startup.*`、`android.binder`、`sched`、`linux.cpu.frequency` 等模块。

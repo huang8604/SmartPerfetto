@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Trace 数据源与采集指南
 
 当分析中发现某些数据不可用时，参考以下指南告知用户如何采集所需数据。

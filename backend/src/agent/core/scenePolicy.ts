@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import type { ConclusionScenePromptHints, SceneTemplateRecord } from './sceneTypes';
 
 const DEEP_REASON_LABEL_PLACEHOLDER = /\{\{\s*deep_reason_label\s*\}\}/g;

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 帧阻塞调用分析 (frame_blocking_calls)
 
 将 `android.critical_blocking_calls` 模块识别的阻塞调用与 `android.frames.timeline` 的帧时间线做交叉匹配，找出每个掉帧帧期间发生的阻塞调用（GC、Binder、锁竞争、IO 等）。

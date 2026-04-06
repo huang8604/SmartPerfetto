@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动类加载分析 (startup_class_loading_in_range)
 
 统计启动阶段类加载切片耗时，使用 stdlib 的 `android_class_loading_for_startup` 表。

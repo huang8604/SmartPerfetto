@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 /**
  * CPU 大小核分布分析模板
  * 分析线程在不同 CPU 核心上的运行时间分布

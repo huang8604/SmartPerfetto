@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动关键任务发现 (startup_critical_tasks)
 
 自动识别启动区间内所有活跃线程，按 CPU 时间排序，为每个线程提供四象限分析 + 摆核 + 核迁移统计。打破"主线程隧道视野"：不预定义哪些线程是关键的，而是从数据出发，自动发现启动区间内 CPU 占用最高的 Top N 线程。

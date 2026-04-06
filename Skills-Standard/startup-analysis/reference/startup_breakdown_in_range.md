@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动归因分解 (startup_breakdown_in_range)
 
 统计启动阶段各归因原因耗时占比，基于 Perfetto stdlib 的 `android_startup_opinionated_breakdown` 表。

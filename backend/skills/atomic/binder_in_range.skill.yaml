@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # =============================================================================
 # Binder 延迟分析（原子 Skill）
 # =============================================================================
@@ -79,4 +83,3 @@ sql: |
   GROUP BY client_process, server_process
   HAVING total_client_ms > 1
   ORDER BY total_client_ms DESC
-

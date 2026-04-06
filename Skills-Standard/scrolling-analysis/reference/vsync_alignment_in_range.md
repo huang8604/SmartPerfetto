@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # VSync 对齐分析 (vsync_alignment_in_range)
 
 分析帧与 VSync 信号的对齐情况，检测帧是否在 VSync 周期内完成。

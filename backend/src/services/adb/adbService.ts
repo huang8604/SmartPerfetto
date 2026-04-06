@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { AdbDevice, AdbDeviceInfo, AdbDeviceState } from './types';
@@ -243,4 +247,3 @@ export function getAdbService(): AdbService {
   if (!singleton) singleton = new AdbService();
   return singleton;
 }
-

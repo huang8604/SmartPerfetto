@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # VSync 相位对齐分析 (vsync_phase_alignment)
 
 分析输入事件与 VSync 信号的相位关系，定位跟手延迟中的 VSync 等待瓶颈。相位差决定了输入事件需要等待多久才能被处理（跟手度的关键因素）。

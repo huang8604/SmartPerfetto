@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # SmartPerfetto - 一键合并 Perfetto 上游更新
 # 此脚本会自动从官方 perfetto 仓库合并最新代码到你的 fork
 

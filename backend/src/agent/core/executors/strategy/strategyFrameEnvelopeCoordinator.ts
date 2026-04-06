@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
 import type { DataEnvelope } from '../../../../types/dataContract';
 import type { AgentResponse } from '../../../types/agentProtocol';
 import type { StageDefinition, DirectSkillTask } from '../../../strategies';

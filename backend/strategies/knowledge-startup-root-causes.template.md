@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # Android 启动慢根因分类体系
 
 > 本文档是 Agent 在启动分析 Phase 3（结论生成）阶段的参考手册。

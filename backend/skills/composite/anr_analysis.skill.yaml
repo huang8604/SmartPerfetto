@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # =============================================================================
 # ANR 分析 v3.0（组合 Skill）- 基于三篇专业文章重构
 # =============================================================================

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 <!-- No template variables — static content -->
 ### WebView 分析注意事项
 - **渲染线程**：WebView 有独立的 Compositor 线程和 Renderer 线程，不在标准 RenderThread 中

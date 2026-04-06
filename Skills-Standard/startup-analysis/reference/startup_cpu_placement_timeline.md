@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2024-2026 Gracker (Chris) | SmartPerfetto -->
+
 # 启动摆核时序分析 (startup_cpu_placement_timeline)
 
 按时间桶分析主线程的核类型变化，检测"启动初期被困小核"的问题。典型场景包括：冷启动 fork 后继承 Zygote 的 CPU affinity 初期可能在小核、cgroup 设置延迟（AMS 还没把新进程加入 top-app cgroup）、uclamp_min 生效延迟等。

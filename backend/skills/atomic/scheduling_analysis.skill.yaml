@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
 # =============================================================================
 # 线程调度分析（原子 Skill）
 # =============================================================================
@@ -96,4 +100,3 @@ sql: |
   GROUP BY tt.utid
   HAVING running_ms > 0 OR runnable_ms > 0
   ORDER BY runnable_ms DESC
-
