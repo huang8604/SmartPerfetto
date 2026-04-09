@@ -43,10 +43,19 @@ type SceneCategory =
   | 'inertial_scroll'
   | 'navigation'
   | 'app_switch'
+  | 'home_screen'
+  | 'app_foreground'
   | 'tap'
   | 'long_press'
   | 'idle'
-  | 'jank_region';  // Fallback: performance issue regions
+  | 'jank_region'
+  | 'back_key'
+  | 'home_key'
+  | 'recents_key'
+  | 'anr'
+  | 'ime_show'
+  | 'ime_hide'
+  | 'window_transition';
 
 // Performance thresholds for determining "problem" scenes
 const PROBLEM_THRESHOLDS: Record<string, { durationMs?: number; fps?: number }> = {

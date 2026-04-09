@@ -544,6 +544,8 @@ type SceneCategory =
   | 'inertial_scroll'
   | 'navigation'
   | 'app_switch'
+  | 'home_screen'
+  | 'app_foreground'
   | 'screen_on'
   | 'screen_off'
   | 'screen_sleep'
@@ -553,7 +555,14 @@ type SceneCategory =
   | 'tap'
   | 'long_press'
   | 'idle'
-  | 'jank_region';  // Fallback: regions with performance issues (derived from jank_events)
+  | 'jank_region'
+  | 'back_key'
+  | 'home_key'
+  | 'recents_key'
+  | 'anr'
+  | 'ime_show'
+  | 'ime_hide'
+  | 'window_transition';
 
 interface DetectedScene {
   type: SceneCategory;
@@ -2788,6 +2797,8 @@ const SCENE_DISPLAY_NAMES: Record<SceneCategory, string> = {
   inertial_scroll: '惯性滑动',
   navigation: '跳转',
   app_switch: '应用切换',
+  home_screen: '桌面',
+  app_foreground: '应用内',
   screen_on: '屏幕点亮',
   screen_off: '屏幕熄灭',
   screen_sleep: '屏幕休眠',
@@ -2798,6 +2809,13 @@ const SCENE_DISPLAY_NAMES: Record<SceneCategory, string> = {
   long_press: '长按',
   idle: '空闲',
   jank_region: '性能问题区间',
+  back_key: '返回键',
+  home_key: 'Home键',
+  recents_key: '最近任务键',
+  anr: 'ANR',
+  ime_show: '键盘弹出',
+  ime_hide: '键盘收起',
+  window_transition: '窗口转场',
 };
 
 const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
@@ -2809,6 +2827,8 @@ const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
   inertial_scroll: 'scroll',
   navigation: 'navigation',
   app_switch: 'system',
+  home_screen: 'system',
+  app_foreground: 'system',
   screen_on: 'system',
   screen_off: 'system',
   screen_sleep: 'system',
@@ -2819,6 +2839,13 @@ const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
   long_press: 'tap',
   idle: 'system',
   jank_region: 'jank',  // Use jank color to highlight performance issues
+  back_key: 'system',
+  home_key: 'system',
+  recents_key: 'system',
+  anr: 'jank',
+  ime_show: 'system',
+  ime_hide: 'system',
+  window_transition: 'navigation',
 };
 
 /** A single continuous segment in a state timeline lane. */
@@ -3249,6 +3276,15 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
         'split_screen': 'split_screen',
         'pip': 'navigation',
         'app_switch': 'app_switch',
+        'home_screen': 'home_screen',
+        'app_foreground': 'app_foreground',
+        'back_key': 'back_key',
+        'home_key': 'home_key',
+        'recents_key': 'recents_key',
+        'anr': 'anr',
+        'ime_show': 'ime_show',
+        'ime_hide': 'ime_hide',
+        'window_transition': 'window_transition',
         'idle': 'idle',
       };
 

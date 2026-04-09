@@ -51,6 +51,8 @@ const PROBLEM_THRESHOLDS: Record<string, SceneThreshold> = {
   tap: { durationMs: 200 },
   long_press: { durationMs: 500 },
   navigation: { durationMs: 500 },
+  anr: { durationMs: 5000 },
+  window_transition: { durationMs: 500 },
 };
 
 const SCENE_DISPLAY_NAMES: Record<string, string> = {
@@ -62,6 +64,8 @@ const SCENE_DISPLAY_NAMES: Record<string, string> = {
   inertial_scroll: '惯性滑动',
   navigation: '页面跳转',
   app_switch: '应用切换',
+  app_foreground: '应用内',
+  home_screen: '桌面',
   screen_on: '屏幕点亮',
   screen_off: '屏幕熄灭',
   screen_sleep: '屏幕休眠',
@@ -72,7 +76,25 @@ const SCENE_DISPLAY_NAMES: Record<string, string> = {
   long_press: '长按',
   idle: '空闲',
   jank_region: '性能问题区间',
+  back_key: '返回键',
+  home_key: 'Home键',
+  recents_key: '最近任务键',
+  anr: 'ANR',
+  ime_show: '键盘弹出',
+  ime_hide: '键盘收起',
+  window_transition: '窗口转场',
 };
+
+/** Known launcher / home-screen package patterns */
+const LAUNCHER_PATTERNS = [
+  'miui.home', 'launcher', 'trebuchet', 'lawnchair',
+  'nexuslauncher', 'home', 'oneplus.launcher',
+];
+
+function isLauncherPackage(pkg: string): boolean {
+  const lower = pkg.toLowerCase();
+  return LAUNCHER_PATTERNS.some((p) => lower.includes(p));
+}
 
 // ---------------------------------------------------------------------------
 // buildDisplayedScenes — full timeline list, no truncation
@@ -146,6 +168,26 @@ export function buildDisplayedScenes(envelopes: DataEnvelope[]): BuildDisplayedS
       // Previously missing from the legacy extractor's handled step list.
       for (const row of rows) {
         const scene = sceneFromScreenStateChange(row, scenes.length);
+        if (scene) scenes.push(scene);
+      }
+    } else if (stepId === 'navigation_keys' || stepId === 'gesture_navigation') {
+      for (const row of rows) {
+        const scene = sceneFromNavigationKey(row, scenes.length);
+        if (scene) scenes.push(scene);
+      }
+    } else if (stepId === 'anr_events') {
+      for (const row of rows) {
+        const scene = sceneFromAnrEvent(row, scenes.length);
+        if (scene) scenes.push(scene);
+      }
+    } else if (stepId === 'ime_events') {
+      for (const row of rows) {
+        const scene = sceneFromImeEvent(row, scenes.length);
+        if (scene) scenes.push(scene);
+      }
+    } else if (stepId === 'window_transitions') {
+      for (const row of rows) {
+        const scene = sceneFromWindowTransition(row, scenes.length);
         if (scene) scenes.push(scene);
       }
     } else if (stepId === 'jank_events') {
@@ -392,19 +434,30 @@ function sceneFromTopAppChange(row: Record<string, any>, index: number): Display
   const durationMs = nsToMs(dur);
   if (!Number.isFinite(durationMs)) return null;
 
+  const pkg = String(row.app_package ?? '') || 'unknown';
+  const isLauncher = isLauncherPackage(pkg);
+  const sceneType = isLauncher ? 'home_screen' : 'app_foreground';
+  const label = isLauncher
+    ? `${displayNameOf('home_screen')} (${formatDuration(durationMs)})`
+    : `${displayNameOf('app_foreground')} (${formatDuration(durationMs)})`;
+
   return {
     id: `top_app_changes-${index}`,
-    sceneType: 'app_switch',
+    sceneType,
     sourceStepId: 'top_app_changes',
     startTs,
     endTs,
     durationMs,
-    processName: String(row.app_package ?? '') || 'unknown',
-    label: `${displayNameOf('app_switch')} (${durationMs}ms)`,
+    processName: pkg,
+    label,
     metadata: {},
     severity: 'good',
     analysisState: 'not_planned',
   };
+}
+
+function formatDuration(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
 }
 
 function sceneFromScrollInitiation(row: Record<string, any>, index: number): DisplayedScene | null {
@@ -464,6 +517,114 @@ function sceneFromScreenStateChange(row: Record<string, any>, index: number): Di
       event: eventText,
     },
     severity: 'good',
+    analysisState: 'not_planned',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// New scene factories: navigation keys, ANR, IME, window transitions
+// ---------------------------------------------------------------------------
+
+function sceneFromNavigationKey(row: Record<string, any>, index: number): DisplayedScene | null {
+  const startTs = String(row.ts ?? '');
+  const dur = String(row.dur ?? '0');
+  const endTs = safeAddNs(startTs, dur) ?? startTs;
+  if (!startTs) return null;
+  const durationMs = nsToMs(dur);
+  const safeDurationMs = Number.isFinite(durationMs) ? durationMs : 0;
+
+  const keyName = String(row.key_name ?? '').trim();
+  if (keyName !== 'back_key' && keyName !== 'home_key' && keyName !== 'recents_key') return null;
+
+  return {
+    id: `navigation_keys-${index}`,
+    sceneType: keyName,
+    sourceStepId: 'navigation_keys',
+    startTs,
+    endTs,
+    durationMs: safeDurationMs,
+    processName: 'system',
+    label: `${displayNameOf(keyName)} (${formatDuration(safeDurationMs)})`,
+    metadata: { keyName },
+    severity: 'good',
+    analysisState: 'not_planned',
+  };
+}
+
+function sceneFromAnrEvent(row: Record<string, any>, index: number): DisplayedScene | null {
+  const startTs = String(row.ts ?? '');
+  const dur = String(row.dur ?? '5000000000');
+  const endTs = safeAddNs(startTs, dur) ?? startTs;
+  if (!startTs) return null;
+  const durationMs = nsToMs(dur);
+  const safeDurationMs = Number.isFinite(durationMs) ? durationMs : 5000;
+
+  return {
+    id: `anr_events-${index}`,
+    sceneType: 'anr',
+    sourceStepId: 'anr_events',
+    startTs,
+    endTs,
+    durationMs: safeDurationMs,
+    processName: String(row.process_name ?? '') || 'unknown',
+    label: `ANR (${formatDuration(safeDurationMs)})`,
+    metadata: {
+      processName: row.process_name,
+      anrType: row.anr_type,
+    },
+    severity: 'bad',
+    analysisState: 'not_planned',
+  };
+}
+
+function sceneFromImeEvent(row: Record<string, any>, index: number): DisplayedScene | null {
+  const startTs = String(row.ts ?? '');
+  const dur = String(row.dur ?? '0');
+  const endTs = safeAddNs(startTs, dur) ?? startTs;
+  if (!startTs) return null;
+  const durationMs = nsToMs(dur);
+  const safeDurationMs = Number.isFinite(durationMs) ? durationMs : 0;
+
+  const action = String(row.ime_action ?? '').trim();
+  if (action !== 'ime_show' && action !== 'ime_hide') return null;
+  const sceneType = action;
+
+  return {
+    id: `ime_events-${index}`,
+    sceneType,
+    sourceStepId: 'ime_events',
+    startTs,
+    endTs,
+    durationMs: safeDurationMs,
+    processName: 'system',
+    label: `${displayNameOf(sceneType)} (${formatDuration(safeDurationMs)})`,
+    metadata: {},
+    severity: 'good',
+    analysisState: 'not_planned',
+  };
+}
+
+function sceneFromWindowTransition(row: Record<string, any>, index: number): DisplayedScene | null {
+  const startTs = String(row.ts ?? '');
+  const dur = String(row.dur ?? '0');
+  const endTs = safeAddNs(startTs, dur) ?? startTs;
+  if (!startTs || !dur) return null;
+  const durationMs = nsToMs(dur);
+  if (!Number.isFinite(durationMs)) return null;
+
+  return {
+    id: `window_transitions-${index}`,
+    sceneType: 'window_transition',
+    sourceStepId: 'window_transitions',
+    startTs,
+    endTs,
+    durationMs,
+    processName: 'system_server',
+    label: `${displayNameOf('window_transition')} (${formatDuration(durationMs)})`,
+    metadata: {
+      transitionType: row.transition_type,
+    },
+    severity: severityFor('window_transition', durationMs),
     analysisState: 'not_planned',
   };
 }

@@ -27,6 +27,7 @@ export type SceneTypeGroup =
   | 'app_switch'
   | 'idle'
   | 'jank_region'
+  | 'anr'
   | 'all';
 
 export interface SceneReconstructionRouteRule {
@@ -211,11 +212,12 @@ export const DEFAULT_DOMAIN_MANIFEST: DomainManifest = {
 const SCENE_TYPE_GROUPS: Record<Exclude<SceneTypeGroup, 'all'>, string[]> = {
   startup: ['cold_start', 'warm_start', 'hot_start'],
   scroll: ['scroll', 'inertial_scroll'],
-  interaction: ['tap', 'long_press'],
-  navigation: ['navigation'],
-  app_switch: ['app_switch'],
+  interaction: ['tap', 'long_press', 'ime_show', 'ime_hide'],
+  navigation: ['navigation', 'back_key', 'home_key', 'recents_key', 'window_transition'],
+  app_switch: ['app_switch', 'home_screen', 'app_foreground'],
   idle: ['idle'],
   jank_region: ['jank_region'],
+  anr: ['anr'],
 };
 
 function normalizeToken(value: string): string {

@@ -21,6 +21,7 @@ prerequisites:
     - android.battery_stats
     - android.startup.startups
     - android.frames.timeline
+    - android.anrs
 
 triggers:
   keywords:
@@ -108,7 +109,15 @@ steps:
         CASE
           WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name='process_counter_track') THEN 1
           ELSE 0
-        END AS has_process_counter_track
+        END AS has_process_counter_track,
+        CASE
+          WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name='android_key_events') THEN 1
+          ELSE 0
+        END AS has_key_events,
+        CASE
+          WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name='android_anrs') THEN 1
+          ELSE 0
+        END AS has_anrs
     save_as: table_availability
 
   # ==========================================================================
@@ -629,6 +638,337 @@ steps:
       ORDER BY scroll_start_ts
       LIMIT 100
     save_as: scroll_starts
+    optional: true
+
+  # ==========================================================================
+  # L2: 导航按键事件 (Back/Home/Recents — 三键导航)
+  # ==========================================================================
+  - id: navigation_keys
+    type: atomic
+    name: "导航按键"
+    condition: table_availability.data[0]?.has_key_events === 1
+    display:
+      level: hidden
+      layer: list
+      title: "导航按键"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: key_name
+          label: "按键"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+    sql: |
+      -- Pair DOWN → nearest UP per key_code using ROW_NUMBER for strict matching.
+      -- Handles repeats/double-taps by assigning each DOWN its own ordinal.
+      WITH downs AS (
+        SELECT
+          ts, key_code,
+          ROW_NUMBER() OVER (PARTITION BY key_code ORDER BY ts) AS rn
+        FROM android_key_events
+        WHERE action = 0 AND key_code IN (3, 4, 187)
+      ),
+      ups AS (
+        SELECT
+          ts AS up_ts, key_code,
+          ROW_NUMBER() OVER (PARTITION BY key_code ORDER BY ts) AS rn
+        FROM android_key_events
+        WHERE action = 1 AND key_code IN (3, 4, 187)
+      )
+      SELECT
+        printf('%d', d.ts) AS ts,
+        printf('%d', COALESCE(u.up_ts - d.ts, 0)) AS dur,
+        CASE d.key_code
+          WHEN 4 THEN '返回键'
+          WHEN 3 THEN 'Home键'
+          WHEN 187 THEN '最近任务键'
+        END AS event,
+        CASE d.key_code
+          WHEN 4 THEN 'back_key'
+          WHEN 3 THEN 'home_key'
+          WHEN 187 THEN 'recents_key'
+        END AS key_name,
+        'navigation_key' AS category
+      FROM downs d
+      LEFT JOIN ups u ON u.key_code = d.key_code AND u.rn = d.rn AND u.up_ts >= d.ts
+      WHERE COALESCE(u.up_ts - d.ts, 0) >= 0
+      ORDER BY d.ts
+      LIMIT 100
+    save_as: nav_keys
+    optional: true
+
+  # ==========================================================================
+  # L2: 手势导航 (Back gesture / SwipeToHome — 手势导航模式)
+  # ==========================================================================
+  - id: gesture_navigation
+    type: atomic
+    name: "手势导航"
+    display:
+      level: hidden
+      layer: list
+      title: "手势导航"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: key_name
+          label: "类型"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+    sql: |
+      SELECT
+        printf('%d', s.ts) AS ts,
+        printf('%d', s.dur) AS dur,
+        CASE
+          WHEN s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*'
+            OR s.name GLOB '*BackPanel*' THEN '返回手势'
+          WHEN s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*'
+            OR s.name GLOB '*launcher*goHome*' THEN 'Home手势'
+          WHEN s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*'
+            THEN '最近任务手势'
+          ELSE NULL
+        END AS event,
+        CASE
+          WHEN s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*'
+            OR s.name GLOB '*BackPanel*' THEN 'back_key'
+          WHEN s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*'
+            OR s.name GLOB '*launcher*goHome*' THEN 'home_key'
+          WHEN s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*'
+            THEN 'recents_key'
+        END AS key_name,
+        'navigation_key' AS category
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name GLOB 'com.android.systemui*' OR p.name GLOB '*launcher*')
+        AND s.dur > 10000000
+        AND (
+          s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*'
+          OR s.name GLOB '*BackPanel*'
+          OR s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*'
+          OR s.name GLOB '*launcher*goHome*'
+          OR s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*'
+        )
+      ORDER BY s.ts
+      LIMIT 100
+    save_as: gesture_nav
+    optional: true
+
+  # ==========================================================================
+  # L2: 窗口转场动画
+  # ==========================================================================
+  - id: window_transitions
+    type: atomic
+    name: "窗口转场"
+    display:
+      level: hidden
+      layer: list
+      title: "窗口转场"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: transition_type
+          label: "转场类型"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+    sql: |
+      SELECT
+        printf('%d', s.ts) AS ts,
+        printf('%d', s.dur) AS dur,
+        CASE
+          WHEN s.name GLOB '*openAnimation*' OR s.name GLOB '*AppTransitionReady*'
+            THEN '窗口打开 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          WHEN s.name GLOB '*closeAnimation*'
+            THEN '窗口关闭 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          WHEN s.name GLOB '*Shell transition*'
+            THEN 'Shell转场 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          WHEN s.name GLOB '*startingWindow*'
+            THEN '启动窗口 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          ELSE '窗口转场 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+        END AS event,
+        CASE
+          WHEN s.name GLOB '*openAnimation*' OR s.name GLOB '*AppTransitionReady*' THEN 'open'
+          WHEN s.name GLOB '*closeAnimation*' THEN 'close'
+          WHEN s.name GLOB '*Shell transition*' THEN 'shell'
+          WHEN s.name GLOB '*startingWindow*' THEN 'starting_window'
+          ELSE 'other'
+        END AS transition_type,
+        'window_transition' AS category
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      WHERE (p.name = 'system_server' OR p.name GLOB 'com.android.wm.shell*')
+        AND s.dur > 50000000
+        AND (
+          s.name GLOB '*AppTransition*'
+          OR s.name GLOB '*openAnimation*'
+          OR s.name GLOB '*closeAnimation*'
+          OR s.name GLOB '*Shell transition*'
+          OR s.name GLOB '*startingWindow*'
+        )
+      ORDER BY s.ts
+      LIMIT 100
+    save_as: win_transitions
+    optional: true
+
+  # ==========================================================================
+  # L2: ANR 检测
+  # ==========================================================================
+  - id: anr_events
+    type: atomic
+    name: "ANR 事件"
+    condition: table_availability.data[0]?.has_anrs === 1
+    display:
+      level: hidden
+      layer: list
+      title: "ANR 事件"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: anr_type
+          label: "ANR类型"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+    sql: |
+      -- ts in android_anrs is the detection moment (when timeout expired).
+      -- The actual blocking period is [ts - timeout, ts].
+      -- Use anr_dur_ms → default_anr_dur_ms fallback for the blocking window.
+      SELECT
+        printf('%d', ts - CAST(COALESCE(anr_dur_ms, default_anr_dur_ms, 5000) AS INTEGER) * 1000000) AS ts,
+        printf('%d', CAST(COALESCE(anr_dur_ms, default_anr_dur_ms, 5000) AS INTEGER) * 1000000) AS dur,
+        'ANR: ' || REPLACE(REPLACE(process_name, 'com.', ''), 'android.', '') ||
+          ' (' || COALESCE(anr_type, 'unknown') || ')' AS event,
+        process_name,
+        COALESCE(anr_type, 'unknown') AS anr_type,
+        'anr' AS category
+      FROM android_anrs
+      ORDER BY ts
+      LIMIT 50
+    save_as: anr_events
+    optional: true
+
+  # ==========================================================================
+  # L2: 输入法 (键盘) 显示/隐藏
+  # ==========================================================================
+  - id: ime_events
+    type: atomic
+    name: "输入法事件"
+    display:
+      level: hidden
+      layer: list
+      title: "输入法"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur
+        - name: dur
+          label: "持续"
+          type: duration
+          format: duration_ms
+          unit: ns
+        - name: event
+          label: "事件"
+          type: string
+        - name: ime_action
+          label: "操作"
+          type: string
+        - name: category
+          label: "类别"
+          type: string
+    sql: |
+      SELECT
+        printf('%d', s.ts) AS ts,
+        printf('%d', s.dur) AS dur,
+        CASE
+          WHEN s.name GLOB '*showSoftInput*'
+            OR s.name GLOB '*InputMethodService*show*'
+            OR s.name GLOB '*InputMethodManager*show*'
+            THEN '键盘弹出 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          WHEN s.name GLOB '*hideSoftInput*'
+            OR s.name GLOB '*InputMethodService*hide*'
+            OR s.name GLOB '*InputMethodManager*hide*'
+            THEN '键盘收起 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          ELSE NULL
+        END AS event,
+        CASE
+          WHEN s.name GLOB '*show*' THEN 'ime_show'
+          ELSE 'ime_hide'
+        END AS ime_action,
+        'ime' AS category
+      FROM slice s
+      WHERE s.dur > 5000000
+        AND (
+          s.name GLOB '*showSoftInput*'
+          OR s.name GLOB '*hideSoftInput*'
+          OR s.name GLOB '*InputMethodService*show*'
+          OR s.name GLOB '*InputMethodService*hide*'
+          OR s.name GLOB '*InputMethodManager*show*'
+          OR s.name GLOB '*InputMethodManager*hide*'
+        )
+      ORDER BY s.ts
+      LIMIT 100
+    save_as: ime_events
     optional: true
 
   # ==========================================================================
@@ -1741,7 +2081,7 @@ steps:
   - id: clean_timeline
     type: atomic
     name: "场景时间线"
-    condition: table_availability.data[0]?.has_input_events === 1 || table_availability.data[0]?.has_startups === 1
+    condition: table_availability.data[0]?.has_input_events === 1 || table_availability.data[0]?.has_startups === 1 || table_availability.data[0]?.has_key_events === 1 || table_availability.data[0]?.has_anrs === 1
     display:
       level: detail
       layer: list
@@ -1894,7 +2234,13 @@ steps:
           ts,
           safe_dur AS dur,
           '切换到 ' || REPLACE(REPLACE(str_value, 'com.', ''), 'android.', '') AS event,
-          'app_switch' AS event_type,
+          CASE
+            WHEN LOWER(str_value) LIKE '%launcher%' OR LOWER(str_value) LIKE '%miui.home%'
+              OR LOWER(str_value) LIKE '%trebuchet%' OR LOWER(str_value) LIKE '%nexuslauncher%'
+              OR LOWER(str_value) LIKE '%lawnchair%' OR LOWER(str_value) LIKE '%.home%'
+              THEN 'home_screen'
+            ELSE 'app_foreground'
+          END AS event_type,
           str_value AS app_package,
           'app_switch' AS category,
           4 AS priority
@@ -1979,6 +2325,97 @@ steps:
         WHERE gap_ns >= 800000000
         LIMIT 30
       ),
+      -- ========== 数据源 7: 导航按键 + 手势导航 ==========
+      nav_key_ev AS (
+        SELECT ts, dur, event, key_name AS event_type, NULL AS app_package,
+               'navigation_key' AS category, 2 AS priority
+        FROM (
+          -- Source A: android_key_events (三键导航)
+          SELECT printf('%d', d.ts) AS ts, printf('%d', COALESCE(u.up_ts - d.ts, 0)) AS dur,
+            CASE d.key_code WHEN 4 THEN '返回键' WHEN 3 THEN 'Home键' WHEN 187 THEN '最近任务键' END AS event,
+            CASE d.key_code WHEN 4 THEN 'back_key' WHEN 3 THEN 'home_key' WHEN 187 THEN 'recents_key' END AS key_name
+          FROM (SELECT ts, key_code, ROW_NUMBER() OVER (PARTITION BY key_code ORDER BY ts) AS rn
+                FROM android_key_events WHERE action = 0 AND key_code IN (3,4,187)) d
+          LEFT JOIN (SELECT ts AS up_ts, key_code, ROW_NUMBER() OVER (PARTITION BY key_code ORDER BY ts) AS rn
+                     FROM android_key_events WHERE action = 1 AND key_code IN (3,4,187)) u
+            ON u.key_code = d.key_code AND u.rn = d.rn AND u.up_ts >= d.ts
+          WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='android_key_events')
+          UNION ALL
+          -- Source B: gesture navigation slices (手势导航)
+          SELECT printf('%d', s.ts) AS ts, printf('%d', s.dur) AS dur,
+            CASE
+              WHEN s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*' OR s.name GLOB '*BackPanel*' THEN '返回手势'
+              WHEN s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*'
+                OR s.name GLOB '*launcher*goHome*' THEN 'Home手势'
+              WHEN s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*' THEN '最近任务手势'
+            END AS event,
+            CASE
+              WHEN s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*' OR s.name GLOB '*BackPanel*' THEN 'back_key'
+              WHEN s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*'
+                OR s.name GLOB '*launcher*goHome*' THEN 'home_key'
+              WHEN s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*' THEN 'recents_key'
+            END AS key_name
+          FROM slice s
+          JOIN thread_track tt ON s.track_id = tt.id JOIN thread t ON tt.utid = t.utid JOIN process p ON t.upid = p.upid
+          WHERE (p.name GLOB 'com.android.systemui*' OR p.name GLOB '*launcher*')
+            AND s.dur > 10000000
+            AND (s.name GLOB '*BackGesture*' OR s.name GLOB '*onBackGesture*' OR s.name GLOB '*BackPanel*'
+                 OR s.name GLOB '*SwipeToHome*' OR s.name GLOB '*goToHome*' OR s.name GLOB '*launcher*goHome*'
+                 OR s.name GLOB '*RecentsAnimation*' OR s.name GLOB '*startRecentsActivity*')
+        ) sub
+        WHERE event IS NOT NULL
+        LIMIT 60
+      ),
+      -- ========== 数据源 8: ANR ==========
+      anr_ev AS (
+        SELECT
+          printf('%d', ts - CAST(COALESCE(anr_dur_ms, default_anr_dur_ms, 5000) AS INTEGER) * 1000000) AS ts,
+          printf('%d', CAST(COALESCE(anr_dur_ms, default_anr_dur_ms, 5000) AS INTEGER) * 1000000) AS dur,
+          'ANR: ' || REPLACE(REPLACE(process_name, 'com.', ''), 'android.', '') ||
+            ' (' || COALESCE(anr_type, 'unknown') || ')' AS event,
+          'anr' AS event_type,
+          process_name AS app_package,
+          'anr' AS category,
+          1 AS priority
+        FROM android_anrs
+        WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='android_anrs')
+        LIMIT 20
+      ),
+      -- ========== 数据源 9: 输入法 ==========
+      ime_ev AS (
+        SELECT printf('%d', s.ts) AS ts, printf('%d', s.dur) AS dur,
+          CASE WHEN s.name GLOB '*show*' THEN '键盘弹出 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+               ELSE '键盘收起 [' || CAST(s.dur / 1000000 AS INT) || 'ms]'
+          END AS event,
+          CASE WHEN s.name GLOB '*show*' THEN 'ime_show' ELSE 'ime_hide' END AS event_type,
+          NULL AS app_package, 'ime' AS category, 4 AS priority
+        FROM slice s
+        WHERE s.dur > 5000000
+          AND (s.name GLOB '*showSoftInput*' OR s.name GLOB '*hideSoftInput*'
+               OR s.name GLOB '*InputMethodService*show*' OR s.name GLOB '*InputMethodService*hide*'
+               OR s.name GLOB '*InputMethodManager*show*' OR s.name GLOB '*InputMethodManager*hide*')
+        LIMIT 30
+      ),
+      -- ========== 数据源 10: 窗口转场 ==========
+      win_trans_ev AS (
+        SELECT printf('%d', s.ts) AS ts, printf('%d', s.dur) AS dur,
+          CASE
+            WHEN s.name GLOB '*openAnimation*' THEN '窗口打开'
+            WHEN s.name GLOB '*closeAnimation*' THEN '窗口关闭'
+            WHEN s.name GLOB '*Shell transition*' THEN 'Shell转场'
+            ELSE '窗口转场'
+          END || ' [' || CAST(s.dur / 1000000 AS INT) || 'ms]' AS event,
+          'window_transition' AS event_type,
+          NULL AS app_package, 'window_transition' AS category, 4 AS priority
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id JOIN thread t ON tt.utid = t.utid JOIN process p ON t.upid = p.upid
+        WHERE (p.name = 'system_server' OR p.name GLOB 'com.android.wm.shell*')
+          AND s.dur > 50000000
+          AND (s.name GLOB '*AppTransition*' OR s.name GLOB '*openAnimation*'
+               OR s.name GLOB '*closeAnimation*' OR s.name GLOB '*Shell transition*'
+               OR s.name GLOB '*startingWindow*')
+        LIMIT 30
+      ),
       -- ========== 合并 + 过滤 + 排序 ==========
       all_events AS (
         SELECT ts, dur, event, event_type, app_package, category, priority FROM launch_ev
@@ -1990,6 +2427,14 @@ steps:
         SELECT ts, dur, event, event_type, app_package, category, priority FROM system_ev WHERE event IS NOT NULL
         UNION ALL
         SELECT ts, dur, event, event_type, app_package, category, priority FROM idle_ev
+        UNION ALL
+        SELECT ts, dur, event, event_type, app_package, category, priority FROM nav_key_ev
+        UNION ALL
+        SELECT ts, dur, event, event_type, app_package, category, priority FROM anr_ev
+        UNION ALL
+        SELECT ts, dur, event, event_type, app_package, category, priority FROM ime_ev
+        UNION ALL
+        SELECT ts, dur, event, event_type, app_package, category, priority FROM win_trans_ev
       ),
       -- ========== 格式化输出 ==========
       ranked AS (
@@ -2025,6 +2470,12 @@ steps:
           WHEN event_type = 'tap' AND dur / 1e6 < 100 THEN '🟢'
           WHEN event_type = 'tap' AND dur / 1e6 < 200 THEN '🟡'
           WHEN event_type = 'tap' AND dur / 1e6 > 200 THEN '🔴'
+          -- ANR 固定严重
+          WHEN event_type = 'anr' THEN '🔴 ANR'
+          -- 窗口转场评级
+          WHEN event_type = 'window_transition' AND dur / 1e6 < 300 THEN '🟢'
+          WHEN event_type = 'window_transition' AND dur / 1e6 < 500 THEN '🟡'
+          WHEN event_type = 'window_transition' THEN '🔴'
           -- 其他事件不评级
           ELSE ''
         END AS rating

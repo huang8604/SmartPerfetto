@@ -99,27 +99,41 @@ function buildPrompt(input: Stage3SummaryInput): string {
   const failedCount = input.jobs.filter((j) => j.state === 'failed').length;
 
   return [
-    '你是 Android 性能分析助手。给定以下 Trace 中检测到的场景列表和已完成的深度分析结果,',
-    '用 200 字以内的中文写一段整体叙述,概括这段 Trace 里发生了什么、有哪些值得关注的性能问题。',
-    '不要逐项罗列,要有重点;不要复述数字,要解释含义。',
+    '你是一个还原用户手机操作过程的助手。请根据下面按时间排列的场景列表,',
+    '用第三人称视角写一段 200 字以内的中文叙述,像讲故事一样还原用户从头到尾在手机上做了什么。',
     '',
-    `## 场景列表 (共 ${input.scenes.length} 个,显示前 ${sceneLines.length}):`,
+    '要求:',
+    '- 从用户视角描述,比如"用户在桌面停留了片刻,然后点击图标启动了某应用"',
+    '- 按时间顺序串联场景,交代因果关系(点击→启动→进入应用→操作→返回)',
+    '- 自然地融入性能观感,例如"启动较慢,用户等待了约1.3秒"、"滑动流畅无卡顿"',
+    '- 用应用名的可读部分(如 launch.aosp.heavy 而非完整包名)让叙述简洁',
+    '- 不要罗列数据表格,不要加 markdown 标题/列表/代码块,只输出连贯叙述',
+    '',
+    `## 操作时间线 (共 ${input.scenes.length} 个场景):`,
     ...sceneLines,
     '',
-    analysisLines.length > 0 ? '## 已完成的深度分析:' : '## 深度分析:无',
+    analysisLines.length > 0 ? '## 深度分析发现的性能问题:' : '',
     ...analysisLines,
-    '',
-    failedCount > 0 ? `注意:${failedCount} 个场景的分析失败,可能影响完整性。` : '',
-    '',
-    '只输出叙述文字,不要加 markdown 标题、列表或代码块。',
+    failedCount > 0 ? `(${failedCount} 个场景分析失败)` : '',
   ]
-    .filter((l) => l !== undefined)
+    .filter((l) => l !== undefined && l !== '')
     .join('\n');
 }
 
 function formatSceneLine(scene: DisplayedScene, index: number): string {
   const sev = sevLabel(scene.severity);
-  return `${index + 1}. ${sev} ${scene.label} [${scene.sceneType}] @ ${scene.processName ?? 'unknown'}`;
+  const app = shortAppName(scene.processName ?? 'unknown');
+  const durStr = scene.durationMs >= 1000
+    ? `${(scene.durationMs / 1000).toFixed(1)}s`
+    : `${Math.round(scene.durationMs)}ms`;
+  return `${index + 1}. ${sev} [${scene.sceneType}] ${app} (${durStr})`;
+}
+
+/** Extract readable app name: com.example.launch.aosp.heavy → launch.aosp.heavy */
+function shortAppName(processName: string): string {
+  return processName
+    .replace(/^com\.(android\.|miui\.|example\.)?/, '')
+    .replace(/^org\./, '');
 }
 
 function formatAnalysisLine(job: SceneAnalysisJob): string {
