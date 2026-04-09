@@ -42,11 +42,16 @@ export async function runStage3Summary(
 
   const prompt = buildPrompt(input);
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), HAIKU_TIMEOUT_MS);
+  let stream: ReturnType<typeof sdkQuery> | undefined;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    console.warn(`[SceneStage3Summarizer] Summary timed out after ${HAIKU_TIMEOUT_MS / 1000}s`);
+    try { stream?.close(); } catch { /* ignore */ }
+  }, HAIKU_TIMEOUT_MS);
 
   try {
-    const stream = sdkQuery({
+    stream = sdkQuery({
       prompt,
       options: {
         model: loadClaudeConfig().lightModel,
@@ -62,7 +67,7 @@ export async function runStage3Summary(
 
     let result = '';
     for await (const msg of stream) {
-      if (ac.signal.aborted) break;
+      if (timedOut) break;
       if ((msg as any).type === 'result' && (msg as any).subtype === 'success') {
         result = (msg as any).result || '';
       }
@@ -78,6 +83,7 @@ export async function runStage3Summary(
     return null;
   } finally {
     clearTimeout(timer);
+    try { stream?.close(); } catch { /* ignore */ }
   }
 }
 

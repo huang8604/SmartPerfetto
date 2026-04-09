@@ -750,6 +750,7 @@ export async function verifyWithLLM(
   conclusion: string,
   options?: { model?: string },
 ): Promise<VerificationIssue[] | undefined> {
+  const VERIFY_TIMEOUT_MS = 30_000; // 30s — Haiku single-turn should finish well within this
   try {
     const findingSummary = findings
       .slice(0, 15)
@@ -795,10 +796,28 @@ ${conclusionPreview}${truncationNote}
     });
 
     let result = '';
-    for await (const msg of stream) {
-      if (msg.type === 'result' && (msg as any).subtype === 'success') {
-        result = (msg as any).result || '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      console.warn(`[ClaudeVerifier] LLM verification timed out after ${VERIFY_TIMEOUT_MS / 1000}s`);
+      try { stream.close(); } catch { /* ignore */ }
+    }, VERIFY_TIMEOUT_MS);
+
+    try {
+      for await (const msg of stream) {
+        if (timedOut) break;
+        if (msg.type === 'result' && (msg as any).subtype === 'success') {
+          result = (msg as any).result || '';
+        }
       }
+    } finally {
+      clearTimeout(timer);
+      try { stream.close(); } catch { /* ignore */ }
+    }
+
+    if (timedOut) {
+      console.warn('[ClaudeVerifier] Returning undefined due to timeout (graceful degradation)');
+      return undefined;
     }
 
     // Parse JSON from the result. LLM responses may be truncated mid-JSON,

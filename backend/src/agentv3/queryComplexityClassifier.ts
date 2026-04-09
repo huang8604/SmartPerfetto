@@ -83,6 +83,7 @@ async function classifyWithHaiku(
     ? renderTemplate(template, { query })
     : `Classify this Android trace analysis query as "quick" (factual) or "full" (analysis).\nQuery: ${query}\nOutput JSON: {"complexity": "quick" or "full", "reason": "..."}`;
 
+  const CLASSIFY_TIMEOUT_MS = 15_000; // 15s — single-turn classification should be fast
   const stream = sdkQuery({
     prompt,
     options: {
@@ -98,10 +99,27 @@ async function classifyWithHaiku(
   });
 
   let result = '';
-  for await (const msg of stream) {
-    if (msg.type === 'result' && (msg as any).subtype === 'success') {
-      result = (msg as any).result || '';
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    console.warn(`[ComplexityClassifier] Classification timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`);
+    try { stream.close(); } catch { /* ignore */ }
+  }, CLASSIFY_TIMEOUT_MS);
+
+  try {
+    for await (const msg of stream) {
+      if (timedOut) break;
+      if (msg.type === 'result' && (msg as any).subtype === 'success') {
+        result = (msg as any).result || '';
+      }
     }
+  } finally {
+    clearTimeout(timer);
+    try { stream.close(); } catch { /* ignore */ }
+  }
+
+  if (timedOut) {
+    return { complexity: 'full', reason: 'classification timed out (graceful degradation)' };
   }
 
   const jsonMatch = result.match(/\{[\s\S]*?\}/);
