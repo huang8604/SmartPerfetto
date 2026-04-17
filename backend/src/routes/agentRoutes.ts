@@ -732,7 +732,6 @@ router.post('/analyze', async (req, res) => {
       getModelRouter,
       createSessionLogger,
       sessionPersistenceService: SessionPersistenceService.getInstance(),
-      sessionContextManager,
       buildRecoveredResultFromContext,
     });
 

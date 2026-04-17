@@ -10,6 +10,7 @@ import { isClaudeCodeEnabled, createClaudeRuntime } from '../../agentv3';
 import { getTraceProcessorService } from '../../services/traceProcessorService';
 import {
   type EnhancedSessionContext,
+  sessionContextManager as defaultSessionContextManager,
 } from '../../agent/context/enhancedSessionContext';
 import { type SessionLogger } from '../../services/sessionLogger';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
@@ -84,7 +85,9 @@ interface AgentAnalyzeSessionServiceDeps<TSession extends AnalyzeManagedSession>
   getModelRouter: () => ModelRouter;
   createSessionLogger: (sessionId: string) => SessionLogger;
   sessionPersistenceService: SessionPersistenceService;
-  sessionContextManager: SessionContextManagerLike;
+  /** Defaults to the module-level `sessionContextManager` singleton. Callers
+   *  (HTTP route, CLI) no longer need to import it just to satisfy the deps. */
+  sessionContextManager?: SessionContextManagerLike;
   buildRecoveredResultFromContext: (
     sessionId: string,
     context: EnhancedSessionContext
@@ -134,7 +137,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     this.getModelRouter = deps.getModelRouter;
     this.createSessionLogger = deps.createSessionLogger;
     this.sessionPersistenceService = deps.sessionPersistenceService;
-    this.sessionContextManager = deps.sessionContextManager;
+    this.sessionContextManager = deps.sessionContextManager ?? defaultSessionContextManager;
     this.buildRecoveredResultFromContext = deps.buildRecoveredResultFromContext;
   }
 

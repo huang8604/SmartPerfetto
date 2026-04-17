@@ -89,7 +89,8 @@ export class CliAnalyzeService {
       },
       createSessionLogger,
       sessionPersistenceService: this.persistence,
-      sessionContextManager,
+      // sessionContextManager omitted — AgentAnalyzeSessionService defaults to
+      // the module-level singleton internally.
       // Only invoked on resume; PR1 covers fresh analyze only. Returning null
       // lets prepareSession fall through to a new session rather than throw.
       buildRecoveredResultFromContext: () => null,
