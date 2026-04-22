@@ -314,4 +314,8 @@ Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 The `perfetto/` submodule is a fork of [Google's Perfetto](https://github.com/google/perfetto), licensed under [Apache 2.0](perfetto/LICENSE).
 
-For commercial licensing options (use without AGPL obligations), please contact the maintainer.
+For commercial licensing options (use without AGPL obligations), please contact the maintainer at **smartperfetto@gracker.dev**.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities. Do not file public issues for security concerns.

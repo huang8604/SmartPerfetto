@@ -168,6 +168,17 @@ Scopes: skills, agentv3, frontend, strategies, ci
 - Check [Technical Architecture](docs/technical-architecture.md) for deep dives
 - Check [MCP Tools Reference](docs/mcp-tools-reference.md) for tool documentation
 
+## Versioning
+
+SmartPerfetto follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The **single source of truth for the project version** is the `version` field in
+[`backend/package.json`](backend/package.json). The root `package.json` exists as
+a workspace entry point; keep its `version` in sync but treat it as a mirror, not
+the primary. Release tags follow `vX.Y.Z` format.
+
+When cutting a release, update `backend/package.json`, then [CHANGELOG.md](CHANGELOG.md),
+then the root `package.json` to match, in that order.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0](LICENSE).
