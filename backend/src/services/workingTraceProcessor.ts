@@ -387,6 +387,33 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     const startTime = Date.now();
 
     return new Promise((resolve) => {
+      let settled = false;
+      let req: http.ClientRequest | null = null;
+      let wallClockTimer: NodeJS.Timeout | undefined;
+
+      const finish = (result: QueryResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(wallClockTimer);
+        resolve(result);
+      };
+
+      // `http.request({ timeout })` is socket-idle based. Some trace_processor
+      // hangs keep the HTTP request open, so enforce an absolute wall-clock cap.
+      wallClockTimer = setTimeout(() => {
+        req?.destroy();
+        finish({
+          columns: [],
+          rows: [],
+          durationMs: Date.now() - startTime,
+          error: 'Query timeout',
+        });
+      }, traceProcessorConfig.queryTimeoutMs);
+
+      if (IS_TEST_ENV && typeof (wallClockTimer as any).unref === 'function') {
+        (wallClockTimer as any).unref();
+      }
+
       // Encode QueryArgs protobuf
       const requestBody = encodeQueryArgs(sql);
 
@@ -402,12 +429,13 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         timeout: traceProcessorConfig.queryTimeoutMs,
       };
 
-      const req = http.request(options, (res) => {
+      req = http.request(options, (res) => {
         const chunks: Buffer[] = [];
 
         res.on('data', (chunk) => chunks.push(chunk));
 
         res.on('end', () => {
+          if (settled) return;
           const responseBuffer = Buffer.concat(chunks);
           const durationMs = Date.now() - startTime;
 
@@ -417,7 +445,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
             if (parsed.error) {
               logger.warn('TraceProcessor', `Query error: ${parsed.error}`);
-              resolve({
+              finish({
                 columns: parsed.columnNames,
                 rows: parsed.rows,
                 durationMs,
@@ -425,7 +453,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
               });
             } else {
               logger.debug('TraceProcessor', `Query returned ${parsed.rows.length} rows in ${durationMs}ms`);
-              resolve({
+              finish({
                 columns: parsed.columnNames,
                 rows: parsed.rows,
                 durationMs,
@@ -433,7 +461,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
             }
           } catch (parseError: any) {
             console.error(`[TraceProcessor] Failed to parse response:`, parseError.message);
-            resolve({
+            finish({
               columns: [],
               rows: [],
               durationMs,
@@ -444,8 +472,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       });
 
       req.on('error', (error) => {
+        if (settled) return;
         console.error(`[TraceProcessor] HTTP request failed:`, error.message);
-        resolve({
+        finish({
           columns: [],
           rows: [],
           durationMs: Date.now() - startTime,
@@ -455,7 +484,7 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
 
       req.on('timeout', () => {
         req.destroy();
-        resolve({
+        finish({
           columns: [],
           rows: [],
           durationMs: Date.now() - startTime,

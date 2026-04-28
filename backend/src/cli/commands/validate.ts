@@ -32,6 +32,25 @@ interface ValidationResult {
   warnings: string[];
 }
 
+interface VendorOverrideDefinition {
+  extends?: string;
+  version?: string;
+  meta?: {
+    display_name?: string;
+    description?: string;
+    vendor?: string;
+    [key: string]: any;
+  };
+  vendor_detection?: {
+    signatures?: Array<{ pattern?: string; confidence?: string }>;
+  };
+  additional_steps?: any[];
+  thresholds_override?: Record<string, any>;
+  override_params?: Record<string, any>;
+  additional_diagnostics?: any[];
+  additional_output_sections?: any[];
+}
+
 const SKILLS_DIR = path.join(__dirname, '../../../skills');
 const STRATEGIES_DIR = path.join(__dirname, '../../../strategies');
 
@@ -271,6 +290,124 @@ function validateSkillDefinition(skill: SkillDefinition, filePath: string): Vali
   };
 }
 
+function validateVendorOverrideDefinition(override: VendorOverrideDefinition, filePath: string): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!override.extends || typeof override.extends !== 'string') {
+    errors.push('Missing required field: extends');
+  }
+  if (!override.version) {
+    errors.push('Missing required field: version');
+  }
+
+  if (!override.meta) {
+    warnings.push('Missing field: meta');
+  } else {
+    if (!override.meta.display_name) warnings.push('Missing field: meta.display_name');
+    if (!override.meta.description) warnings.push('Missing field: meta.description');
+    if (!override.meta.vendor) warnings.push('Missing field: meta.vendor');
+  }
+
+  const signatures = override.vendor_detection?.signatures;
+  if (signatures !== undefined) {
+    if (!Array.isArray(signatures)) {
+      errors.push('vendor_detection.signatures must be an array');
+    } else {
+      const validConfidences = new Set(['high', 'medium', 'low']);
+      signatures.forEach((sig, index) => {
+        if (!sig?.pattern || typeof sig.pattern !== 'string') {
+          errors.push(`vendor_detection.signatures[${index}]: Missing required field: pattern`);
+        }
+        if (sig?.confidence && !validConfidences.has(sig.confidence)) {
+          warnings.push(
+            `vendor_detection.signatures[${index}]: Unknown confidence '${sig.confidence}' ` +
+            `(valid: ${[...validConfidences].join(', ')})`
+          );
+        }
+      });
+    }
+  } else {
+    warnings.push('Missing field: vendor_detection.signatures');
+  }
+
+  const hasAdditionalSteps = Array.isArray(override.additional_steps) && override.additional_steps.length > 0;
+  const hasThresholdOverrides = !!override.thresholds_override && Object.keys(override.thresholds_override).length > 0;
+  const hasOverrideParams = !!override.override_params && Object.keys(override.override_params).length > 0;
+
+  if (!hasAdditionalSteps && !hasThresholdOverrides && !hasOverrideParams) {
+    warnings.push('Override defines no additional_steps, thresholds_override, or override_params');
+  }
+
+  if (override.additional_steps !== undefined) {
+    if (!Array.isArray(override.additional_steps)) {
+      errors.push('additional_steps must be an array');
+    } else {
+      const stepIds = new Set<string>();
+      const defined = new Set(['start_ts', 'end_ts', 'package', 'vendor']);
+
+      override.additional_steps.forEach((step, index) => {
+        const stepPath = `additional_steps[${index}]`;
+        if (!step || typeof step !== 'object') {
+          errors.push(`${stepPath}: must be an object`);
+          return;
+        }
+
+        if (!step.id) {
+          errors.push(`${stepPath}: Missing required field: id`);
+        } else if (stepIds.has(step.id)) {
+          errors.push(`${stepPath}: Duplicate step id: ${step.id}`);
+        } else {
+          stepIds.add(step.id);
+          defined.add(step.id);
+        }
+
+        if (!step.name) {
+          warnings.push(`${stepPath}: Missing field: name`);
+        }
+
+        if (step.save_as) {
+          defined.add(String(step.save_as));
+        }
+
+        if (step.sql !== undefined) {
+          if (typeof step.sql !== 'string' || !step.sql.trim()) {
+            errors.push(`${stepPath}: sql must be a non-empty string`);
+          } else {
+            const sqlIssues = validateSql(step.sql);
+            errors.push(...sqlIssues.errors.map(e => `${stepPath}: ${e}`));
+            warnings.push(...sqlIssues.warnings.map(w => `${stepPath}: ${w}`));
+
+            for (const ref of extractVariableReferences(step.sql)) {
+              const actualRef = String(ref || '').split('|')[0].trim();
+              if (actualRef.startsWith('prev.') || actualRef.startsWith('item.')) continue;
+              const root = actualRef.split('.')[0];
+              if (!defined.has(root)) {
+                warnings.push(`${stepPath}: Variable reference '${ref}' may not be defined at this step`);
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  if (override.thresholds_override) {
+    for (const [name, threshold] of Object.entries(override.thresholds_override)) {
+      if (!threshold?.levels) {
+        warnings.push(`thresholds_override.${name}: Missing levels definition`);
+      }
+    }
+  }
+
+  return {
+    file: filePath,
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
 /**
  * Basic SQL validation
  */
@@ -372,9 +509,9 @@ function extractVariableReferences(sql: string): string[] {
 function validateFile(filePath: string): ValidationResult {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    const skill = yaml.load(content) as SkillDefinition;
+    const parsed = yaml.load(content) as SkillDefinition | VendorOverrideDefinition;
 
-    if (!skill) {
+    if (!parsed) {
       return {
         file: filePath,
         valid: false,
@@ -383,7 +520,11 @@ function validateFile(filePath: string): ValidationResult {
       };
     }
 
-    return validateSkillDefinition(skill, filePath);
+    if (/\.override\.ya?ml$/.test(filePath)) {
+      return validateVendorOverrideDefinition(parsed as VendorOverrideDefinition, filePath);
+    }
+
+    return validateSkillDefinition(parsed as SkillDefinition, filePath);
   } catch (error: any) {
     return {
       file: filePath,

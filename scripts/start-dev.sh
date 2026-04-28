@@ -464,7 +464,10 @@ echo "Cleaning up orphan trace_processor_shell processes..."
 pkill -f "trace_processor_shell.*httpd" 2>/dev/null || true
 sleep 1
 
-# Check and build trace_processor_shell if needed
+# Check and build trace_processor_shell if needed.
+# This binary is treated as a pinned local build artifact: if it exists, reuse it
+# across dev-server starts. Rebuild it manually after Perfetto major upgrades
+# (for example v54 -> v55) or delete it to let this script build from source.
 TRACE_PROCESSOR="$PERFETTO_DIR/out/ui/trace_processor_shell"
 if [ ! -f "$TRACE_PROCESSOR" ]; then
   echo "=============================================="
@@ -508,6 +511,8 @@ if [ ! -f "$TRACE_PROCESSOR" ]; then
 else
   echo "trace_processor_shell found: $TRACE_PROCESSOR"
 fi
+
+"$TRACE_PROCESSOR" --version | head -n 1 || true
 
 if [ "$SKIP_BUILD" = false ]; then
   # Generate frontend types from backend data contract
