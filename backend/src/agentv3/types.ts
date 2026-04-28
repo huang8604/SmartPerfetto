@@ -245,6 +245,17 @@ export interface ToolCallRecord {
   timestamp: number;
   /** Phase ID this tool call was matched to (if any) */
   matchedPhaseId?: string;
+  /**
+   * One-line, human-readable digest of the tool's input. Used by plan
+   * adherence checks to confirm the *right* call was made, not just any call
+   * with the right tool name (e.g. distinguishing different `invoke_skill`
+   * targets).
+   */
+  inputSummary?: string;
+  /** For `invoke_skill`: the skillId argument, lifted out for direct matching. */
+  skillId?: string;
+  /** sha256(input) prefix — stable identifier across runs for the same call. */
+  paramsHash?: string;
 }
 
 // =============================================================================

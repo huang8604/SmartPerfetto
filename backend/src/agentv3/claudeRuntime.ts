@@ -29,6 +29,7 @@ import { buildAgentDefinitions } from './claudeAgentDefinitions';
 import { getExtendedKnowledgeBase } from '../services/sqlKnowledgeBase';
 import type { AnalysisNote, AnalysisPlanV3, ClaudeAnalysisContext, ComplexityClassifierInput, FailedApproach, Hypothesis, QueryComplexity, TraceCompleteness, UncertaintyFlag } from './types';
 import { ArtifactStore } from './artifactStore';
+import { summarizeToolCallInput } from './toolCallSummary';
 import type { SessionStateSnapshot, SessionFieldsForSnapshot } from './sessionStateSnapshot';
 import { AgentMetricsCollector, persistSessionMetrics } from './agentMetrics';
 import {
@@ -450,7 +451,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // P2-1: Turn-level autonomy watchdog — detect repetitive tool failures
       // P1-G2: Per-tool tracking — each tool gets its own failure tracking
-      const toolCallHistory: Array<{ name: string; success: boolean; startTime?: number }> = [];
+      const toolCallHistory: Array<{ name: string; success: boolean; startTime?: number; input?: unknown }> = [];
       const WATCHDOG_WINDOW = 3; // consecutive same-tool failures to trigger warning
       const watchdogFiredTools = new Set<string>(); // tracks which tools have triggered warnings
 
@@ -595,7 +596,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               if (block.type === 'tool_use') {
                 toolNames.push(block.name.replace(MCP_NAME_PREFIX, ''));
                 // P2-1: Watchdog — track tool calls for repetitive failure detection
-                toolCallHistory.push({ name: block.name, success: true, startTime: Date.now() });
+                toolCallHistory.push({
+                  name: block.name,
+                  success: true,
+                  startTime: Date.now(),
+                  input: block.input,
+                });
               }
             }
             currentTurnMetrics = {
@@ -672,6 +678,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 toolName: lastTool.name,
                 timestamp: Date.now(),
                 matchedPhaseId,
+                ...summarizeToolCallInput(shortToolName, lastTool.input),
               });
               // P2-8: Cap toolCallLog to prevent unbounded growth within a turn
               if (plan.toolCallLog.length > 100) {
