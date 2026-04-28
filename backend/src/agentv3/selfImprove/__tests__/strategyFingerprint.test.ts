@@ -2,14 +2,15 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, beforeAll } from '@jest/globals';
 import {
   computePatchFingerprint,
+  computeStrategyContentHash,
   detectDrift,
   RunSnapshotRegistry,
   type StrategyVersionFingerprint,
 } from '../strategyFingerprint';
-import type { PhaseHint } from '../../strategyLoader';
+import { getRegisteredScenes, invalidateStrategyCache, type PhaseHint } from '../../strategyLoader';
 
 const baseHint: PhaseHint = {
   id: 'phase_2_6',
@@ -153,5 +154,33 @@ describe('RunSnapshotRegistry', () => {
     const second = r.capture('sess-1', 'general');
     expect(r.size()).toBe(1);
     expect(second.fingerprint.appliedAt).toBeGreaterThanOrEqual(first.fingerprint.appliedAt);
+  });
+});
+
+/**
+ * Regression for Codex F.6: previously `strategyFilePath(scene)` joined
+ * `${scene}.strategy.md`, which silently produced an empty content hash
+ * for scenes whose file basename uses a hyphen (touch_tracking,
+ * scroll_response). The loader now exposes the real source path; this
+ * test exercises the real on-disk strategies (no mock).
+ */
+describe('computeStrategyContentHash resolves real source path', () => {
+  beforeAll(() => invalidateStrategyCache());
+
+  it('returns a 64-char hex hash for every registered scene', () => {
+    const scenes = getRegisteredScenes().map(s => s.scene);
+    expect(scenes.length).toBeGreaterThanOrEqual(12);
+    for (const scene of scenes) {
+      expect(computeStrategyContentHash(scene)).toMatch(/^[a-f0-9]{64}$/);
+    }
+  });
+
+  it('resolves underscore scene ids whose file basename uses a hyphen', () => {
+    expect(computeStrategyContentHash('touch_tracking')).toMatch(/^[a-f0-9]{64}$/);
+    expect(computeStrategyContentHash('scroll_response')).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('returns empty string for unknown scenes', () => {
+    expect(computeStrategyContentHash('this-scene-does-not-exist')).toBe('');
   });
 });

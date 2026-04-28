@@ -45,6 +45,14 @@ export interface StrategyDefinition {
   /** Phase-level hints for mid-analysis restatement injection. */
   phaseHints: PhaseHint[];
   content: string;
+  /**
+   * Absolute path to the source `*.strategy.md` file. Required because the
+   * scene id (e.g. `touch_tracking`) is not always the file basename
+   * (`touch-tracking.strategy.md`); callers that need the file itself —
+   * fingerprinting, hot-reload diffing — must resolve through this field
+   * instead of `${scene}.strategy.md`.
+   */
+  sourcePath: string;
 }
 
 const STRATEGIES_DIR = path.resolve(__dirname, '../../strategies');
@@ -85,6 +93,7 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
     optionalCapabilities: (frontmatter.optional_capabilities as string[]) || [],
     phaseHints,
     content,
+    sourcePath: filePath,
   };
 }
 
@@ -116,6 +125,16 @@ export function getRegisteredScenes(): StrategyDefinition[] {
 /** Get phase-level restatement hints for a scene. Returns [] if scene has no hints. */
 export function getPhaseHints(scene: string): PhaseHint[] {
   return loadStrategies().get(scene)?.phaseHints || [];
+}
+
+/**
+ * Resolve the absolute path of the `*.strategy.md` file backing a scene.
+ * Returns `undefined` for unknown scenes. Use this instead of `${scene}.strategy.md`
+ * — file basenames may use hyphens (`touch-tracking.strategy.md`) where
+ * the scene id uses underscores (`touch_tracking`).
+ */
+export function getStrategyFilePath(scene: string): string | undefined {
+  return loadStrategies().get(scene)?.sourcePath;
 }
 
 /** Clear cached strategies and templates — useful for dev/test reloads. */

@@ -34,6 +34,7 @@ import * as path from 'path';
 import {
   getStrategyContent,
   getPhaseHints,
+  getStrategyFilePath,
   type PhaseHint,
 } from '../strategyLoader';
 
@@ -73,8 +74,16 @@ export type DriftStatus =
   | 'patch_changed'        // the targeted phase_hint differs in normalized form
   | 'patch_deleted';       // the targeted phase_hint id is no longer present
 
+/**
+ * Resolve the strategy file path through the loader's registry rather than
+ * naively joining `${scene}.strategy.md`. Compound scene ids use underscores
+ * (`touch_tracking`) while their file basenames use hyphens
+ * (`touch-tracking.strategy.md`); the naive form silently returned an empty
+ * hash for those scenes. Falls back to the legacy join for unknown scenes
+ * so misconfigured tests still get a deterministic-looking path.
+ */
 function strategyFilePath(scene: string): string {
-  return path.join(STRATEGIES_DIR, `${scene}.strategy.md`);
+  return getStrategyFilePath(scene) ?? path.join(STRATEGIES_DIR, `${scene}.strategy.md`);
 }
 
 /**
