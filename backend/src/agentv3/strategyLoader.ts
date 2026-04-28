@@ -48,7 +48,8 @@ export interface StrategyDefinition {
 }
 
 const STRATEGIES_DIR = path.resolve(__dirname, '../../strategies');
-const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
+/** Tolerates leading `<!-- -->` blocks (e.g. SPDX/license headers) before the frontmatter. */
+const FRONTMATTER_RE = /^(?:\s*<!--[\s\S]*?-->\s*)*---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 /** In dev mode, skip caching so .strategy.md / .template.md edits take effect without restart. */
 const DEV_MODE = process.env.NODE_ENV !== 'production';
 

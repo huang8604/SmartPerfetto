@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+/**
+ * Regression guard for a P0 hidden bug introduced by commit b8ad6fe
+ * ("add AGPL v3 SPDX headers to 609 source files").
+ *
+ * That commit prepended an HTML SPDX comment block to every
+ * `*.strategy.md` file. The frontmatter regex previously required the
+ * file to begin with `---\n`, so `parseStrategyFile()` started returning
+ * `null` for every strategy — silently disabling the entire scene-
+ * strategy system until v2.1 Phase 0.2 caught it. All existing
+ * `__tests__` mocked `strategyLoader`, so no test caught the regression.
+ *
+ * This suite intentionally exercises the real loader (no mock) against
+ * the on-disk strategy files to ensure scenes load even when the files
+ * carry leading SPDX/license comments.
+ */
+
+import { describe, it, expect, beforeAll } from '@jest/globals';
+import { getRegisteredScenes, getStrategyContent, getPhaseHints, invalidateStrategyCache } from '../strategyLoader';
+
+describe('strategyLoader tolerates leading SPDX HTML comments', () => {
+  beforeAll(() => {
+    invalidateStrategyCache();
+  });
+
+  it('loads at least 12 scenes from disk', () => {
+    expect(getRegisteredScenes().length).toBeGreaterThanOrEqual(12);
+  });
+
+  it('returns non-empty content for known scenes', () => {
+    for (const scene of ['scrolling', 'startup', 'anr', 'memory', 'general']) {
+      const content = getStrategyContent(scene);
+      expect(content).toBeDefined();
+      expect((content || '').length).toBeGreaterThan(100);
+    }
+  });
+
+  it('returns parsed phase_hints for scenes that declare them', () => {
+    // Use ranges, not exact counts, so that strategy edits that add or remove
+    // hints do not break this regression test (which only asserts that the
+    // SPDX-tolerant parser still recognises phase_hints at all).
+    expect(getPhaseHints('scrolling').length).toBeGreaterThan(0);
+    expect(getPhaseHints('startup').length).toBeGreaterThan(0);
+    expect(getPhaseHints('anr').length).toBeGreaterThan(0);
+  });
+
+  it('returns empty phase_hints array for scenes without hints', () => {
+    expect(getPhaseHints('general')).toEqual([]);
+    expect(getPhaseHints('memory')).toEqual([]);
+  });
+});
