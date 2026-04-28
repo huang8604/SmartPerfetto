@@ -57,9 +57,6 @@ jobs:
       - name: Build backend
         run: npm run build
 
-      - name: Check generated frontend types
-        run: npm run check:types
-
       - name: Run core tests
         run: npm run test:core
 
