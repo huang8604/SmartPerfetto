@@ -401,7 +401,12 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       // `http.request({ timeout })` is socket-idle based. Some trace_processor
       // hangs keep the HTTP request open, so enforce an absolute wall-clock cap.
       wallClockTimer = setTimeout(() => {
+        logger.warn(
+          'TraceProcessor',
+          `Query exceeded ${traceProcessorConfig.queryTimeoutMs}ms; destroying processor ${this.id}`,
+        );
         req?.destroy();
+        this.destroy();
         finish({
           columns: [],
           rows: [],

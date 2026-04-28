@@ -1,6 +1,7 @@
 name: backend-agent-regression-gate
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "backend/**"
@@ -60,9 +61,28 @@ jobs:
       - name: Run core tests
         run: npm run test:core
 
-      # Download pre-built trace_processor_shell from Google's LUCI artifacts.
-      # This avoids building Perfetto from source (~5-10 min) in CI.
-      # Binary integrity is verified via pinned sha256 before any exec.
+  scene-trace-regression:
+    if: github.event_name == 'workflow_dispatch'
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "backend/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Download + verify trace_processor_shell
         working-directory: .
         run: |
@@ -74,10 +94,10 @@ jobs:
           echo "trace_processor_shell downloaded + verified ($(du -h trace_processor_shell | cut -f1))"
           ./trace_processor_shell --version
 
-      - name: Run scene trace regression
+      - name: Run scene trace regression (manual)
         env:
           TRACE_PROCESSOR_PATH: ${{ github.workspace }}/trace_processor_shell
           TP_PORT_MIN: 9800
           TP_PORT_MAX: 9899
-          TP_QUERY_TIMEOUT_MS: 30000
-        run: npm run test:scene-trace-regression
+          TP_QUERY_TIMEOUT_MS: 10000
+        run: timeout 8m npm run test:scene-trace-regression
