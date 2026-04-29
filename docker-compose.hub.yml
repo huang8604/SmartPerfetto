@@ -1,0 +1,27 @@
+services:
+  smartperfetto:
+    # 替换为你在 Docker Hub 上的实际镜像名称，例如 yourusername/smartperfetto:latest
+    image: gracker/smartperfetto:latest
+    ports:
+      - "3000:3000"    # Backend API
+      - "10000:10000"  # Perfetto UI
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - FRONTEND_URL=http://localhost:10000
+    env_file:
+      - .env
+    volumes:
+      - uploads:/app/backend/uploads
+      - logs:/app/backend/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  uploads:
+  logs:
