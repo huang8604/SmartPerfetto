@@ -91,8 +91,8 @@ docker compose up --build
 - Python 3
 - 支持 submodule 的 Git
 - 开发脚本依赖的基础命令：`curl`、`lsof`、`pkill`
-- C++ 编译工具链：macOS 执行 `xcode-select --install`，Linux 执行 `sudo apt-get install build-essential python3`
 - 一个大模型 API Key，或 Anthropic 兼容 API 代理
+- _可选_ — C++ 编译工具链（macOS：`xcode-select --install`；Linux：`sudo apt-get install build-essential python3`）：仅在走 `--build-from-source` 回退路径时需要，默认流程会下载 prebuilt 二进制。
 
 ```bash
 cp backend/.env.example backend/.env
@@ -102,7 +102,7 @@ cp backend/.env.example backend/.env
 ./scripts/start-dev.sh
 ```
 
-首次启动会安装依赖并编译 `trace_processor_shell`。启动后访问：
+首次启动会安装依赖并下载 version-pinned 的 `trace_processor_shell` 预编译产物（约 5 秒，按 `scripts/trace-processor-pin.env` 的 SHA256 校验）。如果需要从源码编译——例如改了 Perfetto C++ 代码——加 `--build-from-source` 参数（或设 `TRACE_PROCESSOR_PREBUILT=0`）。启动后访问：
 
 - 前端：[http://localhost:10000](http://localhost:10000)
 - 后端：[http://localhost:3000](http://localhost:3000)

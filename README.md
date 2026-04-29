@@ -92,8 +92,8 @@ Prerequisites:
 - Python 3
 - Git with submodule support
 - Shell tools used by the dev scripts: `curl`, `lsof`, `pkill`
-- C++ build tools: `xcode-select --install` on macOS, or `sudo apt-get install build-essential python3` on Linux
 - An LLM API key or an Anthropic-compatible proxy
+- _Optional_ — C++ build tools (`xcode-select --install` on macOS, `sudo apt-get install build-essential python3` on Linux): only required for the `--build-from-source` fallback path; the default flow downloads a prebuilt `trace_processor_shell`.
 
 ```bash
 cp backend/.env.example backend/.env
@@ -103,7 +103,7 @@ cp backend/.env.example backend/.env
 ./scripts/start-dev.sh
 ```
 
-The first run installs dependencies and builds `trace_processor_shell`. After startup:
+The first run installs dependencies and downloads a version-pinned `trace_processor_shell` prebuilt (~5s, SHA256-verified against `scripts/trace-processor-pin.env`). Pass `--build-from-source` (or set `TRACE_PROCESSOR_PREBUILT=0`) if you need to compile from source — for example after modifying Perfetto C++ code. After startup:
 
 - Frontend: [http://localhost:10000](http://localhost:10000)
 - Backend: [http://localhost:3000](http://localhost:3000)
