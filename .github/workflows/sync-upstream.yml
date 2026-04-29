@@ -18,7 +18,7 @@ jobs:
         with:
           # 注意：默认的 GITHUB_TOKEN 同步后不会触发其他 workflow（如 Docker 构建）
           # 如果希望同步后自动触发 docker-publish，这里需要配置为 Personal Access Token (PAT)
-          # token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
 
       - name: Sync Upstream
