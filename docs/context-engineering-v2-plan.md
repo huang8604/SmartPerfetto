@@ -84,15 +84,15 @@
 
 **验收**：6 个新单测 + 6/6 regression PASS + supersede store migration 后无 fingerprint mismatch。
 
-### Phase 1: SDK spike + cache-aware foundation（1.5 天）
+### Phase 1: SDK spike + cache-aware foundation
 
-- **1.0（hard gate）** SDK capability spike：cache_control 落点 / 1h TTL / breakpoint 数量 / mid-stream push 能力。结果决定 1.1 + 3.1 设计
-- **1.1** 按 spike 结果加 `cache_control: {ttl: '1h'}`（spike 失败则只做 prefix 重排）
-- **1.2** 抽 `buildSystemPromptParts()` → `{stablePrefix, cacheBoundary, volatileSuffix}`；stablePrefix 只放 `role + arch + methodology + capability_registry + 12-scene-skeleton(每个 scene 1 行 name+goal)`
-- **1.3** 复用 `AgentMetrics` 已有字段，补缺 `uncached_input_tokens` 计算口径
-- **1.4** `cache-stability.test.ts` 断言**真实 SDK 序列化字节**，不抽样字段对比
+- **1.0 ✅ 已完成** SDK capability spike：见 `docs/sdk-capability-spike-2026-04-28.md`。**关键发现**：`@anthropic-ai/claude-agent-sdk` 的 `systemPrompt` 类型是 `string | {type:'preset',preset:'claude_code',append?}` —— **不接受 `cache_control` block，无法显式配置 1h TTL**。Query handle 也只暴露 `interrupt()` / `setPermissionMode()`，无 mid-stream message push API
+- **1.1 ❌ 已 dropped** 显式 `cache_control: {ttl: '1h'}` —— SDK 类型签名不接受。原计划改为 "等 SDK 暴露后再做"，目前只能依赖 SDK 内部默认 cache（5 min TTL）
+- **1.2 未做** 抽 `buildSystemPromptParts()` → `{stablePrefix, cacheBoundary, volatileSuffix}`；stablePrefix 只放 `role + arch + methodology + capability_registry + 12-scene-skeleton(每个 scene 1 行 name+goal)`。**单独 PR**——537 行 builder 重构
+- **1.3 ⏳ 部分** 复用 `AgentMetrics` 已有 `cacheHitRate` 字段；`uncached_input_tokens` 仍待抽 derived getter
+- **1.4 ✅ 已完成 lite** 4 个 cache-stability 测试（同 ctx 字节相等 / volatile 不影响 stable prefix / 无 Date.now() 漏入），见 `claudeSystemPrompt.test.ts:cache stability`
 
-**验收**：SDK spike 报告 + cache_read_ratio 提升 ≥ 30 个百分点 + `total_cost_usd` 下降。
+**实际验收**：SDK spike 落地 + 4 个 stability guards。绝对 cache_read_ratio 提升需 Phase 1.2 完成后才能量化。
 
 ### Phase 2: Plan template + 真硬拦截（2 天）
 
@@ -102,17 +102,22 @@
 - **2.4** 删 LivingPlan 新 class 设想（O.1 砍）；扩 `sessionPlans` + `sessionStateSnapshot` 现有结构
 - **2.5 决策点提前**：跑 baseline-postPhase2.1 → A=补 12 scene phase_hints / B=弃用 phase_hints 只保 plan_template / C=保留 3 高风险 scene
 
-### Phase 3: SDK-aware compact + bounded recovery（1 天）
+### Phase 3: SDK-aware compact + bounded recovery（拆 4 个 PR）
 
-- **3.1** 按 SDK spike 结果分支：(a) 支持 mid-stream → 当场 push；(b) 不支持 → 提前结束 turn + resume + recovery prompt
-- **3.2** Token meter 用 `uncached_input + cache_creation + recent_payload`（**不**用 cache_read）；阈值 `CLAUDE_PRECOMPACT_THRESHOLD=0.6`
-- **3.3** Recovery note 保留最近 N=5 条 raw tool origin（仅存 `{tool, inputSummary, artifactIds, rowCount, topObservations}`）
-- **3.4 recitation 限频**：phase transition / post-compact 第一条 / `fetch_artifact(full+rows)`；其它数据 tool 不 append（O.3 砍）
+> **SDK spike 结果（2026-04-28，见 `docs/sdk-capability-spike-2026-04-28.md`）**：
+> Claude Agent SDK 不支持 `cache_control` 也无 mid-stream message push API。
+> 所以 Phase 3.1 不能"当场 push 到 SDK"——改为 **interrupt + resume + recovery preamble**
+> （详见 `docs/v2.1-phase-3-active-compact-design.md`）。
 
-### Phase 4: Metrics CLI report + 单测覆盖（0.5 天）
+- **3-1 ✅ 已完成** Token meter 抽到独立 `contextTokenMeter.ts`：用 `uncached_input + cache_creation + payloadBytesToTokens(recent_payload)`（**不**用 cache_read），阈值 `CLAUDE_PRECOMPACT_THRESHOLD=0.6`，纯函数 12 个单测
+- **3-2 ✅ 已完成** Recovery note 抽到独立 `recoveryNoteBuilder.ts` + 加 `recent_tool_calls` section（保留最近 N=5 条结构化摘要：`{toolName, skillId?, inputSummary, matchedPhaseId}`），11 个单测
+- **3-3 未做** Orchestrator 集成：在 `claudeRuntime` 主循环每 turn 后调用 token meter；超阈值则 `query.interrupt()` → `sdkQuery({resume, prompt: recoveryPreamble + originalQuery})`。**最高风险**，单独 PR
+- **3-4 未做** Recitation 限频包装器：phase transition / post-compact 第一条 / `fetch_artifact(full+rows)`；其它数据 tool 不 append（O.3 砍）
 
-- **4.1** `scripts/contextEngineeringReport.ts` 输出 JSON / Markdown 三档对比；不上 dashboard endpoint（O.2 砍）
-- **4.2** 5 组单测：next_phase_reminder / hard-gate 真硬拦截 / compact recovery 路径 / fingerprint v2 dual-read / plan template schema
+### Phase 4: Metrics CLI report + 单测覆盖（0.5 天，✅ 已完成）
+
+- **4.1 ✅** `scripts/captureContextEngineeringBaseline.ts` 输出 JSON / Markdown 三档对比；不上 dashboard endpoint（O.2 砍）
+- **4.2 ✅** 5+ 组核心单测：next_phase_reminder（`phaseHintMatcher.test.ts` 9 测试） / hard-gate 真硬拦截（`validatePlanAgainstSceneTemplate.test.ts` 10 测试） / compact recovery（`recoveryNoteBuilder.test.ts` 11 测试） / fingerprint v2 dual-read（`hintFingerprint.test.ts` 4 测试） / plan template frontmatter（`planTemplateFrontmatter.test.ts` 7 测试）+ token meter（`contextTokenMeter.test.ts` 12 测试）
 
 ### Phase 5（已并入 2.5）
 
