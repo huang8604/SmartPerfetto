@@ -662,7 +662,7 @@ function isDedicatedSceneReplayRequest(query: string): boolean {
 router.post('/analyze', async (req, res) => {
   try {
     const requestId = getRequestId(req);
-    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext, referenceTraceId } = req.body;
+    const { traceId, query, sessionId: requestedSessionId, options = {}, selectionContext: rawSelectionContext, referenceTraceId, traceContext: rawTraceContext } = req.body;
 
     if (!traceId) {
       return res.status(400).json({
@@ -784,6 +784,13 @@ router.post('/analyze', async (req, res) => {
       runSequence: runContext.sequence,
     });
 
+    // Validate traceContext — must be array of objects with columns/rows
+    const traceContext = Array.isArray(rawTraceContext)
+      ? rawTraceContext.filter(
+          (d: any) => d && typeof d === 'object' && Array.isArray(d.columns) && Array.isArray(d.rows),
+        )
+      : undefined;
+
     runAgentDrivenAnalysis(sessionId, query, traceId, {
       ...options,
       selectionContext,
@@ -791,6 +798,7 @@ router.post('/analyze', async (req, res) => {
       traceProcessorService,
       runContext,
       referenceTraceId,
+      traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
     }).catch((error) => {
       const session = assistantAppService.getSession(sessionId);
       if (session) {
@@ -2260,6 +2268,7 @@ async function runAgentDrivenAnalysis(
         adb: options.adb,
         selectionContext: options.selectionContext,
         analysisMode: options.analysisMode,
+        traceContext: options.traceContext,
       });
     });
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);

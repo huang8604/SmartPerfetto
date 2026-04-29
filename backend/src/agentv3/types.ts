@@ -175,6 +175,12 @@ export interface TrackEventSelectionContext {
   eventId: number;
   ts: number;
   dur?: number;
+  // Pre-queried metadata from frontend (avoids first SQL turn)
+  name?: string;
+  threadName?: string;
+  processName?: string;
+  depth?: number;
+  childCount?: number;
 }
 
 /** Discriminated union: either an area or a single-slice selection from Perfetto UI. */

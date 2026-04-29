@@ -153,6 +153,11 @@ export function buildSelectionContextSection(sel: SelectionContext): string {
       ts: sel.ts,
       durationStr: sel.dur !== undefined ? `${(sel.dur / 1e6).toFixed(2)} ms` : '未知',
       sliceEnd: sel.dur !== undefined ? `${sel.ts}+${sel.dur}` : `${sel.ts}`,
+      name: sel.name ?? '(查询中...)',
+      threadName: sel.threadName ?? '未知',
+      processName: sel.processName ?? '未知',
+      depth: sel.depth ?? '未知',
+      childCount: sel.childCount ?? '未知',
     });
   }
 

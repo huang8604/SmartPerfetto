@@ -287,6 +287,20 @@ export interface AnalysisOptions {
    * - 'auto' or undefined: defer to queryComplexityClassifier
    */
   analysisMode?: 'fast' | 'full' | 'auto';
+
+  /**
+   * Pre-queried trace datasets from the frontend (populated by quick-action buttons).
+   * Injected into the AI prompt as Markdown tables so the AI can analyze immediately
+   * without spending turns on basic SQL queries.
+   */
+  traceContext?: TraceDataset[];
+}
+
+/** A pre-queried dataset sent from the frontend alongside the analysis request. */
+export interface TraceDataset {
+  label: string;
+  columns: string[];
+  rows: unknown[][];
 }
 
 // =============================================================================

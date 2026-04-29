@@ -135,6 +135,24 @@ function savePersistedSessionMapSync(map: Map<string, SessionMapEntry>): void {
 // P2-G1: ALLOWED_TOOLS is now auto-derived from createClaudeMcpServer() return value.
 // No longer hardcoded — adding a new MCP tool automatically includes it.
 
+/**
+ * Format pre-queried trace datasets as Markdown tables to prepend to the AI prompt.
+ * Mirrors smartperfetto's approach: data is ready upfront so the AI skips basic SQL turns.
+ */
+function formatTraceContext(datasets: import('../agent/core/orchestratorTypes').TraceDataset[]): string {
+  if (!datasets || datasets.length === 0) return '';
+  const parts = datasets.map((d) => {
+    const header = `| ${d.columns.join(' | ')} |`;
+    const sep = `| ${d.columns.map(() => '---').join(' | ')} |`;
+    const rows = (d.rows as unknown[][]).slice(0, 100).map(
+      (r) => `| ${r.map((v) => String(v ?? '—')).join(' | ')} |`,
+    );
+    const truncNote = d.rows.length > 100 ? `\n*(前 100 行，共 ${d.rows.length} 行)*` : '';
+    return `### ${d.label}\n${header}\n${sep}\n${rows.join('\n')}${truncNote}`;
+  });
+  return `## 前端预查询 Trace 数据\n\n以下数据已由前端查询完毕，直接使用，无需重复 SQL 查询：\n\n${parts.join('\n\n')}`;
+}
+
 /** Check if an error is retryable (API overload/server errors). */
 function isRetryableError(err: Error): boolean {
   const msg = err.message || '';
@@ -422,6 +440,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         if (selSection) {
           effectivePrompt = `${selSection}\n\n${query}`;
         }
+      }
+      // Prepend pre-queried trace data so the AI has all context without spending turns on SQL
+      if (options.traceContext && options.traceContext.length > 0) {
+        const traceSection = formatTraceContext(options.traceContext);
+        effectivePrompt = `${traceSection}\n\n${effectivePrompt}`;
       }
 
       const sdkEnv = createSdkEnv();
@@ -1342,8 +1365,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         : undefined;
       const sdkEnv = createSdkEnv();
 
+      // Prepend pre-queried trace data so the AI skips basic SQL turns in fast mode
+      let quickPrompt = query;
+      if (options.traceContext && options.traceContext.length > 0) {
+        quickPrompt = `${formatTraceContext(options.traceContext)}\n\n${query}`;
+      }
+
       const { stream, close: closeSdk } = sdkQueryWithRetry({
-        prompt: query,
+        prompt: quickPrompt,
         options: {
           model: quickConfig.model,
           maxTurns: quickConfig.maxTurns,
