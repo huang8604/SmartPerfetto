@@ -91,7 +91,7 @@ npm test
 
 ## Contributing Skills
 
-Skills are YAML-based analysis pipelines. See [Skill System Guide](docs/skill-system-guide.md) for the full DSL reference.
+Skills are YAML-based analysis pipelines. See [Skill System Guide](docs/reference/skill-system.md) for the full DSL reference.
 
 ```yaml
 # backend/skills/atomic/example_skill.skill.yaml
@@ -165,8 +165,9 @@ Scopes: skills, agentv3, frontend, strategies, ci
 ## Getting Help
 
 - Open an [Issue](https://github.com/Gracker/SmartPerfetto/issues) for bugs or feature requests
-- Check [Technical Architecture](docs/technical-architecture.md) for deep dives
-- Check [MCP Tools Reference](docs/mcp-tools-reference.md) for tool documentation
+- Start from the [Documentation Center](docs/README.md)
+- Check [Technical Architecture](docs/architecture/technical-architecture.md) for deep dives
+- Check [MCP Tools Reference](docs/reference/mcp-tools.md) for tool documentation
 
 ## Versioning
 

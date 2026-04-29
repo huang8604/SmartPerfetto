@@ -9,7 +9,7 @@
  * Persisted entries are versioned via `schemaVersion` so consumers can evolve
  * the structure without breaking older JSONL lines.
  *
- * See docs/self-improving-design.md §15 (Provenance) for the full schema.
+ * See docs/architecture/self-improving-design.md §15 (Provenance) for the full schema.
  */
 
 const MAX_COMMENT_CHARS = 500;

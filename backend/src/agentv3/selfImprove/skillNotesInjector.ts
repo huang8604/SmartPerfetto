@@ -12,7 +12,7 @@
  * the invoke_skill text content. The agent reads them as context but the
  * downstream JSON payload is unchanged.
  *
- * Budget rules per docs/self-improving-design.md §8:
+ * Budget rules per docs/architecture/self-improving-design.md §8:
  *   full path:    1500 tokens total / 200 per skill / once per (analysis, skill)
  *   quick path:   0 by default (env override SELF_IMPROVE_QUICK_NOTES_BUDGET ≤100)
  *   correction retry: 0 — never injected

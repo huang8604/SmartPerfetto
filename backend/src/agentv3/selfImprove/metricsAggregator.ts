@@ -13,7 +13,7 @@
  * so a single corrupt file doesn't take the dashboard down. The endpoint is
  * intentionally read-only — no side effects, no implicit migrations.
  *
- * See docs/self-improving-design.md §16 (testing strategy) — these counts
+ * See docs/architecture/self-improving-design.md §16 (testing strategy) — these counts
  * power both the dashboard and the trend regression suite.
  */
 

@@ -16,7 +16,7 @@
  * restores the old negative-pattern weight. This is the §12 design point
  * Codex flagged in Round 4: a green CI is not the same as a real fix.
  *
- * See docs/self-improving-design.md §12 (Supersede State Machine).
+ * See docs/architecture/self-improving-design.md §12 (Supersede State Machine).
  */
 
 import Database from 'better-sqlite3';

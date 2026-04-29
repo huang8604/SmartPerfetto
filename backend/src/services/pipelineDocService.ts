@@ -52,6 +52,7 @@ const PIPELINE_DOC_MAP: Record<string, string> = {
   ANDROID_VIEW_MIXED: 'android_view_mixed.md',
   ANDROID_VIEW_MULTI_WINDOW: 'android_view_multi_window.md',
   ANDROID_PIP_FREEFORM: 'android_pip_freeform.md',
+  COMPOSE_STANDARD: 'compose_standard.md',
   SURFACEVIEW_BLAST: 'surfaceview.md',
   TEXTUREVIEW_STANDARD: 'textureview.md',
   SURFACE_CONTROL_API: 'surface_control_api.md',
@@ -65,11 +66,14 @@ const PIPELINE_DOC_MAP: Record<string, string> = {
   WEBVIEW_SURFACE_CONTROL: 'webview_surface_control.md',
   WEBVIEW_SURFACEVIEW_WRAPPER: 'webview_surfaceview_wrapper.md',
   WEBVIEW_TEXTUREVIEW_CUSTOM: 'webview_textureview_custom.md',
+  CHROME_BROWSER_VIZ: 'chrome_browser_viz.md',
   GAME_ENGINE: 'game_engine.md',
+  IMAGEREADER_PIPELINE: 'imagereader_pipeline.md',
   CAMERA_PIPELINE: 'camera_pipeline.md',
   VIDEO_OVERLAY_HWC: 'video_overlay_hwc.md',
   HARDWARE_BUFFER_RENDERER: 'hardware_buffer_renderer.md',
   VARIABLE_REFRESH_RATE: 'variable_refresh_rate.md',
+  SOFTWARE_COMPOSITING: 'software_compositing.md',
 };
 
 export class PipelineDocService {
@@ -77,10 +81,12 @@ export class PipelineDocService {
   private cache: Map<string, PipelineTeachingContent> = new Map();
 
   constructor(docsDir?: string) {
-    // Default to rendering_pipelines directory relative to project root
+    // Default to docs/rendering_pipelines directory relative to project root.
+    // These markdown files are part of the public docs and are also used as
+    // runtime teaching content by pipeline analysis.
     this.docsDir =
       docsDir ||
-      path.join(__dirname, '..', '..', '..', 'rendering_pipelines');
+      path.join(__dirname, '..', '..', '..', 'docs', 'rendering_pipelines');
   }
 
   /**

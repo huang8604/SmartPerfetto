@@ -14,7 +14,7 @@
  * Writes are atomic (tmp + rename) so a partial write never leaves a
  * corrupt notes file that breaks the next invoke_skill injection.
  *
- * See docs/self-improving-design.md §9 (Trust Boundary), §13.
+ * See docs/architecture/self-improving-design.md §9 (Trust Boundary), §13.
  */
 
 import * as fs from 'fs';

@@ -122,4 +122,4 @@ cp backend/.env.example backend/.env
 # Backend @ :3000, Frontend @ :10000
 ```
 
-For detailed technical documentation, see [docs/technical-architecture.md](technical-architecture.md).
+For detailed technical documentation, see [Technical Architecture](../architecture/technical-architecture.md).

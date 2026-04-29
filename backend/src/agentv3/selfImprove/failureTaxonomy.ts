@@ -16,7 +16,7 @@
  * invent. Unknown failure modes default to `unknown` and never trigger
  * supersede actions in PR9.
  *
- * See docs/self-improving-design.md §3 (Failure Taxonomy).
+ * See docs/architecture/self-improving-design.md §3 (Failure Taxonomy).
  */
 
 import { createHash } from 'crypto';

@@ -25,7 +25,7 @@
  * version of its scene's strategy + phase_hints — `invalidateStrategyCache()`
  * must never half-update an analysis mid-flight.
  *
- * See docs/self-improving-design.md §11 (Strategy Version Fingerprint).
+ * See docs/architecture/self-improving-design.md §11 (Strategy Version Fingerprint).
  */
 
 import { createHash } from 'crypto';

@@ -6,7 +6,7 @@
  * Pre-rot token meter for v2.1 Phase 3-1.
  *
  * The Claude Agent SDK does not let user code push a recovery message
- * mid-stream (see `docs/sdk-capability-spike-2026-04-28.md`). The
+ * mid-stream (see `docs/archive/context-engineering/sdk-capability-spike-2026-04-28.md`). The
  * fallback is to monitor the *uncached* portion of the running
  * conversation and trip a threshold *before* the SDK runs out of
  * context, so the orchestrator can `interrupt()` and start a fresh

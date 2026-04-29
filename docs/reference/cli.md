@@ -439,7 +439,7 @@ CLI 写入跨三个存储位置（`~/.smartperfetto/sessions/<id>/` + `backend/d
 
 ## 8. 参考
 
-- Plan：[内部 plan 文件](../backend/.context/plans/) 或提交记录里的 feat(cli) 系列
+- Plan：历史内部 plan 已不随开源仓库发布，可参考提交记录里的 `feat(cli)` 系列
 - E2E 验证过程：见提交 `525f9942` commit message 和 PR 描述
 - 上游 agentv3 架构：`.claude/rules/backend.md` 里的模块索引
 - git push 规则：`.claude/rules/git.md`（perfetto 子模块 fork 规则仍适用）

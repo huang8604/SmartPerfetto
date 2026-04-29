@@ -1,6 +1,6 @@
 # 从 Trace 到洞察：SmartPerfetto AI Agent 的 Harness Engineering 实战
 
-![SmartPerfetto Cover](images/00-cover.png)
+![SmartPerfetto Cover](../images/00-cover.png)
 
 > 这篇文章记录了 SmartPerfetto 从零到可用过程中的关键技术决策——为什么选这个方案而不是那个，哪些地方踩了坑，踩完之后怎么调整的。
 
@@ -75,7 +75,7 @@ lookup_knowledge("rendering-pipeline")  → 加载渲染管线参考资料
 
 下图展示了一次完整分析的请求生命周期——从用户输入到最终结论的每一步：
 
-![请求生命周期](images/02-data-flow.png)
+![请求生命周期](../images/02-data-flow.png)
 
 两条路径的分析步骤相同——查帧数据 → 定位 jank → 追踪阻塞链 → 关联系统状态 → 归纳结论。
 
@@ -89,11 +89,11 @@ Agent 的分析结果同时落地到 Perfetto UI 上：
 
 **运行截图：以 SmartPerfetto 前端以 Perfetto 插件的形式存在**
 
-![all.png](./images/image-20260330000546934.png)
+![all.png](../images/image-20260330000546934.png)
 
 **运行截图：滑动分析的时候详细分析每一个掉帧的地方， 点击最左边那个剪头可以展开**
 
-![jank detection](./images/jank.png)
+![jank detection](../images/jank.png)
 
 **运行截图：滑动分析结论**
 
@@ -101,11 +101,11 @@ Agent 的分析结果同时落地到 Perfetto UI 上：
 
 **运行截图：滑动分析结论，代表帧分析**
 
-![jank1](./images/jank1.png)
+![jank1](../images/jank1.png)
 
 **运行截图：滑动分析结论，代表帧分析**
 
-![jank2](./images/jank2.png)
+![jank2](../images/jank2.png)
 
 **运行截图：每一轮分析都有单独的分析 report，内容与前端显示的一致（更详细一些）**
 
@@ -189,7 +189,7 @@ LLM 做推理和表达，工具做查询和计算。连接两者的是 MCP（Mod
 
 下图是完整的系统架构，展示了从用户请求到分析结论的 4 个阶段：
 
-![系统架构总览](images/01-architecture-overview.png)
+![系统架构总览](../images/01-architecture-overview.png)
 
 ---
 
@@ -890,7 +890,7 @@ stdlib 视图作者经常会用领域前缀的列名来避开多表 JOIN 时的 
 
 下图汇总了 SmartPerfetto 的 Harness Engineering 全景——从输入路由到跨会话学习：
 
-![Harness Engineering 全景](images/03-eleven-layers.png)
+![Harness Engineering 全景](../images/03-eleven-layers.png)
 
 ## 结语
 

@@ -18,7 +18,7 @@
  *      so they can run heavier downstream checks (regression, e2e) before
  *      pushing the branch.
  *
- * See docs/self-improving-design.md §13.2 (Worktree isolation), §13 (PR9c).
+ * See docs/architecture/self-improving-design.md §13.2 (Worktree isolation), §13 (PR9c).
  */
 
 import * as path from 'path';

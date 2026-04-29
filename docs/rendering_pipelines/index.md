@@ -38,10 +38,15 @@
 | **SurfaceView** | SurfaceView/EGL | Dedicated Thread | SurfaceFlinger | 独立 Surface，减少 App 侧合成 | `scrolling-aosp-purerenderthread` |
 | **TextureView** | SurfaceTexture | Dedicated Thread | App RenderThread | 灵活性高，但有多余拷贝/同步 | `scrolling-webview-texture` |
 | **OpenGL ES** | EGL/GLES | GL Thread | SurfaceFlinger | 高频指令流，适合地图/游戏 | `scrolling-gl-map` |
+| **Jetpack Compose** | Compose + HWUI | Main + RenderThread | SurfaceFlinger | Recomposition / Layout / DisplayList 驱动 | `pipeline_compose_standard` |
+| **Chrome Browser Viz** | Chromium Viz | Renderer + Viz/GPU | SurfaceFlinger | 独立 Chrome 多进程合成 | `pipeline_chrome_browser_viz` |
+| **ImageReader** | BufferQueue consumer | Camera/GPU/Codec | App ImageReader | 帧获取、ML、录制、二次处理 | `pipeline_imagereader_pipeline` |
+| **Software Compositing** | SurfaceFlinger client composition | App producers | SurfaceFlinger CPU | HWC/GPU 不可用时的降级路径 | `pipeline_software_compositing` |
 
 ## 详细链路文档
 
 - [Android View (Standard) Pipeline](android_view_standard.md)
+- **[Jetpack Compose Standard Pipeline](compose_standard.md)**: Compose + HWUI 标准链路，重点关注 Recomposition、Layout 和 RenderThread 交界。
 - **[Android View (Multi-Window) Pipeline](android_view_multi_window.md)**: 同一进程内双窗口（如 Dialog）导致的主线程/渲染线程串行争抢。
 - [Android View (Software) Pipeline](android_view_software.md)
 - **[Android View (Mixed) Pipeline](android_view_mixed.md)**: **[NEW]** 混合渲染模式 (Hybrid Composition)。
@@ -59,6 +64,9 @@
 - **[Hardware Buffer Renderer](hardware_buffer_renderer.md)**: **[NEW]** Android 14+ 现代软件渲染 API。
 - **[ANGLE (GLES-over-Vulkan)](angle_gles_vulkan.md)**: **[NEW]** OpenGL ES 到 Vulkan 翻译层。
 - **[Variable Refresh Rate (VRR)](variable_refresh_rate.md)**: **[NEW]** 动态刷新率渲染管线。
+- **[Chrome Browser Viz Pipeline](chrome_browser_viz.md)**: 独立 Chrome Browser / Renderer / GPU-Viz 多进程渲染。
+- **[ImageReader Pipeline](imagereader_pipeline.md)**: ImageReader 作为 BufferQueue consumer 获取帧，用于 ML、录制、后处理等场景。
+- **[Software Compositing Pipeline](software_compositing.md)**: SurfaceFlinger client composition / CPU 合成回退路径。
 
 ## WebView Rendering Deep Dive
 

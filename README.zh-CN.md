@@ -218,9 +218,12 @@ npm run test:core
 
 ## 文档
 
-- [技术架构](docs/technical-architecture.md)
-- [MCP 工具参考](docs/mcp-tools-reference.md)
-- [Skill 系统指南](docs/skill-system-guide.md)
+- [文档中心](docs/README.md)
+- [快速开始](docs/getting-started/quick-start.md)
+- [架构总览](docs/architecture/overview.md)
+- [API 参考](docs/reference/api.md)
+- [MCP 工具参考](docs/reference/mcp-tools.md)
+- [Skill 系统指南](docs/reference/skill-system.md)
 - [数据合约](backend/docs/DATA_CONTRACT_DESIGN.md)
 - [渲染管线参考](docs/rendering_pipelines/)
 - [安全策略](SECURITY.md)

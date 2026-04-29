@@ -1,6 +1,6 @@
 # SmartPerfetto 架构文章 Q&A
 
-> 这篇文章收集了[《从 Trace 到洞察：SmartPerfetto AI Agent 的 Harness Engineering 实战》](./architecture-deep-dive.md)发布后收到的技术问题，以问答形式展开讨论。
+> 这篇文章收集了[《从 Trace 到洞察：SmartPerfetto AI Agent 的 Harness Engineering 实战》](./deep-dive.md)发布后收到的技术问题，以问答形式展开讨论。
 
 ---
 

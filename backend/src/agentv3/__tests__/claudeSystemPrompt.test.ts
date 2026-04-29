@@ -330,7 +330,7 @@ describe('buildSystemPrompt', () => {
    * Phase 1.4 of v2.1 — protect the implicit prompt cache.
    *
    * The Claude Agent SDK does not expose `cache_control` (see
-   * `docs/sdk-capability-spike-2026-04-28.md`), so the only lever we have
+   * `docs/archive/context-engineering/sdk-capability-spike-2026-04-28.md`), so the only lever we have
    * over caching is making sure the prompt bytes themselves are stable
    * across turns. These tests catch silent regressions where a timestamp,
    * Date.now() call, or non-determinism quietly leaks into the prompt.

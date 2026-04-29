@@ -14,7 +14,7 @@
  * `withWorktree(opts, fn)` is the recommended entry — it guarantees cleanup
  * via try/finally even if `fn` throws.
  *
- * See docs/self-improving-design.md §13.2 (Worktree isolation).
+ * See docs/architecture/self-improving-design.md §13.2 (Worktree isolation).
  */
 
 import { execFile as execFileCb } from 'child_process';

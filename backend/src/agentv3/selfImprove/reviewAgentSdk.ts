@@ -11,7 +11,7 @@
  * must respond with strict JSON matching ReviewAgentNoteEmission. Anything
  * else is rejected upstream by skillNotesWriter and the job is failed.
  *
- * See docs/self-improving-design.md §9 (Trust Boundary), §10 (Worker Limits).
+ * See docs/architecture/self-improving-design.md §9 (Trust Boundary), §10 (Worker Limits).
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';

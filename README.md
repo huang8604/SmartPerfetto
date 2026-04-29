@@ -219,9 +219,12 @@ Do not hardcode prompt content in TypeScript. Put scene logic in `backend/strate
 
 ## Documentation
 
-- [Technical Architecture](docs/technical-architecture.md)
-- [MCP Tools Reference](docs/mcp-tools-reference.md)
-- [Skill System Guide](docs/skill-system-guide.md)
+- [Documentation Center](docs/README.md)
+- [Quick Start](docs/getting-started/quick-start.md)
+- [Architecture Overview](docs/architecture/overview.md)
+- [API Reference](docs/reference/api.md)
+- [MCP Tools Reference](docs/reference/mcp-tools.md)
+- [Skill System Guide](docs/reference/skill-system.md)
 - [Data Contract](backend/docs/DATA_CONTRACT_DESIGN.md)
 - [Rendering Pipeline References](docs/rendering_pipelines/)
 - [Security Policy](SECURITY.md)
