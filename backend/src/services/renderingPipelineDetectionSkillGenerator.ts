@@ -745,6 +745,289 @@ function buildActiveRenderingProcessesSql(): string {
     `;
 }
 
+// =============================================================================
+// Phase B: Article-grounded 4-feature signal extractors
+// =============================================================================
+// Adds three orthogonal output channels that the LLM Agent and downstream skills
+// can consume for article-grounded diagnosis (S01 §4 特征分型 + 12 锚点).
+// These SQL builders are PURELY ADDITIVE — they don't modify the primary scoring
+// in buildDeterminePipelineSql, so existing canonical regression remains stable.
+// =============================================================================
+
+/**
+ * S01 §4 特征分型 [feature 2: layer count]
+ * Queries SurfaceFlinger-side layer information for the dominant App.
+ *
+ * Layer count is the article's decisive signal:
+ * - Standard HWUI / Compose / TextureView: 1 layer (host window only)
+ * - SurfaceView / Mixed (with SV) / Multi-window: ≥2 layers
+ * - WebView Functor / TextureView Custom: 0 independent layer (回宿主)
+ * - WebView SurfaceControl: N overlay candidates
+ */
+function buildLayerSignalsSql(): string {
+  return `
+      WITH
+      dominant_process AS (
+        SELECT
+          p.upid,
+          p.name as process_name,
+          COUNT(*) as render_cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name IS NOT NULL
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+          AND s.name IS NOT NULL
+          AND (
+            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+            OR (s.name GLOB '*Choreographer#doFrame*')
+            OR (s.name GLOB '*eglSwapBuffers*')
+            OR (s.name GLOB '*vkQueuePresentKHR*')
+            OR (s.name GLOB '*FrameTimeline*')
+          )
+        GROUP BY p.upid
+        HAVING COUNT(*) > 5
+        ORDER BY render_cnt DESC
+        LIMIT 1
+      ),
+      dominant_pkg AS (
+        SELECT
+          CASE
+            WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+            ELSE process_name
+          END as pkg
+        FROM dominant_process
+      ),
+      app_layers AS (
+        -- FrameTimeline 提供 layer_name 维度（Android 12+）
+        SELECT DISTINCT layer_name
+        FROM actual_frame_timeline_slice
+        WHERE layer_name IS NOT NULL
+          AND (
+            ('\${package}' <> '' AND layer_name GLOB '*' || '\${package}' || '*')
+            OR ('\${package}' = '' AND layer_name GLOB '*' || (SELECT pkg FROM dominant_pkg) || '*')
+          )
+      )
+      SELECT
+        COALESCE((SELECT COUNT(*) FROM app_layers), 0) as app_layer_count,
+        COALESCE((SELECT GROUP_CONCAT(layer_name, '; ') FROM app_layers), '') as app_layer_names,
+        CASE
+          WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*SurfaceView*' OR layer_name GLOB 'SurfaceView*') > 0 THEN 1
+          ELSE 0
+        END as has_surfaceview_layer,
+        CASE
+          WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*video*' OR layer_name GLOB '*Video*' OR layer_name GLOB '*MediaCodec*') > 0 THEN 1
+          ELSE 0
+        END as has_video_layer,
+        CASE
+          WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*io.flutter*' OR layer_name GLOB '*Flutter*') > 0 THEN 1
+          ELSE 0
+        END as has_flutter_layer,
+        CASE
+          WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*Camera*' OR layer_name GLOB '*camera*') > 0 THEN 1
+          ELSE 0
+        END as has_camera_layer
+    `;
+}
+
+/**
+ * S01 §4 特征分型 [feature 4: extra rhythm sources]
+ * Detects non-vsync-app rhythm sources in the App scope:
+ * - Swappy/SwappyVk frame pacing
+ * - AChoreographer (NDK Choreographer)
+ * - setFrameRate / setFrameRateCategory APIs
+ * - Camera HAL sensor trigger
+ * - MediaCodec codec pacing
+ * - Game engine main loop
+ *
+ * Used by LLM Agent to know whether the App relies on vsync-app or has its own rhythm.
+ */
+function buildExtraRhythmSignalsSql(): string {
+  return `
+      WITH
+      dominant_process AS (
+        SELECT
+          p.upid,
+          p.name as process_name,
+          COUNT(*) as render_cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name IS NOT NULL
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+          AND s.name IS NOT NULL
+          AND (
+            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+            OR (s.name GLOB '*Choreographer#doFrame*')
+            OR (s.name GLOB '*eglSwapBuffers*')
+            OR (s.name GLOB '*vkQueuePresentKHR*')
+          )
+        GROUP BY p.upid
+        HAVING COUNT(*) > 5
+        ORDER BY render_cnt DESC
+        LIMIT 1
+      ),
+      dominant_pkg AS (
+        SELECT
+          CASE
+            WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+            ELSE process_name
+          END as pkg
+        FROM dominant_process
+      ),
+      app_filter_upids AS (
+        SELECT p.upid
+        FROM process p
+        WHERE '\${package}' <> '' AND p.name GLOB '\${package}*'
+        UNION
+        SELECT p.upid
+        FROM process p
+        JOIN dominant_pkg dp
+        WHERE '\${package}' = ''
+          AND dp.pkg IS NOT NULL
+          AND p.name GLOB dp.pkg || '*'
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+      ),
+      app_slices AS (
+        SELECT s.name as slice_name, COUNT(*) as cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE s.name IS NOT NULL
+          AND p.upid IN (SELECT upid FROM app_filter_upids)
+        GROUP BY s.name
+      )
+      SELECT
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*Swappy*'), 0) as swappy_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*SwappyVk_*'), 0) as swappy_vk_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*AChoreographer*'), 0) as achoreographer_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*setFrameRate*'), 0) as set_frame_rate_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*setFrameRateCategory*'), 0) as set_frame_rate_category_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*PlayerLoop*' OR slice_name GLOB '*FEngineLoop*' OR slice_name GLOB '*MainLoop*'), 0) as engine_main_loop_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*' OR slice_name GLOB '*processCaptureResult*'), 0) as camera_capture_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*releaseOutputBuffer*' OR slice_name GLOB '*MediaCodec*'), 0) as mediacodec_pacing_count,
+        CASE
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*Swappy*' OR slice_name GLOB '*SwappyVk_*'), 0) > 0 THEN 'swappy_pacing'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*AChoreographer*'), 0) > 0 THEN 'achoreographer'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*PlayerLoop*' OR slice_name GLOB '*FEngineLoop*' OR slice_name GLOB '*MainLoop*'), 0) > 0 THEN 'engine_main_loop'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*'), 0) > 0 THEN 'camera_sensor_trigger'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*releaseOutputBuffer*'), 0) > 0 THEN 'video_codec_pacing'
+          ELSE 'vsync_app_only'
+        END as primary_rhythm_source
+    `;
+}
+
+/**
+ * S01 §4 特征分型 [feature 3: queueBuffer path]
+ * Distinguishes the BufferQueue path:
+ * - BBQ_TRANSACTION_INPROC (BLAST: applyTransaction + BLASTBufferQueue both present)
+ * - BUFFERQUEUE_INPROC (Legacy: queueBuffer present BUT no BLAST signals)
+ * - HOST_RESAMPLE (TextureView: updateTexImage on RenderThread + SurfaceTexture)
+ * - ACQUIRE_FENCE_NONE_INPROC (Software: lockCanvas/unlockCanvasAndPost)
+ * - SURFACECONTROL_TRANSACTION_DIRECT (NDK: ASurfaceTransaction without BLAST)
+ *
+ * Used by LLM Agent to know which buffer path the trace exhibits, regardless of
+ * which primary pipeline got selected by detection scoring.
+ */
+function buildBufferqueuePathSignalsSql(): string {
+  return `
+      WITH
+      dominant_process AS (
+        SELECT
+          p.upid,
+          p.name as process_name,
+          COUNT(*) as render_cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name IS NOT NULL
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+          AND s.name IS NOT NULL
+          AND (
+            (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+            OR (s.name GLOB '*Choreographer#doFrame*')
+            OR (s.name GLOB '*eglSwapBuffers*')
+            OR (s.name GLOB '*vkQueuePresentKHR*')
+          )
+        GROUP BY p.upid
+        HAVING COUNT(*) > 5
+        ORDER BY render_cnt DESC
+        LIMIT 1
+      ),
+      dominant_pkg AS (
+        SELECT
+          CASE
+            WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+            ELSE process_name
+          END as pkg
+        FROM dominant_process
+      ),
+      app_filter_upids AS (
+        SELECT p.upid
+        FROM process p
+        WHERE '\${package}' <> '' AND p.name GLOB '\${package}*'
+        UNION
+        SELECT p.upid
+        FROM process p
+        JOIN dominant_pkg dp
+        WHERE '\${package}' = ''
+          AND dp.pkg IS NOT NULL
+          AND p.name GLOB dp.pkg || '*'
+          AND p.name NOT LIKE 'com.android.systemui%'
+          AND p.name NOT LIKE 'system_server%'
+          AND p.name NOT LIKE '/system/%'
+      ),
+      app_slices AS (
+        SELECT s.name as slice_name, COUNT(*) as cnt
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE s.name IS NOT NULL
+          AND p.upid IN (SELECT upid FROM app_filter_upids)
+        GROUP BY s.name
+      )
+      SELECT
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) as blast_bq_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) as apply_transaction_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*queueBuffer*'), 0) as queue_buffer_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*updateTexImage*'), 0) as update_tex_image_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*lockCanvas*'), 0) as lock_canvas_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*unlockCanvasAndPost*'), 0) as unlock_canvas_post_count,
+        COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*ASurfaceTransaction*'), 0) as asurface_transaction_count,
+        CASE
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) > 0
+               AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) > 0
+            THEN 'BBQ_TRANSACTION_INPROC'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*ASurfaceTransaction*'), 0) > 0
+               AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+            THEN 'SURFACECONTROL_TRANSACTION_DIRECT'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*updateTexImage*'), 0) > 0
+            THEN 'HOST_RESAMPLE'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*lockCanvas*' OR slice_name GLOB '*unlockCanvasAndPost*'), 0) > 0
+               AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+            THEN 'ACQUIRE_FENCE_NONE_INPROC'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*queueBuffer*'), 0) > 0
+               AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+               AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) = 0
+            THEN 'BUFFERQUEUE_INPROC'
+          ELSE 'UNKNOWN'
+        END as bufferqueue_path
+    `;
+}
+
 export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDefinition> {
   await ensurePipelineSkillsInitialized();
 
@@ -757,6 +1040,10 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
   const subvariantsSql = buildSubvariantsSql();
   const traceRequirementsSql = buildTraceRequirementsSql();
   const activeProcessesSql = buildActiveRenderingProcessesSql();
+  // Phase B: 4-feature 分型新增 SQL（layer 数 / 额外节奏 / bufferqueue 路径）
+  const layerSignalsSql = buildLayerSignalsSql();
+  const extraRhythmSignalsSql = buildExtraRhythmSignalsSql();
+  const bufferqueuePathSignalsSql = buildBufferqueuePathSignalsSql();
 
   return {
     name: 'rendering_pipeline_detection',
@@ -826,6 +1113,40 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         sql: activeProcessesSql,
         save_as: 'active_rendering_processes',
       },
+      // ----- Phase B: Article-grounded 4 特征分型扩展 -----
+      {
+        id: 'layer_signals',
+        type: 'atomic',
+        name: 'SF Layer 数与名字模式 (S01 §4 特征分型 - feature 2)',
+        display: {
+          level: 'detail',
+          title: 'Layer 信号',
+        },
+        sql: layerSignalsSql,
+        save_as: 'layer_signals',
+      },
+      {
+        id: 'extra_rhythm_signals',
+        type: 'atomic',
+        name: '额外节奏源 (S01 §4 特征分型 - feature 4)',
+        display: {
+          level: 'detail',
+          title: '额外节奏源',
+        },
+        sql: extraRhythmSignalsSql,
+        save_as: 'extra_rhythm_signals',
+      },
+      {
+        id: 'bufferqueue_path_signals',
+        type: 'atomic',
+        name: 'BufferQueue 路径分型 (S01 §4 特征分型 - feature 3)',
+        display: {
+          level: 'detail',
+          title: 'BufferQueue 路径',
+        },
+        sql: bufferqueuePathSignalsSql,
+        save_as: 'bufferqueue_path_signals',
+      },
       {
         id: 'pipeline_bundle',
         type: 'pipeline',
@@ -847,6 +1168,10 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         { name: 'subvariants', label: '子变体信息' },
         { name: 'trace_requirements', label: '采集完整性检查' },
         { name: 'active_rendering_processes', label: '活跃渲染进程列表 (用于智能 Pin)' },
+        // Phase B: 4 特征分型扩展（用于 LLM Agent 与下游 skill 引用）
+        { name: 'layer_signals', label: 'Layer 信号 (SF 侧 layer 数与命名模式)' },
+        { name: 'extra_rhythm_signals', label: '额外节奏源 (Swappy/AChoreographer/Camera/Codec)' },
+        { name: 'bufferqueue_path_signals', label: 'BufferQueue 路径分型' },
         { name: 'pipeline_bundle', label: '渲染管线教学聚合结果' },
       ],
     },
