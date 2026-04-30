@@ -21,6 +21,28 @@ meta:
   icon: "window"
   family: hwui
   doc_path: "rendering_pipelines/android_view_multi_window.md"
+  # ----- Article-grounded signature (S06) -----
+  s_article_ref: "S06"
+  four_features:
+    producer_threads: ["main", "RenderThread"]   # 同进程多窗口共享单 RenderThread（进程级单例）
+    expected_layer_count: 2   # 主窗口 + 1+ 辅助（Dialog/PopupWindow/Activity Embedding 等）
+    bufferqueue_path: "BBQ_TRANSACTION_INPROC_MULTIPLE"   # 各窗口各自 BBQ
+    extra_rhythm_sources: []   # 同进程共享一条 vsync-app
+  deviation_anchors: "serialized_multi_viewroot_anchor_2_3_4_5"
+  # 锚点偏离：同一 doFrame 内多个 ViewRootImpl 的 ②③④⑤ 串行执行（callback 注册顺序决定）。
+  # 跨进程多窗口形态（split-screen/PiP/freeform）则是各进程独立 ①-⑥，⑧ SF 多 layer latch。
+  non_primary_note: |
+    此 pipeline ID 已在代码 NON_PRIMARY_PIPELINE_IDS（renderingPipelineDetectionSkillGenerator.ts:23）
+    中注册，不会被选为 primary，只会出现在 features list。
+  subvariants_note: |
+    文章 S06 严格区分（按窗口形态 + 进程拓扑两条轴）：
+    - MULTI_WINDOW_SAME_PROCESS（Dialog/PopupWindow/同 App 多 Activity/Activity Embedding）— 当前 ID 主要覆盖
+    - MULTI_WINDOW_SPLIT_SCREEN（分屏，通常跨进程）
+    - MULTI_WINDOW_PIP（Picture in Picture）
+    - MULTI_WINDOW_FREEFORM（自由窗口/桌面模式）
+    Phase E 拆分独立 ID。
+    决定性信号（同进程）：trace 同一 main thread 看到多次 performTraversals。
+    YAML 当前不支持"同 doFrame 内多次出现"语义，留 Phase B 主决策树用 SQL 时间窗口分组实现。
 
 detection:
   required_signals:
@@ -39,6 +61,10 @@ detection:
     - signal: has_draw_frame
       slice_pattern: "DrawFrame*"
       weight: 20
+    - signal: has_perform_traversals_multi
+      slice_pattern: "*performTraversals*"
+      weight: 12
+      min_count: 2   # 至少 2 次以区分单窗口与多窗口（同 doFrame 多次的精确判断留 Phase B）
 
 teaching:
   title: "Android View 多窗口渲染管线"
@@ -206,6 +232,39 @@ analysis:
       name: "RenderThread 串行化"
       description: "多窗口导致 RenderThread 工作量翻倍"
       detection_skill: render_thread_slices
+
+    # ----- Article-grounded issues (S06) -----
+    - id: traversal_callback_serialization
+      name: "performTraversals callback 串行竞争"
+      description: |
+        同一 doFrame 内多个 ViewRootImpl 的 performTraversals 在 main thread 串行执行
+        （注册顺序决定先后）。一个窗口 TRAVERSAL 变长会直接挤掉另一个窗口本帧的预算。
+        S06 §"同进程场景：多个 ViewRootImpl 在同一个 doFrame() 里串行执行"。
+      detection_skill: app_frame_production
+
+    - id: drawframe_serialization_on_renderthread
+      name: "RenderThread 进程级单例下 DrawFrame 串行排队"
+      description: |
+        HWUI RenderThread 是进程级单例（RenderThread::getInstance()），
+        同一进程所有窗口的 HardwareRenderer 都向同一个 RenderThread 投递任务。
+        多窗口 DrawFrame slice 在 RenderThread 上串行排队，主窗口滚动 + Dialog 动画同时发生时
+        哪一个先开始画对这一帧结果有影响。
+      detection_skill: render_thread_slices
+
+    - id: geometry_visibility_change_late
+      name: "窗口几何/可见性变化与 buffer 更新不同帧生效"
+      description: |
+        窗口大小/位置/可见性/裁剪通过 SurfaceControl.Transaction 进入系统。
+        SurfaceSyncGroup（API 34+）/ sync transaction 能让几何与 buffer 同帧生效，
+        但应用还没 draw / fence 未 ready / 跨进程 Producer 节奏不可控时，目标帧仍可能错过。
+      detection_skill: sf_composition_in_range
+
+    - id: same_process_callback_order_dependency
+      name: "callback 注册顺序决定窗口先后"
+      description: |
+        Choreographer.doFrame() 按 callback 注册顺序依次执行 pending callbacks——
+        先注册的窗口先执行，后注册的被挤后。Dialog 弹出时机不同会改变后续帧的 callback 顺序。
+      detection_skill: app_frame_production
 
   recommended_skills:
     - render_thread_slices

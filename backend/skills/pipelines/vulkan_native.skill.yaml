@@ -21,6 +21,22 @@ meta:
   icon: "vulkan"
   family: graphics
   doc_path: "rendering_pipelines/vulkan_native.md"
+  # ----- Article-grounded signature (S08) -----
+  s_article_ref: "S08"
+  four_features:
+    producer_threads: ["graphics queue thread", "presentation queue thread"]   # Vulkan 显式 swapchain
+    optional_producer_threads: ["VkQueue*", "*Vulkan*", "RenderThread", "engine threads"]
+    expected_layer_count: 1
+    bufferqueue_path: "ANATIVEWINDOW_VULKAN_SWAPCHAIN"
+    # ↑ Vulkan: vkAcquireNextImageKHR 拿 image → command buffer → vkQueueSubmit → vkQueuePresentKHR
+    extra_rhythm_sources: ["app_render_loop", "swappy_pacing"]
+  deviation_anchors: "explicit_swapchain_anchor_4_5_6_no_view_root"
+  # 锚点偏离：与 OpenGL ES 类似但显式 swapchain；
+  # ④ vkAcquireNextImageKHR / ⑤ vkCmdDraw* + vkQueueSubmit / ⑥ vkQueuePresentKHR；
+  # release fence 由 HWC 返回决定 Producer 下次 dequeue 是否能获得可写 image slot。
+  subvariants_note: |
+    文章 S08 列出 GameActivity 现代替代品（替代 NativeActivity）。
+    Swappy 介入路径：SwappyVk_queuePresent 替代直接 vkQueuePresentKHR，提供 frame pacing。
 
 detection:
   # Required: vkQueuePresentKHR is the definitive Vulkan frame submission
@@ -165,6 +181,35 @@ analysis:
       description: "vkQueueSubmit 或 vkQueuePresentKHR 等待过长"
       detection_skill: gpu_analysis
 
+    # ----- Article-grounded issues (S08) -----
+    - id: vk_acquire_next_image_blocked_by_release_fence
+      name: "vkAcquireNextImageKHR 长等不是 GPU 慢"
+      description: |
+        vkAcquireNextImageKHR 长等的常见原因：上游消费慢导致 release fence 晚回，或 swapchain image 都用完。
+        不是 GPU 渲染慢——是 Producer 拿不到可写 image slot。S08 §"vkAcquireNextImageKHR 长等"。
+      detection_skill: present_fence_timing
+
+    - id: pipeline_creation_jank
+      name: "vkCreateGraphicsPipelines 首次创建卡顿"
+      description: |
+        Vulkan pipeline 首次创建（含 shader 编译、PSO 状态预生成）成本高。
+        若运行时按需创建会引入首帧/首场景卡顿。建议预热（pipeline cache）或离线编译。
+      detection_skill: jank_frame_detail
+
+    - id: swappy_pacing_alignment_wait
+      name: "Swappy/SwappyVk frame pacing 对齐等待"
+      description: |
+        启用 SwappyVk_queuePresent 时若帧超 budget，会被强制推迟到下个 vsync——这是设计行为。
+        超 budget 频繁会让有效帧率从 60→30/45。
+      detection_skill: vsync_phase_alignment
+
+    - id: pre_rotation_missing
+      name: "未处理 pre-rotation 触发系统侧补旋转"
+      description: |
+        App 责任处理 pre-rotation。未处理时系统补旋转引入延迟（横竖屏切换、外接显示场景明显）。
+      detection_skill: gpu_render_in_range
+
   recommended_skills:
     - gpu_analysis
     - gpu_metrics
+    - present_fence_timing

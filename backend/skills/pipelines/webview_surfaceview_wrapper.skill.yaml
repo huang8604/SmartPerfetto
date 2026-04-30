@@ -21,6 +21,18 @@ meta:
   icon: "video"
   family: webview
   doc_path: "rendering_pipelines/webview_surfaceview_wrapper.md"
+  # ----- Article-grounded signature (S09 + S12) -----
+  s_article_ref: "S09"
+  four_features:
+    producer_threads: ["MediaCodec*", "media.codec", "media.swcodec", "CrRendererMain"]
+    expected_layer_count: 1   # 视频独立 SurfaceView layer
+    bufferqueue_path: "MEDIACODEC_TO_INDEPENDENT_SURFACE"   # 视频解码 → 独立 Surface BufferQueue → SF
+    extra_rhythm_sources: ["video_codec_pacing"]
+  deviation_anchors: "video_independent_surface_anchor_4_5_6_at_codec"
+  # 锚点偏离：网页全屏视频时由 MediaCodec 直接解码到独立 SurfaceView 的 BufferQueue（同 S12 video overlay）。
+  # CrRendererMain 主要管视频外壳 UI（控制条/字幕/手势）。
+  related_pipeline: "全屏视频部分等价于 VIDEO_OVERLAY_HWC（S12），与之配合使用"
+  subvariants_note: "文章 S09 列出的 5 种 WebView 路径之一（参 webview_gl_functor 注释）。"
 
 detection:
   scoring_signals:
@@ -156,6 +168,29 @@ auto_pin:
       main_thread_only: true
 
 analysis:
+  common_issues:
+    # ----- Article-grounded issues (S09 + S12) -----
+    - id: codec_underflow
+      name: "MediaCodec output buffer 不足"
+      description: |
+        MediaCodec releaseOutputBuffer 频率与显示节奏不匹配——pool 用完时下一次 dequeueOutputBuffer 阻塞。
+        触发原因：HWC 消费慢 / SurfaceView consumer back-pressure / decoder 解码慢。
+      detection_skill: gpu_render_in_range
+
+    - id: hwc_overlay_decision_for_video
+      name: "HWC overlay 决策对视频敏感"
+      description: |
+        视频 buffer 通常 YUV NV12/P010 格式，HWC 倾向 device composition；但 DRM/HDCP 受保护内容必须走 secure overlay；
+        旋转、缩放比例超 HWC scaler 能力或 HDR 元数据不支持 → 回退 client composition 增加 GPU 负担。
+      detection_skill: sf_layer_count_in_range
+
+    - id: webview_video_chrome_decoupling
+      name: "网页视频与外壳 UI 解耦"
+      description: |
+        视频 layer 走 MediaCodec → 独立 Surface 路径，CrRendererMain 仅管理外壳。
+        若网页外壳 UI（控制条、字幕）渲染卡，但视频流畅，要分别归因。
+      detection_skill: sf_frame_consumption
+
   recommended_skills:
     - sf_frame_consumption
     - cpu_analysis

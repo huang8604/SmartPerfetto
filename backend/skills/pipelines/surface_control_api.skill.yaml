@@ -21,6 +21,22 @@ meta:
   icon: "code"
   family: surface
   doc_path: "rendering_pipelines/surface_control_api.md"
+  # ----- Article-grounded signature (related: S03 SurfaceView, S05 mixed) -----
+  s_article_ref: "S03"   # NDK SurfaceControl 是 SurfaceView/SurfaceControl 体系的低级别接口
+  four_features:
+    producer_threads: ["main", "any custom thread (NDK ANativeWindow_*)"]
+    expected_layer_count: "1+"   # 应用通过 ASurfaceControl_create 任意创建
+    bufferqueue_path: "ANATIVEWINDOW + ASURFACETRANSACTION"   # 绕过 ViewRoot 直接 NDK 提交
+    extra_rhythm_sources: []
+  deviation_anchors: "ndk_direct_anchor_4_5_6_no_view_root"
+  # 锚点偏离：应用直接走 ANativeWindow_dequeueBuffer/queueBuffer + ASurfaceTransaction，
+  # 绕过 ViewRootImpl 和 HWUI（不走 ②③）。系统侧 ⑦→⑫ 与基线一致。
+  shared_with_blast_note: |
+    SurfaceControl API 与 BLAST 共享同一事务式更新体系，但不等价：
+    - BLAST (BLASTBufferQueue) 内部用 SurfaceControl Transaction 实现 buffer + 几何原子性
+    - SurfaceControl API 是直接暴露给 NDK 的接口
+    BLAST 是上层抽象，SurfaceControl API 是底层接口。trace 上看到 ASurfaceTransaction* 是 NDK 直接使用，
+    看到 BLASTBufferQueue* 是 HWUI 通过 BLAST 使用——同体系但不同层次。
 
 detection:
   # Key signals: NDK SurfaceControl API uses ASurfaceControl/ASurfaceTransaction.
@@ -160,6 +176,30 @@ analysis:
       name: "Layer 层级过深"
       description: "过多 Child Layer 导致合成开销"
       detection_skill: surfaceflinger_analysis
+
+    # ----- Article-grounded issues (S03/S05) -----
+    - id: transaction_merge_for_atomicity
+      name: "Transaction 未合并导致几何与 buffer 不同帧"
+      description: |
+        NDK 应用应该把多个 ASurfaceTransaction_set* 操作合到同一个 transaction 再 apply，
+        而不是分别 apply。多个独立 transaction 不保证在同一帧生效，会出现几何与 buffer 错位一帧。
+        S05 §"系统提供的多 Surface 同步机制"。
+      detection_skill: sf_composition_in_range
+
+    - id: ndk_acquire_fence_propagation
+      name: "NDK Producer 必须正确传递 acquire fence"
+      description: |
+        NDK Producer 调用 ASurfaceTransaction_setBuffer 时必须正确传 acquire fence
+        （ANativeWindow_lockBuffer/queueBuffer 的 fence FD），否则 SF 可能读到 GPU 未写完的 buffer。
+      detection_skill: present_fence_timing
+
+    - id: async_apply_no_completion_callback
+      name: "ASurfaceTransaction_apply 默认异步无完成回调"
+      description: |
+        ASurfaceTransaction_apply 默认是异步——返回不代表 transaction 已生效。
+        需要等待生效用 ASurfaceTransaction_setOnComplete 或 ASurfaceTransaction_setOnCommit 注册回调。
+        Android 13+ TransactionCommittedListener 是公开 API。
+      detection_skill: render_thread_slices
 
   recommended_skills:
     - sf_frame_consumption

@@ -21,6 +21,29 @@ meta:
   icon: "pip"
   family: surface
   doc_path: "rendering_pipelines/android_pip_freeform.md"
+  # ----- Article-grounded signature (S06 多窗口) -----
+  s_article_ref: "S06"   # PIP/Freeform 是多窗口子变种
+  four_features:
+    producer_threads: ["main", "RenderThread"]   # 跨进程时各窗口独立 RT
+    expected_layer_count: "2+"   # 主窗口 layer + PIP/freeform layer
+    bufferqueue_path: "BBQ_TRANSACTION_INPROC + WMS_GEOMETRY_TRANSACTION"
+    extra_rhythm_sources: []
+  deviation_anchors: "wms_resize_geometry_overlay_anchor_8"
+  # 锚点偏离：WMS 通过 resizeTask 改变 Task bounds + windowing mode → SurfaceControl.Transaction 改几何 →
+  # ⑧ SF 一轮处理多窗口 latch + 应用几何变换。
+  non_primary_note: |
+    此 pipeline_id 已在代码 NON_PRIMARY_PIPELINE_IDS（renderingPipelineDetectionSkillGenerator.ts:23）中注册，
+    不会被选为 primary，只会出现在 features list。
+  windowing_modes: |
+    Android 16+ AOSP 把 desktop windowing 写为 OEM 可配置的 freeform multi-window 能力。
+    Task 的 windowing mode：FULLSCREEN / MULTI_WINDOW / PINNED / FREEFORM /（Android 11 legacy）SPLIT_SCREEN_PRIMARY/SECONDARY。
+  subvariants_note: |
+    文章 S06 把多窗口拆为 4 子变种：
+    - MULTI_WINDOW_SAME_PROCESS（Dialog/PopupWindow/Activity Embedding）
+    - MULTI_WINDOW_SPLIT_SCREEN
+    - MULTI_WINDOW_PIP（当前 ID 部分覆盖）
+    - MULTI_WINDOW_FREEFORM（当前 ID 部分覆盖）
+    Phase E 拆 MULTI_WINDOW_PIP / MULTI_WINDOW_FREEFORM 独立 ID。
 
 detection:
   scoring_signals:
@@ -170,6 +193,29 @@ analysis:
       name: "Freeform 边界更新慢"
       description: "拖动 Freeform 窗口时响应延迟"
       detection_skill: app_frame_production
+
+    # ----- Article-grounded issues (S06) -----
+    - id: syncgroup_geometry_buffer_alignment
+      name: "几何与 buffer 没同帧生效（缺 SurfaceSyncGroup）"
+      description: |
+        PIP 进入/退出、Freeform resize 时窗口几何变化与 buffer 更新若不同帧生效，会出现"窗口已是新尺寸但内容还是旧 buffer"或"内容已新但位置还是旧"的错位。
+        Android 14+ 公开的 SurfaceSyncGroup（API 34）可让受控 SurfaceControl/SurfaceView 几何与 buffer 同帧生效；
+        Android 13 内部的 SurfaceSyncer 也提供类似能力。S06 §"几何变化与内容更新要同帧生效"。
+      detection_skill: sf_composition_in_range
+
+    - id: hwc_plane_limit_with_more_windows
+      name: "PIP 增加同屏 layer 数挤占 HWC plane"
+      description: |
+        PIP 与主窗口同屏时活跃 layer 数增加，超出 HWC overlay plane 上限或不满足约束（透明/旋转/HDR）的 layer 会回退到 client composition，
+        GPU 合成成本和带宽抬升。S06 §"HWC 的组合题在多窗口里更复杂"。
+      detection_skill: sf_layer_count_in_range
+
+    - id: shell_transition_animation_overhead
+      name: "Shell transition 动画开销"
+      description: |
+        Android 13+ Shell transition（WMShell + sync）重做了 PIP/Freeform 进入/退出动画的协调机制。
+        转场期间 Shell 进程、SystemUI 进程和应用进程都参与；trace 上看到 SystemUI/Shell 相关动画 slice 是常态。
+      detection_skill: sf_frame_consumption
 
   recommended_skills:
     - sf_frame_consumption

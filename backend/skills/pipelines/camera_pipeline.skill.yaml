@@ -21,6 +21,29 @@ meta:
   icon: "camera"
   family: specialized
   doc_path: "rendering_pipelines/camera_pipeline.md"
+  # ----- Article-grounded signature (S11) -----
+  s_article_ref: "S11"
+  four_features:
+    producer_threads: ["cameraserver", "camera HAL", "Camera*", "RequestThread", "CaptureSession"]
+    optional_consumer_threads: ["RenderThread", "ImageReader", "media.codec"]
+    expected_layer_count: 1   # 预览独立 layer（SurfaceView 模式）或 0（TextureView 模式回宿主）
+    bufferqueue_path: "HAL_PRODUCED_TO_PREVIEW_SURFACE_OR_IMAGEREADER"
+    extra_rhythm_sources: ["sensor_exposure_capture_rhythm"]
+  deviation_anchors: "no_vsync_app_hardware_sensor_trigger"
+  # 锚点偏离：① 没有 vsync-app（sensor 采集节奏由 capture request 参数决定）；
+  # ② 宿主 UI Choreographer callback 仅管控制层，不生产预览像素；
+  # ④⑤⑥ 由 Camera HAL 完成，App 只配置 Surface。
+  subvariants_note: |
+    文章 S11 把 Camera 类型拆为 4 个子变种：
+    - CAMERA_PREVIEW_SURFACEVIEW（预览独立 SV，zero-copy overlay 理想路径）
+    - CAMERA_PREVIEW_TEXTUREVIEW（预览回宿主 TV，宿主采样路径）
+    - CAMERA_IMAGEANALYSIS_READER（分析路径 ImageReader）
+    - CAMERA_VIDEORECORD_SURFACE（录像 Surface）
+    Phase E 拆分独立 ID。当前 ID 一并覆盖。
+  multi_output_back_pressure: |
+    Camera 多路输出（preview/analysis/record）共享同一 capture pipeline——
+    任一路消费慢会 back-pressure 整段 pipeline，导致预览看似"卡"实际是被某路拖慢。
+    分析时必须分开看 3 路。
 
 detection:
   scoring_signals:
@@ -156,6 +179,37 @@ analysis:
       description: "相机预览帧率不稳定"
       detection_skill: sf_frame_consumption
 
+    # ----- Article-grounded issues (S11) -----
+    - id: multi_output_back_pressure
+      name: "多路输出 back-pressure 拖慢预览"
+      description: |
+        Camera 多路输出（preview/analysis/record）共享同一 capture pipeline。
+        任一路消费慢（典型如 ImageReader 不及时 release / Codec 堆积）会 back-pressure HAL，
+        让预览看似卡顿。分析时必须分别看三路输出谁在回压，不能只盯 HAL 慢。
+      detection_skill: gpu_render_in_range
+
+    - id: release_fence_late_blocks_hal
+      name: "Release fence 晚回阻塞 HAL"
+      description: |
+        消费侧 release fence 晚回（HWC/SurfaceFlinger/宿主采样/Codec 编码） →
+        HAL 拿不到新 buffer → request pipeline 整体 back-pressure。
+      detection_skill: present_fence_timing
+
+    - id: textureview_extra_resample_overhead
+      name: "TextureView 模式宿主 RT 采样开销"
+      description: |
+        预览承载若是 TextureView，宿主 RT updateTexImage acquire + GPU 重采样会引入额外延迟（通常 +1 帧）。
+        SurfaceView 模式可走 device composition 避免此开销。
+      detection_skill: render_thread_slices
+
+    - id: sensor_trigger_not_vsync_aligned
+      name: "sensor 采集节奏不对齐 vsync"
+      description: |
+        Camera 帧率不等于显示刷新率（典型 30fps 视频拍摄在 60Hz 屏）。
+        分析卡顿要分别看 capture frame rate（HAL processCaptureResult 频率）vs preview display frame rate（SF latch 频率）。
+      detection_skill: vsync_alignment_in_range
+
   recommended_skills:
     - sf_frame_consumption
     - cpu_analysis
+    - present_fence_timing

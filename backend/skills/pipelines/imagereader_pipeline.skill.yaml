@@ -22,6 +22,23 @@ meta:
   icon: "image"
   family: specialized
   doc_path: "rendering_pipelines/imagereader_pipeline.md"
+  # ----- Article-grounded signature (S07 + S09 + S11 cross-cutting) -----
+  s_article_ref: "S07"   # ImageReader 是离屏消费者；S09 提到 WebView 罕见 ImageReader 路径；S11 提到 Camera 分析路径
+  four_features:
+    producer_threads: ["any (Camera HAL / MediaCodec / GPU / Chromium)"]
+    consumer_threads: ["ImageReader callback thread", "App thread (acquireNextImage)"]
+    expected_layer_count: 0   # ImageReader 是离屏消费者，不在 SF
+    bufferqueue_path: "BUFFERQUEUE_AS_CONSUMER"   # ImageReader 作为 BQ consumer，从 producer 收 buffer
+    extra_rhythm_sources: ["producer_rhythm"]
+  deviation_anchors: "cross_cutting_consumer_no_sf_anchor_7_to_12"
+  # ImageReader 是 cross-cutting 消费者，不属于独立 pipeline。可与 Camera/MediaCodec/GPU 任何 Producer 共存。
+  cross_cutting_nature: |
+    ImageReader 不是独立 pipeline——它是任何 Producer 的可选消费者。
+    可与 CAMERA_PIPELINE / VIDEO_OVERLAY_HWC / 任何渲染管线共存。
+    Detection 标志着"App 主动消费帧做二次处理"（ML 推理 / 屏幕录制 / 自定义 ISP / 帧分析）。
+  subvariants_note: |
+    文章 S11 把 Camera ImageReader 路径单列为 CAMERA_IMAGEANALYSIS_READER 子变种。
+    Phase E 评估是否拆分。
 
 # ==========================================================================
 # Detection Rules
@@ -196,6 +213,22 @@ analysis:
       name: "HardwareBuffer 跨进程传递延迟"
       description: "当 producer 和 consumer 在不同进程时，Buffer 传递延迟增大"
       detection_skill: binder_analysis
+
+    # ----- Article-grounded issues (S11 Camera ImageReader 路径) -----
+    - id: imagereader_back_pressures_camera_hal
+      name: "ImageReader 回压 Camera HAL"
+      description: |
+        Camera 多路输出场景下，App 不及时 Image.close() 导致 ImageReader pool 满。
+        backward pressure 经 BufferQueue 传到 HAL，HAL 拿不到 buffer slot 让 capture pipeline 整体停摆。
+        分析时要看 acquireNextImage 频率与 close() 频率是否匹配。S11 §"buffer 回收压力"。
+      detection_skill: gpu_render_in_range
+
+    - id: maximages_too_low
+      name: "ImageReader maxImages 配置过小"
+      description: |
+        maxImages 决定 BufferQueue 深度，过小会触发 producer 频繁阻塞。
+        典型经验：ML 推理场景 maxImages >= 2；高吞吐场景 >= 4。但越大越占内存。
+      detection_skill: memory_analysis
 
   recommended_skills:
     - gpu_analysis

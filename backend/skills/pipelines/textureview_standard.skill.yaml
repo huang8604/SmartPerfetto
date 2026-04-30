@@ -21,6 +21,28 @@ meta:
   icon: "texture"
   family: surface
   doc_path: "rendering_pipelines/textureview.md"
+  # ----- Article-grounded signature (S04) -----
+  s_article_ref: "S04"
+  four_features:
+    producer_threads: ["RenderThread"]   # 宿主 RT 既消费外部纹理，又生产宿主 buffer
+    optional_external_producer_threads: ["media.codec*", "media.swcodec", "cameraserver", "engine threads"]
+    expected_layer_count: 1   # 永远是单宿主 layer——SF 看不到 TextureView 独立 layer
+    bufferqueue_path: "HOST_RESAMPLE"   # 外部 → SurfaceTexture(应用进程内 consumer) → 宿主 RT GPU 重采样 → 宿主 BBQ
+    extra_rhythm_sources: ["external_producer_onFrameAvailable"]   # 外部到达反向触发宿主帧
+  deviation_anchors: "host_resample_anchor_4_5_anchor_5_anchor_6"
+  # 锚点偏离：外部 Producer 走自己的 ④⑤⑥ 落到 SurfaceTexture；
+  # 宿主 ⑤ 在 syncFrameState 阶段做 updateTexImage acquire + GPU 重采样（双次 ⑤）；
+  # 宿主 ⑥ 通过自己的 BBQ 提交合并后窗口结果。⑦→⑫ 与基线一致但宿主层已含外部内容。
+  hard_constraint: |
+    强制依赖 hardwareAccelerated=true（HWUI Hardware/Texture Layer）。
+    宿主 Window 没开硬件加速时 TextureView 不工作——这是它和 SurfaceView 的架构区别之一。
+  known_limitation: |
+    无法显示 DRM 受保护内容——HWUI 通用渲染 context 不在 protected 模式下，读 secure buffer 只能拿到黑屏。
+    需 DRM 视频时必须改用 SurfaceView。
+  consumer_strategy_note: |
+    现代 HWUI 路径通过 ASurfaceTexture_dequeueBuffer 取最新 pending buffer，丢弃中间帧。
+    Producer 比宿主消费快时 trace 上预期 dropped/skipped frames，不是逐帧消费。
+    若业务需要逐帧消费（视频编辑/分析）应改用 ImageReader 自管 BufferQueue。
 
 detection:
   scoring_signals:
@@ -38,6 +60,9 @@ detection:
     - signal: has_render_thread
       thread_pattern: "RenderThread*"
       weight: 20
+    - signal: has_deferred_layer_updater
+      slice_pattern: "*DeferredLayerUpdater*"
+      weight: 8   # article-precise signal: DeferredLayerUpdater::apply() 触发 updateTexImage（S04）
 
   exclude_if:
     - thread: "1.ui"           # Flutter TextureView → FLUTTER_TEXTUREVIEW
@@ -223,6 +248,54 @@ analysis:
       description: "宿主侧纹理更新、采样或合成耗时过长"
       detection_skill: render_thread_slices
 
+    # ----- Article-grounded issues (S04) -----
+    - id: yuv_rgb_resampling_overhead
+      name: "GPU 重采样 + YUV→RGB 色彩转换开销"
+      description: |
+        宿主 RenderThread 在执行 TextureView 所在的 DisplayList 时 GPU 要采样外部纹理进宿主窗口 buffer。
+        GL 路径：samplerExternalOES（YUV→RGB 由 EGL/GL 扩展或硬件采样路径处理）。
+        Vulkan 路径：AHardwareBuffer → VkImage + VkSamplerYcbcrConversion（不要写死 VK_FORMAT_*）。
+        外部 buffer 尺寸常与显示尺寸不一致还要做缩放，alpha/圆角/旋转一并结算。S04 §"宿主 GPU 的重采样与 YUV→RGB 代价"。
+      detection_skill: gpu_render_in_range
+
+    - id: external_producer_late_arrival
+      name: "外部 Producer 晚到导致宿主收口失败"
+      description: |
+        外部内容晚到 SurfaceTexture，宿主下一次 doFrame 还没到，或宿主 syncFrameState 阶段没消费到最新 buffer。
+        看 trace 时要往上游追外部 Producer 的 queueBuffer 和 onFrameAvailable 时刻；
+        Producer 可能跨进程（media.codec/cameraserver/Codec2 vendor service）。S04 §"外部 Producer 把内容送到 SurfaceTexture"。
+      detection_skill: render_thread_slices
+
+    - id: frame_drop_strategy_takes_latest
+      name: "TextureView consumer 倾向取最新（丢中间帧）"
+      description: |
+        现代 HWUI 路径通过 ASurfaceTexture_dequeueBuffer 取最新 pending buffer，丢弃中间帧。
+        Producer 比宿主消费快时 trace 上预期 dropped/skipped frames。需逐帧消费（视频编辑/分析）应改 ImageReader。
+        S04 §"updateTexImage() 在 syncFrameState 阶段的 acquire 时机"。
+      detection_skill: app_frame_production
+
+    - id: requires_hardware_acceleration
+      name: "TextureView 不支持 hardwareAccelerated=false"
+      description: |
+        TextureView 强制依赖 HWUI Hardware/Texture Layer 机制——宿主 Window 没开硬件加速时直接不工作。
+        和 SurfaceView 不同（独立 Surface 与硬件加速无关）。
+      detection_skill: render_thread_slices
+
+    - id: cannot_display_drm_protected_content
+      name: "无法显示 DRM 受保护内容"
+      description: |
+        受保护 buffer (GRALLOC_USAGE_PROTECTED) 只能通过 secure composition / secure overlay 路径读取。
+        TextureView 走宿主 GPU 重采样而 HWUI 通用 context 不在 protected 模式 → 黑屏。需要 DRM 视频时改用 SurfaceView。
+      detection_skill: sf_composition_in_range
+
+    - id: dual_fence_layers
+      name: "TextureView 实际有两套 fence"
+      description: |
+        外部 Producer 侧 fence 保护"宿主 updateTexImage 时不读到 GPU 没写完的外部内容"；
+        宿主侧 fence 保护"SF latch 时不读到宿主 GPU 没合成完的最终窗口结果"。两层不能混淆。
+      detection_skill: present_fence_timing
+
   recommended_skills:
     - render_thread_slices
     - gpu_analysis
+    - present_fence_timing

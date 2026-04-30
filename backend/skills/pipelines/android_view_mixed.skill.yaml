@@ -21,6 +21,24 @@ meta:
   icon: "layers"
   family: hwui
   doc_path: "rendering_pipelines/android_view_mixed.md"
+  # ----- Article-grounded signature (S05) -----
+  s_article_ref: "S05"
+  four_features:
+    producer_threads: ["main", "RenderThread"]
+    optional_producer_threads: ["GLThread", "MediaCodec*", "*Decoder*", "EGLThread"]
+    expected_layer_count: 2     # 宿主 + 独立 SurfaceView layer（最少）；TextureView 路径仍是 1 层
+    bufferqueue_path: "BBQ_TRANSACTION_INPROC + INDEPENDENT_LAYER"   # 多条并行
+    extra_rhythm_sources: ["video_codec_pacing", "camera_sensor_trigger"]   # 视情况
+  deviation_anchors: "multi_path_anchor_4_5_6_8"
+  # 锚点偏离：宿主走完整 ④⑤⑥；独立 Producer 也各自走 ④⑤⑥（独立节奏）；
+  # ⑧ SF latch 这一轮处理多 layer——文章 §"多 Layer 场景里，SF 会对没有新 buffer 的 Layer 沿用旧内容"。
+  subvariants_note: |
+    文章 S05 区分 3 个子变种：
+    - MIXED_RENDERING_HWUI_SURFACEVIEW（独立 layer 进 SF，SF 看到 ≥2 个 layer）
+    - MIXED_RENDERING_HWUI_TEXTUREVIEW（外部内容回宿主 RT 通过 updateTexImage 吸收，仍单 layer）
+    - MIXED_RENDERING_HYBRID（两者都有）
+    Phase E 会拆分独立 ID。
+    关键判别：在 SF 进程下查 layer 数量（>1 → SurfaceView，=1 → TextureView/纯宿主）。
 
 detection:
   required_signals:
@@ -42,6 +60,10 @@ detection:
     - signal: has_decoder_thread
       thread_pattern: "*Decoder*"
       weight: 8
+    - signal: has_update_tex_image_active
+      slice_pattern: "*updateTexImage*"
+      weight: 8
+      min_count: 2   # min_count=2 避免偶发触发；weight 低于 TEXTUREVIEW_STANDARD 自身权重以避免竞争
 
   exclude_if:
     - thread: "1.ui"
@@ -236,6 +258,46 @@ analysis:
       name: "Layer 同步问题"
       description: "View 和 SurfaceView 帧率不同步"
       detection_skill: sf_frame_consumption
+
+    # ----- Article-grounded issues (S05) -----
+    - id: new_old_buffer_mismatch
+      name: "新旧 buffer 混合（同帧不同步）"
+      description: |
+        SF 本轮 latch 时主窗口用新 buffer 但 SurfaceView 用旧（或反之），用户看到"新旧混合"。
+        例：外层 UI 已是新状态了，视频还是旧帧；视频已经到了，遮罩还是旧位置。
+        S05 §"SF 会对没有新 buffer 的 Layer 沿用旧内容"。
+      detection_skill: sf_frame_consumption
+
+    - id: texture_resample_overhead
+      name: "TextureView 采样开销"
+      description: |
+        TextureView 路径下宿主 RenderThread 通过 updateTexImage acquire 外部内容，
+        再做 GPU 重采样进宿主 buffer。这一步吃宿主 RT 预算 + GPU 带宽。
+        若外部内容是 YUV 还需 YUV→RGB 色彩转换，额外开销固定存在（不算 jank）。
+      detection_skill: render_thread_slices
+
+    - id: geometry_transaction_desync
+      name: "几何 transaction 与 buffer 更新不同帧生效"
+      description: |
+        SurfaceView 的几何变化 transaction 与宿主 ViewRoot hole-punch 没在同一帧生效，
+        引发位置错位一帧。可通过 SurfaceSyncGroup（API 34+）/ TransactionCommittedListener 缓解。
+        S05 §"系统提供的多 Surface 同步机制"。
+      detection_skill: sf_composition_in_range
+
+    - id: hwc_overlay_fallback_more_layers
+      name: "多 layer 触发 HWC 降级"
+      description: |
+        多 layer 场景下 HWC overlay plane 数量上限被超出 / 透明混合 / 旋转缩放约束，
+        导致更多 layer 被打回 client composition，GPU 合成带宽和功耗上升。
+        S05 §"HWC 面对的是更复杂的 layer 组合题"。
+      detection_skill: sf_layer_count_in_range
+
+    - id: acquire_fence_late_blocks_layer
+      name: "某条独立 layer acquire fence 晚 signal"
+      description: |
+        某条独立 layer 的 acquire fence 晚 signal，SF 这一轮选择沿用该 layer 旧内容。
+        典型如 MediaCodec 输出 buffer 的 GPU 写入晚于本轮 vsync-sf。
+      detection_skill: present_fence_timing
 
   recommended_skills:
     - scrolling_analysis

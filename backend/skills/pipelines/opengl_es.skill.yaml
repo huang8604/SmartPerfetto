@@ -21,6 +21,21 @@ meta:
   icon: "gpu"
   family: graphics
   doc_path: "rendering_pipelines/opengl_es.md"
+  # ----- Article-grounded signature (S08) -----
+  s_article_ref: "S08"
+  four_features:
+    producer_threads: ["GLThread"]
+    optional_producer_threads: ["RenderThread", "*EGL*", "engine threads"]
+    expected_layer_count: 1
+    bufferqueue_path: "ANATIVEWINDOW_BUFFERQUEUE"   # GLThread → eglSwapBuffers → ANativeWindow 底层 BufferQueue
+    extra_rhythm_sources: ["app_render_loop", "swappy_pacing"]
+  deviation_anchors: "app_render_loop_anchor_4_5_6_no_view_root"
+  # 锚点偏离：① vsync-app 可能存在但不驱动核心 Producer（应用自己的 render loop 驱动）；
+  # ②③ Java 宿主可能有 doFrame，但 native Producer 不等它；
+  # ④⑤⑥ 由 GLThread 接管（自己 dequeueBuffer → glDraw* → eglSwapBuffers → queueBuffer）。
+  subvariants_note: |
+    文章 S08 列出几个相关子变种：NATIVEACTIVITY_MAIN（NativeActivity 纯 native 线程）、
+    GAMEACTIVITY_MAIN（GameActivity 现代替代品）。当前 ID 主要覆盖 GLSurfaceView/GLThread 模式。
 
 detection:
   # Narrow to the typical GLSurfaceView / GLThread-driven GLES pipeline to avoid
@@ -143,6 +158,28 @@ analysis:
       description: "glFinish 或 eglSwapBuffers 等待过长"
       detection_skill: gpu_analysis
 
+    # ----- Article-grounded issues (S08) -----
+    - id: egl_swap_blocked_by_release_fence
+      name: "eglSwapBuffers 阻塞等 release fence"
+      description: |
+        eglSwapBuffers 长等可能不是 GPU 慢——是 release fence 没回（HWC 还没释放上一帧 buffer）
+        或 swapchain 内 buffer 用完。隐式管理下原因不直接可见。S08 §"Vulkan 的 vkAcquireNextImageKHR 长等"对照。
+      detection_skill: gpu_render_in_range
+
+    - id: swappy_pacing_alignment_wait
+      name: "Swappy frame pacing 对齐等待"
+      description: |
+        启用 Swappy（SwappyGL_swap）时若帧超 budget，会被强制推迟到下个 vsync 对齐——这是设计行为不是 jank。
+        但若超 budget 频繁会让有效帧率从 60→30。
+      detection_skill: vsync_phase_alignment
+
+    - id: pre_rotation_missing
+      name: "未处理 pre-rotation 触发系统侧补旋转"
+      description: |
+        App 责任处理 pre-rotation。未处理时系统侧补旋转引入额外延迟和 GPU 开销（横竖屏切换、外接显示场景明显）。
+      detection_skill: gpu_render_in_range
+
   recommended_skills:
     - gpu_analysis
     - gpu_metrics
+    - present_fence_timing

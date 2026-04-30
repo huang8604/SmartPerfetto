@@ -21,6 +21,27 @@ meta:
   icon: "cpu"
   family: hwui
   doc_path: "rendering_pipelines/android_view_software.md"
+  # ----- Article-grounded signature (S07) -----
+  s_article_ref: "S07"
+  four_features:
+    producer_threads: ["main"]   # 无 RenderThread；主线程做 CPU Skia 栅格化
+    expected_layer_count: 1
+    bufferqueue_path: "ACQUIRE_FENCE_NONE_INPROC"  # acquire fence = NO_FENCE（CPU 写完即 ready）
+    extra_rhythm_sources: []
+  deviation_anchors: "skips_renderthread_anchor_5"
+  # 锚点 ⑤ 偏离：CPU 在 main thread 完成栅格化（不经 GPU）。其余按"最终可见对象"判断：
+  # 软件绘制到主窗口 Surface 时仍走 ⑥-⑫；纯离屏（截图/缩略图）则 ⑦-⑫ 完全缺席。
+  subvariants_note: |
+    文章 S07 把 software/离屏拆为 4 子变种：
+    1. SOFTWARE_RENDERING_CANVAS（整窗 lockCanvas，无 RenderThread）— 当前 ID 主要覆盖
+    2. SOFTWARE_RENDERING_LAYER（View.setLayerType(LAYER_TYPE_SOFTWARE)，混合路径，仍有 RenderThread + Bitmap upload）— 当前 exclude_if RenderThread 排除掉
+    3. OFFSCREEN_HARDWAREBUFFER（HardwareBufferRenderer 离屏 GPU，Android 14+/API 35）
+    4. OFFSCREEN_BITMAP（离屏 Bitmap + 纹理上传）
+    Phase E 会拆分独立 ID。
+    article-precise slice 名（用于 LLM 诊断参考）：
+    - nSurface_lockCanvas / nSurface_unlockCanvasAndPost（native 层 Surface 操作）
+    - drawSoftware（ViewRootImpl.drawSoftware()）
+    - copyBlt（dirty region 模式下从旧 buffer 抄 non-dirty 像素）
 
 detection:
   required_signals:
@@ -119,6 +140,32 @@ analysis:
       name: "CPU 渲染瓶颈"
       description: "软件渲染占用大量 CPU 时间"
       detection_skill: cpu_analysis
+
+    # ----- Article-grounded issues (S07) -----
+    - id: dirty_region_copyblt_overhead
+      name: "Dirty region copyBlt 开销"
+      description: |
+        Surface::lock(dirty) 带 dirty region 调用时，frameworks/native/libs/gui/Surface.cpp
+        会通过 copyBlt(backBuffer, frontBuffer, copyback) 把上一帧 non-dirty 像素抄到新 buffer。
+        即使 dirty 区域很小，仍有 buffer 拷贝开销；新旧 buffer 尺寸/格式不一致时还会强制全重绘。
+        S07 §"CPU software rendering 这一段在做什么"。
+      detection_skill: cpu_analysis
+
+    - id: no_acquire_fence_release_fence_still_present
+      name: "无 acquire fence 但 release fence 仍存在"
+      description: |
+        软件路径下 unlockAndPost 提交时 acquire fence = NO_FENCE，SF latch 无需等待。
+        但 release fence 仍然存在：HWC presentDisplay 后通过 getReleaseFences() 返回，
+        SF 经 BufferQueue 回传给 Producer 通知可重新 dequeue。Producer 仍可能卡 dequeueBuffer 等 release。
+      detection_skill: render_thread_slices
+
+    - id: software_layer_bitmap_upload
+      name: "LAYER_TYPE_SOFTWARE 的 Bitmap 上传开销"
+      description: |
+        若某 View 设了 LAYER_TYPE_SOFTWARE，子树会被绘制到离屏 Bitmap 再由 HWUI 作为纹理上传参与 GPU 合成。
+        Trace 中表现为 RenderThread 仍存在（与纯软件不同），但额外伴随 Bitmap 分配 + uploadToTexture slice。
+        当前 ID 因 exclude_if RenderThread 排除此场景；Phase E 拆 SOFTWARE_RENDERING_LAYER 独立 ID。
+      detection_skill: render_thread_slices
 
   recommended_skills:
     - cpu_analysis

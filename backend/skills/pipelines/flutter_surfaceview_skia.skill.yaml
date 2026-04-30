@@ -21,6 +21,23 @@ meta:
   icon: "flutter"
   family: flutter
   doc_path: "rendering_pipelines/flutter_surfaceview.md"
+  # ----- Article-grounded signature (S10) -----
+  s_article_ref: "S10"
+  four_features:
+    producer_threads: ["1.ui", "1.raster", "1.io"]
+    optional_producer_threads: ["DartWorker*", "io.flutter.*"]
+    expected_layer_count: 1
+    bufferqueue_path: "ENGINE_TO_INDEPENDENT_SURFACE"
+    extra_rhythm_sources: ["engine_animator_beginframe"]
+  deviation_anchors: "engine_anchor_2_3_4_5_6_at_engine_threads_skia_backend"
+  # 与 Impeller 相同的 Engine 路径，区别仅在 ⑤ raster 阶段使用 Skia backend（含运行时 shader 编译）。
+  layer_signature: 'io.flutter.* surface 名（独立 layer）'
+  subvariants_note: |
+    文章 S10 的 Skia 后端路径——与 Impeller 是同一个 RenderMode.surface 的两种 backend。
+    现代 Flutter 默认 Impeller，Skia 仍出现在：旧版本、特定配置、Impeller fallback 场景。
+  skia_disadvantage: |
+    Skia 运行时 shader compilation：首次使用新 effect 触发 shader 编译，
+    导致首帧/首场景卡顿。Trace 中 SkGpu / SkiaGpu 配合 GrShaderUtils 是典型信号。
 
 detection:
   scoring_signals:
@@ -150,7 +167,28 @@ analysis:
       description: "运行时 Shader 编译 (Runtime Shader Compilation) 导致首次使用卡顿"
       detection_skill: jank_frame_detail
 
+    # ----- Article-grounded issues (S10) -----
+    - id: ui_thread_overrun
+      name: "1.ui 线程超 budget"
+      description: "Dart build/layout/paint 过重；与 Impeller 路径相同。"
+      detection_skill: app_frame_production
+
+    - id: raster_thread_overrun
+      name: "1.raster 线程超 budget（含 Skia 编译）"
+      description: |
+        GPU submission 重 / fence 等待 / Skia shader 首次编译。
+        Skia 路径下 raster 线程超 budget 还可能因 shader 缓存未命中。
+      detection_skill: gpu_render_in_range
+
+    - id: skia_first_use_jank
+      name: "首次使用新效果的 Shader 编译卡顿"
+      description: |
+        Skia 运行时编译 shader：首次使用某个 BlendMode / SkShader / RuntimeEffect 时触发编译。
+        缓解：预热（precache shader）、SkSL warmup、降级到 Impeller。
+      detection_skill: jank_frame_detail
+
   recommended_skills:
     - scrolling_analysis
     - jank_frame_detail
     - gpu_analysis
+    - flutter_scrolling_analysis

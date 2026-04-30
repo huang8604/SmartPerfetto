@@ -21,6 +21,27 @@ meta:
   icon: "refresh"
   family: specialized
   doc_path: "rendering_pipelines/variable_refresh_rate.md"
+  # ----- Article-grounded signature (S01 + S12 + cross-cutting) -----
+  s_article_ref: "S01"   # S01 总览中讨论刷新率与帧节奏；具体应用见 S12 视频/S13 游戏
+  four_features:
+    producer_threads: []   # VRR 是显示侧 cross-cutting feature，不是独立 Producer
+    expected_layer_count: "any"
+    bufferqueue_path: "ANY"
+    extra_rhythm_sources: ["setFrameRate_API", "setFrameRateCategory_API", "ARR_hardware_support"]
+  deviation_anchors: "cross_cutting_feature_at_anchor_7_to_12"
+  # 锚点偏离：VRR 不是独立 pipeline，是 ⑦-⑫ 阶段的显示策略改进。
+  # 应用通过 setFrameRate / setFrameRateCategory / setRequestedFrameRate 表达期望，SF 汇总后选 DisplayMode。
+  non_primary_note: |
+    此 pipeline_id 已在 NON_PRIMARY_PIPELINE_IDS 中，且使用 GLOBAL_SCOPE_PIPELINE_IDS（信号在 SF 进程而不是 App 进程）。
+    Detection 改动只影响 features list。
+  api_evolution: |
+    版本演进：
+    - Android 11+: Surface.setFrameRate（声明 surface 期望帧率）
+    - Android 14+: View.setRequestedFrameRate / Compose Modifier.requestedFrameRate（View 级帧率优先级）
+    - Android 16+: Display.hasArrSupport / Display.getSuggestedFrameRate（主动查询 ARR 能力）
+  jank_decoupling: |
+    VRR/ARR 节省的是功耗、抖动和高频段浪费，不是 deadline。
+    一帧已经 miss deadline 时改变刷新率不能救它（FrameTimeline expected_frame_timeline_slice 仍按当前刷新率算 deadline）。
 
 detection:
   # Required: VRR always operates through SurfaceFlinger
@@ -213,6 +234,29 @@ analysis:
       name: "VRR 目标未达"
       description: "帧率低于 VRR 目标刷新率"
       detection_skill: jank_frame_detail
+
+    # ----- Article-grounded issues -----
+    - id: vrr_does_not_save_jank
+      name: "VRR 不能救 missed deadline 的帧"
+      description: |
+        VRR/ARR 改的是显示策略（功耗/抖动/高频段浪费），不改单帧的 deadline。
+        FrameTimeline expected_frame_timeline_slice 仍按当前刷新率算 deadline，
+        生产或合成超 budget 时 jank 该出现还是出现。
+      detection_skill: jank_frame_detail
+
+    - id: setframerate_called_excessively
+      name: "setFrameRate 调用过频"
+      description: |
+        setFrameRate 是声明性 API（一次性表达期望帧率），频繁调用引发 SurfaceFlinger 反复重投票 DisplayMode，
+        增加 SF 开销。设计上应一次性声明，仅在场景切换时调整。
+      detection_skill: sf_frame_consumption
+
+    - id: framerate_vote_competition_multi_layer
+      name: "多 layer 帧率投票竞争"
+      description: |
+        多 layer 同时活跃时（视频 30fps + UI 60fps + IME 120Hz）SF 需协调最终 DisplayMode。
+        投票策略由 SF 决定，可能不是简单取最高。S01 §"应用侧能影响刷新率的入口"。
+      detection_skill: sf_layer_count_in_range
 
   recommended_skills:
     - scrolling_analysis

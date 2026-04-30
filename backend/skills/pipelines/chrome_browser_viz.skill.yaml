@@ -23,6 +23,24 @@ meta:
   icon: "web"
   family: webview
   doc_path: "rendering_pipelines/chrome_browser_viz.md"
+  # ----- Article-grounded signature (S09) -----
+  s_article_ref: "S09"
+  four_features:
+    producer_threads: ["CrBrowserMain", "CrRendererMain", "VizCompositorThread", "CrGpuMain", "CompositorTileWorker*"]
+    expected_layer_count: 1   # Chrome 独立 App，输出窗口 layer
+    bufferqueue_path: "MULTIPROCESS_CHROMIUM_TO_OUTPUT_SURFACE"
+    # ↑ Browser Process (CrBrowserMain) → Renderer Process (CrRendererMain Blink) → Viz/GPU Process (VizCompositorThread + CrGpuMain) → Output Surface
+    extra_rhythm_sources: ["chromium_compositor_rhythm", "viz_display_scheduler"]
+  deviation_anchors: "multiprocess_chromium_arch_anchor_2_3_4_5_6_at_chromium"
+  # 锚点偏离：Chrome 独立 App，多进程架构（Browser/Renderer/GPU 各一个进程）；
+  # 应用层 ②③④⑤⑥ 全在 Chromium 进程链路完成，宿主 vsync-app 仅触发 Viz 调度。
+  difference_from_webview: |
+    与 WEBVIEW_* 区别：
+    - Chrome Browser 是独立 App（标准 Chrome 浏览器、Edge、Brave 等），有 CrBrowserMain 主线程
+    - WebView 是 Android API 提供的嵌入式组件，运行在宿主 App 进程内（无 CrBrowserMain）
+    - Chrome 启用了完整 OOP-R（Out-of-Process Rasterization）+ Viz；WebView 默认不启用 OOP-R
+  ipc_layers: |
+    多进程通信通过 Mojo IPC（不是 Binder）。Mojo 延迟分析需用 Chromium 自带 trace category。
 
 # ==========================================================================
 # Detection Rules
@@ -240,6 +258,28 @@ analysis:
       name: "IPC 延迟"
       description: "进程间通信 (Mojo/IPC) 延迟过高"
       detection_skill: binder_analysis
+
+    # ----- Article-grounded issues (S09) -----
+    - id: cross_process_compositor_frame_aggregation_late
+      name: "Viz 聚合多个 Renderer CompositorFrame 晚"
+      description: |
+        Viz 需要在每个 BeginFrame 周期内聚合所有活跃 Renderer 的 CompositorFrame。
+        某个 Renderer 提交晚会让 Viz 这一帧拿到不完整的 frame 集合 — 显示停留旧画面或部分更新。
+      detection_skill: sf_frame_consumption
+
+    - id: oopr_raster_task_queueing
+      name: "OOP-R RasterTask 在 GPU 进程排队"
+      description: |
+        多 Renderer 同时活跃时 RasterTask 都涌入 CrGpuMain，
+        队列长会让某些 tile 的光栅化晚到，最终影响 CompositorFrame 完整性。
+      detection_skill: gpu_render_in_range
+
+    - id: chrome_specific_swap_chain_buffers
+      name: "Chrome 特有的 swap chain buffer 数（不是 BLASTBufferQueue）"
+      description: |
+        Chrome 直接管理 ANativeWindow/swap chain，不走 Android HWUI 的 BLASTBufferQueue 路径。
+        分析 buffer 周转时不要套用 BLAST 经验——Chrome 自己的 swap chain 深度由 Viz 决定。
+      detection_skill: render_thread_slices
 
   recommended_skills:
     - sf_frame_consumption

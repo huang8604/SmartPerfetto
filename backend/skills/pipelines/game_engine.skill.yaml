@@ -21,6 +21,29 @@ meta:
   icon: "gamepad"
   family: specialized
   doc_path: "rendering_pipelines/game_engine.md"
+  # ----- Article-grounded signature (S13) -----
+  s_article_ref: "S13"
+  four_features:
+    producer_threads: ["UnityMain", "UnityGfx*", "GameThread", "RenderThread", "RHIThread", "GodotMain", "TaskGraph*"]
+    expected_layer_count: 1   # 引擎独占一个 game Surface layer
+    bufferqueue_path: "ENGINE_SWAPCHAIN_TO_INDEPENDENT_SURFACE"
+    # Vulkan: vkAcquireNextImageKHR → vkQueuePresentKHR；GLES: eglSwapBuffers
+    extra_rhythm_sources: ["swappy_frame_pacing", "engine_loop", "achoreographer"]
+  deviation_anchors: "engine_main_loop_anchor_2_3_4_5_6"
+  # 锚点偏离：① 引擎可能用 AChoreographer 接 vsync；② 引擎主循环代替 Android Choreographer.doFrame；
+  # ④⑤⑥ 由引擎管线（Game/Render/RHI 多线程并行）；⑥ 处常有 Swappy 介入帧节奏控制。
+  subvariants_note: |
+    文章 S13 把 Game 类型拆为 6 个子变种：
+    - NATIVE_ENGINE_VULKAN（重度 3D 引擎，Vulkan swapchain）
+    - NATIVE_ENGINE_GLES（GLES 路径）
+    - NATIVE_ENGINE_SWAPPY（Swappy frame pacing 包装）
+    - MINIGAME_CONTAINER（微信/抖音小游戏，JS + GLES）
+    - CLOUD_GAME_DECODER（本地是解码 + SurfaceView，等同 S12）
+    - XR_GAME_TIMEWARP（AR/VR，引擎 + Camera + SLAM + timewarp）
+    Phase E 拆分独立 ID。当前 ID 主要覆盖 NATIVE_ENGINE_*。
+  cross_frame_lag: |
+    Game/Render/RHI 三线程跨帧 lag（通常 1-3 帧）：每个时刻三线程在处理不同帧，
+    不能按 wall-clock 对齐到"同一帧"，要用 frame_id marker 跨线程关联。
 
 detection:
   scoring_signals:
@@ -244,7 +267,45 @@ analysis:
       description: "DrawCall 过多或 Shader 复杂"
       detection_skill: gpu_analysis
 
+    # ----- Article-grounded issues (S13) -----
+    - id: triple_thread_attribution_required
+      name: "Game/Render/RHI 三线程归因"
+      description: |
+        UE: GameThread / RenderThread / RHIThread 三线程并行处理不同帧（cross-frame lag 通常 1-3 帧）。
+        Unity: UnityMain / UnityGfx 双线程模型。任一线程超 budget 都拖整体 FPS。
+        归因要按 frame_id marker 跨线程关联，不能按 wall-clock 对齐。
+      detection_skill: game_fps_analysis
+
+    - id: vk_acquire_next_image_blocked
+      name: "vkAcquireNextImageKHR 长等"
+      description: |
+        Native Vulkan 路径下 vkAcquireNextImageKHR 长等通常不是 GPU 慢——
+        是 release fence 晚（HWC 消费慢）或 swapchain image 用完。
+      detection_skill: present_fence_timing
+
+    - id: swappy_frame_pacing_force_skip
+      name: "Swappy 强制跳帧到下个 vsync"
+      description: |
+        Swappy(SwappyVk_queuePresent / SwappyGL_swap) 检测到帧超 budget 时强制推迟到下个 vsync——
+        这是设计行为，但导致有效帧率从 60→30。Trace 中表现为帧间隔从 16.67ms 突变 33.33ms。
+      detection_skill: vsync_phase_alignment
+
+    - id: pipeline_state_object_creation_jank
+      name: "PSO/pipeline 创建首帧卡顿"
+      description: |
+        Vulkan vkCreateGraphicsPipelines / GLES first-use shader compilation 引发首帧或首场景卡顿。
+        缓解：pipeline cache、shader warmup、PSO 预热表。
+      detection_skill: jank_frame_detail
+
+    - id: hwc_client_fallback_due_to_overlay_competition
+      name: "系统浮层挤占触发 HWC client composition"
+      description: |
+        Dialog/IME/Toast/system overlay 增加同屏 layer 数 → HWC plane 不够 → game layer 被打回 client composition →
+        SF GPU 合成成本上升，挤占 game 自己的 GPU 预算。
+      detection_skill: sf_layer_count_in_range
+
   recommended_skills:
     - game_fps_analysis
     - cpu_analysis
     - gpu_analysis
+    - present_fence_timing

@@ -21,6 +21,22 @@ meta:
   icon: "translate"
   family: graphics
   doc_path: "rendering_pipelines/angle_gles_vulkan.md"
+  # ----- Article-grounded signature (S08) -----
+  s_article_ref: "S08"
+  four_features:
+    producer_threads: ["GLThread", "RenderThread", "any custom"]
+    expected_layer_count: 1
+    bufferqueue_path: "ANATIVEWINDOW_VULKAN_SWAPCHAIN_VIA_ANGLE"   # ANGLE 翻译 → Vulkan swapchain
+    extra_rhythm_sources: []
+  deviation_anchors: "translation_layer_anchor_4_5_6"
+  # 锚点偏离：应用看到的是 GLES API（glDraw* / eglSwapBuffers），底层实际通过 ANGLE 翻译为 Vulkan
+  # （vkCmdDraw* / vkQueuePresentKHR）。两组 slice 同时出现是该 pipeline 的标志。
+  non_primary_note: |
+    此 pipeline_id 已在代码 NON_PRIMARY_PIPELINE_IDS 中（renderingPipelineDetectionSkillGenerator.ts:23），
+    不会被选为 primary，只出现在 features list。它属于"实现细节/正交特征"，与 OPENGL_ES / VULKAN_NATIVE 的 primary 选择并不冲突。
+  ecosystem_note: |
+    Android 生态中 ANGLE 常由 Chromium / WebView / 自研内核启用；游戏引擎也可能直接集成。
+    Android 15+ 对 ANGLE 的支持提升，但是否默认启用仍依设备和 OEM 策略。
 
 detection:
   required_signals:
@@ -141,6 +157,21 @@ analysis:
       name: "ANGLE 翻译开销"
       description: "API 翻译层的 CPU 开销"
       detection_skill: cpu_analysis
+
+    # ----- Article-grounded issues (S08) -----
+    - id: angle_validation_overhead
+      name: "ANGLE GLES 状态验证开销"
+      description: |
+        ANGLE 需要把 GLES 状态机映射到 Vulkan 的显式状态对象（pipeline、descriptor set、render pass 等），
+        每次 GLES 调用都涉及状态验证。状态变化频繁的应用 CPU 开销显著。
+      detection_skill: cpu_analysis
+
+    - id: dual_layer_slices_visible
+      name: "trace 同时出现 GLES + Vulkan slice 是 ANGLE 标志"
+      description: |
+        在同一进程同时看到 glDraw* / eglSwapBuffers（应用层）和 vkCmdDraw* / vkQueuePresentKHR（ANGLE 后端）
+        是该 pipeline 的决定性信号。仅看到 GLES 而无 Vulkan 痕迹更可能是 GLES 原生或 ANGLE 的 OpenGL 后端。
+      detection_skill: gpu_analysis
 
   recommended_skills:
     - gpu_analysis

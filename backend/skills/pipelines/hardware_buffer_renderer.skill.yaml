@@ -21,6 +21,28 @@ meta:
   icon: "memory"
   family: specialized
   doc_path: "rendering_pipelines/hardware_buffer_renderer.md"
+  # ----- Article-grounded signature (S07 OFFSCREEN_HARDWAREBUFFER 子变种) -----
+  s_article_ref: "S07"
+  four_features:
+    producer_threads: ["main", "RenderThread"]
+    expected_layer_count: 0   # 离屏生产，可见时通过 SurfaceControl Transaction 直推
+    bufferqueue_path: "OFFSCREEN_HARDWAREBUFFER + SURFACECONTROL_TRANSACTION_DIRECT"
+    # ↑ 离屏 GPU 生产 HardwareBuffer → 直接通过 SurfaceControl.Transaction.setBuffer 提交（跳过 BBQ）
+    extra_rhythm_sources: []
+  deviation_anchors: "offscreen_hardwarebuffer_anchor_5_no_bbq_anchor_6"
+  # 锚点偏离：⑤ GPU 渲染到离屏 HardwareBuffer（不是宿主 buffer）；
+  # ⑥ 跳过标准 BBQ，直接通过 SurfaceControl.Transaction.setBuffer 进入 SF。
+  android_version: |
+    Android 14 AOSP 已存在但 @hide / @SystemApi；Android 15 / API 35 才正式公开。
+    Android 10-13 的离屏硬件渲染通常通过 HardwareRenderer + setSurface() 或 EGL 离屏 context + HardwareBuffer 组合实现。
+  subvariants_note: |
+    文章 S07 把 software/离屏拆为 4 子变种，HBR 对应：
+    OFFSCREEN_HARDWAREBUFFER（HardwareBufferRenderer 离屏 GPU，Android 14+/API 35）。
+    Phase E 拆 OFFSCREEN_BITMAP（离屏 Bitmap + 纹理上传）独立 ID。
+  no_bbq_implication: |
+    离屏结果直接通过 SurfaceControl.Transaction.setBuffer() 提交时跳过 BLASTBufferQueue。
+    Trace 上看不到这条 layer 的 BufferTX counter——要从 SF 进程 transaction 接收点和 layer latch 看，
+    不能按窗口提交习惯找 BBQ。S07 §"BufferQueue/queueBuffer/BufferTX 在这一类里怎么理解"。
 
 detection:
   scoring_signals:
@@ -161,6 +183,21 @@ analysis:
       name: "Transaction 提交时机不当"
       description: "HBR 内容未同步到 VSync"
       detection_skill: vsync_alignment_in_range
+
+    # ----- Article-grounded issues (S07) -----
+    - id: no_bufftx_counter_visible
+      name: "Trace 看不到该 layer 的 BufferTX"
+      description: |
+        HBR 直推 SurfaceControl.Transaction.setBuffer 时跳过 BBQ，trace 上看不到该 layer 的 BufferTX counter。
+        排查时要从 SF 进程 transaction 接收点和 layer latch 看，不能按 BLAST 窗口经验找。
+      detection_skill: sf_composition_in_range
+
+    - id: consumer_late_consume_offscreen_invisible_to_sf
+      name: "纯离屏场景 SF 看不到中间结果"
+      description: |
+        若 HBR 输出仅供编码/缓存等纯离屏消费，SF 完全看不到这份内容。
+        分析时要分别看"中间结果生产线程"和"最终消费者"，FrameTimeline 不适用。
+      detection_skill: gpu_render_in_range
 
   recommended_skills:
     - sf_frame_consumption

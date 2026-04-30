@@ -21,6 +21,29 @@ meta:
   icon: "memory"
   family: surfaceflinger
   doc_path: "rendering_pipelines/software_compositing.md"
+  # ----- Article-grounded signature (S01 + S05/S06 HWC client composition) -----
+  s_article_ref: "S01"   # S01 §HWC 决策职责 + 合成路径
+  four_features:
+    producer_threads: []   # 该 pipeline 不是 App 侧管线，是 SF 侧合成路径
+    consumer_threads: ["SurfaceFlinger"]
+    expected_layer_count: "any"
+    bufferqueue_path: "SF_CLIENT_COMPOSITION"   # SF 用 GPU 把多 layer 合到 client target buffer，再 HWC present
+    extra_rhythm_sources: []
+  deviation_anchors: "anchor_10_client_composition_when_hwc_rejects"
+  # 锚点偏离：⑩ client composition 由 SF 用 GPU（或极端 fallback CPU）把无法 device composition 的 layer 合到 client target。
+  # 不要混淆"SF 软件合成"与 ANDROID_VIEW_SOFTWARE（应用侧 lockCanvas 软件绘制）—— 这两个是完全不同概念。
+  difference_from_android_view_software: |
+    ANDROID_VIEW_SOFTWARE：应用侧 CPU Skia 绘制（lockCanvas/unlockCanvasAndPost），无 RenderThread。
+    SOFTWARE_COMPOSITING：SF 侧 client composition（HWC 把 layer 打回 SF GPU 合成）。
+    两者都叫"软件"但本质不同：前者是 Producer 路径，后者是 Consumer 合成路径。
+  hwc_fallback_triggers: |
+    HWC 把 layer 从 DEVICE 降级到 CLIENT（S01 5 步谈判）的常见原因：
+    - 透明混合（alpha < 1.0 且复杂遮挡关系）
+    - 旋转或缩放超 HWC 能力
+    - overlay plane 数量不足（同屏 layer > HWC plane 上限）
+    - 受保护内容路径（DRM/HDCP）
+    - 色彩空间或 HDR 元数据不支持
+    - HWC 自身不支持的混合模式
 
 detection:
   required_signals:
@@ -149,6 +172,29 @@ analysis:
     - id: hwc_layer_overflow
       name: "HWC 叠加层溢出"
       description: "Layer 数量超过硬件叠加层上限，触发 Client 合成"
+      detection_skill: surfaceflinger_analysis
+
+    # ----- Article-grounded issues (S01 + S05/S06) -----
+    - id: client_composition_increases_gpu_load
+      name: "Client composition 加重 SF GPU 负担"
+      description: |
+        HWC 拒绝某 layer 后 SF 用 GPU 合成到 client target buffer，再交回 HWC present。
+        这一段 GPU 工作完全压在 SF 进程，挤占 game/video/UI 应用自己的 GPU 预算 — 多 layer 场景尤其明显。
+      detection_skill: gpu_render_in_range
+
+    - id: hwc_decision_oscillation
+      name: "HWC 决策反复抖动"
+      description: |
+        相邻几帧 layer 几何/可见性变化频繁时 HWC 重新评估，
+        device ↔ client 合成方式来回切换会造成功耗和延迟周期性抬升。
+        S05 §"功耗上涨、带宽突然变高、偶发卡顿，常常发生在这种策略切换附近"。
+      detection_skill: sf_layer_count_in_range
+
+    - id: hwc_secure_composition_path
+      name: "DRM/HDCP 强制 secure overlay 路径"
+      description: |
+        受保护内容（GRALLOC_USAGE_PROTECTED）必须走 secure overlay 或 secure composition 路径。
+        路径错（例如 TextureView 走 HWUI 普通 GPU context 读 protected buffer）→ 黑屏或拒绝播放。
       detection_skill: surfaceflinger_analysis
 
   recommended_skills:

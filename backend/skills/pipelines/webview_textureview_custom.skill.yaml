@@ -21,6 +21,23 @@ meta:
   icon: "web"
   family: webview
   doc_path: "rendering_pipelines/webview_textureview_custom.md"
+  # ----- Article-grounded signature (S09 + S04) -----
+  s_article_ref: "S09"
+  four_features:
+    producer_threads: ["WebViewCore", "X5*", "UCCore*", "TBS*"]
+    consumer_threads: ["RenderThread"]
+    expected_layer_count: 1   # 网页内容回宿主，单 layer
+    bufferqueue_path: "CUSTOM_KERNEL_TO_SURFACETEXTURE_TO_HOST_BBQ"   # 定制内核 → SurfaceTexture → 宿主 RT updateTexImage
+    extra_rhythm_sources: ["custom_kernel_rhythm"]
+  deviation_anchors: "custom_kernel_to_host_resample_anchor_5"
+  # 锚点偏离：与 FLUTTER_TEXTUREVIEW 类似，但 Producer 是国内定制内核（X5/UC/TBS）。
+  # 内核可能有自己的渲染优化策略，但整体仍是 SurfaceTexture producer + 宿主侧再次合成 的架构。
+  custom_kernels: |
+    国内常见定制内核：
+    - 腾讯 X5 / TBS（QQ、微信、QQ 浏览器）
+    - 阿里 UCCore（UC 浏览器、夸克、支付宝）
+    - 百度 ZeusCore（百度 App）
+  subvariants_note: "文章 S09 列出的 5 种 WebView 路径之一（参 webview_gl_functor 注释）。"
 
 detection:
   scoring_signals:
@@ -156,6 +173,29 @@ auto_pin:
       main_thread_only: true
 
 analysis:
+  common_issues:
+    # ----- Article-grounded issues (S09 + S04) -----
+    - id: custom_kernel_invisible_to_aosp_optimizations
+      name: "AOSP 优化对定制内核失效"
+      description: |
+        AOSP WebView 优化（OOP-R / Viz / SurfaceControl）仅适用于 stock WebView。
+        X5/UC/TBS 等定制内核不走这些路径，性能特征与 stock 完全不同——分析时不要套用 stock 经验。
+      detection_skill: cpu_analysis
+
+    - id: textureview_resample_overhead
+      name: "宿主 RT updateTexImage + GPU 重采样开销"
+      description: |
+        定制内核走 TextureView 路径，所有 S04 TextureView 的代价都适用：updateTexImage acquire、
+        GPU 重采样、YUV→RGB 色彩转换、acquire/release 双层 fence。
+      detection_skill: gpu_render_in_range
+
+    - id: kernel_thread_naming_unstable
+      name: "定制内核线程名不稳定"
+      description: |
+        X5/UC/TBS 定制内核的线程名随版本变化大（X5_GLBackbufferThread / TbsRenderThread / UCRenderingThread 等）。
+        Trace 中识别需要交叉用 process name + slice 名 pattern。
+      detection_skill: cpu_analysis
+
   recommended_skills:
     - render_thread_slices
     - cpu_analysis

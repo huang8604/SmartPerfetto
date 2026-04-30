@@ -21,6 +21,16 @@ meta:
   icon: "android"
   family: hwui
   doc_path: "rendering_pipelines/android_view_standard.md"
+  # ----- Article-grounded signature (S02) -----
+  s_article_ref: "S02"
+  four_features:
+    producer_threads: ["RenderThread"]
+    expected_layer_count: 1
+    bufferqueue_path: "BUFFERQUEUE_INPROC"   # 老 BufferQueue，无 Transaction 原子性
+    extra_rhythm_sources: []
+  deviation_anchors: "baseline_legacy_no_blast_anchor_6"
+  # 锚点 ⑥ 偏离基线：buffer 通过 Binder 调用提交给 SF，无 BLAST Transaction 原子性绑定。
+  # 其余 ①-⑤、⑦-⑫ 与 S02 baseline 完全一致。
 
 detection:
   required_signals:
@@ -199,6 +209,22 @@ analysis:
     - id: buffer_stall
       name: "Buffer 等待"
       description: "等待 BufferQueue 可用 Buffer"
+      detection_skill: render_thread_slices
+
+    # ----- Article-grounded issues (S02) -----
+    - id: tearing_or_size_desync
+      name: "撕裂或尺寸错位"
+      description: |
+        Legacy BufferQueue 缺乏 BLAST 的原子事务保证——几何变化（位置/尺寸/裁剪）
+        与 buffer 更新不在同一帧生效时，用户能看到撕裂或尺寸错位一帧。
+        升级到 Android 12+/BLAST 路径可显著改善此类问题。
+      detection_skill: sf_composition_in_range
+
+    - id: binder_submit_overhead
+      name: "Binder 提交开销"
+      description: |
+        Legacy 路径下 buffer 通过 Binder 调用从 App 进程提交给 SurfaceFlinger，
+        相比 BLAST in-process Transaction 多一次跨进程通信开销，对短帧预算敏感。
       detection_skill: render_thread_slices
 
   recommended_skills:

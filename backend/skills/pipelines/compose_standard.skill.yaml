@@ -21,6 +21,23 @@ meta:
   icon: "android"
   family: hwui
   doc_path: "rendering_pipelines/compose_standard.md"
+  # ----- Article-grounded signature (S02 Compose 章节) -----
+  s_article_ref: "S02"   # Compose 走相同 HWUI 路径，仅 main thread 工作形态不同
+  four_features:
+    producer_threads: ["RenderThread"]
+    expected_layer_count: 1
+    bufferqueue_path: "BBQ_TRANSACTION_INPROC"
+    extra_rhythm_sources: []
+  deviation_anchors: "baseline_compose_main_thread_form_only"
+  # 12 锚点完整覆盖（与 ANDROID_VIEW_STANDARD_BLAST 一致），仅 ② 内 main thread 工作形态不同：
+  # View 系统走 measure/layout/draw 命令式 API；Compose 走声明式三阶段（Composition/Layout/Drawing）+ 重组机制。
+  # ⑤ RenderThread 之后的所有锚点完全相同——RenderThread / BLASTBufferQueue / SurfaceFlinger / HWC / present fence 路径与 View 系统共用 HWUI 底层。
+  compose_specific: true
+  compose_tracing_dependency_note: |
+    Compose 特有 slice 需要启用 androidx.compose.runtime:runtime-tracing
+    （Compose UI 1.3.0+, Studio Flamingo+, API 30+）。
+    未启用 tracing 时只能看到笼统的 ComposeView#onMeasure / onLayout / onDraw 这种宿主 View 回调 slice，
+    看不到 Composable 函数级细节。排查 Compose 性能问题前先确认 tracing 已开启。
 
 detection:
   required_signals:
@@ -203,6 +220,29 @@ analysis:
       name: "重量级 Composition"
       description: "单帧 Composition 阶段耗时过长"
       detection_skill: jank_frame_detail
+
+    # ----- Article-grounded issues (S02 Compose 章节) -----
+    - id: non_skippable_recomposition
+      name: "非 skippable Composable 频繁重组"
+      description: |
+        Composable 参数不 stable（如普通 List<T>、未加注解的 data class、捕获不稳定状态的 lambda），
+        Compose 编译器无法将其标记为 skippable。即使参数内容没变，每次 state change 都会重组。
+        定位手段：Compose Compiler stability report 或 Layout Inspector 重组计数。
+      detection_skill: app_frame_production
+
+    - id: subcompose_layout_multipass
+      name: "SubcomposeLayout / intrinsic measurements 多 pass"
+      description: |
+        Compose 默认是一次 measure/layout 遍历（single-pass），但 SubcomposeLayout / intrinsic measurements
+        / Lookahead 这些机制会带来额外 pass。深嵌套使用时主线程 Layout 阶段时间会被放大。
+      detection_skill: app_frame_production
+
+    - id: state_read_scope_too_wide
+      name: "State 读取范围过宽"
+      description: |
+        State 读取范围过宽，触发过多 Composable 重组——典型如顶层 ViewModel 字段被多个 Composable 读取，
+        某个字段变化引发整页重组。修复：用 derivedStateOf / 拆分 State 缩小读取作用域。
+      detection_skill: app_frame_production
 
   recommended_skills:
     - scrolling_analysis

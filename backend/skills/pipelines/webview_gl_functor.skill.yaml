@@ -21,6 +21,29 @@ meta:
   icon: "web"
   family: webview
   doc_path: "rendering_pipelines/webview_gl_functor.md"
+  # ----- Article-grounded signature (S09) -----
+  s_article_ref: "S09"
+  four_features:
+    producer_threads: ["RenderThread", "CrRendererMain", "Compositor", "CompositorTileWorker*"]
+    optional_producer_threads: ["VizCompositorThread"]   # Viz 在 WebView 中不做 swap
+    expected_layer_count: 0   # Functor 路径下网页内容回宿主窗口，不占独立 layer
+    bufferqueue_path: "CHROMIUM_DDL_TO_HOST_RENDERTHREAD_REPLAY"   # Chromium Viz 生成 DDL → 宿主 RT replay → 宿主 BBQ
+    extra_rhythm_sources: ["chromium_compositor_rhythm"]
+  deviation_anchors: "host_rt_replay_anchor_5_at_host_rt"
+  # 锚点偏离：① 宿主 vsync-app 仍走；② 宿主 doFrame；
+  # ⑤ 在宿主 RenderThread 上由 AwDrawFnImpl::DrawGL/DrawVk replay Chromium 生成的 DDL，
+  # 这一段叠在宿主 RT 预算里——超 budget 会拖整页掉帧。
+  layer_signature: "宿主 window layer 1 个（网页内容已被宿主吸收）"
+  subvariants_note: |
+    文章 S09 区分 5 种 WebView 路径：
+    - WEBVIEW_GL_FUNCTOR（当前 ID）— Functor，回宿主 RT
+    - WEBVIEW_SURFACE_CONTROL — SurfaceControl overlay，独立合成
+    - WEBVIEW_SURFACEVIEW_WRAPPER — 网页独立 SurfaceView（典型全屏视频）
+    - WEBVIEW_TEXTUREVIEW_CUSTOM — 第三方内核 TextureView
+    - WEBVIEW_IMAGEREADER_PIPELINE — 罕见中转路径
+  thread_locations: |
+    Chromium 线程可能在宿主 App 进程或独立 sandboxed_process（com.google.android.webview:sandboxed_process*）。
+    主体 HWUI App 带 :sandboxed_process 子进程时，主进程仍是 ANDROID_VIEW_STANDARD_BLAST，子进程才走 Functor。
 
 detection:
   required_signals:
@@ -179,6 +202,28 @@ analysis:
     - id: js_long_task
       name: "JS 长任务"
       description: "JavaScript 执行阻塞渲染"
+      detection_skill: cpu_analysis
+
+    # ----- Article-grounded issues (S09) -----
+    - id: host_renderthread_overrun_via_functor
+      name: "宿主 RT 因 functor replay 段超 budget"
+      description: |
+        Chromium 网页内容产出的 DDL 在 AwDrawFnImpl::DrawGL/DrawVk 段 replay 到宿主 RT。
+        网页内容重时这一段独自就能让宿主 RT 超 budget，外部表现是整页掉帧（不是网页"自己"掉帧）。
+      detection_skill: render_thread_slices
+
+    - id: chromium_renderer_jank
+      name: "Chromium Renderer 卡导致网页更新晚"
+      description: |
+        CrRendererMain 上 Blink Layout/Paint 重，或 Compositor 线程卡住，导致下一次 functor replay 拿到的 DDL 是旧内容。
+        宿主 RT 看不出这一帧"为什么晚了"，要切到 Chromium 线程上找。
+      detection_skill: cpu_analysis
+
+    - id: blink_v8_long_task
+      name: "Blink V8 长任务（>50ms）"
+      description: |
+        JS 执行长任务（>50ms）阻塞 Renderer 主线程，导致后续 input/animation 都卡。
+        Web Vitals 中的 INP/TBT 与此直接相关。
       detection_skill: cpu_analysis
 
   recommended_skills:

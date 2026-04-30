@@ -21,6 +21,20 @@ meta:
   icon: "web"
   family: webview
   doc_path: "rendering_pipelines/webview_surface_control.md"
+  # ----- Article-grounded signature (S09) -----
+  s_article_ref: "S09"
+  four_features:
+    producer_threads: ["VizCompositorThread", "CrRendererMain", "Compositor", "CompositorTileWorker*"]
+    expected_layer_count: "N (overlay candidates)"   # Chromium 为每个 candidate 创建 SurfaceControl overlay
+    bufferqueue_path: "CHROMIUM_TO_ASURFACECONTROL_TRANSACTION"   # Chromium overlay candidates → ASurfaceControl 直接提交
+    extra_rhythm_sources: ["chromium_compositor_rhythm"]
+  deviation_anchors: "independent_overlay_anchor_6_at_chromium_to_sf"
+  # 锚点偏离：网页内容由 Chromium 直接走 ASurfaceControl/ASurfaceTransaction 提交到 SF，
+  # 不经宿主 RT replay，避免阻塞宿主 RenderThread。
+  subvariants_note: "文章 S09 列 5 种 WebView 路径中的 SurfaceControl 模式（参 webview_gl_functor 注释）。"
+  hwc_constraint: |
+    overlay candidate 数量过多时 HWC plane 不够 → 部分 candidate 回退到 client composition
+    → SF GPU 合成成本上升。这是 SurfaceControl 模式相对 Functor 的额外风险点。
 
 detection:
   scoring_signals:
@@ -145,6 +159,29 @@ analysis:
       description: "Viz 合成器处理延迟"
       detection_skill: sf_frame_consumption
 
+    # ----- Article-grounded issues (S09) -----
+    - id: hwc_overlay_count_overflow_to_client_composition
+      name: "Overlay candidate 数量过多触发 HWC client composition 回退"
+      description: |
+        Chromium 为每个 overlay candidate 创建 SurfaceControl，HWC plane 数量有限。
+        多 overlay 同屏时部分会被打回 client composition，GPU 带宽吃紧。
+      detection_skill: sf_layer_count_in_range
+
+    - id: surfacecontrol_transaction_late_apply
+      name: "ASurfaceTransaction apply 晚到"
+      description: |
+        Chromium 的 overlay transaction 与宿主窗口 transaction 不同帧 apply 时，用户看到 layer 错位。
+        SurfaceSyncGroup（API 34+）可以让多 transaction 同帧生效。
+      detection_skill: sf_composition_in_range
+
+    - id: chromium_renderer_blocking_compositor
+      name: "Chromium Renderer 阻塞 Compositor"
+      description: |
+        CrRendererMain 卡或 commit 慢，VizCompositorThread 收不到 CompositorFrame，
+        ASurfaceTransaction 提交也会延迟。
+      detection_skill: cpu_analysis
+
   recommended_skills:
     - sf_frame_consumption
+    - sf_layer_count_in_range
     - cpu_analysis

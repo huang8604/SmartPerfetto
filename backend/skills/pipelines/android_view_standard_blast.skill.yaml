@@ -22,6 +22,19 @@ meta:
   icon: "android"
   family: hwui
   doc_path: "rendering_pipelines/android_view_standard.md"
+  # ----- Article-grounded signature (S02) -----
+  # 文档字段：被 LLM Agent 用于语义化诊断；不参与 detection 评分
+  s_article_ref: "S02"
+  four_features:
+    producer_threads: ["RenderThread"]
+    expected_layer_count: 1
+    bufferqueue_path: "BBQ_TRANSACTION_INPROC"   # BLAST in-process Transaction
+    extra_rhythm_sources: []                       # 仅 vsync-app 驱动，无额外节奏源
+  deviation_anchors: "baseline_complete_1_to_12"
+  # 12 锚点完整覆盖（① vsync-app → ② doFrame 5 callbacks → ③ syncAndDrawFrame →
+  # ④ dequeueBuffer → ⑤ Skia/GPU → ⑥ queueBuffer→Transaction (BufferTx +1 在此) →
+  # ⑦ vsync-sf → ⑧ latch → ⑨ HWC validate → ⑩ client composition (按需) →
+  # ⑪ presentDisplay → ⑫ scan-out + present fence)
 
 # ==========================================================================
 # Detection Rules
@@ -52,6 +65,9 @@ detection:
     - signal: has_set_transaction_state
       slice_pattern: "*setTransactionState*"
       weight: 10
+    - signal: has_apply_transaction
+      slice_pattern: "*applyTransaction*"
+      weight: 12  # BLAST 强信号：Transaction 应用是 BLAST 提交的关键证据（S02）
 
   exclude_if:
     - thread: "1.ui"           # Flutter
@@ -301,6 +317,36 @@ analysis:
       name: "SyncFrameState 慢"
       description: "UI 线程与 RenderThread 同步耗时过长"
       detection_skill: render_thread_slices
+
+    # ----- Article-grounded issues (S02) -----
+    - id: buffer_slot_blocked
+      name: "BufferSlot 卡 ACQUIRED"
+      description: |
+        dequeueBuffer 长时间等待，根因是上一帧对应的 BufferSlot 仍卡在 ACQUIRED 状态——
+        HWC 还在显示该 buffer 或 SF 这一轮没把它释放，release fence 因此晚回。
+        S02 §dequeueBuffer 为什么会等：要按 release fence → acquire fence → SF latch 这条链回查。
+      detection_skill: render_thread_slices
+
+    - id: doframe_callback_imbalance
+      name: "doFrame 5-callback 不均衡"
+      description: |
+        Choreographer#doFrame 内 INPUT/ANIMATION/INSETS_ANIMATION/TRAVERSAL/COMMIT 5 个 callback 中
+        某段独占预算（典型如 TRAVERSAL 因为深嵌套 ViewGroup measure 反复触发）。
+      detection_skill: app_frame_production
+
+    - id: hwc_client_fallback
+      name: "HWC 降级 client composition"
+      description: |
+        HWC 把原本 DEVICE 的 layer 在 validateDisplay→getChangedCompositionTypes 阶段降级到 CLIENT，
+        SF 用 GPU 补合成。常见触发：透明、旋转、受保护内容、plane 数量不足。表现为 SF Duration 抬升 + GPU 带宽吃紧。
+      detection_skill: sf_composition_in_range
+
+    - id: present_fence_late
+      name: "present fence 持续偏晚"
+      description: |
+        提交按时但 present fence 偏晚——问题已落到系统收尾阶段（panel 模式切换/刷新率切换/扫描输出延迟）。
+        S02 §"为什么 HWC / present fence 要放到最后看"。
+      detection_skill: present_fence_timing
 
   recommended_skills:
     - scrolling_analysis

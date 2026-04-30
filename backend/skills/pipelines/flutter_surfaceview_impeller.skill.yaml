@@ -21,6 +21,34 @@ meta:
   icon: "flutter"
   family: flutter
   doc_path: "rendering_pipelines/flutter_surfaceview.md"
+  # ----- Article-grounded signature (S10) -----
+  s_article_ref: "S10"
+  four_features:
+    producer_threads: ["1.ui", "1.raster", "1.io"]   # Flutter 三线程模型
+    optional_producer_threads: ["DartWorker*", "io.flutter.*"]
+    expected_layer_count: 1   # SurfaceView 模式：Flutter 独立 layer
+    bufferqueue_path: "ENGINE_TO_INDEPENDENT_SURFACE"   # Engine raster → 独立 Surface → BufferQueue → SF
+    extra_rhythm_sources: ["engine_animator_beginframe"]   # Engine 通过 JNI 向 Choreographer 注册 FrameCallback
+  deviation_anchors: "engine_anchor_2_3_4_5_6_at_engine_threads"
+  # 锚点偏离：① Engine 经 JNI 注册 FrameCallback 接 vsync；
+  # ② Flutter Animator::BeginFrame 代替宿主 doFrame 5-callback；
+  # ③ Flutter 内部状态同步（无 syncAndDrawFrame）；
+  # ④⑤⑥ Engine Rasterizer 完成（Impeller backend）；
+  # ⑦-⑫ 走标准系统侧（独立 layer 进 SF）。
+  layer_signature: 'io.flutter.* surface 名（独立 layer）'
+  subvariants_note: |
+    文章 S10 的 Flutter SurfaceView 子变种：
+    - FLUTTER_SURFACEVIEW（surface 模式，Impeller 或 Skia 后端）— 当前 ID 覆盖 Impeller
+    - FLUTTER_TEXTUREVIEW（texture 模式，回宿主，单 layer）— FLUTTER_TEXTUREVIEW 覆盖
+    - FLUTTER_IMAGVIEW_HC_OVERLAY / FLUTTER_HC_OVERLAY_PLATFORMVIEW（Hybrid Composition / PlatformView）— Phase E 拆分
+    - FLUTTER_TEXTUREVIEW_PLATFORMVIEW（PlatformView TextureLayer 路径）— Phase E 拆分
+  impeller_advantage: |
+    Impeller 预编译 shader/pipeline，消除 Skia 时代的运行时 shader compilation jank。
+    Android 上 Impeller 默认 Vulkan backend，不支持时回退 OpenGL ES。
+  known_traps: |
+    - PlatformView 策略（VD/HC/TLHC/HCPP）默认选择随版本变化，不能假设固定
+    - 透明背景强制 texture 模式（SurfaceView 无法透明混合）— 此时不属于此 ID
+    - Flutter 双线程任一超 budget 都是 jank，不能只看 raster
 
 detection:
   scoring_signals:
@@ -168,7 +196,38 @@ analysis:
       description: "Layer Tree 过于复杂，光栅化耗时"
       detection_skill: gpu_analysis
 
+    # ----- Article-grounded issues (S10) -----
+    - id: ui_thread_overrun
+      name: "1.ui 线程超 budget"
+      description: |
+        Dart build/layout/paint 过重（ListView 大量 widget、RepaintBoundary 设置错误、
+        StatelessWidget 内部不该用 Container.padding+Container.color 组合等）。
+        UI 线程超 budget → Layer Tree 提交晚 → raster 线程晚开始。
+      detection_skill: app_frame_production
+
+    - id: raster_thread_overrun
+      name: "1.raster 线程超 budget"
+      description: |
+        GPU submission 重 / fence 等待 / Impeller pipeline 创建（首次新 effect）。
+        raster 线程超 budget 即使 ui 线程及时也会 jank。
+      detection_skill: gpu_render_in_range
+
+    - id: dual_thread_attribution_required
+      name: "归因必须区分 ui/raster 双线程"
+      description: |
+        Flutter 双线程任一超 budget 都是 jank，不能只看 raster。
+        归因要分别看 1.ui 上 Animator::BeginFrame 与 1.raster 上 Rasterizer::DoDraw 的时长。
+      detection_skill: app_frame_production
+
+    - id: platformview_strategy_unknown
+      name: "PlatformView 策略未确认"
+      description: |
+        PlatformView 4 种策略（VD/HC/TLHC/HCPP）默认选择随 Flutter 版本变化。
+        含 PlatformView 时需先确认实际策略，否则归因会错。
+      detection_skill: sf_layer_count_in_range
+
   recommended_skills:
     - scrolling_analysis
     - jank_frame_detail
     - gpu_analysis
+    - flutter_scrolling_analysis
