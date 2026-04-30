@@ -27,6 +27,18 @@ fi
 
 VERSION=$(basename "$VERSION_DIR")
 echo "Found compiled frontend: $VERSION"
+
+# Warn about stale version directories — rsync --delete only cleans inside the
+# versioned dir, it does NOT remove old sibling dirs (e.g. v54.0-abc123/).
+# Those must be removed manually with: git rm -r frontend/<old-version>/
+STALE_DIRS=$(find "$FRONTEND_DIR" -maxdepth 1 -type d -name 'v*' ! -name "$VERSION" 2>/dev/null || true)
+if [ -n "$STALE_DIRS" ]; then
+  echo "⚠️  Stale version directories found (no longer referenced by index.html):"
+  echo "$STALE_DIRS" | sed 's|^|     |'
+  echo "   Remove them with: git rm -r <dir>"
+  echo ""
+fi
+
 echo "Updating frontend/ ..."
 
 # Copy top-level files
@@ -52,3 +64,6 @@ echo ""
 echo "Next steps:"
 echo "  git add frontend/"
 echo "  git commit -m 'chore(frontend): update prebuilt to $VERSION'"
+echo ""
+echo "Note: if you upgraded to a new Perfetto version, also remove the old"
+echo "  versioned directory: git rm -r frontend/<old-version>/"
