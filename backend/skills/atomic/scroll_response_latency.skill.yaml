@@ -26,6 +26,12 @@ meta:
   description: "基于 android_input_events 测量滚动手势从输入事件到首帧渲染的响应延迟"
   icon: "swipe_right"
   tags: [scroll, response, latency, input, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    滑动响应路径不同：标准 input→Choreographer→ViewRoot；
+    Flutter texture 模式额外多一层宿主采样；WebView Functor 含 Chromium 路径；
+    RN input→main→Bridge/JSI→mqt_js。未来按 pipeline_id 调整响应路径解析。
 
 prerequisites:
   modules:

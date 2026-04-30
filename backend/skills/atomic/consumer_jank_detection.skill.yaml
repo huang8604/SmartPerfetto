@@ -26,6 +26,15 @@ meta:
   description: "检测 Consumer (SurfaceFlinger) 侧的卡顿"
   icon: "warning"
   tags: [jank, consumer, surfaceflinger, atomic]
+  # ----- Phase F: pipeline-aware 接口 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    本 skill 已暴露 pipeline_id 可选输入。
+    当前实现按 layer_name 过滤通用判断（pipeline-agnostic），未来可按 pipeline_id 切换 SQL：
+    - Flutter: 1.ui jank（Animator::BeginFrame 超 budget）vs 1.raster jank（Rasterizer 超 budget）分开计
+    - Camera: 多路输出 back-pressure 归因（preview/analysis/record）
+    - Video: codec underflow（releaseOutputBuffer pool 耗尽）vs HWC overlay degradation
+    - Game: 三线程 lag 归因（GameThread/RenderThread/RHIThread）
 
 prerequisites:
   required_tables:
@@ -48,6 +57,10 @@ inputs:
   - name: end_ts
     type: timestamp
     required: false
+  - name: pipeline_id
+    type: string
+    required: false
+    description: "Pipeline ID (Phase F: pipeline-aware optional input; 当前实现 pipeline-agnostic, 未来按 pipeline 切换 SQL)"
 
 steps:
   # Step 1: 检测 VSync 周期

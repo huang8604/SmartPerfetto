@@ -23,6 +23,12 @@ meta:
   description: "统计时间范围内 SurfaceFlinger 活跃图层数量，辅助 SF 合成性能诊断"
   icon: "layers"
   tags: [surfaceflinger, layer, composition, diagnostics]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    Layer 数量是 4 特征分型的"特征 2"。expected_layer_count 按 pipeline 不同：
+    标准/TextureView=1, SurfaceView/Mixed≥2, HC overlay=N, WebView Functor=0。
+    未来按 pipeline_id 标注期望 layer 数 + 偏离判定。
 
 prerequisites:
   required_tables:

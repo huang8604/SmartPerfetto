@@ -27,6 +27,14 @@ meta:
   description: "检测帧间隙（缺帧）并分析 UI Thread/RenderThread 在 gap 期间的活动状态"
   icon: "broken_image"
   tags: [frame, gap, missing, production, diagnostics]
+  # ----- Phase F: pipeline-aware 接口 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    "活动状态"分类当前是 pipeline-agnostic（UI Thread + RenderThread）。
+    未来按 pipeline_id 切换：
+    - Flutter: 看 1.ui + 1.raster 双线程活动
+    - Game: 看 GameThread + RenderThread + RHIThread 三线程
+    - WebView Functor: 看宿主 RT + Chromium CrRendererMain 双链路
 
 prerequisites:
   required_tables:
@@ -48,6 +56,10 @@ inputs:
     type: timestamp
     required: false
     description: "分析结束时间戳(ns)"
+  - name: pipeline_id
+    type: string
+    required: false
+    description: "Pipeline ID (Phase F: pipeline-aware optional input)"
   - name: min_gap_vsync
     type: number
     required: false

@@ -22,6 +22,11 @@ meta:
   description: "识别每个掉帧帧期间的阻塞调用（GC、Binder、锁竞争、IO 等）"
   icon: "block"
   tags: [frame, blocking, jank, root_cause, diagnostics]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    "阻塞调用"分析当前 pipeline-agnostic（main thread）。未来按 pipeline_id 切换：
+    Flutter 看 1.ui 阻塞；Game 看 GameThread；RN 看 mqt_js。
 
 prerequisites:
   modules:

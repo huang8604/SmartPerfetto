@@ -18,6 +18,11 @@ meta:
   description: "分析 SurfaceFlinger 合成延迟"
   icon: "layers"
   tags: [surfaceflinger, composition, framework, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    SF 合成时多 layer 类型（SurfaceView/Mixed/HC overlay）的归因 SQL 与单 layer 类型不同。
+    未来按 pipeline_id + layer_count 切换合成成本分解 SQL。
 
 inputs:
   - name: start_ts

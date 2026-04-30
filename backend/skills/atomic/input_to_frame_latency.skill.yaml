@@ -28,6 +28,15 @@ meta:
   description: "基于 android_input_events 测量每个 MotionEvent 到对应帧 present 的延迟，用于跟手度分析"
   icon: "swipe_vertical"
   tags: [touch_tracking, follow_finger, input, latency, per_frame, atomic]
+  # ----- Phase F: pipeline-aware 接口 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    Input 触达"应用"的路径在不同 pipeline 下不同（S14 React Native / S10 Flutter / S09 WebView）：
+    - 标准 HWUI: input → main thread → Choreographer.doFrame
+    - Flutter: input → platform thread → 1.ui thread Animator::BeginFrame
+    - RN Old Arch: input → main → Bridge → mqt_js → Bridge → main → 原生 View
+    - RN New Arch: input → main → JSI → mqt_js → Fabric → main
+    未来按 pipeline_id 切换 input 路径与帧绑定 SQL。
 
 prerequisites:
   modules:
@@ -50,6 +59,10 @@ inputs:
     type: string
     required: false
     description: "事件动作过滤（默认 MOVE）"
+  - name: pipeline_id
+    type: string
+    required: false
+    description: "Pipeline ID (Phase F: pipeline-aware optional input)"
 
 display:
   level: detail

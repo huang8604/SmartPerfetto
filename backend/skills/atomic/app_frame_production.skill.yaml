@@ -12,6 +12,11 @@ meta:
   description: "分析应用主线程的帧生产情况"
   icon: "movie"
   tags: [frame, production, app, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    "App 帧生产"在双/三线程时归因不同：Flutter 1.ui+1.raster；Game GameThread+RenderThread+RHI；
+    RN mqt_js→Bridge/JSI→main。未来按 pipeline_id 切换主线程过滤 SQL。
 
 prerequisites:
   required_tables:

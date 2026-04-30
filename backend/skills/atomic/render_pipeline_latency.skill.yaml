@@ -18,6 +18,12 @@ meta:
   description: "分解帧渲染全链路各阶段耗时"
   icon: "timeline"
   tags: [render, pipeline, latency, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    端到端延迟的"端"在不同 pipeline 不同：
+    标准 HWUI input→display；Flutter 1.ui begin→1.raster done→present；
+    Game 引擎 swapBuffers→present；Camera HAL processCaptureRequest→preview present。
 
 inputs:
   - name: start_ts

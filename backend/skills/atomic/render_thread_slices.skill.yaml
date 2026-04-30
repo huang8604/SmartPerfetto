@@ -12,6 +12,15 @@ meta:
   description: "分析渲染线程的时间片分布"
   icon: "brush"
   tags: [rendering, thread, slice, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    "RenderThread"在不同 pipeline 是不同线程：
+    - 标准 HWUI: RenderThread
+    - Flutter: 1.raster
+    - Game: RHIThread (UE) / UnityGfx (Unity)
+    - WebView Functor: 宿主 RenderThread（含 Functor replay）
+    未来按 pipeline_id 切换 thread filter SQL。
 
 prerequisites:
   required_tables:

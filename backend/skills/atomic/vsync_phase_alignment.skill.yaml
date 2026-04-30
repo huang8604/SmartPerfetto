@@ -23,6 +23,11 @@ meta:
   description: "基于 android_input_events 分析输入事件与 VSync 信号的相位关系"
   icon: "sync"
   tags: [vsync, phase, alignment, input, latency, touch_tracking, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    输入相位对齐在不同 pipeline 不同：标准 vsync-app；Game Swappy 自管 frame pacing；
+    Flutter Engine vsync 经 JNI 桥接。未来按 pipeline_id 切换 input→vsync 路径解析。
 
 prerequisites:
   modules:

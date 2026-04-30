@@ -18,6 +18,11 @@ meta:
   description: "分析 GPU 渲染耗时和 Fence 等待"
   icon: "memory"
   tags: [gpu, render, fence, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    GPU 工作来源不同：标准 RenderThread；Flutter raster；Game (Vulkan vs GLES)；
+    Camera ISP；Video decoder。未来按 pipeline_id 切换 GPU 来源识别 SQL。
 
 inputs:
   - name: start_ts

@@ -17,6 +17,11 @@ meta:
   description: "检测帧时长抖动与高方差区间"
   icon: "show_chart"
   tags: [frame, jank, variance, frametimeline]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    方差计算的 frame 来源不同：标准用 FrameTimeline；Game 用 producer thread submit interval；
+    Camera 用 HAL processCaptureResult interval；Tunneled Video 用 HAL trace。
 
 triggers:
   keywords:

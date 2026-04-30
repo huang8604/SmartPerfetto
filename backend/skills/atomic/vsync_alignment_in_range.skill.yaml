@@ -18,6 +18,11 @@ meta:
   description: "分析帧与 VSync 信号的对齐情况"
   icon: "sync"
   tags: [vsync, display, timing, atomic]
+  # ----- Phase F: pipeline-aware 接口标注 -----
+  pipeline_aware: true
+  pipeline_aware_note: |
+    Camera/Video/Game(Swappy) 不严格对齐 vsync-app（各自有独立节奏）。
+    未来按 pipeline_id 切换"对齐预期"判定（vsync-app 严格 vs Camera HAL 节奏 vs Swappy frame pacing）。
 
 inputs:
   - name: start_ts
