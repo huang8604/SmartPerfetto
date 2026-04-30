@@ -147,6 +147,17 @@ CLAUDE_LIGHT_MODEL=your-light-model
 
 Known proxy options include [one-api](https://github.com/songquanpeng/one-api), [new-api](https://github.com/Calcium-Ion/new-api), and [LiteLLM](https://github.com/BerriAI/litellm). The selected model must support streaming and tool/function calling reliably. See [backend/.env.example](backend/.env.example) for provider examples and tuning options.
 
+### Turn Budgets
+
+SmartPerfetto has separate turn budgets for fast and full analysis:
+
+```bash
+CLAUDE_QUICK_MAX_TURNS=5   # fast mode default
+CLAUDE_MAX_TURNS=30        # full mode default
+```
+
+Raise these values for slower models or traces that need more tool iterations. The total safety timeout scales with the turn budget: full mode uses `CLAUDE_FULL_PER_TURN_MS` per turn, and fast mode uses `CLAUDE_QUICK_PER_TURN_MS` per turn. Restart the backend after changing `.env`.
+
 ## Basic Usage
 
 1. Open [http://localhost:10000](http://localhost:10000).

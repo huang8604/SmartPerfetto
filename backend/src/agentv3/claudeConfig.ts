@@ -45,7 +45,15 @@ const DEFAULT_LIGHT_MODEL = 'claude-haiku-4-5';
 // Scrolling pipeline: 1 time-range + 1 scrolling_analysis + 2-3 deep-drill (blocking_chain/binder_root_cause)
 // + 1-2 jank_frame_detail + hypothesis submit/resolve + conclusion = ~20-25 turns
 const DEFAULT_MAX_TURNS = 30;
+const DEFAULT_QUICK_MAX_TURNS = 5;
 const DEFAULT_EFFORT: EffortLevel = 'high';
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 export function loadClaudeConfig(overrides?: Partial<ClaudeAgentConfig>): ClaudeAgentConfig {
   return {
@@ -180,7 +188,7 @@ isClaudeCodeEnabled._warned = false;
 export function createQuickConfig(baseConfig: ClaudeAgentConfig): ClaudeAgentConfig {
   return {
     ...baseConfig,
-    maxTurns: 5,
+    maxTurns: parsePositiveIntEnv('CLAUDE_QUICK_MAX_TURNS', DEFAULT_QUICK_MAX_TURNS),
     effort: 'low',
     enableVerification: false,
     enableSubAgents: false,

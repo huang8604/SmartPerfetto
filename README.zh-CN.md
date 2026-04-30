@@ -147,6 +147,17 @@ CLAUDE_LIGHT_MODEL=your-light-model
 
 常见代理包括 [one-api](https://github.com/songquanpeng/one-api)、[new-api](https://github.com/Calcium-Ion/new-api) 和 [LiteLLM](https://github.com/BerriAI/litellm)。选择的模型需要稳定支持流式输出和 tool/function calling。完整厂商示例和调优参数见 [backend/.env.example](backend/.env.example)。
 
+### 轮次预算
+
+SmartPerfetto 区分 fast 和 full 两套轮次预算：
+
+```bash
+CLAUDE_QUICK_MAX_TURNS=5   # fast 模式默认值
+CLAUDE_MAX_TURNS=30        # full 模式默认值
+```
+
+如果使用较慢模型，或某些 trace 需要更多工具调用轮次，可以调高这些值。总 safety timeout 会随轮次预算放大：full 模式每轮使用 `CLAUDE_FULL_PER_TURN_MS`，fast 模式每轮使用 `CLAUDE_QUICK_PER_TURN_MS`。修改 `.env` 后需要重启 backend。
+
 ## 基本用法
 
 1. 打开 [http://localhost:10000](http://localhost:10000)。

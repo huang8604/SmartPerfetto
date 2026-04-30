@@ -91,6 +91,9 @@ export interface AgentDrivenReportData {
     confidence: number;
     rounds: number;
     totalDurationMs: number;
+    partial?: boolean;
+    terminationReason?: string;
+    terminationMessage?: string;
   };
   hypotheses: Array<{
     id: string;
