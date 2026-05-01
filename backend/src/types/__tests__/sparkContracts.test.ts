@@ -15,6 +15,7 @@ import {
   type TraceConfigGeneratorContract,
   type JankDecisionTreeContract,
   type ThreadSchedContextContract,
+  type BinderRootCauseChainContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -479,5 +480,79 @@ describe('Plan 11 — ThreadSchedContextContract', () => {
     expect(contract.threadStates[0].durByStateNs.Running).toBe(60_000_000);
     expect(contract.wakeupEdges?.[0].reason).toBe('binder');
     expect(contract.criticalChain?.[0].threadName).toBe('main');
+  });
+});
+
+describe('Plan 12 — BinderRootCauseChainContract', () => {
+  it('chains victim to root cause across processes', () => {
+    const contract: BinderRootCauseChainContract = {
+      ...makeSparkProvenance({source: 'binder-root-cause'}),
+      victim: {
+        step: 0,
+        side: 'client',
+        pid: 1234,
+        tid: 1234,
+        process: 'com.example.app',
+        thread: 'main',
+        method: 'IPackageManager.queryIntentActivities',
+        range: {startNs: 100_000_000, endNs: 200_000_000},
+      },
+      chain: [
+        {
+          step: 1,
+          side: 'server',
+          pid: 1000,
+          tid: 1042,
+          process: 'system_server',
+          thread: 'binder:1000_3',
+          method: 'queryIntentActivities',
+          range: {startNs: 110_000_000, endNs: 195_000_000},
+          blockedOn: 'lock(PackageManagerService.mLock)',
+        },
+        {
+          step: 2,
+          side: 'server',
+          pid: 1000,
+          tid: 1500,
+          process: 'system_server',
+          thread: 'PackageManager',
+          method: 'scanPackageLocked',
+          range: {startNs: 50_000_000, endNs: 110_000_000},
+          blockedOn: 'io(read)',
+        },
+      ],
+      rootCause: {
+        step: 2,
+        side: 'server',
+        pid: 1000,
+        tid: 1500,
+        process: 'system_server',
+        thread: 'PackageManager',
+        method: 'scanPackageLocked',
+        range: {startNs: 50_000_000, endNs: 110_000_000},
+        blockedOn: 'io(read)',
+      },
+      coverage: [{sparkId: 7, planId: '12', status: 'scaffolded'}],
+    };
+    expect(contract.chain).toHaveLength(2);
+    expect(contract.rootCause?.blockedOn).toBe('io(read)');
+  });
+
+  it('marks truncated chains rather than fabricating root cause', () => {
+    const contract: BinderRootCauseChainContract = {
+      ...makeSparkProvenance({source: 'binder-root-cause'}),
+      victim: {
+        step: 0,
+        side: 'client',
+        pid: 1234,
+        tid: 1234,
+        range: {startNs: 0, endNs: 100_000},
+      },
+      chain: [],
+      truncated: true,
+      coverage: [{sparkId: 7, planId: '12', status: 'scaffolded'}],
+    };
+    expect(contract.truncated).toBe(true);
+    expect(contract.rootCause).toBeUndefined();
   });
 });

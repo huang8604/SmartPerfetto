@@ -663,6 +663,48 @@ export interface ThreadSchedContextContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 12 — Binder Victim→Server Root-cause Chain (Spark #7)
+// =============================================================================
+
+/** A single hop in the binder transaction chain. */
+export interface BinderChainHop {
+  /** Sequence index within the chain (0 = victim caller). */
+  step: number;
+  side: 'client' | 'server';
+  /** Process+thread id pair. */
+  pid: number;
+  tid: number;
+  process?: string;
+  thread?: string;
+  /** Binder method name if known. */
+  method?: string;
+  /** ns range for the hop slice. */
+  range: NsTimeRange;
+  /** Wait reason if the hop blocked (e.g. lock, IO, cpu_starvation). */
+  blockedOn?: string;
+  evidence?: SparkEvidenceRef;
+}
+
+/**
+ * BinderRootCauseChainContract (Plan 12)
+ *
+ * Output of `binder_root_cause` deep skill. Renders the cross-process chain
+ * from the user-visible victim caller all the way to the system server-side
+ * blocker, anchored on `android.binder` stdlib slices.
+ */
+export interface BinderRootCauseChainContract extends SparkProvenance {
+  /** Victim slice that triggered the analysis (UI-thread blocking call). */
+  victim: BinderChainHop;
+  /** Ordered server-side hops; chain[0] is the immediate callee. */
+  chain: BinderChainHop[];
+  /** Final root cause hop — usually chain[-1] when the chain terminates. */
+  rootCause?: BinderChainHop;
+  /** Why the chain could not be fully resolved (binder data missing, etc.). */
+  truncated?: boolean;
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
