@@ -28,7 +28,6 @@ function requireService_worker () {
 	Object.defineProperty(service_worker$1, "__esModule", { value: true });
 	const LOG_TAG = `ServiceWorker: `;
 	const CACHE_NAME = 'ui-perfetto-dev';
-	const CACHE_BUILD_STAMP = 'causal-map-ai-panel-v1';
 	const OPEN_TRACE_PREFIX = '/_open_trace';
 	// If the fetch() for the / doesn't respond within 3s, return a cached version.
 	// This is to avoid that a user waits too much if on a flaky network.
@@ -283,10 +282,7 @@ function requireService_worker () {
 	    // else... method == 'GET'
 	    const file = postedFiles.get(fileKey);
 	    if (file !== undefined) {
-	        // SmartPerfetto may read this URL twice: once for the WASM engine and
-	        // once for the AI backend auto-upload. Keep it around briefly so both
-	        // consumers can clone the same posted trace without forcing a reopen.
-	        setTimeout(() => postedFiles.delete(fileKey), 5 * 60 * 1000);
+	        postedFiles.delete(fileKey);
 	        return new Response(file);
 	    }
 	    // The file /_open_trace/NNNN does not exist.

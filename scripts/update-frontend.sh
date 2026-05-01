@@ -48,18 +48,32 @@ cp "$DIST_DIR/index.html"          "$FRONTEND_DIR/index.html"
 cp "$DIST_DIR/service_worker.js"   "$FRONTEND_DIR/service_worker.js" 2>/dev/null || true
 
 # Sync versioned directory.
-# Exclude source maps (repo size) and WASM/engine bundles — these require a
-# full GN+ninja build and must NOT be overwritten by --only-wasm-memory64
-# builds which produce 38KB stubs instead of the real 244KB bundles.
-# engine_bundle.js and traceconv_bundle.js are preserved from the previous
-# full build committed in git.
+# Exclude source maps (repo size) and JS engine bundles — the --only-wasm-memory64
+# build produces 38KB stubs for engine_bundle.js and traceconv_bundle.js instead
+# of the real 244KB bundles, so we preserve those from git.
+# WASM files ARE real products of the --only-wasm-memory64 build and must be copied.
 rsync -a --delete \
   --exclude="*.map" \
-  --exclude="*.wasm" \
   --exclude="engine_bundle.js" \
   --exclude="traceconv_bundle.js" \
   "$VERSION_DIR/" \
   "$FRONTEND_DIR/$VERSION/"
+
+# Restore JS engine bundles if they are missing (e.g. first-time copy of a new
+# version directory). The real bundles live in the previous versioned directory
+# committed in git; stubs from --only-wasm-memory64 are ~38KB and must not be used.
+for BUNDLE in engine_bundle.js traceconv_bundle.js; do
+  TARGET="$FRONTEND_DIR/$VERSION/$BUNDLE"
+  if [ ! -f "$TARGET" ] || [ "$(wc -c < "$TARGET")" -lt 100000 ]; then
+    PREV=$(find "$FRONTEND_DIR" -maxdepth 2 -name "$BUNDLE" ! -path "$TARGET" 2>/dev/null | head -1)
+    if [ -n "$PREV" ]; then
+      echo "  Restoring $BUNDLE from previous build: $(basename "$(dirname "$PREV")")"
+      cp "$PREV" "$TARGET"
+    else
+      echo "  ⚠️  $BUNDLE not found in any previous version — a full GN+ninja build may be required."
+    fi
+  fi
+done
 
 echo "✅ frontend/ updated to $VERSION"
 echo ""
