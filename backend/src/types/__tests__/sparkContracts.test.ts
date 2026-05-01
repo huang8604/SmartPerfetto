@@ -21,6 +21,7 @@ import {
   type IoNetworkWakeupContract,
   type GpuSurfaceFlingerContract,
   type StartupAnrMethodGraphContract,
+  type DomainSkillEvalContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -851,5 +852,82 @@ describe('Plan 17 — StartupAnrMethodGraphContract', () => {
     expect(contract.startupPhases?.[0].initializersFired).toContain('Coil');
     expect(contract.anrAttributions?.[0].reason).toBe('input dispatch timeout');
     expect(contract.methodTraceGraph?.[0].children).toEqual(['m2']);
+  });
+});
+
+describe('Plan 18 — DomainSkillEvalContract', () => {
+  it('binds cases to assertions and sub-agents', () => {
+    const contract: DomainSkillEvalContract = {
+      ...makeSparkProvenance({source: 'domain-skill-eval-harness'}),
+      cases: [
+        {
+          caseId: 'scrolling/jank/heavy_mixed',
+          tracePath: 'test-traces/scroll-demo-customer-scroll.pftrace',
+          skillId: 'scrolling_analysis',
+          description: 'Customer scrolling, mixed jank',
+          groundTruthSource: 'manual annotation 2026-04-02',
+        },
+        {
+          caseId: 'startup/heavy/lacunh',
+          tracePath: 'test-traces/lacunh_heavy.pftrace',
+          skillId: 'startup_analysis',
+          description: 'Heavy app startup',
+        },
+      ],
+      assertions: {
+        'scrolling/jank/heavy_mixed': [
+          {
+            path: '$.diagnostics[0].reason_code',
+            expected: 'workload_heavy',
+            rationale: 'workload_heavy must remain a fallback (P > 0.5)',
+          },
+        ],
+        'startup/heavy/lacunh': [
+          {
+            path: '$.summary.ttid_ms',
+            expected: '<2500',
+            tolerance: 0.05,
+          },
+        ],
+      },
+      subAgents: [
+        {
+          id: 'scrolling-expert',
+          domain: 'scrolling',
+          evalCases: ['scrolling/jank/heavy_mixed'],
+        },
+      ],
+      runs: [
+        {
+          caseId: 'scrolling/jank/heavy_mixed',
+          ranAt: Date.now(),
+          status: 'pass',
+          assertionsPassed: 1,
+          assertionsFailed: 0,
+          durationMs: 4200,
+        },
+      ],
+      importers: [
+        {kind: 'atrace', required: true, note: 'Standard import path'},
+        {kind: 'simpleperf', required: false, note: 'Optional sample data'},
+        {kind: 'bpftrace', required: false},
+        {kind: 'macrobenchmark', required: false},
+      ],
+      coverage: [
+        {sparkId: 61, planId: '18', status: 'scaffolded'},
+        {sparkId: 63, planId: '18', status: 'scaffolded'},
+        {sparkId: 67, planId: '18', status: 'scaffolded'},
+        {sparkId: 76, planId: '18', status: 'scaffolded'},
+        {sparkId: 87, planId: '18', status: 'scaffolded'},
+        {sparkId: 99, planId: '18', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.cases).toHaveLength(2);
+    expect(contract.assertions['scrolling/jank/heavy_mixed']).toHaveLength(1);
+    expect(contract.subAgents?.[0].evalCases).toContain(
+      'scrolling/jank/heavy_mixed',
+    );
+    expect(contract.importers?.[0].required).toBe(true);
+    expect(contract.runs?.[0].status).toBe('pass');
   });
 });
