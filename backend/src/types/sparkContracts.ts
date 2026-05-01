@@ -152,6 +152,77 @@ export interface StdlibSkillCoverageContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 02 — Trace Summary v2 与 Baseline Artifact (Spark #2, #22, #102)
+// =============================================================================
+
+/** Hierarchical detail levels for `trace_summary` v2 output. */
+export type TraceSummaryLayer = 'L0' | 'L1' | 'L2' | 'L3';
+
+/**
+ * Single metric spec entry. Drives both `trace_summary()` baseline output and
+ * downstream Skill comparisons. Schema kept minimal — value/unit/range only —
+ * so older snapshots remain readable when new dimensions arrive.
+ */
+export interface TraceSummaryMetric {
+  /** Stable metric id, e.g. `frames.jank_count.p95`. */
+  metricId: string;
+  /** Numeric value. Always paired with `unit`. */
+  value: number;
+  /** Unit string: `ns`, `ms`, `count`, `percent`, `bytes`, ... */
+  unit: string;
+  /** Optional ns range when the metric is bounded to a window. */
+  range?: NsTimeRange;
+  /** Layer this metric belongs to (L0 highest-level → L3 deepest). */
+  layer: TraceSummaryLayer;
+  /** Skill or stdlib module that produced the value. */
+  source: string;
+  /** Evidence pointer for AI quoting. */
+  evidence?: SparkEvidenceRef;
+  /** Why this metric is unavailable for this trace (when applicable). */
+  unsupportedReason?: string;
+}
+
+/**
+ * Baseline artifact descriptor. Baselines live in artifact storage; the
+ * contract tracks references rather than embedding full payloads.
+ */
+export interface TraceSummaryBaselineRef {
+  /** Stable baseline id (`<app>/<device>/<build>/<cuj>`). */
+  baselineId: string;
+  /** Artifact id holding the full snapshot. */
+  artifactId: string;
+  /** When the baseline was captured (epoch ms). */
+  capturedAt: number;
+  /** Number of traces aggregated into the baseline. */
+  sampleCount?: number;
+}
+
+/**
+ * TraceSummaryV2Contract (Plan 02)
+ *
+ * Output of `traceSummaryV2(traceId, options?)`. Surfaces:
+ *  - Hierarchical L0-L3 metrics with provenance for each.
+ *  - Baseline pointer for diff/regression flows (consumed by Plan 25 / 50).
+ *  - `trace_processor_shell` build identifier (Spark #102 — engine continues
+ *    to be canonical).
+ *  - Probe results so callers can detect feature gaps without re-running the
+ *    summary.
+ */
+export interface TraceSummaryV2Contract extends SparkProvenance {
+  /** Trace processor build (semver or git sha). Captures #102 invariant. */
+  traceProcessorBuild?: string;
+  /** Whole-trace ns range covered by this summary. */
+  traceRange: NsTimeRange;
+  /** Probe results — true if the metric was producible on this trace. */
+  probes: Record<string, boolean>;
+  /** L0/L1/L2/L3 metrics in a flat array (layer is per-metric). */
+  metrics: TraceSummaryMetric[];
+  /** Optional baseline pointer when the request asked for diff context. */
+  baseline?: TraceSummaryBaselineRef;
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
