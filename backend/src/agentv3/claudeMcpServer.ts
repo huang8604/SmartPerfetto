@@ -2,7 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -43,6 +43,10 @@ import {
 } from '../services/baselineDiffer';
 import {ProjectMemory} from './projectMemory';
 import {CaseLibrary} from '../services/caseLibrary';
+import {
+  McpToolRegistry,
+  MCP_NAME_PREFIX as REGISTRY_MCP_NAME_PREFIX,
+} from './mcpToolRegistry';
 
 /**
  * Process-wide RagStore singleton, lazily initialized on first MCP tool
@@ -103,8 +107,9 @@ function getCaseLibrary(): CaseLibrary {
 }
 
 /** MCP tool name prefix — derived from the server name 'smartperfetto'.
- * Shared constant to avoid duplication across runtime, MCP server, and agent definitions. */
-export const MCP_NAME_PREFIX = 'mcp__smartperfetto__';
+ * Re-exported from `mcpToolRegistry.ts` so consumers (claudeAgentDefinitions,
+ * tests) keep their existing import path. */
+export const MCP_NAME_PREFIX = REGISTRY_MCP_NAME_PREFIX;
 
 let sqlSchemaCache: SqlSchemaIndex | null = null;
 
@@ -2415,59 +2420,57 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { annotations: { readOnlyHint: true } },
   ) : null;
 
-  // P2-G1: Co-locate tool objects with their names — auto-derives allowedTools
-  // so adding a new MCP tool automatically makes it available to the SDK.
-  const toolEntries: Array<{ tool: any; name: string }> = [];
+  // Plan 41 M0 (P2-G1 evolution): the canonical tool list lives in
+  // `McpToolRegistry`. Each register call carries the §4.5 exposure
+  // level so future hosts (stdio, A2A) can filter without
+  // re-deciding policy. Registration order is preserved exactly to
+  // keep SDK behavior identical to the pre-refactor toolEntries
+  // array — trace regression validates that.
+  const registry = new McpToolRegistry();
 
   if (options.lightweight) {
-    // Lightweight mode: only 3 core data-access tools — no planning, hypothesis, notes, or advanced tools.
-    // Plan gate is automatically disabled because analysisPlan is not passed in lightweight mode.
-    toolEntries.push(
-      { tool: executeSql, name: 'execute_sql' },
-      { tool: invokeSkill, name: 'invoke_skill' },
-      { tool: lookupSqlSchema, name: 'lookup_sql_schema' },
-    );
+    // Lightweight mode: only 3 core data-access tools — no planning,
+    // hypothesis, notes, or advanced tools. Plan gate is automatically
+    // disabled because analysisPlan is not passed in lightweight mode.
+    registry.registerSdk(executeSql, 'execute_sql', 'public');
+    registry.registerSdk(invokeSkill, 'invoke_skill', 'public');
+    registry.registerSdk(lookupSqlSchema, 'lookup_sql_schema', 'public');
   } else {
-    // Full mode: all always-on tools + conditional tools
-    toolEntries.push(
-      { tool: executeSql, name: 'execute_sql' },
-      { tool: invokeSkill, name: 'invoke_skill' },
-      { tool: listSkills, name: 'list_skills' },
-      { tool: detectArchitecture, name: 'detect_architecture' },
-      { tool: lookupSqlSchema, name: 'lookup_sql_schema' },
-      { tool: queryPerfettoSource, name: 'query_perfetto_source' },
-      { tool: listStdlibModules, name: 'list_stdlib_modules' },
-      { tool: lookupKnowledge, name: 'lookup_knowledge' },
-      { tool: lookupBlogKnowledge, name: 'lookup_blog_knowledge' },
-      { tool: lookupBaseline, name: 'lookup_baseline' },
-      { tool: compareBaselines, name: 'compare_baselines' },
-      { tool: recallProjectMemory, name: 'recall_project_memory' },
-      { tool: recallSimilarCase, name: 'recall_similar_case' },
-    );
-    if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
-    if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });
-    if (submitPlan) toolEntries.push({ tool: submitPlan, name: 'submit_plan' });
-    if (updatePlanPhase) toolEntries.push({ tool: updatePlanPhase, name: 'update_plan_phase' });
-    if (revisePlan) toolEntries.push({ tool: revisePlan, name: 'revise_plan' });
-    if (submitHypothesis) toolEntries.push({ tool: submitHypothesis, name: 'submit_hypothesis' });
-    if (resolveHypothesis) toolEntries.push({ tool: resolveHypothesis, name: 'resolve_hypothesis' });
-    if (flagUncertainty) toolEntries.push({ tool: flagUncertainty, name: 'flag_uncertainty' });
-    toolEntries.push({ tool: recallPatterns, name: 'recall_patterns' });
-    // Comparison mode tools — only when referenceTraceId is provided
-    if (compareSkill) toolEntries.push({ tool: compareSkill, name: 'compare_skill' });
-    if (executeSqlOn) toolEntries.push({ tool: executeSqlOn, name: 'execute_sql_on' });
-    if (getComparisonContext) toolEntries.push({ tool: getComparisonContext, name: 'get_comparison_context' });
+    // Full mode: all always-on tools + conditional tools.
+    registry.registerSdk(executeSql, 'execute_sql', 'public');
+    registry.registerSdk(invokeSkill, 'invoke_skill', 'public');
+    registry.registerSdk(listSkills, 'list_skills', 'public');
+    registry.registerSdk(detectArchitecture, 'detect_architecture', 'public');
+    registry.registerSdk(lookupSqlSchema, 'lookup_sql_schema', 'public');
+    registry.registerSdk(queryPerfettoSource, 'query_perfetto_source', 'public');
+    registry.registerSdk(listStdlibModules, 'list_stdlib_modules', 'public');
+    registry.registerSdk(lookupKnowledge, 'lookup_knowledge', 'public');
+    registry.registerSdk(lookupBlogKnowledge, 'lookup_blog_knowledge', 'public');
+    registry.registerSdk(lookupBaseline, 'lookup_baseline', 'public');
+    registry.registerSdk(compareBaselines, 'compare_baselines', 'public');
+    registry.registerSdk(recallProjectMemory, 'recall_project_memory', 'public');
+    registry.registerSdk(recallSimilarCase, 'recall_similar_case', 'public');
+    if (writeAnalysisNote) registry.registerSdk(writeAnalysisNote, 'write_analysis_note', 'internal');
+    if (fetchArtifact) registry.registerSdk(fetchArtifact, 'fetch_artifact', 'public');
+    if (submitPlan) registry.registerSdk(submitPlan, 'submit_plan', 'internal');
+    if (updatePlanPhase) registry.registerSdk(updatePlanPhase, 'update_plan_phase', 'internal');
+    if (revisePlan) registry.registerSdk(revisePlan, 'revise_plan', 'internal');
+    if (submitHypothesis) registry.registerSdk(submitHypothesis, 'submit_hypothesis', 'internal');
+    if (resolveHypothesis) registry.registerSdk(resolveHypothesis, 'resolve_hypothesis', 'internal');
+    if (flagUncertainty) registry.registerSdk(flagUncertainty, 'flag_uncertainty', 'internal');
+    // recall_patterns is currently 'internal' because its handler triggers
+    // openSupersedeStore (mkdir + sqlite migration). Plan 41 M1a will land
+    // SupersedeStoreReadOnlyAdapter and reclassify back to 'public'.
+    registry.registerSdk(recallPatterns, 'recall_patterns', 'internal');
+    // Comparison mode tools — only when referenceTraceId is provided.
+    if (compareSkill) registry.registerSdk(compareSkill, 'compare_skill', 'internal');
+    if (executeSqlOn) registry.registerSdk(executeSqlOn, 'execute_sql_on', 'internal');
+    if (getComparisonContext) registry.registerSdk(getComparisonContext, 'get_comparison_context', 'internal');
   }
 
-  const server = createSdkMcpServer({
-    name: 'smartperfetto',
-    version: '1.0.0',
-    tools: toolEntries.map(e => e.tool),
-  });
-
   return {
-    server,
-    allowedTools: toolEntries.map(e => `${MCP_NAME_PREFIX}${e.name}`),
+    server: registry.buildSdkServer(),
+    allowedTools: registry.buildAllowedTools(),
   };
 }
 
