@@ -31,6 +31,25 @@ import { buildActivePhaseReminder } from './activePhaseReminder';
 import { validatePlanAgainstSceneTemplate, MIN_WAIVER_REASON_CHARS } from './scenePlanTemplates';
 import type { ArtifactStore } from './artifactStore';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
+import { RagStore } from '../services/ragStore';
+
+/**
+ * Process-wide RagStore singleton, lazily initialized on first MCP tool
+ * call. Backs the `lookup_blog_knowledge` tool (Plan 55) and will back
+ * the project-memory recall tool (Plan 44) when that lands.
+ *
+ * Storage path lives next to the existing analysis_*.json files so
+ * operators can find every long-lived agent state in one directory.
+ */
+const RAG_STORE_PATH = path.resolve(
+  __dirname,
+  '../../logs/rag_store.json',
+);
+let cachedRagStore: RagStore | null = null;
+function getRagStore(): RagStore {
+  if (!cachedRagStore) cachedRagStore = new RagStore(RAG_STORE_PATH);
+  return cachedRagStore;
+}
 
 /** MCP tool name prefix — derived from the server name 'smartperfetto'.
  * Shared constant to avoid duplication across runtime, MCP server, and agent definitions. */
@@ -1120,6 +1139,35 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { annotations: { readOnlyHint: true } },
   );
 
+  // lookup_blog_knowledge (Plan 55): retrieve indexed chunks from
+  // androidperformance.com (and, once Plan 44 lands, world memory).
+  // Read-only — calls ragStore.search() which never writes. The index
+  // is populated by the M2 admin route + ingester; until then the
+  // search returns `unsupportedReason='index empty'` so the agent
+  // never invents content.
+  const lookupBlogKnowledge = tool(
+    'lookup_blog_knowledge',
+    'Retrieve indexed knowledge chunks from androidperformance.com to ground analysis claims in published material. ' +
+    'Returns ranked snippets matching the query plus provenance (chunkId, uri, title, author) so the agent can cite. ' +
+    'When the result carries an `unsupportedReason` (e.g. "index empty", "all chunks blocked by unsupportedReason"), ' +
+    'the agent must say the source is unavailable and must NOT summarize, paraphrase, or invent content from this source.',
+    {
+      query: z.string().describe('Search query — natural language is fine; tokens are lowercased and matched against snippet + title.'),
+      top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
+    },
+    async ({ query, top_k }) => {
+      const store = getRagStore();
+      const result = store.search(query, {
+        topK: top_k ?? 5,
+        kinds: ['androidperformance.com'],
+      });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+      };
+    },
+    { annotations: { readOnlyHint: true } },
+  );
+
   // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
   // Enables Claude to self-learn by finding how official code uses tables/functions.
   const queryPerfettoSource = tool(
@@ -2100,6 +2148,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       { tool: queryPerfettoSource, name: 'query_perfetto_source' },
       { tool: listStdlibModules, name: 'list_stdlib_modules' },
       { tool: lookupKnowledge, name: 'lookup_knowledge' },
+      { tool: lookupBlogKnowledge, name: 'lookup_blog_knowledge' },
     );
     if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
     if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });
