@@ -71,6 +71,12 @@ function buildResidency(
  * Decide a thermal verdict given the hottest sample's tempMc and
  * throttleStage. Thresholds chosen to match common Android thermal HAL
  * brackets (cool < 70°C, soft 70-85, hard 85-95, shutdown >= 95).
+ *
+ * Codex round 4 caught that traces from thermal zones often expose only
+ * temperature counters (no HAL stage), so 95°C+ samples without a
+ * throttleStage need to surface as `shutdown_imminent` based on
+ * temperature alone — otherwise pre-shutdown conditions are
+ * under-reported as ordinary hard throttling.
  */
 function decideThermal(
   samples: ThermalThrottleInput[] | undefined,
@@ -80,7 +86,12 @@ function decideThermal(
     (acc, s) => (s.tempMc > acc.tempMc ? s : acc),
     samples[0],
   );
-  if (hottest.throttleStage && hottest.throttleStage >= 3) return 'shutdown_imminent';
+  // Shutdown takes priority — either explicit HAL stage or pure
+  // temperature evidence past the documented shutdown threshold.
+  if ((hottest.throttleStage !== undefined && hottest.throttleStage >= 3)
+      || hottest.tempMc >= 95_000) {
+    return 'shutdown_imminent';
+  }
   if (hottest.throttleStage === 2 || hottest.tempMc >= 85_000) return 'hard_throttle';
   if (hottest.throttleStage === 1 || hottest.tempMc >= 70_000) return 'soft_throttle';
   if (hottest.tempMc >= 60_000) return 'soft_throttle';

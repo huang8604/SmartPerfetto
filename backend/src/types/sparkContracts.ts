@@ -464,19 +464,32 @@ export interface AnonymizationContract extends SparkProvenance {
 //          (Spark #53, #197, #201)
 // =============================================================================
 
-/** Common Perfetto data sources the generator can emit. */
+/**
+ * Canonical Perfetto data source names. Verified against
+ * `perfetto/docs/data-sources/*.md` and
+ * `perfetto/protos/perfetto/config/data_source_config.proto`. Codex round 4
+ * caught that earlier names like `android.frametimeline` and
+ * `android.input` were not real — generated trace configs would silently
+ * fail to capture frame/input data.
+ */
 export type PerfettoDataSourceId =
   | 'linux.ftrace'
   | 'linux.process_stats'
   | 'linux.sys_stats'
-  | 'android.surfaceflinger.frame'
-  | 'android.frametimeline'
-  | 'android.binder'
-  | 'android.input'
+  | 'linux.system_info'
+  | 'linux.sysfs_power'
+  | 'android.surfaceflinger.frametimeline'
+  | 'android.surfaceflinger.layers'
+  | 'android.surfaceflinger.transactions'
+  | 'android.input.inputevent'
   | 'android.power'
-  | 'android.gpu.memory'
-  | 'android.network_packets'
   | 'android.log'
+  | 'android.network_packets'
+  | 'android.java_hprof'
+  | 'gpu.counters'
+  | 'gpu.renderstages'
+  | 'gpu.log'
+  | 'vulkan.memory_tracker'
   | string; // allow forward-compat
 
 /** Single trace config fragment. */

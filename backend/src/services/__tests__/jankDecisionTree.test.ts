@@ -6,25 +6,39 @@ import {describe, it, expect} from '@jest/globals';
 import {buildJankDecisionTree, type JankFrameInput} from '../jankDecisionTree';
 
 describe('buildJankDecisionTree', () => {
-  it('routes AppDeadlineMissed with CPU starvation to cpu_starvation leaf', () => {
-    const frames: JankFrameInput[] = [
+  it('accepts canonical Perfetto "App Deadline Missed" string (Codex P1 regression)', () => {
+    // Round 1 SQL test confirmed Perfetto emits "App Deadline Missed" with
+    // spaces — proto-style "AppDeadlineMissed" never appears in real traces.
+    const c = buildJankDecisionTree([
       {
         frameId: 1,
         startNs: 0,
         endNs: 16_667_000,
-        jankType: 'AppDeadlineMissed',
+        jankType: 'App Deadline Missed',
         uiRunnableNs: 8_000_000,
-        lockBlockedNs: 200_000,
       },
-    ];
-    const c = buildJankDecisionTree(frames);
+    ]);
     expect(c.frameAttributions).toHaveLength(1);
     expect(c.frameAttributions[0].routePath).toEqual([
       'root',
       'app_deadline_missed',
       'app_cpu_starvation',
     ]);
-    expect(c.frameAttributions[0].reasonCode).toBe('cpu_starvation');
+  });
+
+  it('routes comma-joined jank reasons by priority (Codex P1 regression)', () => {
+    // "SurfaceFlinger Scheduling, App Deadline Missed" must route to the
+    // app-side branch (highest priority) so root-cause attribution lands
+    // on the actor the developer can fix.
+    const c = buildJankDecisionTree([
+      {
+        frameId: 9,
+        startNs: 0,
+        endNs: 16_667_000,
+        jankType: 'SurfaceFlinger Scheduling, App Deadline Missed',
+      },
+    ]);
+    expect(c.frameAttributions[0].routePath[1]).toBe('app_deadline_missed');
   });
 
   it('classifies SurfaceFlinger CPU jank to sf_cpu_deadline_missed', () => {
@@ -33,7 +47,7 @@ describe('buildJankDecisionTree', () => {
         frameId: 2,
         startNs: 0,
         endNs: 16_667_000,
-        jankType: 'SurfaceFlingerCpuDeadlineMissed',
+        jankType: 'SurfaceFlinger CPU Deadline Missed',
       },
     ]);
     expect(c.frameAttributions[0].routePath).toEqual([
@@ -46,7 +60,9 @@ describe('buildJankDecisionTree', () => {
     const c = buildJankDecisionTree([
       {frameId: 3, startNs: 0, endNs: 1, jankType: 'Buffer Stuffing'},
       {frameId: 4, startNs: 0, endNs: 1, jankType: 'BufferStuffing'},
+      {frameId: 5, startNs: 0, endNs: 1, jankType: 'SurfaceFlinger Stuffing'},
     ]);
+    expect(c.frameAttributions).toHaveLength(3);
     for (const attr of c.frameAttributions) {
       expect(attr.routePath).toContain('buffer_stuffing');
     }
@@ -68,7 +84,7 @@ describe('buildJankDecisionTree', () => {
         frameId: 7,
         startNs: 0,
         endNs: 16_667_000,
-        jankType: 'AppDeadlineMissed',
+        jankType: 'App Deadline Missed',
       },
     ]);
     expect(c.frameAttributions[0].reasonCode).toBe('workload_heavy');

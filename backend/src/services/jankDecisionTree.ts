@@ -127,15 +127,90 @@ function classifyAppDeadline(input: JankFrameInput): {
   return {leafId, confidence: finalConfidence, reasonCode};
 }
 
+/**
+ * Map a single canonical jank-reason token to its decision-tree branch id.
+ * The strings here are the human-readable labels Perfetto's
+ * frame_timeline_event_parser emits — e.g. "App Deadline Missed" with
+ * spaces, NOT the proto enum form. Codex review caught a P1 where the
+ * earlier code used the proto-style strings, so every real janky frame
+ * fell into `unknown_jank` and the routing tree never ran.
+ *
+ * Both the legacy compact enum form (proto names) AND the canonical
+ * Perfetto strings are accepted so callers can safely pass either.
+ */
+function jankTokenToBranchId(tokenRaw: string): string | null {
+  const token = tokenRaw.trim().toLowerCase();
+  switch (token) {
+    case 'app deadline missed':
+    case 'appdeadlinemissed':
+      return 'app_deadline_missed';
+    case 'surfaceflinger cpu deadline missed':
+    case 'surfaceflingercpudeadlinemissed':
+      return 'sf_cpu_deadline_missed';
+    case 'surfaceflinger gpu deadline missed':
+    case 'surfaceflingergpudeadlinemissed':
+      return 'sf_gpu_deadline_missed';
+    case 'display hal':
+    case 'displayhal':
+      return 'display_hal';
+    case 'prediction error':
+    case 'predictionerror':
+      return 'prediction_error';
+    case 'buffer stuffing':
+    case 'bufferstuffing':
+    case 'surfaceflinger stuffing':
+    case 'sf_stuffing':
+      return 'buffer_stuffing';
+    case 'surfaceflinger scheduling':
+    case 'surfaceflingerscheduling':
+      // SF scheduling is a SurfaceFlinger-side cause; route to SF CPU branch
+      // since both indicate SF main-thread scheduling pressure.
+      return 'sf_cpu_deadline_missed';
+    case 'app resynced jitter':
+    case 'appresyncedjitter':
+      return 'app_deadline_missed';
+    case 'unknown jank':
+    case 'unknown':
+    case 'unspecified':
+    case 'none':
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Branch priority for combined jank reasons. Perfetto emits comma-joined
+ * labels like "SurfaceFlinger Scheduling, App Deadline Missed" — when
+ * multiple reasons are present we route to the most actionable one,
+ * preferring app-side > SF-side > display-side, mirroring how the
+ * scrolling decision tree actually triages root cause.
+ */
+const BRANCH_PRIORITY: Record<string, number> = {
+  app_deadline_missed: 100,
+  sf_cpu_deadline_missed: 80,
+  sf_gpu_deadline_missed: 70,
+  buffer_stuffing: 60,
+  display_hal: 50,
+  prediction_error: 40,
+};
+
 function pickJankBranchId(jankType: FrameTimelineJankType | null): string {
-  if (!jankType || jankType === 'None') return 'unknown_jank';
-  if (jankType === 'AppDeadlineMissed') return 'app_deadline_missed';
-  if (jankType === 'SurfaceFlingerCpuDeadlineMissed') return 'sf_cpu_deadline_missed';
-  if (jankType === 'SurfaceFlingerGpuDeadlineMissed') return 'sf_gpu_deadline_missed';
-  if (jankType === 'DisplayHAL') return 'display_hal';
-  if (jankType === 'PredictionError') return 'prediction_error';
-  if (jankType === 'Buffer Stuffing' || jankType === 'BufferStuffing') return 'buffer_stuffing';
-  return 'unknown_jank';
+  if (!jankType) return 'unknown_jank';
+
+  // Perfetto joins multiple jank reasons with ", " — split + match each.
+  const tokens = String(jankType).split(',');
+  const branches: string[] = [];
+  for (const tok of tokens) {
+    const branch = jankTokenToBranchId(tok);
+    if (branch) branches.push(branch);
+  }
+  if (branches.length === 0) return 'unknown_jank';
+
+  // Pick highest-priority branch deterministically.
+  return branches.reduce((best, candidate) =>
+    (BRANCH_PRIORITY[candidate] ?? 0) > (BRANCH_PRIORITY[best] ?? 0) ? candidate : best,
+  );
 }
 
 /** Build the per-frame attribution rows. */

@@ -82,26 +82,17 @@ export function evaluateAssertion(
   const op = opMatch?.[1];
   const expectedValue = (opMatch?.[2] ?? expected).trim();
 
-  // When tolerance is set, use numeric absolute-diff comparison regardless
-  // of operator (Codex review caught this — string equality previously
-  // ignored tolerance entirely, so 101 vs 100 ±2 wrongly failed).
-  if (typeof assertion.tolerance === 'number' && Number.isFinite(assertion.tolerance)) {
-    const actualNum = Number(value);
-    const expectedNum = Number(expectedValue);
-    if (Number.isFinite(actualNum) && Number.isFinite(expectedNum)) {
-      // Tolerance is interpreted as absolute when >= 1 and as a fraction
-      // (relative to expectedNum) when < 1, matching how callers naturally
-      // express it in YAML strategies.
-      const tol = assertion.tolerance >= 1
-        ? assertion.tolerance
-        : Math.abs(expectedNum) * assertion.tolerance;
-      return {ok: Math.abs(actualNum - expectedNum) <= tol, actual};
-    }
-    // Fall through to operator/equality checks if either value is non-numeric.
-  }
+  // Tolerance is interpreted as absolute when >= 1 and as a fraction of
+  // the expected bound when < 1, matching how callers naturally express
+  // it in YAML strategies.
+  const tolerance = (typeof assertion.tolerance === 'number' && Number.isFinite(assertion.tolerance))
+    ? assertion.tolerance
+    : 0;
+  const slackFor = (boundary: number): number =>
+    tolerance >= 1 ? tolerance : Math.abs(boundary) * tolerance;
 
-  // Equality on strings.
-  if (!op || op === '=') {
+  // String equality (no operator, no numeric coercion needed).
+  if ((!op || op === '=') && tolerance === 0) {
     return {ok: actual === expectedValue, actual};
   }
 
@@ -111,17 +102,23 @@ export function evaluateAssertion(
     return {ok: false, actual};
   }
 
+  // Tolerance widens the bound rather than replacing the operator —
+  // Codex round 4 caught that the previous code threw away `<` / `>=`
+  // semantics when tolerance was set, so `<2500 with tolerance 0.05`
+  // wrongly required actual ≈ 2500 instead of actual < 2500*1.05.
+  const tol = slackFor(expectedNum);
   switch (op) {
     case '<':
-      return {ok: actualNum < expectedNum, actual};
+      return {ok: actualNum < expectedNum + tol, actual};
     case '<=':
-      return {ok: actualNum <= expectedNum, actual};
+      return {ok: actualNum <= expectedNum + tol, actual};
     case '>':
-      return {ok: actualNum > expectedNum, actual};
+      return {ok: actualNum > expectedNum - tol, actual};
     case '>=':
-      return {ok: actualNum >= expectedNum, actual};
+      return {ok: actualNum >= expectedNum - tol, actual};
+    case '=':
     default:
-      return {ok: false, actual};
+      return {ok: Math.abs(actualNum - expectedNum) <= tol, actual};
   }
 }
 

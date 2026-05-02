@@ -79,6 +79,33 @@ describe('evaluateAssertion', () => {
       evaluateAssertion({a: 110}, {path: '$.a', expected: '100', tolerance: 0.05}).ok,
     ).toBe(false);
   });
+
+  it('tolerance widens threshold operators rather than replacing them (Codex round 4 regression)', () => {
+    // <2500 with 5% tolerance → effective bound is < 2625.
+    // 100 must still pass because it's below 2500.
+    expect(
+      evaluateAssertion({a: 100}, {path: '$.a', expected: '<2500', tolerance: 0.05}).ok,
+    ).toBe(true);
+    // 2400 < 2500, also passes.
+    expect(
+      evaluateAssertion({a: 2400}, {path: '$.a', expected: '<2500', tolerance: 0.05}).ok,
+    ).toBe(true);
+    // 2600 > 2500 but within +5% slack (2625), passes.
+    expect(
+      evaluateAssertion({a: 2600}, {path: '$.a', expected: '<2500', tolerance: 0.05}).ok,
+    ).toBe(true);
+    // 2700 > 2625 even with slack, fails.
+    expect(
+      evaluateAssertion({a: 2700}, {path: '$.a', expected: '<2500', tolerance: 0.05}).ok,
+    ).toBe(false);
+    // >=10 with absolute tolerance 1 → effective bound is >= 9.
+    expect(
+      evaluateAssertion({a: 9}, {path: '$.a', expected: '>=10', tolerance: 1}).ok,
+    ).toBe(true);
+    expect(
+      evaluateAssertion({a: 8}, {path: '$.a', expected: '>=10', tolerance: 1}).ok,
+    ).toBe(false);
+  });
 });
 
 describe('runDomainSkillEvalHarness', () => {

@@ -38,6 +38,15 @@ describe('buildCpuThermalPmu', () => {
     expect(c.thermalDecision).toBe('shutdown_imminent');
   });
 
+  it('routes 95C+ without HAL stage to shutdown_imminent (Codex round 4 regression)', () => {
+    // Thermal zones often expose only temp counters with no HAL stage.
+    const c = buildCpuThermalPmu({
+      range: {startNs: 0, endNs: 1},
+      thermalSamples: [{zone: 'skin', ts: 0, tempMc: 96_000}],
+    });
+    expect(c.thermalDecision).toBe('shutdown_imminent');
+  });
+
   it('computes smoothVsJankComparison delta', () => {
     const c = buildCpuThermalPmu({
       range: {startNs: 0, endNs: 1},
