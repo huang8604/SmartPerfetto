@@ -41,6 +41,7 @@ import {
   evaluateRegressionGate,
   type RegressionRule,
 } from '../services/baselineDiffer';
+import {ProjectMemory} from './projectMemory';
 
 /**
  * Process-wide RagStore singleton, lazily initialized on first MCP tool
@@ -72,6 +73,19 @@ function getBaselineStore(): BaselineStore {
   if (!cachedBaselineStore)
     cachedBaselineStore = new BaselineStore(BASELINE_STORE_PATH);
   return cachedBaselineStore;
+}
+
+/** Process-wide ProjectMemory singleton (Plan 44). Independent of the
+ * existing `analysisPatternMemory.ts` session-scope store. */
+const PROJECT_MEMORY_PATH = path.resolve(
+  __dirname,
+  '../../logs/analysis_project_memory.json',
+);
+let cachedProjectMemory: ProjectMemory | null = null;
+function getProjectMemory(): ProjectMemory {
+  if (!cachedProjectMemory)
+    cachedProjectMemory = new ProjectMemory(PROJECT_MEMORY_PATH);
+  return cachedProjectMemory;
 }
 
 /** MCP tool name prefix — derived from the server name 'smartperfetto'.
@@ -1312,6 +1326,43 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { annotations: { readOnlyHint: true } },
   );
 
+  // recall_project_memory (Plan 44): pure-read recall over project +
+  // world memory entries. Strict invariant: handler MUST NOT cause any
+  // disk writes; ProjectMemory.recallProjectMemory() is enforced via
+  // the "1000 calls / mtime unchanged" unit test in projectMemory.test.ts.
+  // Use this when the agent wants to ground claims in past analysis
+  // insights for the same project (or in world-scope insights consolidated
+  // by reviewer approval). The session-scope `recall_patterns` tool is a
+  // separate path that runs against the existing analysisPatternMemory store.
+  const recallProjectMemory = tool(
+    'recall_project_memory',
+    'Recall project- or world-scope memory entries by tag overlap with the query. Read-only — never writes. ' +
+    'Returns up to top_k hits ranked by tag-overlap score; entries with `unsupportedReason` (evicted, retracted) are skipped. ' +
+    'Session-scope memory lives elsewhere (use `recall_patterns` for that path).',
+    {
+      tags: z.array(z.string()).optional().describe('Tags to score against. Without tags, entries rank by their stored confidence.'),
+      project_key: z.string().optional().describe('Restrict to entries created under this project key (e.g. "appId/deviceId").'),
+      scope: z.enum(['project', 'world']).optional().describe('Restrict to a scope. Defaults to both project and world.'),
+      top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
+    },
+    async ({ tags, project_key, scope, top_k }) => {
+      const memory = getProjectMemory();
+      const hits = memory.recallProjectMemory({
+        tags,
+        projectKey: project_key,
+        scope,
+        topK: top_k ?? 5,
+      });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({success: true, hits, count: hits.length}),
+        }],
+      };
+    },
+    { annotations: { readOnlyHint: true } },
+  );
+
   // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
   // Enables Claude to self-learn by finding how official code uses tables/functions.
   const queryPerfettoSource = tool(
@@ -2295,6 +2346,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       { tool: lookupBlogKnowledge, name: 'lookup_blog_knowledge' },
       { tool: lookupBaseline, name: 'lookup_baseline' },
       { tool: compareBaselines, name: 'compare_baselines' },
+      { tool: recallProjectMemory, name: 'recall_project_memory' },
     );
     if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
     if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });
