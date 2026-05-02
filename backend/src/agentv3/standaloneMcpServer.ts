@@ -68,7 +68,16 @@ export const RPC_ERROR_CODES = {
 
 /** Loose shape for the SDK tool object held in the registry —
  * `tool()` from `@anthropic-ai/claude-agent-sdk` returns an opaque
- * descriptor; we only call it via the `handler` it carries. */
+ * descriptor; we only call it via the `handler` it carries.
+ *
+ * Note (Codex round E P1): `inputSchema` on the SDK descriptor is
+ * the Zod raw shape (e.g. `{query: ZodString}`), NOT a JSON
+ * Schema. External MCP clients want JSON Schema. We emit a safe
+ * permissive `{type: 'object', additionalProperties: true}` for
+ * `tools/list` rather than leak the Zod internals; the handler
+ * itself will reject malformed args via the Zod parser the SDK
+ * wraps around it.
+ */
 interface SdkToolLike {
   description?: string;
   inputSchema?: unknown;
@@ -101,6 +110,12 @@ export async function dispatch(
   // Our protocol surface has none, but per JSON-RPC we silently drop.
   if (req.id === undefined) return null;
   const id = req.id;
+
+  // Codex round E P2#5: parse-error sentinel surfaces with a real
+  // PARSE_ERROR response instead of falling through to METHOD_NOT_FOUND.
+  if (req.method === '__parse_error__') {
+    return rpcError(null, RPC_ERROR_CODES.PARSE_ERROR, 'Invalid JSON');
+  }
 
   if (req.method === 'initialize') {
     return {
@@ -194,7 +209,11 @@ function sdkToolToMcpDescriptor(def: McpToolDefinition): {
   return {
     name: def.name,
     description: def.summary || t.description || '',
-    inputSchema: t.inputSchema ?? {type: 'object'},
+    // Codex round E P1#1: SDK's `inputSchema` is Zod raw shape, not
+    // JSON Schema. Emit a safe permissive descriptor so external MCP
+    // clients see valid JSON Schema; the handler still validates
+    // against the real Zod shape on `tools/call`.
+    inputSchema: {type: 'object', additionalProperties: true},
   };
 }
 

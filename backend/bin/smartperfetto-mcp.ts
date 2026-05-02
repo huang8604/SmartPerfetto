@@ -168,6 +168,22 @@ function buildRegistry(): McpToolRegistry {
           }
         }
         const baseline = baselineStore.getBaseline(id);
+        // Codex round E P1#3: standalone (public stdio) host must NOT
+        // surface draft / reviewed / private baselines. Only published
+        // records are considered safe for external consumers.
+        if (baseline && baseline.status !== 'published') {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: `Baseline '${id}' is not published (external hosts see published baselines only)`,
+                }),
+              },
+            ],
+          };
+        }
         return {
           content: [
             {
@@ -220,6 +236,22 @@ function buildRegistry(): McpToolRegistry {
                   error: !base
                     ? `Base baseline '${base_baseline_id}' not found`
                     : `Candidate baseline '${candidate_baseline_id}' not found`,
+                }),
+              },
+            ],
+          };
+        }
+        // Codex round E P1#3: standalone path only diffs PUBLISHED
+        // baselines. A draft / reviewed / private record is not
+        // considered safe for external consumers.
+        if (base.status !== 'published' || candidate.status !== 'published') {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Both baselines must be published; external hosts see published baselines only',
                 }),
               },
             ],

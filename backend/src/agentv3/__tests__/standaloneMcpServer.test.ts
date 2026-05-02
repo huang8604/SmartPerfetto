@@ -86,7 +86,7 @@ describe('dispatch — tools/list', () => {
     expect(tools.map(t => t.name)).toEqual(['alpha']);
   });
 
-  it('descriptor carries name + description + inputSchema', async () => {
+  it('descriptor carries name + description + safe permissive inputSchema', async () => {
     const registry = new McpToolRegistry();
     registry.registerSdk(
       stubSdkTool({
@@ -108,10 +108,24 @@ describe('dispatch — tools/list', () => {
     }>;
     expect(tools[0].name).toBe('alpha');
     expect(tools[0].description).toBe('Describe the thing.');
+    // Codex round E P1#1: SDK's inputSchema is Zod raw shape, not
+    // JSON Schema. We emit a safe permissive descriptor — the
+    // handler still validates against the Zod schema on tools/call.
     expect(tools[0].inputSchema).toEqual({
       type: 'object',
-      properties: {q: {type: 'string'}},
+      additionalProperties: true,
     });
+  });
+
+  it('parse-error sentinel surfaces as a real PARSE_ERROR (Codex round E P2#5)', async () => {
+    const registry = new McpToolRegistry();
+    const resp = await dispatch(registry, {
+      jsonrpc: '2.0',
+      id: null,
+      method: '__parse_error__',
+    });
+    expect(resp!.error?.code).toBe(RPC_ERROR_CODES.PARSE_ERROR);
+    expect(resp!.id).toBeNull();
   });
 });
 

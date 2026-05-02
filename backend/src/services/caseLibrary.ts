@@ -214,7 +214,8 @@ export class CaseLibrary {
   private persist(): void {
     const dir = path.dirname(this.storagePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, {recursive: true});
-    const tmp = `${this.storagePath}.tmp`;
+    // Per-process unique tmp suffix — Codex round E P1#5.
+    const tmp = `${this.storagePath}.tmp.${process.pid}.${Math.random().toString(36).slice(2)}`;
     const envelope: StorageEnvelope = {
       schemaVersion: 1,
       cases: Array.from(this.cases.values()),
