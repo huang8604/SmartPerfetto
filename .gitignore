@@ -127,6 +127,10 @@ backend/test-output/
 # ===================
 Feature-Dev/
 
+# Spark construction plan scratch docs
+todo.md
+docs/superpowers/spark/
+
 # ===================
 # Presentations (internal, not for public)
 # ===================
