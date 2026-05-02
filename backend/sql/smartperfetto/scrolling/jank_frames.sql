@@ -5,33 +5,51 @@
 -- smartperfetto.scrolling.jank_frames
 --
 -- Janky-frame extraction view anchored on FrameTimeline ground truth
--- (Spark #16). Returns one row per janky frame with the canonical
--- attribution dimensions used by the scrolling decision tree.
+-- (Spark #16). Returns ONE ROW PER (process, frame_id) janky frame.
 --
--- Codex review caught that actual_frame_timeline_slice does not expose
--- process_name or expected_dur directly — they live on the `process`
--- table (joined via upid) and on `expected_frame_timeline_slice`
--- (joined via frame token = name). This rewrite does both joins so the
--- view succeeds at include/query time.
+-- Codex round 5 caught two over-counting hazards:
+--   1. actual_frame_timeline_slice has one row per (frame_id, layer)
+--      pair — multi-layer apps would produce duplicate rows per frame.
+--   2. The LEFT JOIN to expected_frame_timeline_slice on (upid, name)
+--      can cartesian-multiply when more than one expected row exists.
+--
+-- The CTEs below collapse both sides to a single row per (upid, name)
+-- so the exported view honors its "one row per janky frame" promise.
+-- Combined jank reasons (e.g., "SurfaceFlinger Scheduling, App
+-- Deadline Missed") are joined back via GROUP_CONCAT(DISTINCT ...).
 
 INCLUDE PERFETTO MODULE android.frames.timeline;
 
 CREATE PERFETTO VIEW smartperfetto_scrolling_jank_frames AS
+WITH expected_per_frame AS (
+  SELECT upid, name, MIN(dur) AS expected_dur_ns
+  FROM expected_frame_timeline_slice
+  GROUP BY upid, name
+),
+actual_dedup AS (
+  SELECT
+    upid,
+    name AS frame_id_str,
+    MIN(ts) AS start_ts,
+    MAX(dur) AS dur_ns,
+    -- Pick a representative layer name; multi-layer joins are dropped.
+    MIN(layer_name) AS layer_name,
+    GROUP_CONCAT(DISTINCT jank_type) AS jank_type
+  FROM actual_frame_timeline_slice
+  WHERE jank_type IS NOT NULL AND jank_type != 'None'
+  GROUP BY upid, name
+)
 SELECT
-  CAST(actual.name AS INTEGER) AS frame_id,
-  actual.ts AS start_ts,
-  actual.dur AS dur_ns,
-  actual.ts + actual.dur AS end_ts,
+  CAST(actual.frame_id_str AS INTEGER) AS frame_id,
+  actual.start_ts,
+  actual.dur_ns,
+  actual.start_ts + actual.dur_ns AS end_ts,
   actual.jank_type,
   process.name AS process_name,
   actual.layer_name,
-  expected.dur AS expected_dur_ns,
-  CASE
-    WHEN actual.jank_type IS NULL OR actual.jank_type = 'None' THEN 0
-    ELSE 1
-  END AS is_jank
-FROM actual_frame_timeline_slice AS actual
+  expected.expected_dur_ns,
+  1 AS is_jank
+FROM actual_dedup AS actual
 LEFT JOIN process USING (upid)
-LEFT JOIN expected_frame_timeline_slice AS expected
-  ON expected.upid = actual.upid AND expected.name = actual.name
-WHERE actual.jank_type IS NOT NULL AND actual.jank_type != 'None';
+LEFT JOIN expected_per_frame AS expected
+  ON expected.upid = actual.upid AND expected.name = actual.frame_id_str;

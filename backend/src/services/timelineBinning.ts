@@ -89,12 +89,20 @@ export function binTimelineSamples(
     buckets[idx].push(s.value);
   }
 
-  const bins: TimelineBin[] = buckets.map((values, i) => ({
-    startNs: range.startNs + i * binDurNs,
-    durNs: binDurNs,
-    value: aggregate(values, aggregation),
-    rowCount: values.length,
-  }));
+  // Codex round 5 caught that the final bucket extended past range.endNs
+  // when totalDur isn't a multiple of binDurNs. Clamp the last bucket so
+  // [startNs, startNs + durNs) stays inside the requested window.
+  const bins: TimelineBin[] = buckets.map((values, i) => {
+    const startNs = range.startNs + i * binDurNs;
+    const naturalEnd = startNs + binDurNs;
+    const clampedEnd = Math.min(naturalEnd, range.endNs);
+    return {
+      startNs,
+      durNs: clampedEnd - startNs,
+      value: aggregate(values, aggregation),
+      rowCount: values.length,
+    };
+  });
 
   return {
     ...makeSparkProvenance({source: 'timeline-binning'}),

@@ -57,6 +57,23 @@ describe('binTimelineSamples', () => {
     });
     expect(isUnsupported(contract)).toBe(true);
   });
+
+  it('clamps the last bin to range.endNs (Codex round 5 regression)', () => {
+    // 100ns range with 30ns bins → 4 bins; last one should be 10ns wide,
+    // not 30ns, so [start, start+dur) stays inside [0, 100).
+    const contract = binTimelineSamples({
+      trackId: 'clamp',
+      samples: [{ts: 95, value: 1}],
+      range: {startNs: 0, endNs: 100},
+      binDurNs: 30,
+    });
+    if (contract.bins) {
+      expect(contract.bins).toHaveLength(4);
+      expect(contract.bins[3].startNs).toBe(90);
+      expect(contract.bins[3].durNs).toBe(10);
+      expect(contract.bins[3].startNs + contract.bins[3].durNs).toBe(100);
+    }
+  });
 });
 
 describe('encodeCounterRle', () => {

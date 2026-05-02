@@ -111,15 +111,30 @@ const PROBE_SLICE_COUNT: ProbeSpec = {
   ],
 };
 
-/** L2 — frame timeline jank counts (Spark #16 ground truth surface). */
+/**
+ * L2 — frame timeline jank counts (Spark #16 ground truth surface).
+ *
+ * Codex round 5 caught that COUNT(*) over actual_frame_timeline_slice
+ * counts timeline-slice rows, not frames — multi-layer apps produce
+ * multiple slice rows per frame, inflating both totals. Aggregate by
+ * (upid, name) first so the L2 metric reports distinct frames.
+ */
 const PROBE_FRAME_TIMELINE_JANK: ProbeSpec = {
   id: 'frame_timeline_jank',
   layer: 'L2',
   sql: `
+    WITH per_frame AS (
+      SELECT
+        upid,
+        name,
+        MAX(CASE WHEN jank_type IS NOT NULL AND jank_type != 'None' THEN 1 ELSE 0 END) AS is_jank
+      FROM actual_frame_timeline_slice
+      GROUP BY upid, name
+    )
     SELECT
       COUNT(*) AS total,
-      SUM(CASE WHEN jank_type IS NOT NULL AND jank_type != 'None' THEN 1 ELSE 0 END) AS jank
-    FROM actual_frame_timeline_slice
+      SUM(is_jank) AS jank
+    FROM per_frame
   `,
   toMetrics: rows => {
     const total = Number(rows[0]?.[0] ?? 0);
