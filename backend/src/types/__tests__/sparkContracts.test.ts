@@ -49,6 +49,10 @@ import {
   type CaseNode,
   type CaseEdge,
   type CaseGraphLibraryContract,
+  type McpToolExposure,
+  type McpToolAci,
+  type A2aAgentCard,
+  type McpPublicApiContract,
 } from '../sparkContracts';
 
 describe('sparkContracts — shared provenance', () => {
@@ -1499,6 +1503,76 @@ describe('Plan 54 — CaseGraphLibraryContract', () => {
       ],
     };
     expect(contract.lastPublishedAt).toBe(1714600000000);
+    expect(contract.coverage).toHaveLength(6);
+  });
+});
+
+describe('Plan 41 — McpPublicApiContract', () => {
+  it('McpToolExposure covers public / internal / deprecated', () => {
+    const levels: McpToolExposure[] = ['public', 'internal', 'deprecated'];
+    expect(levels).toHaveLength(3);
+  });
+
+  it('public read-only tool ACI carries short name + qualified name', () => {
+    const tool: McpToolAci = {
+      toolName: 'invoke_skill',
+      qualifiedName: 'mcp__smartperfetto__invoke_skill',
+      exposure: 'public',
+      summary: 'Invoke a SmartPerfetto skill on the active trace.',
+      requires: ['traceProcessor'],
+    };
+    expect(tool.exposure).toBe('public');
+    expect(tool.qualifiedName).toContain('mcp__smartperfetto__');
+    expect(tool.qualifiedName.endsWith(tool.toolName)).toBe(true);
+  });
+
+  it('internal session-protocol tool stays hidden from external hosts', () => {
+    const tool: McpToolAci = {
+      toolName: 'submit_plan',
+      qualifiedName: 'mcp__smartperfetto__submit_plan',
+      exposure: 'internal',
+      summary:
+        'Submit the agent analysis plan. Internal session protocol; calling from an external host would corrupt the live session.',
+    };
+    expect(tool.exposure).toBe('internal');
+  });
+
+  it('A2aAgentCard partner trust level requires public key fingerprint', () => {
+    const card: A2aAgentCard = {
+      cardId: 'smartperfetto-perf-analyst',
+      displayName: 'SmartPerfetto Performance Analyst',
+      capabilities: ['skill-invocation', 'sql-query', 'baseline-lookup'],
+      trustLevel: 'partner',
+      tools: ['invoke_skill', 'execute_sql', 'lookup_baseline'],
+      publicKey: 'ed25519-fingerprint-abc123',
+    };
+    expect(card.trustLevel).toBe('partner');
+    expect(card.publicKey).toBeDefined();
+  });
+
+  it('McpPublicApiContract surfaces tools + serverVersion + protocolVersion', () => {
+    const contract: McpPublicApiContract = {
+      ...makeSparkProvenance({source: 'plan-41-test'}),
+      tools: [
+        {
+          toolName: 'execute_sql',
+          qualifiedName: 'mcp__smartperfetto__execute_sql',
+          exposure: 'public',
+          summary: 'Run a SQL query against the active trace.',
+        },
+      ],
+      serverVersion: '1.0.0',
+      protocolVersion: '2024-11-05',
+      coverage: [
+        {sparkId: 91, planId: '41', status: 'scaffolded'},
+        {sparkId: 92, planId: '41', status: 'scaffolded'},
+        {sparkId: 96, planId: '41', status: 'scaffolded'},
+        {sparkId: 133, planId: '41', status: 'scaffolded'},
+        {sparkId: 139, planId: '41', status: 'scaffolded'},
+        {sparkId: 173, planId: '41', status: 'scaffolded'},
+      ],
+    };
+    expect(contract.serverVersion).toBe('1.0.0');
     expect(contract.coverage).toHaveLength(6);
   });
 });

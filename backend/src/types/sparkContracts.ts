@@ -1843,6 +1843,96 @@ export interface CaseGraphLibraryContract extends SparkProvenance {
 }
 
 // =============================================================================
+// Plan 41 — Standalone SmartPerfetto MCP Server / A2A / Host API
+//          (Spark #91, #92, #96, #133, #139, #173)
+//
+// Architecture note: the existing in-process MCP server uses
+// `createSdkMcpServer` from `@anthropic-ai/claude-agent-sdk` and registers
+// short tool names. The `MCP_NAME_PREFIX = 'mcp__smartperfetto__'`
+// constant is purely an SDK `allowedTools` prefix — NOT a tool name.
+// Plan 41 introduces a `mcpToolRegistry` that holds short names, plus a
+// stdio adapter that exposes them as native MCP tools. The SDK adapter
+// generates the prefix when it builds `allowedTools`. See §4.5 in the
+// design doc for the full migration plan.
+// =============================================================================
+
+/**
+ * Tool exposure level. Drives whether external hosts (Claude Code,
+ * Cursor, Codex via stdio) and remote A2A peers see the tool.
+ *
+ * - `public` — safe for any host. Read-only data tools.
+ * - `internal` — agentv3 protocol tools (plan / hypothesis / note
+ *   updates). Writing them from an external host would corrupt the
+ *   active session.
+ * - `deprecated` — kept for compatibility, hidden from public surface.
+ */
+export type McpToolExposure = 'public' | 'internal' | 'deprecated';
+
+/**
+ * ACI — Agent-Callable Interface descriptor (Spark #96).
+ *
+ * One per tool. Used by the standalone MCP server to advertise tools
+ * to external hosts and by the SDK adapter to construct `allowedTools`
+ * lists.
+ */
+export interface McpToolAci {
+  /** Short name as registered in `mcpToolRegistry`, e.g. `invoke_skill`. */
+  toolName: string;
+  /** Fully qualified name with SDK prefix, e.g. `mcp__smartperfetto__invoke_skill`. */
+  qualifiedName: string;
+  exposure: McpToolExposure;
+  /** Brief description for agent system prompts. */
+  summary: string;
+  /** JSON-schema fragment for the input args (Zod-derived in practice). */
+  inputSchema?: unknown;
+  /** Example payloads pulled from the existing tool description. */
+  examples?: Array<{args: unknown; expected?: unknown}>;
+  /** Required env vars or capability flags, e.g. `['traceProcessor']`. */
+  requires?: string[];
+}
+
+/**
+ * A2A AgentCard descriptor (Spark #92).
+ *
+ * Advertises the SmartPerfetto agent's capabilities to remote callers.
+ * `trustLevel` controls the handshake required before tool calls are
+ * accepted; `private` cards require a signed key exchange before any
+ * exposed tool is callable from the remote peer.
+ */
+export interface A2aAgentCard {
+  /** Stable card id, e.g. `smartperfetto-perf-analyst`. */
+  cardId: string;
+  /** Display name shown in remote agent UIs. */
+  displayName: string;
+  /** Capabilities advertised to remote callers. */
+  capabilities: string[];
+  /** Trust level — `public` (open) | `partner` (signed) | `private` (handshake). */
+  trustLevel: 'public' | 'partner' | 'private';
+  /** Subset of the `McpToolAci.toolName` set exposed via A2A. */
+  tools: string[];
+  /** Public key fingerprint for `partner` / `private` cards. */
+  publicKey?: string;
+}
+
+/**
+ * McpPublicApiContract (Plan 41)
+ *
+ * Surface of the standalone MCP server + A2A capabilities. Lists every
+ * registered tool with its ACI plus any active A2A agent cards.
+ */
+export interface McpPublicApiContract extends SparkProvenance {
+  /** Every tool registered in `mcpToolRegistry`, regardless of exposure. */
+  tools: McpToolAci[];
+  /** A2A agent cards — empty when A2A is disabled (default). */
+  agentCards?: A2aAgentCard[];
+  /** Server semver. */
+  serverVersion: string;
+  /** MCP protocol version the server speaks. */
+  protocolVersion: string;
+  coverage: SparkCoverageEntry[];
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
