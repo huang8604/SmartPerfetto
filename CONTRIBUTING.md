@@ -82,7 +82,10 @@ Useful targeted commands while iterating:
 ```bash
 cd backend
 
-# Mandatory for code changes; also included in npm run verify:pr
+# Required when changes touch mcp / memory / report / agent runtime; also
+# included in `npm run verify:pr`. Contract-only and CRUD-only changes can run
+# narrower tiers (`npx tsc --noEmit` + relevant unit tests). See README.md
+# "Required checks" for the full tier table.
 npm run test:scene-trace-regression
 
 # Validate skill YAML syntax and contracts

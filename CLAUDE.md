@@ -11,7 +11,7 @@ AI-driven Perfetto analysis platform for Android performance data.
 ```
 Tech: TypeScript strict, follow existing patterns
 Dev:  tsx watch (backend) + build.js --watch (frontend) — auto-rebuild on save
-Test: cd backend && npm run test:scene-trace-regression  ← MANDATORY after every change
+Test: by change category (see Verification table below) — regression mandatory for mcp/memory/report touchpoints + PR landing
 PR Gate: npm run verify:pr                              ← run before opening PR
 Start (users):      ./start.sh                          ← pre-built frontend, no submodule
 Start (UI dev):     ./scripts/start-dev.sh              ← requires perfetto submodule, hot reload
@@ -38,7 +38,9 @@ Every task must satisfy these before completion:
 
 | Task Type | Done When |
 |-----------|-----------|
-| Any code change | `cd backend && npm run test:scene-trace-regression` passes (6 canonical traces) |
+| Contract / type-only change (e.g. `backend/src/types/sparkContracts.ts`) | `cd backend && npx tsc --noEmit` + relevant `__tests__/sparkContracts.test.ts` |
+| CRUD-only service (file IO, no agent path touched) | That service's `__tests__/<name>.test.ts` |
+| Touches mcp / memory / report / agent runtime | `cd backend && npm run test:scene-trace-regression` passes (6 canonical traces) |
 | Skill YAML change | `npm run validate:skills` passes + regression passes |
 | Strategy/template .md change | `npm run validate:strategies` passes + regression passes |
 | Build/type error | `npm run typecheck` passes in backend/ |
@@ -80,7 +82,7 @@ Frontend (Perfetto UI @ :10000) ◄─SSE/HTTP─► Backend (Express @ :3000)
 
 1. **NEVER hardcode prompt content in TypeScript** — use `*.strategy.md` / `*.template.md` (see `rules/prompts.md`)
 2. **ALWAYS push perfetto submodule to `fork` remote**, never `origin` (see `rules/git.md`)
-3. **ALWAYS run trace regression** after code changes (see `rules/testing.md`)
+3. **ALWAYS run the right test tier** after code changes — trace regression for mcp/memory/report touchpoints, full `verify:pr` before PR landing (see `rules/testing.md`)
 4. **ALWAYS check if file is auto-generated** before fixing build errors (see `rules/backend.md`)
 
 ## API Endpoints

@@ -344,7 +344,10 @@ npm run test:core
 必须满足的检查：
 
 - 提 PR 前：在仓库根目录运行 `npm run verify:pr`
-- 任何代码改动：`cd backend && npm run test:scene-trace-regression`
+- 代码改动按类别：
+  - Contract / 纯类型（`backend/src/types/sparkContracts.ts` 等）：`cd backend && npx tsc --noEmit` + 相关 `__tests__/sparkContracts.test.ts`
+  - CRUD-only service（仅文件 IO，未触 agent 路径）：该 service 的单测
+  - 触 mcp / memory / report / agent runtime：`cd backend && npm run test:scene-trace-regression`
 - Skill YAML 改动：`npm run validate:skills` 加场景回归
 - Strategy/template Markdown 改动：`npm run validate:strategies` 加场景回归
 - 构建或类型问题：`cd backend && npm run typecheck`

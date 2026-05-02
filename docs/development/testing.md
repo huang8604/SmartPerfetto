@@ -11,9 +11,15 @@ npm run verify:pr
 
 `verify:pr` 会执行 root 质量检查、backend Skill/Strategy 校验、类型检查、构建、CLI package 检查、核心单测，以及 6 条 canonical trace 回归。它会在缺少 `trace_processor_shell` 时自动下载固定版本的预编译产物。
 
-日常开发时，任何代码改动后至少运行 trace 回归：
+日常开发按改动类型分层执行（详见下方"改动类型与必须验证"表）：
+
+- contract / 纯类型改动（例如 `backend/src/types/sparkContracts.ts`）：`cd backend && npx tsc --noEmit` + 相关 `__tests__/sparkContracts.test.ts`
+- CRUD-only service（仅文件 IO，未触 agent 路径）：该 service 的单测
+- 触 mcp / memory / report / agent runtime：`cd backend && npm run test:scene-trace-regression`
+- PR landing：`npm run verify:pr` 全量
 
 ```bash
+# 触 agent runtime 的典型回归命令：
 cd backend
 npm run test:scene-trace-regression
 ```
@@ -36,8 +42,10 @@ npm run test:scene-trace-regression
 | 改动 | 必跑 |
 |---|---|
 | 提 PR 前 | `npm run verify:pr` |
-| TypeScript 代码 | `npm run test:scene-trace-regression` |
-| Build/type 修复 | `npm run typecheck` + 回归 |
+| Contract / 纯类型（例如 `backend/src/types/sparkContracts.ts`） | `cd backend && npx tsc --noEmit` + 相关 `__tests__/sparkContracts.test.ts` |
+| CRUD-only service（仅文件 IO，未触 agent 路径） | 该 service 的 `__tests__/<name>.test.ts` |
+| 触 mcp / memory / report / agent runtime 的 TypeScript | `npm run test:scene-trace-regression` |
+| Build/type 修复 | `npm run typecheck` + 触类别对应回归 |
 | Skill YAML | `npm run validate:skills` + 回归 |
 | Strategy/template Markdown | `npm run validate:strategies` + 回归 |
 | 前端生成类型相关 | `npm run generate:frontend-types` + 相关前端测试 |

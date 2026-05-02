@@ -344,7 +344,10 @@ npm run test:core
 Required checks:
 
 - Before opening a PR: `npm run verify:pr` from the repository root
-- Any code change: `cd backend && npm run test:scene-trace-regression`
+- Code change by category:
+  - Contract / type-only (`backend/src/types/sparkContracts.ts` etc.): `cd backend && npx tsc --noEmit` + relevant `__tests__/sparkContracts.test.ts`
+  - CRUD-only service (file IO, no agent path touched): that service's unit tests
+  - Touches mcp / memory / report / agent runtime: `cd backend && npm run test:scene-trace-regression`
 - Skill YAML change: `npm run validate:skills` plus scene regression
 - Strategy/template Markdown change: `npm run validate:strategies` plus scene regression
 - Type/build fix: `cd backend && npm run typecheck`

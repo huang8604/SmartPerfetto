@@ -84,11 +84,17 @@ docker compose -f docker-compose.hub.yml up -d
 
 ## 6. 必要检查
 
-开发改动后，至少运行：
+按改动类型选择测试层（详见 [测试与验证](../development/testing.md)）：
+
+- Contract / 纯类型：`cd backend && npx tsc --noEmit` + 相关 sparkContracts 单测
+- CRUD-only service：该 service 的单测
+- 触 mcp / memory / report / agent runtime：
 
 ```bash
 cd backend
 npm run test:scene-trace-regression
 ```
+
+- PR landing：`npm run verify:pr`（强制全量）
 
 更多命令见 [测试与验证](../development/testing.md)。
