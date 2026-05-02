@@ -85,9 +85,12 @@ COPY --from=backend-builder /app/backend/data/perfettoStdlibSymbols.json ./backe
 # falling back to TypeScript analysis.
 COPY --from=flamegraph-analyzer-builder /app/rust/flamegraph-analyzer/target/release/flamegraph-analyzer ./rust/flamegraph-analyzer/target/release/flamegraph-analyzer
 
-# Copy backend runtime files (skills, strategies, templates)
+# Copy backend runtime files (skills, strategies, SQL packages, templates)
 COPY backend/skills ./backend/skills
 COPY backend/strategies ./backend/strategies
+# SmartPerfetto PerfettoSQL package (Spark Plan 03). Loader resolves from
+# `dist/services/../../sql/smartperfetto`, which lands on this path.
+COPY backend/sql ./backend/sql
 
 # Copy pre-built Perfetto UI shipped in the repository.
 # Refresh this directory with scripts/update-frontend.sh before publishing UI changes.

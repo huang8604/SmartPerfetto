@@ -106,6 +106,25 @@ describe('compressArtifact', () => {
     expect(result.contract.clusterRepresentatives).toHaveLength(5);
   });
 
+  it('cluster_representative samples the high tail when N is not divisible by K (Codex round 6 regression)', () => {
+    // 10 rows with 6 clusters — old floor(N/K) = 1 ignored rows 6..9
+    // because the bucketing only ran while start < clusterCount * 1 = 6.
+    // The high-tail bias would silently lose the largest dur values.
+    const tinyRows = Array.from({length: 10}, (_, i) => makeRow(i + 1, i, i * 100));
+    const result = compressArtifact({
+      artifactId: 'art-tail',
+      columns: COLUMNS,
+      rows: tinyRows,
+      strategy: 'cluster_representative',
+      rankBy: 'dur_ns',
+      clusterCount: 6,
+    });
+    // Largest dur_ns value is in row 9 (dur 900). After float-boundary
+    // bucketing, the last bucket should sample from the high end.
+    const maxDurInResult = Math.max(...result.compressedRows.map(r => Number(r[2])));
+    expect(maxDurInResult).toBeGreaterThanOrEqual(700);
+  });
+
   it('falls back to full when rankBy is unknown', () => {
     const result = compressArtifact({
       artifactId: 'art-6',

@@ -47,6 +47,16 @@ describe('buildCpuThermalPmu', () => {
     expect(c.thermalDecision).toBe('shutdown_imminent');
   });
 
+  it('keeps 60-69C readings as cool (Codex round 6 regression)', () => {
+    // The documented bracket says "cool < 70°C". 65°C without a HAL
+    // throttle stage must NOT route to soft_throttle.
+    const c = buildCpuThermalPmu({
+      range: {startNs: 0, endNs: 1},
+      thermalSamples: [{zone: 'skin', ts: 0, tempMc: 65_000}],
+    });
+    expect(c.thermalDecision).toBe('cool');
+  });
+
   it('computes smoothVsJankComparison delta', () => {
     const c = buildCpuThermalPmu({
       range: {startNs: 0, endNs: 1},

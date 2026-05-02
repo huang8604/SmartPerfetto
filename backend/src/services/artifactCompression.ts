@@ -102,19 +102,28 @@ function clusterRepresentatives(
     return {kept: rows.slice(), representativeIndices: []};
   }
   // Simple equi-frequency clustering: split sorted indices into N buckets
-  // and keep the median row of each bucket as the representative.
+  // and keep the median row of each bucket as the representative. We use
+  // floating-point boundaries so the entire range is covered even when
+  // rows.length is not divisible by clusterCount — Codex round 6 caught
+  // that Math.floor(N/K) bucketing dropped the high tail (e.g. 10 rows
+  // with 6 clusters previously returned only the 6 lowest-value rows).
   const indexed = rows
     .map((row, idx) => ({row, idx, value: Number(row[rankIndex])}))
     .sort((a, b) => a.value - b.value);
-  const bucketSize = Math.max(1, Math.floor(indexed.length / clusterCount));
+  const k = Math.min(clusterCount, indexed.length);
   const kept: any[][] = [];
   const representativeIndices: number[] = [];
-  for (let b = 0; b < clusterCount; b++) {
-    const start = b * bucketSize;
-    if (start >= indexed.length) break;
-    const median = Math.min(indexed.length - 1, start + Math.floor(bucketSize / 2));
-    kept.push(indexed[median].row);
-    representativeIndices.push(indexed[median].idx);
+  const seen = new Set<number>();
+  for (let b = 0; b < k; b++) {
+    const start = Math.floor((b * indexed.length) / k);
+    const end = Math.floor(((b + 1) * indexed.length) / k);
+    if (end <= start) continue;
+    const median = start + Math.floor((end - start) / 2);
+    const safeMedian = Math.min(indexed.length - 1, median);
+    if (seen.has(safeMedian)) continue;
+    seen.add(safeMedian);
+    kept.push(indexed[safeMedian].row);
+    representativeIndices.push(indexed[safeMedian].idx);
   }
   return {kept, representativeIndices};
 }

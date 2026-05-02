@@ -94,7 +94,9 @@ function decideThermal(
   }
   if (hottest.throttleStage === 2 || hottest.tempMc >= 85_000) return 'hard_throttle';
   if (hottest.throttleStage === 1 || hottest.tempMc >= 70_000) return 'soft_throttle';
-  if (hottest.tempMc >= 60_000) return 'soft_throttle';
+  // Codex round 6 caught that classifying 60–69°C as soft_throttle
+  // contradicted the documented "cool < 70°C" bracket. Keep cool until
+  // we have either a HAL stage or a temperature past 70°C.
   return 'cool';
 }
 
