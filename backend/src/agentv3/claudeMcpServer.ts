@@ -32,6 +32,15 @@ import { validatePlanAgainstSceneTemplate, MIN_WAIVER_REASON_CHARS } from './sce
 import type { ArtifactStore } from './artifactStore';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
 import { RagStore } from '../services/ragStore';
+import {
+  BaselineStore,
+  deriveBaselineId,
+} from '../services/baselineStore';
+import {
+  computeBaselineDiff,
+  evaluateRegressionGate,
+  type RegressionRule,
+} from '../services/baselineDiffer';
 
 /**
  * Process-wide RagStore singleton, lazily initialized on first MCP tool
@@ -49,6 +58,20 @@ let cachedRagStore: RagStore | null = null;
 function getRagStore(): RagStore {
   if (!cachedRagStore) cachedRagStore = new RagStore(RAG_STORE_PATH);
   return cachedRagStore;
+}
+
+/** Process-wide BaselineStore singleton (Plan 50). Storage lives next
+ * to the other long-lived JSON files so operators have one mental
+ * model for agent state. */
+const BASELINE_STORE_PATH = path.resolve(
+  __dirname,
+  '../../logs/baselines.json',
+);
+let cachedBaselineStore: BaselineStore | null = null;
+function getBaselineStore(): BaselineStore {
+  if (!cachedBaselineStore)
+    cachedBaselineStore = new BaselineStore(BASELINE_STORE_PATH);
+  return cachedBaselineStore;
 }
 
 /** MCP tool name prefix — derived from the server name 'smartperfetto'.
@@ -1168,6 +1191,127 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { annotations: { readOnlyHint: true } },
   );
 
+  // lookup_baseline (Plan 50): fetch a stored App/Device/Build/CUJ
+  // baseline by id or by composite key. Read-only — no store mutation.
+  // The agent uses this to pull the canonical "what this app/device
+  // historically does" record before making regression claims.
+  const lookupBaseline = tool(
+    'lookup_baseline',
+    'Fetch a stored App/Device/Build/CUJ baseline. ' +
+    'Pass either `baseline_id` (canonical "appId/deviceId/buildId/cuj") OR all four key components. ' +
+    'Returns the BaselineRecord with metrics, status, redactionState, and curatorNote. ' +
+    'When the baseline does not exist, the result carries `success: false` and the agent must NOT fabricate baseline values.',
+    {
+      baseline_id: z.string().optional().describe('Canonical baselineId, e.g. "com.example.feed/pixel-9-android-15/main-abc/scroll_feed".'),
+      app_id: z.string().optional().describe('Component appId; required when baseline_id is omitted.'),
+      device_id: z.string().optional().describe('Component deviceId; required when baseline_id is omitted.'),
+      build_id: z.string().optional().describe('Component buildId; required when baseline_id is omitted.'),
+      cuj: z.string().optional().describe('Component CUJ id; required when baseline_id is omitted.'),
+    },
+    async ({ baseline_id, app_id, device_id, build_id, cuj }) => {
+      const store = getBaselineStore();
+      let id = baseline_id;
+      if (!id) {
+        if (app_id && device_id && build_id && cuj) {
+          id = deriveBaselineId({appId: app_id, deviceId: device_id, buildId: build_id, cuj});
+        } else {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: 'Provide either `baseline_id` or all four key components (app_id, device_id, build_id, cuj).',
+              }),
+            }],
+            isError: true,
+          };
+        }
+      }
+      const baseline = store.getBaseline(id);
+      if (!baseline) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({success: false, error: `Baseline '${id}' not found`}),
+          }],
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({success: true, baseline}) }],
+      };
+    },
+    { annotations: { readOnlyHint: true } },
+  );
+
+  // compare_baselines (Plan 50): diff two stored baselines and
+  // optionally evaluate a CI-style regression gate. Read-only —
+  // computes from the stored baselines without mutating either.
+  // Trace-vs-baseline (compare_to_baseline) is deferred until the
+  // trace metric extraction pipeline is built.
+  const compareBaselines = tool(
+    'compare_baselines',
+    'Diff two stored baselines and (optionally) evaluate a regression gate. ' +
+    'Returns a BaselineDiffArtifact with per-metric deltas plus an optional RegressionGateResult when `rules` are supplied. ' +
+    'Per-metric `severity` is one of none / info / warning / regression / unsupported; consult `unsupportedReason` whenever severity is "unsupported" — the agent must NOT treat unsupported metrics as confirming or refuting a regression claim.',
+    {
+      base_baseline_id: z.string().describe('Canonical baselineId for the historical/reference side.'),
+      candidate_baseline_id: z.string().describe('Canonical baselineId for the candidate/new side.'),
+      rules: z.array(z.object({
+        metric_id: z.string().describe('Metric id to gate on.'),
+        threshold: z.number().describe('Maximum allowed absolute fractional delta. 0.10 == 10%.'),
+        expect_increase: z.boolean().optional().describe('When false, gate fails on improvements (must-decrease metrics). Defaults to true.'),
+      })).optional().describe('Optional gate rules. When supplied a RegressionGateResult is returned alongside the diff.'),
+      gate_id: z.string().optional().describe('Stable id for the gate result. Required when `rules` is supplied; otherwise ignored.'),
+    },
+    async ({ base_baseline_id, candidate_baseline_id, rules, gate_id }) => {
+      const store = getBaselineStore();
+      const base = store.getBaseline(base_baseline_id);
+      const candidate = store.getBaseline(candidate_baseline_id);
+      if (!base) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({success: false, error: `Base baseline '${base_baseline_id}' not found`}),
+          }],
+        };
+      }
+      if (!candidate) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({success: false, error: `Candidate baseline '${candidate_baseline_id}' not found`}),
+          }],
+        };
+      }
+      const diff = computeBaselineDiff(base, candidate);
+      let gate = undefined;
+      if (rules && rules.length > 0) {
+        if (!gate_id) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({success: false, error: '`gate_id` is required when `rules` is supplied.'}),
+            }],
+            isError: true,
+          };
+        }
+        const mappedRules: RegressionRule[] = rules.map(r => ({
+          metricId: r.metric_id,
+          threshold: r.threshold,
+          ...(r.expect_increase !== undefined ? {expectIncrease: r.expect_increase} : {}),
+        }));
+        gate = evaluateRegressionGate(base_baseline_id, diff, mappedRules, {gateId: gate_id});
+      }
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({success: true, diff, ...(gate ? {gate} : {})}),
+        }],
+      };
+    },
+    { annotations: { readOnlyHint: true } },
+  );
+
   // query_perfetto_source: Search the Perfetto stdlib for SQL patterns and usage examples.
   // Enables Claude to self-learn by finding how official code uses tables/functions.
   const queryPerfettoSource = tool(
@@ -2149,6 +2293,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       { tool: listStdlibModules, name: 'list_stdlib_modules' },
       { tool: lookupKnowledge, name: 'lookup_knowledge' },
       { tool: lookupBlogKnowledge, name: 'lookup_blog_knowledge' },
+      { tool: lookupBaseline, name: 'lookup_baseline' },
+      { tool: compareBaselines, name: 'compare_baselines' },
     );
     if (writeAnalysisNote) toolEntries.push({ tool: writeAnalysisNote, name: 'write_analysis_note' });
     if (fetchArtifact) toolEntries.push({ tool: fetchArtifact, name: 'fetch_artifact' });
