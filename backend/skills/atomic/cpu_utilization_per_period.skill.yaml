@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# 系统级 CPU 利用率周期（B 级 atomic）
+# =============================================================================
+# 使用 linux.cpu.utilization.system 的 cpu_utilization_per_period 视图。整机
+# CPU 利用率按周期采样，区分于 thread/process 级别。
+
+name: cpu_utilization_per_period
+version: "1.0"
+type: atomic
+category: cpu
+tier: B
+
+meta:
+  display_name: "系统 CPU 利用率"
+  description: "整机 CPU 利用率按周期采样"
+  icon: "speed"
+  tags: [cpu, utilization, system, atomic]
+
+prerequisites:
+  modules:
+    - linux.cpu.utilization.system
+
+inputs: []
+
+steps:
+  - id: system_util
+    type: atomic
+    name: "系统 CPU 利用率"
+    display:
+      level: list
+      layer: number
+      title: "周期 CPU 利用率"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: dur_ms
+          label: "周期(ms)"
+          type: duration
+          format: duration_ms
+        - name: utilization
+          label: "利用率"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e6, 1) AS dur_ms,
+        ROUND(utilization, 4) AS utilization
+      FROM cpu_utilization_per_period
+      ORDER BY ts ASC

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# DVFS 频率残留统计（B 级 atomic）
+# =============================================================================
+# 使用 android.dvfs 模块的 android_dvfs_counter_stats 视图，统计每个 DVFS
+# counter（cpu_freq、gpu_freq、ddr_freq 等）的最小/最大/平均值。
+
+name: android_dvfs_counter_stats
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "DVFS Counter 统计"
+  description: "CPU/GPU/DDR 频率统计（min/max/avg）"
+  icon: "tune"
+  tags: [dvfs, freq, cpu, gpu, atomic]
+
+prerequisites:
+  modules:
+    - android.dvfs
+
+inputs: []
+
+steps:
+  - id: dvfs_stats
+    type: atomic
+    name: "DVFS 频率统计"
+    display:
+      level: list
+      layer: number
+      title: "DVFS Counter 统计"
+      columns:
+        - name: name
+          label: "Counter"
+          type: string
+        - name: min_value
+          label: "最小"
+          type: number
+          format: compact
+        - name: max_value
+          label: "最大"
+          type: number
+          format: compact
+        - name: avg_value
+          label: "平均"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        name,
+        min_value,
+        max_value,
+        ROUND(avg_value, 1) AS avg_value
+      FROM android_dvfs_counter_stats
+      ORDER BY name

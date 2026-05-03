@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# JobScheduler 任务事件（B 级 atomic）
+# =============================================================================
+# 使用 android.job_scheduler 模块列出 JobScheduler 调度的后台任务。
+# 后台任务排期不当是续航问题的第一阶高频根因。
+
+name: android_job_scheduler_events
+version: "1.0"
+type: atomic
+category: background
+tier: B
+
+meta:
+  display_name: "JobScheduler 事件"
+  description: "JobScheduler 后台任务执行序列"
+  icon: "schedule"
+  tags: [job_scheduler, background, lifecycle, atomic]
+
+prerequisites:
+  modules:
+    - android.job_scheduler
+
+inputs: []
+
+steps:
+  - id: job_events
+    type: atomic
+    name: "Job 事件列表"
+    display:
+      level: list
+      layer: number
+      title: "JobScheduler 任务"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: dur_ms
+          label: "耗时(ms)"
+          type: duration
+          format: duration_ms
+        - name: job_name
+          label: "任务名"
+          type: string
+        - name: uid
+          label: "UID"
+          type: number
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e6, 2) AS dur_ms,
+        job_name,
+        uid
+      FROM android_job_scheduler_events
+      ORDER BY ts ASC

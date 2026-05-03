@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Kernel Wakelock 汇总（B 级 atomic）
+# =============================================================================
+# 使用 android.kernel_wakelocks 模块统计每个 wakelock 的总持有时长。
+# 内核 wakelock 持有时间长 → 阻止设备进入 suspend → 后台耗电主因。
+
+name: android_kernel_wakelock_summary
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "Kernel Wakelock 汇总"
+  description: "kernel wakelock 持有时长（阻止 suspend 的源头）"
+  icon: "lock_open"
+  tags: [wakelock, kernel, suspend, power, atomic]
+
+prerequisites:
+  modules:
+    - android.kernel_wakelocks
+
+inputs: []
+
+steps:
+  - id: wakelock_summary
+    type: atomic
+    name: "Wakelock 汇总"
+    display:
+      level: list
+      layer: number
+      title: "Kernel Wakelock 持有时长"
+      columns:
+        - name: name
+          label: "Wakelock"
+          type: string
+        - name: total_held_sec
+          label: "总持有(秒)"
+          type: duration
+          format: compact
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        name,
+        ROUND(SUM(time_held) / 1e9, 1) AS total_held_sec,
+        COUNT(*) AS count
+      FROM android_kernel_wakelocks
+      GROUP BY name
+      ORDER BY total_held_sec DESC
+      LIMIT 30

@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Bitmap 内存占用（B 级 atomic）
+# =============================================================================
+# 使用 android.bitmaps 模块统计每进程 Bitmap 内存占用。Bitmap 是 Android
+# 应用最大的 Java 堆外内存来源之一，重 UI 应用尤其敏感。
+
+name: android_bitmap_memory_per_process
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "Bitmap 内存（按进程）"
+  description: "每进程 Bitmap 内存占用峰值"
+  icon: "image"
+  tags: [memory, bitmap, image, atomic]
+
+prerequisites:
+  modules:
+    - android.bitmaps
+
+inputs: []
+
+steps:
+  - id: bitmap_memory
+    type: atomic
+    name: "Bitmap 内存按进程"
+    display:
+      level: list
+      layer: number
+      title: "Bitmap 内存占用"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: bitmap_count
+          label: "Bitmap 数量"
+          type: number
+          format: compact
+        - name: total_bytes
+          label: "总字节"
+          type: bytes
+          format: compact
+    sql: |
+      SELECT
+        process_name,
+        bitmap_count,
+        bitmap_memory AS total_bytes
+      FROM android_bitmap_counters_per_process
+      ORDER BY bitmap_memory DESC
+      LIMIT 30

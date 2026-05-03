@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# CPU Idle 状态驻留（B 级 atomic）
+# =============================================================================
+# 使用 linux.cpu.idle 模块的 cpu_idle_counters 视图统计每个 CPU 在不同 idle
+# 状态（C0/C1/C2/...）的驻留计数。深度 idle 比例低 → 系统忙；高 → 省电。
+
+name: cpu_idle_state_residency
+version: "1.0"
+type: atomic
+category: cpu
+tier: B
+
+meta:
+  display_name: "CPU Idle 驻留"
+  description: "每 CPU 各 idle 状态的驻留计数"
+  icon: "battery_saver"
+  tags: [cpu, idle, residency, atomic]
+
+prerequisites:
+  modules:
+    - linux.cpu.idle
+
+inputs: []
+
+steps:
+  - id: idle_residency
+    type: atomic
+    name: "Idle 驻留计数"
+    display:
+      level: list
+      layer: number
+      title: "CPU Idle 状态分布"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: cpu
+          label: "CPU"
+          type: number
+        - name: idle_state
+          label: "Idle 状态"
+          type: number
+        - name: value
+          label: "进入次数"
+          type: number
+          format: compact
+    sql: |
+      SELECT ts, cpu, idle, value
+      FROM cpu_idle_counters
+      ORDER BY ts ASC, cpu ASC

@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Linux IRQ 中断汇总（B 级 atomic）
+# =============================================================================
+# 使用 linux.irqs 模块统计硬中断（hard IRQ）和软中断（soft IRQ）的次数和耗时分布。
+# IRQ storm 是 CPU 占用异常的重要根因之一。
+
+name: linux_irq_summary
+version: "1.0"
+type: atomic
+category: kernel
+tier: B
+
+meta:
+  display_name: "IRQ 中断汇总"
+  description: "硬/软中断次数与耗时统计"
+  icon: "bolt"
+  tags: [irq, kernel, hard_irq, soft_irq, atomic]
+
+prerequisites:
+  modules:
+    - linux.irqs
+
+inputs: []
+
+steps:
+  - id: irq_summary
+    type: atomic
+    name: "IRQ 汇总"
+    display:
+      level: list
+      layer: number
+      title: "硬/软 IRQ 次数与耗时"
+      columns:
+        - name: name
+          label: "中断名"
+          type: string
+        - name: count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时(ms)"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_us
+          label: "平均耗时(μs)"
+          type: duration
+          format: compact
+    sql: |
+      SELECT
+        name,
+        COUNT(*) AS count,
+        ROUND(SUM(dur) / 1e6, 2) AS total_dur_ms,
+        ROUND(AVG(dur) / 1e3, 1) AS avg_dur_us
+      FROM (
+        SELECT name, dur FROM linux_hard_irqs
+        UNION ALL
+        SELECT name, dur FROM linux_soft_irqs
+      )
+      GROUP BY name
+      ORDER BY total_dur_ms DESC
+      LIMIT 30

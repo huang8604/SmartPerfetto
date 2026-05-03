@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# GPU Work Period（B 级 atomic）
+# =============================================================================
+# 使用 android.gpu.work_period 模块的 android_gpu_work_period_track 视图，
+# 提取 GPU 实际工作区间（与功耗模型联动 — wattson.gpu 依赖此数据）。
+
+name: android_gpu_work_period_track
+version: "1.0"
+type: atomic
+category: gpu
+tier: B
+
+meta:
+  display_name: "GPU Work Period"
+  description: "GPU 实际工作区间（功耗模型前置数据）"
+  icon: "memory"
+  tags: [gpu, work_period, power, wattson, atomic]
+
+prerequisites:
+  modules:
+    - android.gpu.work_period
+
+inputs: []
+
+steps:
+  - id: gpu_work
+    type: atomic
+    name: "GPU 工作区间"
+    display:
+      level: list
+      layer: number
+      title: "GPU Work Period 区间"
+      columns:
+        - name: ts
+          label: "起始"
+          type: timestamp
+        - name: dur_ms
+          label: "时长(ms)"
+          type: duration
+          format: duration_ms
+        - name: uid
+          label: "UID"
+          type: number
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e6, 2) AS dur_ms,
+        uid
+      FROM android_gpu_work_period_track
+      ORDER BY ts ASC
+      LIMIT 100
