@@ -31,6 +31,7 @@ import type {
 } from './types';
 import {
   openSupersedeStore,
+  openSupersedeStoreReadOnly,
   injectionWeightForSupersede,
   type SupersedeStoreHandle,
 } from './selfImprove/supersedeStore';
@@ -146,29 +147,84 @@ function autoConfirmIfRipe(
 }
 
 /**
- * Lazy supersede store handle. `undefined` = never tried, `null` = open
- * failed (fall back to 1.0 weight). Tests use `setSupersedeStoreForTesting`
- * to inject a mock without touching disk.
+ * Two separate supersede handles so the recall path
+ * (`getSupersedeWeight`, backing the `recall_patterns` MCP tool) can
+ * never silently mkdir or migrate the supersede DB on first call —
+ * the writable factory is reached only by `checkAndRecordRecurrence`.
+ * This is what lets the recall path stay zero-write so the MCP tool
+ * can be classified `public-readonly`.
+ *
+ * The read handle is cached only on success or hard failure. When the
+ * read-only adapter returns null because the DB file does not yet
+ * exist (cold start before any write path runs), the handle stays
+ * `undefined` so the next recall retries — otherwise the read path
+ * would be permanently blind to markers the write path creates later
+ * in the same process.
+ *
+ * `undefined` = retry on next call; `null` = open errored or test
+ * mock disabled. Both fall back to weight 1.0.
  */
-let supersedeStore: SupersedeStoreHandle | null | undefined;
+let supersedeReadHandle: SupersedeStoreHandle | null | undefined;
+let supersedeWriteHandle: SupersedeStoreHandle | null | undefined;
+
+function ensureSupersedeReadHandle(): SupersedeStoreHandle | null {
+  if (supersedeReadHandle !== undefined) return supersedeReadHandle;
+  try {
+    const handle = openSupersedeStoreReadOnly();
+    if (handle) {
+      supersedeReadHandle = handle;
+      return handle;
+    }
+    return null;
+  } catch (err) {
+    console.warn('[PatternMemory] supersede read store unavailable:', (err as Error).message);
+    supersedeReadHandle = null;
+    return null;
+  }
+}
+
+function ensureSupersedeWriteHandle(): SupersedeStoreHandle | null {
+  if (supersedeWriteHandle === undefined) {
+    try {
+      supersedeWriteHandle = openSupersedeStore();
+    } catch (err) {
+      console.warn('[PatternMemory] supersede write store unavailable:', (err as Error).message);
+      supersedeWriteHandle = null;
+    }
+  }
+  return supersedeWriteHandle;
+}
 
 function getSupersedeWeight(failureModeHash: string | undefined): number {
   if (!failureModeHash) return 1.0;
-  if (supersedeStore === undefined) {
-    try {
-      supersedeStore = openSupersedeStore();
-    } catch (err) {
-      console.warn('[PatternMemory] supersede store unavailable:', (err as Error).message);
-      supersedeStore = null;
-    }
-  }
-  if (!supersedeStore) return 1.0;
-  return injectionWeightForSupersede(supersedeStore.findActiveByHash(failureModeHash));
+  const handle = ensureSupersedeReadHandle();
+  if (!handle) return 1.0;
+  return injectionWeightForSupersede(handle.findActiveByHash(failureModeHash));
 }
 
-/** Test-only: inject a mock store (or null to disable). */
-export function setSupersedeStoreForTesting(handle: SupersedeStoreHandle | null): void {
-  supersedeStore = handle;
+/**
+ * Test-only: disable the live supersede store. Both handles snap to
+ * `null` so neither path will attempt an adapter open. This is the
+ * primitive existing fs-mocked tests use to keep production sqlite
+ * out of the test process.
+ *
+ * Use `resetSupersedeHandlesForTesting()` instead when a test needs
+ * to observe which adapter factory the production code calls.
+ */
+export function setSupersedeStoreForTesting(handle: null): void {
+  supersedeReadHandle = handle;
+  supersedeWriteHandle = handle;
+}
+
+/**
+ * Test-only: clear both handles back to `undefined` so the next read
+ * or write attempt triggers a fresh adapter factory call. Used by
+ * tests that spy on `openSupersedeStore*` to verify which factory the
+ * recall path goes through.
+ */
+export function resetSupersedeHandlesForTesting(): void {
+  supersedeReadHandle = undefined;
+  supersedeWriteHandle = undefined;
 }
 
 /**
@@ -517,16 +573,10 @@ export function matchNegativePatterns(features: string[]): Array<NegativePattern
  */
 export function checkAndRecordRecurrence(failureModeHash: string | undefined): void {
   if (!failureModeHash) return;
-  if (supersedeStore === undefined) {
-    try {
-      supersedeStore = openSupersedeStore();
-    } catch {
-      supersedeStore = null;
-    }
-  }
-  if (!supersedeStore) return;
+  const handle = ensureSupersedeWriteHandle();
+  if (!handle) return;
   try {
-    supersedeStore.recordRecurrence(failureModeHash);
+    handle.recordRecurrence(failureModeHash);
   } catch (err) {
     console.warn('[PatternMemory] recurrence record failed:', (err as Error).message);
   }

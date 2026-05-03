@@ -2513,9 +2513,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     if (submitHypothesis) registry.registerSdk(submitHypothesis, 'submit_hypothesis', 'internal');
     if (resolveHypothesis) registry.registerSdk(resolveHypothesis, 'resolve_hypothesis', 'internal');
     if (flagUncertainty) registry.registerSdk(flagUncertainty, 'flag_uncertainty', 'internal');
-    // recall_patterns is currently 'internal' because its handler triggers
-    // openSupersedeStore (mkdir + sqlite migration). Plan 41 M1a will land
-    // SupersedeStoreReadOnlyAdapter and reclassify back to 'public'.
+    // recall_patterns stays 'internal' for one more commit. Plan 41 M1b
+    // routes the recall path through openSupersedeStoreReadOnly so it no
+    // longer mkdir's or migrates the supersede DB on first call. The
+    // public-readonly exposure flip is gated on the M1b invariant test
+    // soaking for one release cycle to catch any hidden writable code
+    // path; that flip is the M1b commit 2 follow-up.
     registry.registerSdk(recallPatterns, 'recall_patterns', 'internal');
     // Comparison mode tools — only when referenceTraceId is provided.
     if (compareSkill) registry.registerSdk(compareSkill, 'compare_skill', 'internal');
