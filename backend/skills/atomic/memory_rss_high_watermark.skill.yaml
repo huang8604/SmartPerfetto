@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# 进程 RSS 内存峰值（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 linux.memory.high_watermark 模块，列出每个进程
+# 的 RSS 内存峰值。是"哪个进程吃内存最多"的快速排序入口。
+#
+# 与 memory_pressure_in_range / lmk_kill_attribution 配合使用：
+# 高 RSS + LMK 杀进程 → 该进程是内存压力源头。
+
+name: memory_rss_high_watermark
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "进程 RSS 内存峰值"
+  description: "每进程 RSS 内存最高水位（高内存 = 风险源头）"
+  icon: "memory"
+  tags: [memory, rss, watermark, atomic]
+
+prerequisites:
+  modules:
+    - linux.memory.high_watermark
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+  - name: top_n
+    type: number
+    required: false
+    default: 30
+
+steps:
+  - id: rss_peaks
+    type: atomic
+    name: "RSS 内存峰值排行"
+    display:
+      level: list
+      layer: bytes
+      title: "Top RSS 占用进程"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: rss_high_watermark_kb
+          label: "RSS 峰值(KB)"
+          type: bytes
+          format: compact
+    sql: |
+      SELECT
+        process_name,
+        rss_high_watermark_kb
+      FROM memory_rss_high_watermark_per_process
+      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
+      ORDER BY rss_high_watermark_kb DESC
+      LIMIT ${top_n|30}

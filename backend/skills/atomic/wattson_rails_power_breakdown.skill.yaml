@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Wattson Power Rails 聚合分析（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 wattson.aggregation 模块，从 trace 中提取每条 power
+# rail（CPU/GPU/DDR/Modem 等）的总能耗（mWs）和峰值功率（mW）。
+#
+# 数据前置：trace 必须开启 power_rails 数据源 + battery counters。否则
+# wattson_rails_aggregation 表为空（capability detection 在 traceCompletenessProber
+# 的 `power_rails` capability 中处理）。
+
+name: wattson_rails_power_breakdown
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "Power Rails 能耗分解"
+  description: "按 power rail 统计能耗（mWs）和峰值功率（mW）"
+  icon: "battery_full"
+  tags: [power, wattson, rails, energy, atomic]
+
+prerequisites:
+  modules:
+    - wattson.aggregation
+
+inputs:
+  - name: top_n
+    type: number
+    required: false
+    default: 20
+    description: "返回前 N 条 rail（按能耗排序）"
+
+steps:
+  - id: rails_aggregation
+    type: atomic
+    name: "Power Rails 能耗聚合"
+    display:
+      level: list
+      layer: number
+      title: "按 Rail 的能耗与峰值功率"
+      columns:
+        - name: name
+          label: "Rail 名称"
+          type: string
+        - name: total_energy_uws
+          label: "总能耗(uWs)"
+          type: number
+          format: compact
+        - name: avg_power_mw
+          label: "平均功率(mW)"
+          type: number
+          format: compact
+        - name: max_power_mw
+          label: "峰值功率(mW)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        name,
+        ROUND(estimate_value_total) AS total_energy_uws,
+        ROUND(estimate_value_avg, 2) AS avg_power_mw,
+        ROUND(estimate_value_max, 2) AS max_power_mw
+      FROM wattson_rails_aggregation
+      ORDER BY estimate_value_total DESC
+      LIMIT ${top_n|20}

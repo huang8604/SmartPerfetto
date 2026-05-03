@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Doze（深度休眠）状态时间线（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android.battery.doze 模块，提取 deep idle 和 light
+# idle 区间。Doze 是 Android 最重要的省电模式，频繁退出 Doze 是后台耗电
+# 主因之一。
+
+name: battery_doze_state_timeline
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "Doze 休眠状态时间线"
+  description: "Deep/Light idle 区间时间线"
+  icon: "bedtime"
+  tags: [doze, idle, battery, power, atomic]
+
+prerequisites:
+  modules:
+    - android.battery.doze
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  - id: deep_idle_intervals
+    type: atomic
+    name: "Deep Idle 区间"
+    display:
+      level: list
+      layer: duration
+      title: "Deep Idle 时间段"
+      columns:
+        - name: ts
+          label: "起始"
+          type: timestamp
+        - name: dur_sec
+          label: "时长(秒)"
+          type: duration
+          format: compact
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e9, 1) AS dur_sec
+      FROM android_deep_idle_state
+      WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts ASC
+
+  - id: light_idle_intervals
+    type: atomic
+    name: "Light Idle 区间"
+    display:
+      level: list
+      layer: duration
+      title: "Light Idle 时间段"
+      columns:
+        - name: ts
+          label: "起始"
+          type: timestamp
+        - name: dur_sec
+          label: "时长(秒)"
+          type: duration
+          format: compact
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e9, 1) AS dur_sec
+      FROM android_light_idle_state
+      WHERE (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts ASC

@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Wattson App Startup 窗口功耗（B 级 atomic）
+# =============================================================================
+# 使用 wattson.windows 的 wattson_window_app_startup 表，针对每次应用启动
+# 窗口给出总能耗（mWs）。可与 startup_analysis 联动定位"启动期耗电特别高"
+# 的应用。
+
+name: wattson_app_startup_power
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "应用启动期能耗"
+  description: "每次应用启动期间的总能耗（mWs）"
+  icon: "rocket_launch"
+  tags: [power, wattson, startup, energy, atomic]
+
+prerequisites:
+  modules:
+    - wattson.windows
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "应用包名 GLOB（可选）"
+
+steps:
+  - id: startup_power
+    type: atomic
+    name: "启动期能耗列表"
+    display:
+      level: list
+      layer: duration
+      title: "应用启动能耗"
+      columns:
+        - name: package
+          label: "包名"
+          type: string
+        - name: window_ts
+          label: "起始时间"
+          type: timestamp
+        - name: dur_ms
+          label: "启动时长(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: total_energy_uws
+          label: "总能耗(uWs)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        package,
+        ts AS window_ts,
+        ROUND(dur / 1e6, 1) AS dur_ms,
+        ROUND(total_estimate) AS total_energy_uws
+      FROM wattson_window_app_startup
+      WHERE (package GLOB '${package}*' OR '${package}' = '')
+      ORDER BY ts ASC

@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# 应用进程启动事件汇总（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android.app_process_starts 模块，列出 trace 区间
+# 内所有应用进程启动事件（不限于 cold start，含所有 fork 出的子进程）。
+#
+# 与 startup_analysis 的区别：startup_analysis 关注用户感知的启动（TTID/
+# TTFD），本 skill 关注系统层面所有 process start，包括 service 进程、
+# 后台进程等。可作为"系统是否在大量 fork 进程"的诊断入口。
+
+name: app_process_starts_summary
+version: "1.0"
+type: atomic
+category: app_lifecycle
+tier: B
+
+meta:
+  display_name: "应用进程启动汇总"
+  description: "系统层面所有应用进程 fork 事件（含后台/service 进程）"
+  icon: "playlist_add"
+  tags: [process, fork, lifecycle, atomic]
+
+prerequisites:
+  modules:
+    - android.app_process_starts
+
+inputs:
+  - name: package
+    type: string
+    required: false
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  - id: process_starts
+    type: atomic
+    name: "进程启动事件"
+    display:
+      level: list
+      layer: duration
+      title: "应用进程启动事件"
+      columns:
+        - name: process_name
+          label: "进程名"
+          type: string
+        - name: process_start_ts
+          label: "启动时间"
+          type: timestamp
+        - name: total_dur_ms
+          label: "启动耗时(ms)"
+          type: duration
+          format: duration_ms
+          unit: ms
+        - name: reason
+          label: "启动原因"
+          type: string
+    sql: |
+      SELECT
+        process_name,
+        process_start_ts,
+        ROUND(total_dur / 1e6, 1) AS total_dur_ms,
+        reason
+      FROM android_app_process_starts
+      WHERE (process_name GLOB '${package}*' OR '${package}' = '')
+        AND (${start_ts} IS NULL OR process_start_ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR process_start_ts < ${end_ts})
+      ORDER BY process_start_ts ASC

@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# 线程级 CPU 利用率周期采样（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 linux.cpu.utilization.thread 模块，按线程统计
+# CPU 利用率（按周期）。比 sched_slice 直接 GROUP BY 更高效，stdlib 已
+# 处理频率归一化。
+#
+# 用途：
+# - "哪些线程在某时间窗口内 CPU 利用率高"
+# - 替代 cpu_load_in_range 等手写的 sched_slice 聚合 skill
+
+name: cpu_thread_utilization_period
+version: "1.0"
+type: atomic
+category: cpu
+tier: B
+
+meta:
+  display_name: "线程 CPU 利用率（周期）"
+  description: "按线程统计 CPU 利用率，已频率归一化"
+  icon: "speed"
+  tags: [cpu, thread, utilization, sched, atomic]
+
+prerequisites:
+  modules:
+    - linux.cpu.utilization.thread
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+  - name: top_n
+    type: number
+    required: false
+    default: 30
+
+steps:
+  - id: thread_util
+    type: atomic
+    name: "线程 CPU 利用率"
+    display:
+      level: list
+      layer: percent
+      title: "Top 高利用率线程"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: utilization
+          label: "利用率"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        process_name,
+        thread_name,
+        ROUND(utilization, 4) AS utilization
+      FROM cpu_thread_utilization_per_period
+      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
+      ORDER BY utilization DESC
+      LIMIT ${top_n|30}

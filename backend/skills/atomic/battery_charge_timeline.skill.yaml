@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# 电池电量时间线（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android.battery 模块，获取电池电量、电压、电流的
+# 时间序列。可与功耗分析配合定位"trace 区间内掉电速率"。
+
+name: battery_charge_timeline
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "电池电量时间线"
+  description: "电池电量/电压/电流采样时间序列"
+  icon: "battery_charging_full"
+  tags: [battery, charge, voltage, current, atomic]
+
+prerequisites:
+  modules:
+    - android.battery
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  - id: battery_samples
+    type: atomic
+    name: "电池采样序列"
+    display:
+      level: list
+      layer: number
+      title: "电池电量/电压/电流"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: capacity_pct
+          label: "电量(%)"
+          type: percentage
+        - name: charge_uah
+          label: "电荷(μAh)"
+          type: number
+          format: compact
+        - name: voltage_uv
+          label: "电压(μV)"
+          type: number
+          format: compact
+        - name: current_ua
+          label: "电流(μA)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        ts,
+        capacity_percent AS capacity_pct,
+        charge_uah,
+        voltage_uv,
+        current_ua
+      FROM android_battery_charge
+      WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts ASC

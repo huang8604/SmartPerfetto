@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Wattson 线程级功耗归因（B 级 atomic）
+# =============================================================================
+# 使用 wattson.aggregation 的 wattson_threads_aggregation 表，按线程归因 CPU
+# 能耗（mWs）。是排查"谁在偷电"的入口。
+#
+# 数据前置：trace 必须开启 ftrace.sched + power_rails + cpu_freq_idle 才能让
+# wattson 估算可用。否则表为空（参考 traceCompletenessProber `power_rails` /
+# `cpu_freq_idle` capabilities）。
+
+name: wattson_thread_power_attribution
+version: "1.0"
+type: atomic
+category: power
+tier: B
+
+meta:
+  display_name: "线程功耗归因"
+  description: "按线程归因 CPU 能耗（mWs）—— 排查偷电进程"
+  icon: "developer_board"
+  tags: [power, wattson, thread, attribution, atomic]
+
+prerequisites:
+  modules:
+    - wattson.aggregation
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名 GLOB（可选）"
+  - name: top_n
+    type: number
+    required: false
+    default: 30
+    description: "返回前 N 个线程"
+
+steps:
+  - id: thread_attribution
+    type: atomic
+    name: "线程级 CPU 功耗"
+    display:
+      level: list
+      layer: number
+      title: "Top 耗电线程（按 CPU mWs）"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: total_cpu_uws
+          label: "总能耗(uWs)"
+          type: number
+          format: compact
+        - name: avg_cpu_mw
+          label: "平均功率(mW)"
+          type: number
+          format: compact
+    sql: |
+      SELECT
+        process_name,
+        thread_name,
+        ROUND(estimate_value_total) AS total_cpu_uws,
+        ROUND(estimate_value_avg, 2) AS avg_cpu_mw
+      FROM wattson_threads_aggregation
+      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
+      ORDER BY estimate_value_total DESC
+      LIMIT ${top_n|30}

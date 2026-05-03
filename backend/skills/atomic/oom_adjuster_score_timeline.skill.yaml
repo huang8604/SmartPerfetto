@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# OOM Adjuster Score 时间线（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android.oom_adjuster 模块，提取每个进程的
+# oom_score_adj 变化区间。oom_score_adj 决定进程在内存压力下的存活优先级
+# （前台 = 0、可见 = 100-200、缓存 = 900+）。
+#
+# 排查"为啥后台进程频繁被升 oom_adj 然后被杀"的入口数据。
+
+name: oom_adjuster_score_timeline
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "OOM Score 时间线"
+  description: "进程 oom_score_adj 变化区间"
+  icon: "low_priority"
+  tags: [memory, oom, lmk, priority, atomic]
+
+prerequisites:
+  modules:
+    - android.oom_adjuster
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  - id: oom_intervals
+    type: atomic
+    name: "OOM Score 区间"
+    display:
+      level: list
+      layer: duration
+      title: "进程 OOM Score 变化"
+      columns:
+        - name: ts
+          label: "起始时间"
+          type: timestamp
+        - name: dur_sec
+          label: "时长(秒)"
+          type: duration
+          format: compact
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: oom_score_adj
+          label: "OOM Score"
+          type: number
+        - name: bucket_name
+          label: "进程优先级"
+          type: string
+    sql: |
+      SELECT
+        ts,
+        ROUND(dur / 1e9, 2) AS dur_sec,
+        process_name,
+        score AS oom_score_adj,
+        bucket AS bucket_name
+      FROM android_oom_adj_intervals
+      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
+        AND (${start_ts} IS NULL OR ts + dur > ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts ASC

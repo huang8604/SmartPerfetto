@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# LMK Kill 归因（B 级 atomic）
+# =============================================================================
+# 使用 Perfetto stdlib 的 android.memory.lmk 模块，列出所有 LMK（Low Memory
+# Killer）杀进程事件，含被杀进程、oom_score_adj、原因、时间戳。
+#
+# 排查"应用为啥被杀"的入口数据。
+
+name: lmk_kill_attribution
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "LMK 杀进程归因"
+  description: "Low Memory Killer 杀进程事件列表"
+  icon: "delete_forever"
+  tags: [memory, lmk, kill, oom, atomic]
+
+prerequisites:
+  modules:
+    - android.memory.lmk
+
+inputs:
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名 GLOB（可选）"
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
+
+steps:
+  - id: lmk_events
+    type: atomic
+    name: "LMK 事件列表"
+    display:
+      level: list
+      layer: duration
+      title: "LMK 杀进程事件"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+        - name: process_name
+          label: "被杀进程"
+          type: string
+        - name: pid
+          label: "PID"
+          type: number
+        - name: oom_score_adj
+          label: "OOM Score"
+          type: number
+    sql: |
+      SELECT
+        ts,
+        process_name,
+        pid,
+        oom_score_adj
+      FROM android_lmk_events
+      WHERE (process_name GLOB '${process_name}*' OR '${process_name}' = '')
+        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
+      ORDER BY ts ASC
