@@ -30,9 +30,11 @@ import advancedAIRoutes from './routes/advancedAIRoutes';
 import providerRoutes from './routes/providerRoutes';
 import flamegraphRoutes from './routes/flamegraphRoutes';
 import baselineRoutes from './routes/baselineRoutes';
+import ciGateRoutes from './routes/ciGateRoutes';
 import memoryRoutes from './routes/memoryRoutes';
 import caseRoutes from './routes/caseRoutes';
 import ragAdminRoutes from './routes/ragAdminRoutes';
+import {authenticate} from './middleware/auth';
 import {
   assertTraceAnalysisConfiguredForStartup,
   getTraceAnalysisConfigurationStatus,
@@ -150,6 +152,7 @@ app.use('/api/advanced-ai', advancedAIRoutes);
 app.use('/api/v1/providers', providerRoutes);
 app.use('/api/flamegraph', flamegraphRoutes);
 app.use('/api/baselines', baselineRoutes);
+app.use('/api/ci', authenticate, ciGateRoutes);
 app.use('/api/memory', memoryRoutes);
 app.use('/api/cases', caseRoutes);
 app.use('/api/rag', ragAdminRoutes);

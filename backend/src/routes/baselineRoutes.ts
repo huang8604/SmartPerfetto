@@ -26,6 +26,7 @@ import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
+import {authenticate} from '../middleware/auth';
 import {BaselineStore} from '../services/baselineStore';
 import type {BaselineRecord} from '../types/sparkContracts';
 
@@ -55,7 +56,7 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
    * (sampleCount ≥ 3, redactionState='redacted' when key carries
    * identifiable info) surface as 400 with a descriptive `error`.
    */
-  router.post('/', (req, res) => {
+  router.post('/', authenticate, (req, res) => {
     const record = req.body as BaselineRecord | undefined;
     if (!record || typeof record !== 'object') {
       return res
@@ -91,12 +92,13 @@ export function createBaselineRoutes(store?: BaselineStore): ExpressRouter {
   });
 
   /** DELETE /api/baselines/:id */
-  router.delete('/:id', (req, res) => {
-    const removed = s.removeBaseline(req.params.id);
+  router.delete('/:id', authenticate, (req, res) => {
+    const id = req.params.id as string;
+    const removed = s.removeBaseline(id);
     if (!removed) {
       return res
         .status(404)
-        .json({success: false, error: `Baseline '${req.params.id}' not found`});
+        .json({success: false, error: `Baseline '${id}' not found`});
     }
     return res.json({success: true});
   });
