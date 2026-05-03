@@ -25,7 +25,7 @@ keywords: []
 | **GPU / 渲染** | `invoke_skill("gpu_analysis")` | GPU 频率、利用率、Fence 等待 |
 | **Binder / IPC** | `invoke_skill("binder_analysis")` → 特定事务 → `invoke_skill("binder_detail")` | Binder 通信分析 |
 | **锁竞争 / 死锁** | `invoke_skill("lock_contention_analysis")` | Monitor 竞争、锁链分析 |
-| **电源 / 功耗 / 唤醒** | `invoke_skill("suspend_wakeup_analysis")` | Suspend/wakeup、wakelock 归因 |
+| **电源 / 功耗 / 唤醒** | 优先切到 power 策略；或 `invoke_skill("wattson_rails_power_breakdown")` / `invoke_skill("suspend_wakeup_analysis")` | 先看 power_rails/battery_counters/cpu_freq_idle/gpu_work_period 数据完整度；缺 Wattson 数据时退化为 wakelock/Doze/唤醒链 |
 | **SurfaceFlinger / 合成** | `invoke_skill("surfaceflinger_analysis")` | SF 合成延迟、GPU/HWC 分析 |
 | **网络** | `invoke_skill("network_analysis")` | 网络活动分析 |
 | **特定时间段** | `invoke_skill("system_load_in_range", { start_ts, end_ts })` | 任意时间段的系统负载 |
@@ -37,9 +37,10 @@ keywords: []
 - **ANR**: anr_analysis → anr_detail
 - **点击/触摸**: click_response_analysis → click_response_detail (逐事件深钻)
 - **概览/场景还原**: scene_reconstruction → 按场景路由到对应 Skill
+- **功耗/耗电**: wattson_rails_power_breakdown → wattson_thread_power_attribution；数据缺失时 battery_charge_timeline / android_kernel_wakelock_summary / suspend_wakeup_analysis fallback
 
 也可以使用 `list_skills` 发现更多可用技能，或使用 `execute_sql` 做自定义查询。
 
 #### 通用场景关键 Stdlib 表
 
-写 execute_sql 时优先使用（完整列表见方法论模板）：`slice_self_dur`、`cpu_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`、`android_dvfs_counters`
+写 execute_sql 时优先使用（完整列表见方法论模板）：`slice_self_dur`、`cpu_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`、`android_dvfs_counters`、`wattson_rails_aggregation`、`android_battery_charge`

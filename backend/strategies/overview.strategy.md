@@ -14,6 +14,8 @@ optional_capabilities:
   - binder_ipc
   - gc_memory
   - thermal_throttling
+  - power_rails
+  - battery_counters
 keywords:
   - 发生了什么
   - 有什么问题
@@ -78,6 +80,7 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 | scroll / inertial_scroll | jank_frames > 0 | janks artifact |
 | tap | total latency > 200ms | gestures artifact |
 | long_press | duration > 500ms | gestures artifact |
+| power / wakelock | wakelock/Doze/battery 状态异常 | Trace 数据完整度 + power/battery skills |
 
 按严重程度排序，选取 **top 3** 问题场景进入深钻。
 如果所有场景都在阈值内，报告"trace 中未检测到明显性能问题"并给出各场景的关键指标。
@@ -92,6 +95,7 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 | scroll / inertial_scroll | `scrolling_analysis` | start_ts, end_ts, process_name |
 | tap | `click_response_analysis` | start_ts, end_ts, package, enable_per_event_detail=false |
 | 有 jank 的时间区间 | `scrolling_analysis` | start_ts, end_ts, process_name |
+| 耗电/唤醒/待机异常 | `battery_charge_timeline` / `android_kernel_wakelock_summary` / `suspend_wakeup_analysis` | start_ts, end_ts |
 
 **不需要深钻的场景类型**（仅在时间线中描述即可）：
 - idle：空闲时段（信息性）

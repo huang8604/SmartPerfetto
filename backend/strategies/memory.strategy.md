@@ -11,6 +11,7 @@ required_capabilities:
 optional_capabilities:
   - cpu_scheduling
   - binder_ipc
+  - battery_counters
 keywords:
   - 内存
   - memory
@@ -56,11 +57,22 @@ invoke_skill("lmk_analysis")
 ```
 返回：LMK 事件列表、被杀进程、OOM-adj 分布、重启循环检测。
 
+如果需要更轻量的事件/分数视图，或 `lmk_analysis` 结果为空但用户明确问 OOM/adj：
+```
+invoke_skill("lmk_kill_attribution")
+invoke_skill("oom_adjuster_score_timeline")
+invoke_skill("memory_rss_high_watermark")
+```
+- `lmk_kill_attribution`：LMK 事件、被杀进程、adj、oom_score_adj
+- `oom_adjuster_score_timeline`：进程 OOM adj 分数时间线
+- `memory_rss_high_watermark`：RSS high watermark，辅助识别增长型内存压力
+
 **Phase 3 — 深度分析（按需选择）：**
 
 | 信号 | 工具 | 何时使用 |
 |------|------|---------|
 | GPU 内存 / DMA-BUF | `invoke_skill("dmabuf_analysis")` | 图形密集应用的 GPU 内存分析 |
+| Bitmap 内存 | `invoke_skill("android_bitmap_memory_per_process")` | 图片/纹理密集应用的 Bitmap footprint |
 | GC 压力 | `invoke_skill("gc_analysis")` | Java 堆内存问题、频繁 GC |
 | 页缺失 | `execute_sql` 查询 `page_fault` | 内存映射文件访问延迟 |
 | 系统内存压力 | `invoke_skill("memory_pressure_in_range", { start_ts, end_ts })` | 特定时间段的内存压力事件 |

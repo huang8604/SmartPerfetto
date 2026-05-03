@@ -11,6 +11,9 @@ optional_capabilities:
   - gpu
   - thermal_throttling
   - surfaceflinger
+  - gpu_work_period
+  - power_rails
+  - cpu_freq_idle
 keywords:
   - 游戏
   - game
@@ -60,6 +63,13 @@ invoke_skill("gpu_analysis")
 ```
 检查 GPU 频率/利用率、Fence 等待时间。
 
+如果 Trace 数据完整度显示 `gpu_work_period` 可用，再补充：
+```
+invoke_skill("android_gpu_work_period_track")
+invoke_skill("mali_gpu_power_state")
+```
+用于判断 GPU active region 是否连续、Mali power state 是否异常。无 `gpu_work_period` 时只能做 GPU 频率/帧间隔定性分析。
+
 **Phase 3 — 系统级交叉分析：**
 
 | 信号 | 检查工具 | 说明 |
@@ -67,6 +77,8 @@ invoke_skill("gpu_analysis")
 | CPU 频率下降 | `invoke_skill("thermal_throttling")` | 游戏长时间运行容易触发热节流 |
 | 内存压力 | `invoke_skill("memory_analysis")` | 游戏内存占用大，可能触发 LMK |
 | CPU 调度 | `invoke_skill("cpu_analysis")` | 游戏线程调度到小核会造成帧率波动 |
+| 线程/进程 CPU 利用率 | `invoke_skill("cpu_thread_utilization_period")` / `invoke_skill("cpu_process_utilization_period")` | 判断 UnityMain/GameThread/RenderThread 是否 CPU-bound |
+| 功耗归因 | `invoke_skill("wattson_thread_power_attribution")` | 仅在 power_rails + cpu_freq_idle 可用时做线程能耗归因 |
 
 **Phase 4 — 引擎特定分析：**
 

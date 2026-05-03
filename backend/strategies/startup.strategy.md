@@ -15,6 +15,10 @@ optional_capabilities:
   - disk_io
   - memory_pressure
   - thermal_throttling
+  - power_rails
+  - battery_counters
+  - cpu_freq_idle
+  - gpu_work_period
 keywords:
   - 启动
   - 冷启动
@@ -50,6 +54,11 @@ phase_hints:
     constraints: '冷启动必须调用 startup_slow_reasons 检查 DEX2OAT/baseline profile/debuggable 等官方因素。Q4(Sleeping) >25% 必须用 blocking_chain_analysis 追踪阻塞源。'
     critical_tools: ['startup_slow_reasons', 'blocking_chain_analysis']
     critical: true
+  - id: startup_power_overlay
+    keywords: ['power', 'battery', 'wattson', '功耗', '耗电', '电池', '启动期能耗', '掉电']
+    constraints: '用户关心启动功耗/耗电时，先检查 Trace 数据完整度中的 power_rails、battery_counters、cpu_freq_idle、gpu_work_period。数据可用才调用 wattson_app_startup_power；缺失时输出采集建议，禁止把空表解释为低功耗。'
+    critical_tools: ['wattson_app_startup_power', 'battery_charge_timeline', 'android_dvfs_counter_stats']
+    critical: false
   - id: conclusion
     keywords: ['结论', 'conclusion', '输出', 'output', '报告', 'report', '总结']
     constraints: '输出必须包含：启动类型判定(cold/warm/hot) + TTID/TTFD 数值 + 阶段耗时分解 + 根因编号引用(A1-A18/B1-B12) + 双受众格式([App層]+[系統/平台層])。'
@@ -266,6 +275,28 @@ invoke_skill("memory_pressure_in_range", {
 - **如果 pressure_level 为 "none" 或 "low" 且无 reclaim/LMK 强信号**：
   - 系统内存压力可排除。D 状态来自其他原因，需在结论阶段结合 Phase 2.6 信号进一步区分（详见上方排除场景列表）
   - 在结论的"可排除因素"中写明：**"系统内存压力：pressure_score=X，无 reclaim/LMK 信号，可排除"**
+
+**Phase 2.57 — 启动期功耗 Overlay（仅当用户关心启动耗电/功耗时执行）：**
+
+先检查系统提示中的 Trace 数据完整度：
+- `power_rails` + `cpu_freq_idle` 可用 → 可以做 Wattson 启动窗口能耗归因
+- `battery_counters` 可用 → 可以看启动前后电池采样趋势
+- 任一关键 capability 缺失 → 结论中加“数据采集建议”，不要把空表当成“启动不耗电”
+
+```
+invoke_skill("wattson_app_startup_power", { package: "<包名>" })
+invoke_skill("battery_charge_timeline", {
+  start_ts: "<启动开始时间戳>",
+  end_ts: "<启动结束时间戳>"
+})
+```
+
+交叉验证：
+- 若启动窗口能耗高，再调用 `app_process_starts_summary` 判断是否有进程反复拉起
+- 若 DVFS/温控相关，再调用 `android_dvfs_counter_stats` 或 `thermal_throttling`
+- 若 GPU 首帧渲染占比高且 `gpu_work_period` 可用，再调用 `android_gpu_work_period_track`
+
+输出必须标明可信度：Wattson 量化归因 / 电池采样趋势 / 数据不足。
 
 **冷启动专项诊断（冷启动必须执行 ⚠️）：**
 

@@ -33,6 +33,10 @@ interface CapabilityDef {
   displayName: string;
   /** Primary table to probe for data existence */
   primaryTable: string;
+  /** Stdlib modules that must be included before probing this table. */
+  requiredModules?: string[];
+  /** Capture guidance appended when the table is missing or empty. */
+  captureHint?: string;
   /** Architectures where this capability is relevant (empty = all) */
   applicableArchs?: RenderingArchitectureType[];
   /** Architectures where this capability is explicitly NOT relevant */
@@ -187,27 +191,68 @@ const CAPABILITY_REGISTRY: CapabilityDef[] = [
   },
 
   // ── Wattson power-modeling prerequisites (added 2026-05 per docs/skills-audit-2026-05.md M2.0) ──
-  // Wattson stdlib (wattson.cpu.estimates / wattson.gpu / wattson.tasks.attribution) requires
-  // power-rails counters AND CPU freq+idle counters in the captured trace. Most production
-  // traces don't enable them, so all wattson skills must check this capability before producing
-  // numeric results — if missing, return recording_recommendation instead of empty tables.
+  // Wattson stdlib and the new power skills require specific capture sources. Most production
+  // traces don't enable them, so the prompt must surface gaps before Claude trusts empty tables.
+  // These entries explicitly INCLUDE their stdlib modules before probing; otherwise sqlite_master
+  // reports the tables as missing even when the trace data would support them.
   {
     id: 'power_rails',
     displayName: '功耗 Rails 估算（Wattson 前置）',
-    // _wattson_power_rails / power_rail_* counters; we probe the canonical `_wattson_cpu_states` derived view
-    // populated only when power_rails + cpu_freq + cpu_idle data sources are all enabled at capture.
-    primaryTable: '_wattson_cpu_states',
+    primaryTable: 'wattson_rails_aggregation',
+    requiredModules: ['wattson.aggregation'],
+    captureHint: '需要 android.power collect_power_rails，且设备硬件支持 power rails',
+    priority: 'optional',
+  },
+  {
+    id: 'battery_counters',
+    displayName: '电池电量/电流采样（功耗前置）',
+    primaryTable: 'android_battery_charge',
+    requiredModules: ['android.battery'],
+    captureHint: '需要 android.power battery_poll_ms 采样',
     priority: 'optional',
   },
   {
     id: 'cpu_freq_idle',
     displayName: 'CPU 频率/Idle 状态（Wattson 前置）',
-    // android.dvfs already covers freq; this entry probes idle-state residency separately
-    // because some captures enable freq tracking without idle (incomplete for wattson).
-    primaryTable: 'cpu_idle_state',
+    primaryTable: 'cpu_idle_counters',
+    requiredModules: ['linux.cpu.idle'],
+    captureHint: '需要 ftrace cpu_idle/cpu_frequency 相关事件；只有频率没有 idle 时 Wattson 估算不完整',
+    priority: 'optional',
+  },
+  {
+    id: 'gpu_work_period',
+    displayName: 'GPU Work Period（Wattson GPU 前置）',
+    primaryTable: 'android_gpu_work_period_track',
+    requiredModules: ['android.gpu.work_period'],
+    captureHint: '需要 android.gpu.work_period 数据源；否则无法做 GPU active region/能耗归因',
     priority: 'optional',
   },
 ];
+
+async function loadProbeModules(
+  tps: TraceProcessorService,
+  traceId: string,
+): Promise<void> {
+  const modules = Array.from(new Set(
+    CAPABILITY_REGISTRY.flatMap(cap => cap.requiredModules ?? []),
+  ));
+  if (modules.length === 0) return;
+
+  for (const module of modules) {
+    try {
+      const result = await tps.query(traceId, `INCLUDE PERFETTO MODULE ${module};`);
+      if ((result as any)?.error) {
+        console.warn(`[TraceCompleteness] Failed to load probe module ${module}: ${(result as any).error}`);
+      }
+    } catch (err) {
+      console.warn(`[TraceCompleteness] Failed to load probe module ${module}:`, (err as Error).message);
+    }
+  }
+}
+
+function appendCaptureHint(reason: string, cap: CapabilityDef): string {
+  return cap.captureHint ? `${reason}；${cap.captureHint}` : reason;
+}
 
 /**
  * Probe trace data completeness.
@@ -223,6 +268,8 @@ export async function probeTraceCompleteness(
   architectureType?: RenderingArchitectureType,
 ): Promise<TraceCompleteness> {
   const t0 = Date.now();
+
+  await loadProbeModules(tps, traceId);
 
   // ── Layer 1: Schema existence check ──────────────────────────────────────
   // Query sqlite_master for all table/view names relevant to our capabilities.
@@ -313,7 +360,7 @@ export async function probeTraceCompleteness(
         displayName: cap.displayName,
         status: 'missing_config_suspected',
         primaryTable: cap.primaryTable,
-        reason: `表 ${cap.primaryTable} 不存在 — 可能未开启所需 trace 配置`,
+        reason: appendCaptureHint(`表 ${cap.primaryTable} 不存在 — 可能未开启所需 trace 配置`, cap),
       });
       continue;
     }
@@ -327,7 +374,7 @@ export async function probeTraceCompleteness(
         status: 'missing_config_suspected',
         primaryTable: cap.primaryTable,
         rowEstimate: 0,
-        reason: `表 ${cap.primaryTable} 存在但无数据 — 可能未开启所需 atrace/ftrace 配置，或场景未发生`,
+        reason: appendCaptureHint(`表 ${cap.primaryTable} 存在但无数据 — 可能未开启所需 atrace/ftrace 配置，或场景未发生`, cap),
       });
     } else if (rowCount < INSUFFICIENT_THRESHOLD) {
       insufficient.push({

@@ -15,6 +15,9 @@ optional_capabilities:
   - thermal_throttling
   - input_latency
   - lock_contention
+  - gpu_work_period
+  - cpu_freq_idle
+  - battery_counters
 keywords:
   - 滑动
   - 卡顿
@@ -54,6 +57,11 @@ phase_hints:
     constraints: '对占比 >15% 且绝对帧数 >3 的 reason_code，必须选最严重帧执行 jank_frame_detail/blocking_chain_analysis 深钻。禁止仅靠 batch_frame_root_cause 统计分类直接出结论。workload_heavy 必须最后兜底。'
     critical_tools: ['jank_frame_detail', 'blocking_chain_analysis', 'lookup_knowledge']
     critical: true
+  - id: frame_metrics_overlay
+    keywords: ['overrun', 'per_frame', 'ui time', 'cpu time', 'work period', 'mali', '帧内', 'GPU', '功耗', '频率']
+    constraints: '需要帧内 CPU/UI/GPU 细分时，优先用 frame_overrun_summary、cpu_time_per_frame、frame_ui_time_breakdown、android_gpu_work_period_track、mali_gpu_power_state 作为补充证据。缺 gpu_work_period 时必须标注数据不足。'
+    critical_tools: ['frame_overrun_summary', 'cpu_time_per_frame', 'frame_ui_time_breakdown', 'android_gpu_work_period_track', 'mali_gpu_power_state']
+    critical: false
   - id: conclusion
     keywords: ['结论', 'conclusion', '输出', 'output', '报告', 'report', '总结']
     constraints: '输出必须包含：全帧根因分布表（按 reason_code 聚合）+ 代表帧分析（含四象限+频率+根因推理链）+ 按优先级排序的优化建议。每个 CRITICAL/HIGH 必须有量化证据+因果链。'
@@ -150,6 +158,22 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | **多帧 `reason_code = render_thread_heavy`** | 对最严重帧调用 `invoke_skill("jank_frame_detail")` 查看 RT top slices | uploadBitmap？shader 初始化？syncFrameState？drawFrame 内部哪个阶段慢？ |
 | **多帧 `reason_code = gpu_fence_wait` 或 `shader_compile`** | 调用 `invoke_skill("gpu_analysis")` 或 `execute_sql` 查询 GPU 频率/利用率 | GPU 频率被限？shader 复杂度？GPU 负载过高？ |
 | **VRR 设备（VSync 周期 ≠ 16.67ms）** | 注意 1.5x VSync 阈值需基于实际 VSync 周期 | 如 120Hz = 8.33ms, 1.5x = 12.5ms |
+
+**Phase 1.8 — 帧内指标 / GPU / CPU 利用率补充（按需执行）：**
+
+当用户追问"每帧 CPU/UI 时间"、"GPU work period"、"Mali power state"、"是 CPU 还是 GPU 限制"时，优先调用已落地的 B-tier atomic skill：
+
+| 问题 | 调用 | 说明 |
+|---|---|---|
+| 每帧 deadline overrun | `invoke_skill("frame_overrun_summary")` | 基于 `android.frames.per_frame_metrics`，列出 overrun 帧 |
+| 每帧 CPU 时间 | `invoke_skill("cpu_time_per_frame")` | 区分帧窗口内 CPU 消耗 |
+| UI thread 时间分解 | `invoke_skill("frame_ui_time_breakdown")` | 看 UI thread 在每帧的耗时分布 |
+| CPU process/thread 周期利用率 | `invoke_skill("cpu_process_utilization_period")` / `invoke_skill("cpu_thread_utilization_period")` | 用于 workload_heavy、后台抢占、线程归因 |
+| CPU cluster 拓扑 | `invoke_skill("cpu_cluster_mapping_view")` | 解释大小核分布，辅助 small_core_placement |
+| GPU work period | `invoke_skill("android_gpu_work_period_track")` | 只有 `gpu_work_period` capability 可用时才做 GPU active region 判断 |
+| Mali power state | `invoke_skill("mali_gpu_power_state")` | Mali 设备专用；无数据时标注设备/trace 不支持 |
+
+这些是补充证据，不替代 Phase 1.9 的根因深钻。若 Trace 数据完整度提示 `gpu_work_period` / `cpu_freq_idle` 缺失，结论中必须说明 GPU/CPU 供应侧判断的可信度下降。
 
 **Phase 1.9 — 根因深钻（🔴 强制执行，不可跳过）：**
 
