@@ -246,14 +246,19 @@ steps:
           label: "评级"
           type: string
     sql: |
-      WITH vsync_cfg AS (
+      WITH vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) AS interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-app'
+      ),
+      vsync_cfg AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(c.ts - LAG(c.ts) OVER (ORDER BY c.ts), 0.5) AS INTEGER)
-           FROM counter c
-           JOIN counter_track t ON c.track_id = t.id
-           WHERE t.name = 'VSYNC-app'),
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER),
           16666667
         ) as period_ns
+        FROM vsync_intervals
+        WHERE interval_ns BETWEEN 5500000 AND 50000000
       ),
       input_with_frame AS (
         SELECT
@@ -324,14 +329,19 @@ steps:
           label: "值(ms)"
           type: number
     sql: |
-      WITH vsync_cfg AS (
+      WITH vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) AS interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-app'
+      ),
+      vsync_cfg AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(c.ts - LAG(c.ts) OVER (ORDER BY c.ts), 0.5) AS INTEGER)
-           FROM counter c
-           JOIN counter_track t ON c.track_id = t.id
-           WHERE t.name = 'VSYNC-app'),
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER),
           16666667
         ) as period_ns
+        FROM vsync_intervals
+        WHERE interval_ns BETWEEN 5500000 AND 50000000
       ),
       valid AS (
         SELECT end_to_end_latency_dur as latency_ns

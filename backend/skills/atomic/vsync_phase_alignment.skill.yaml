@@ -136,14 +136,19 @@ steps:
           type: duration
           format: duration_ms
     sql: |
-      WITH vsync_cfg AS (
+      WITH vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) AS interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-app'
+      ),
+      vsync_cfg AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(c.ts - LAG(c.ts) OVER (ORDER BY c.ts), 0.5) AS INTEGER)
-           FROM counter c
-           JOIN counter_track t ON c.track_id = t.id
-           WHERE t.name = 'VSYNC-app'),
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER),
           16666667
         ) as period_ns
+        FROM vsync_intervals
+        WHERE interval_ns BETWEEN 5500000 AND 50000000
       ),
       vsync_events AS (
         SELECT c.ts as vsync_ts
@@ -193,14 +198,19 @@ steps:
           label: "值"
           type: string
     sql: |
-      WITH vsync_cfg AS (
+      WITH vsync_intervals AS (
+        SELECT c.ts - LAG(c.ts) OVER (ORDER BY c.ts) AS interval_ns
+        FROM counter c
+        JOIN counter_track t ON c.track_id = t.id
+        WHERE t.name = 'VSYNC-app'
+      ),
+      vsync_cfg AS (
         SELECT COALESCE(
-          (SELECT CAST(PERCENTILE(c.ts - LAG(c.ts) OVER (ORDER BY c.ts), 0.5) AS INTEGER)
-           FROM counter c
-           JOIN counter_track t ON c.track_id = t.id
-           WHERE t.name = 'VSYNC-app'),
+          CAST(PERCENTILE(interval_ns, 0.5) AS INTEGER),
           16666667
         ) as period_ns
+        FROM vsync_intervals
+        WHERE interval_ns BETWEEN 5500000 AND 50000000
       ),
       vsync_events AS (
         SELECT c.ts as vsync_ts
@@ -237,7 +247,7 @@ steps:
       UNION ALL
       SELECT '偏移>75%周期(不利相位)', CAST(ROUND(
         100.0 * (SELECT COUNT(*) FROM valid WHERE offset_ns > (SELECT period_ns FROM vsync_cfg) * 0.75) /
-        MAX((SELECT COUNT(*) FROM valid), 1), 1) AS TEXT) || '%' FROM valid LIMIT 1
+        MAX((SELECT COUNT(*) FROM valid), 1), 1) AS TEXT) || '%' FROM valid
       UNION ALL
       SELECT '样本数', CAST(COUNT(*) AS TEXT) FROM valid
 

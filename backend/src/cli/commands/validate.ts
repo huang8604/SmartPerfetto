@@ -804,6 +804,7 @@ export const validateCommand = new Command('validate')
       const possiblePaths = [
         path.join(SKILLS_DIR, 'composite', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'atomic', `${skillId}.skill.yaml`),
+        path.join(SKILLS_DIR, 'deep', `${skillId}.skill.yaml`),
         path.join(SKILLS_DIR, 'custom', `${skillId}.skill.yaml`),
       ];
 
@@ -818,6 +819,7 @@ export const validateCommand = new Command('validate')
       // Validate all skills
       files = findSkillFiles(path.join(SKILLS_DIR, 'composite'), /\.skill\.ya?ml$/);
       files.push(...findSkillFiles(path.join(SKILLS_DIR, 'atomic'), /\.skill\.ya?ml$/));
+      files.push(...findSkillFiles(path.join(SKILLS_DIR, 'deep'), /\.skill\.ya?ml$/));
 
       if (options.all) {
         files.push(...findSkillFiles(path.join(SKILLS_DIR, 'vendors'), /\.override\.ya?ml$/));
