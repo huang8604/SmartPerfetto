@@ -389,12 +389,22 @@ function buildDeterminePipelineSql(pipelines: PipelineDefinition[]): string {
         WHERE pipeline_id IN (${featureIdsSql})
           AND score >= ${SCORE_THRESHOLD}
       ),
+      candidate_list AS (
+        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as candidates_list
+        FROM candidates
+        GROUP BY 'all_candidates'
+      ),
+      feature_list AS (
+        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as features_list
+        FROM features
+        GROUP BY 'all_features'
+      ),
       result AS (
         SELECT
           COALESCE((SELECT pipeline_id FROM primary_pipeline), ${sqlStringLiteral(DEFAULT_PIPELINE_ID)}) as primary_pipeline_id,
           COALESCE((SELECT score FROM primary_pipeline), 0.50) as primary_confidence,
-          COALESCE((SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') FROM candidates), '') as candidates_list,
-          COALESCE((SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') FROM features), '') as features_list
+          COALESCE((SELECT candidates_list FROM candidate_list), '') as candidates_list,
+          COALESCE((SELECT features_list FROM feature_list), '') as features_list
       )
       SELECT
         r.primary_pipeline_id,

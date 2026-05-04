@@ -551,12 +551,22 @@ steps:
         SELECT pipeline_id, score FROM all_scores
         WHERE pipeline_id IN ('VARIABLE_REFRESH_RATE', 'VIDEO_OVERLAY_HWC', 'SURFACE_CONTROL_API')
           AND score > 0.3
+      ),
+      candidate_list AS (
+        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') as candidates_list
+        FROM candidates
+        GROUP BY 'all_candidates'
+      ),
+      feature_list AS (
+        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') as features_list
+        FROM features
+        GROUP BY 'all_features'
       )
       SELECT
         COALESCE((SELECT pipeline_id FROM primary_pipeline), 'ANDROID_VIEW_STANDARD_BLAST') as primary_pipeline_id,
         COALESCE((SELECT score FROM primary_pipeline), 0.50) as primary_confidence,
-        (SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') FROM candidates) as candidates_list,
-        (SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') FROM features) as features_list,
+        (SELECT candidates_list FROM candidate_list) as candidates_list,
+        (SELECT features_list FROM feature_list) as features_list,
         CASE COALESCE((SELECT pipeline_id FROM primary_pipeline), 'ANDROID_VIEW_STANDARD_BLAST')
           WHEN 'ANDROID_VIEW_STANDARD_BLAST' THEN 'rendering_pipelines/android_view_standard.md'
           WHEN 'ANDROID_VIEW_STANDARD_LEGACY' THEN 'rendering_pipelines/android_view_standard.md'

@@ -24,6 +24,8 @@ describe('rendering_pipeline_detection generator', () => {
     // This ensures YAML detection is the single source of truth for scoring configuration.
     expect(determineStep.sql).toContain('has_blast_buffer_queue');
     expect(determineStep.sql).toContain('ANDROID_VIEW_STANDARD_BLAST');
+    expect(determineStep.sql).toContain('candidate_list AS');
+    expect(determineStep.sql).toContain("GROUP BY 'all_candidates'");
 
     // Non-primary / feature-only pipelines should not win primary selection.
     // Keep these checks stable to prevent regressions where a backend/impl-detail pipeline
