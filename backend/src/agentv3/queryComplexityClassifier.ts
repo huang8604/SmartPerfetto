@@ -6,8 +6,8 @@
  * Query Complexity Classifier — routes queries to quick vs full analysis pipeline.
  *
  * Two-stage classification:
- * 1. Hard rules (instant, no LLM): selection context, comparison mode, drill-down,
- *    deterministic scenes → force 'full'
+ * 1. Hard rules (instant, no LLM): selection context → scoped quick,
+ *    comparison/drill-down/deterministic scenes → full
  * 2. AI classification (Haiku, ~1-2s): for remaining queries, determine if the question
  *    is a simple factual lookup or requires multi-step analysis
  *
@@ -79,17 +79,18 @@ export async function classifyQueryComplexity(
 }
 
 /**
- * Hard rules that force 'full' without needing AI.
+ * Hard rules that route without needing AI.
  * Returns null if no hard rule matches (proceed to AI classification).
  */
 function applyHardRules(
   input: ComplexityClassifierInput,
 ): { complexity: QueryComplexity; reason: string } | null {
-  if (input.hasSelectionContext) {
-    return { complexity: 'full', reason: 'UI selection context present' };
-  }
   if (input.hasReferenceTrace) {
     return { complexity: 'full', reason: 'comparison mode' };
+  }
+  if (input.hasSelectionContext) {
+    const kind = input.selectionContext?.kind ?? 'unknown';
+    return { complexity: 'quick', reason: `UI ${kind} selection context present` };
   }
   if (input.hasExistingFindings) {
     return { complexity: 'full', reason: 'prior findings exist' };

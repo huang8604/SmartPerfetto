@@ -122,14 +122,15 @@ describe('classifyQueryComplexity — keyword pre-filter', () => {
 describe('classifyQueryComplexity — hard rules (no keyword match)', () => {
   const neutralQuery = '随便问问'; // No drill-down or confirm keywords
 
-  it('UI selection context → full', async () => {
+  it('UI selection context → quick scoped answer', async () => {
     const result = await classifyQueryComplexity(makeInput({
       query: neutralQuery,
       hasSelectionContext: true,
+      selectionContext: { kind: 'track_event', eventId: 123, ts: 1000 },
     }));
-    expect(result.complexity).toBe('full');
+    expect(result.complexity).toBe('quick');
     expect(result.source).toBe('hard_rule');
-    expect(result.reason).toMatch(/UI selection context/);
+    expect(result.reason).toMatch(/UI track_event selection context/);
   });
 
   it('comparison mode (reference trace) → full', async () => {
@@ -157,6 +158,28 @@ describe('classifyQueryComplexity — hard rules (no keyword match)', () => {
     }));
     expect(result.complexity).toBe('full');
     expect(result.reason).toMatch(/multi-turn continuity/);
+  });
+
+  it('selection context overrides prior full continuity for a new scoped lookup', async () => {
+    const result = await classifyQueryComplexity(makeInput({
+      query: neutralQuery,
+      hasSelectionContext: true,
+      selectionContext: { kind: 'area', startNs: 100, endNs: 200 },
+      hasPriorFullAnalysis: true,
+    }));
+    expect(result.complexity).toBe('quick');
+    expect(result.reason).toMatch(/UI area selection context/);
+  });
+
+  it('selection context overrides deterministic scrolling scene for a scoped slice lookup', async () => {
+    const result = await classifyQueryComplexity(makeInput({
+      query: '分析滑动性能',
+      sceneType: 'scrolling',
+      hasSelectionContext: true,
+      selectionContext: { kind: 'track_event', eventId: 123, ts: 1000 },
+    }));
+    expect(result.complexity).toBe('quick');
+    expect(result.reason).toMatch(/UI track_event selection context/);
   });
 
   it('deterministic scene (scrolling) → full', async () => {

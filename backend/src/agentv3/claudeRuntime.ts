@@ -378,6 +378,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         query,
         sceneType,
         hasSelectionContext: !!options.selectionContext,
+        selectionContext: options.selectionContext,
         hasReferenceTrace: !!options.referenceTraceId,
         // Only count findings from full (non-simple) turns as "existing findings" for drill-down detection
         hasExistingFindings: previousTurns.some(t => t.intent?.complexity !== 'simple' && t.findings?.length > 0),

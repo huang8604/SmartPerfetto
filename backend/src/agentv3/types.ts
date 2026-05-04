@@ -22,6 +22,8 @@ export interface ComplexityClassifierInput {
   sceneType: SceneType;
   /** Whether user selected a time range or slice in Perfetto UI */
   hasSelectionContext: boolean;
+  /** Structured Perfetto UI selection, when present. Used to keep scoped slice/range lookups lightweight. */
+  selectionContext?: SelectionContext;
   /** Whether a reference trace is loaded for comparison */
   hasReferenceTrace: boolean;
   /** Whether prior turns have produced findings (drill-down context) */
