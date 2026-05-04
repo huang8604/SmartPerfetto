@@ -36,13 +36,23 @@ compound_patterns:
 phase_hints:
   - id: power_data_gate
     keywords: ['power', 'battery', 'wattson', '功耗', '耗电', '电池', '数据', '采集']
-    constraints: '先检查 Trace 数据完整度中的 power_rails、battery_counters、cpu_freq_idle、gpu_work_period。缺失时必须输出数据采集建议，禁止把空表解释为“没有功耗问题”。'
-    critical_tools: ['lookup_knowledge']
+    constraints: '先检查 Trace 数据完整度中的 power_rails、battery_counters、cpu_freq_idle、gpu_work_period。缺失时必须输出数据采集建议，禁止把空表解释为“没有功耗问题”。需要总览时优先调用 power_consumption_overview。'
+    critical_tools: ['power_consumption_overview', 'lookup_knowledge']
     critical: true
   - id: wattson_attribution
     keywords: ['wattson', 'rail', 'thread', '归因', '能耗', 'energy', 'power_rails']
     constraints: '只有 power_rails/cpu_freq_idle 数据可用时才用 Wattson 归因。优先调用 wattson_rails_power_breakdown，再调用 wattson_thread_power_attribution；启动窗口问题再加 wattson_app_startup_power。'
     critical_tools: ['wattson_rails_power_breakdown', 'wattson_thread_power_attribution', 'wattson_app_startup_power']
+    critical: false
+  - id: battery_drain_chain
+    keywords: ['battery drain', 'standby drain', '掉电', '待机耗电', '后台耗电', 'wakelock', 'doze', 'job', 'network']
+    constraints: '用户问掉电/待机耗电时优先调用 battery_drain_attribution，把 battery/Doze/wakelock/job/network/suspend-wakeup 串起来；缺 rail 数据时只能给事件链归因。'
+    critical_tools: ['battery_drain_attribution']
+    critical: false
+  - id: thermal_chain
+    keywords: ['thermal', 'throttling', '发热', '温控', '降频', '热节流', 'gpu work period', 'mali']
+    constraints: '用户问发热、降频、热导致卡顿时优先调用 thermal_throttling_chain；同时说明温度传感器/DVFS/GPU work period 哪些数据存在，哪些缺失。'
+    critical_tools: ['thermal_throttling_chain']
     critical: false
   - id: fallback_state_power
     keywords: ['wakelock', 'doze', 'battery', 'dvfs', 'thermal', '唤醒', '待机', '降频']
@@ -58,6 +68,9 @@ plan_template:
     - id: power_attribution_or_fallback
       match_keywords: ['wattson', 'rail', 'thread', 'wakelock', 'doze', '归因', '唤醒', '降频']
       suggestion: '功耗场景需要包含 Wattson 归因或状态事件 fallback 分析阶段'
+    - id: power_composite_entrypoint
+      match_keywords: ['power_consumption_overview', 'battery_drain_attribution', 'thermal_throttling_chain', '总览', '掉电', '温控链路']
+      suggestion: '复杂功耗问题建议先用 power_consumption_overview / battery_drain_attribution / thermal_throttling_chain 建立统一证据链'
 ---
 
 #### 功耗 / 电池 / Wattson 分析（用户提到 功耗、耗电、电池、掉电、wattson）
@@ -86,6 +99,12 @@ lookup_knowledge("data-sources")
 
 **Phase 1 — Wattson rail/thread 归因（数据可用时）：**
 
+复杂功耗问题优先使用总览入口：
+```
+invoke_skill("power_consumption_overview", { package: "<包名>" })
+```
+
+需要拆开看时再调用：
 ```
 invoke_skill("wattson_rails_power_breakdown")
 invoke_skill("wattson_thread_power_attribution", { process_name: "<包名>" })
@@ -107,6 +126,12 @@ invoke_skill("app_process_starts_summary")
 
 **Phase 3 — 电池/Doze/Wakelock fallback（Wattson 数据缺失或用户问待机耗电时）：**
 
+掉电/待机耗电优先使用组合入口：
+```
+invoke_skill("battery_drain_attribution", { package: "<包名>" })
+```
+
+需要拆开看时再调用：
 ```
 invoke_skill("battery_charge_timeline")
 invoke_skill("battery_doze_state_timeline")
@@ -117,6 +142,11 @@ invoke_skill("suspend_wakeup_analysis")
 输出要明确标注：这是状态/事件链证据，能说明“是否频繁唤醒、是否无法进入 Doze、是否有 wakelock”，但不是 rail 级功耗量化。
 
 **Phase 4 — GPU/温控/频率交叉验证（按需）：**
+
+温控/降频/发热导致性能问题时优先：
+```
+invoke_skill("thermal_throttling_chain", { package: "<包名>" })
+```
 
 | 信号 | 调用 |
 |---|---|

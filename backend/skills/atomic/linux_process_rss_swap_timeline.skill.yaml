@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: linux_process_rss_swap_timeline
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "Linux 进程 RSS/Swap 时间线"
+  description: "基于 linux.memory.process stdlib 汇总进程 RSS、anon RSS 和 swap 峰值"
+  icon: "memory"
+  tags: [linux, memory, rss, swap, process, atomic]
+
+triggers:
+  keywords:
+    zh: [RSS, swap, 进程内存, Linux 内存, 常驻内存]
+    en: [rss, swap, process memory, linux memory, resident set]
+  patterns:
+    - ".*(RSS|swap|常驻内存|进程内存).*"
+    - ".*(rss|swap|resident|process memory).*"
+
+prerequisites:
+  modules:
+    - linux.memory.process
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+
+steps:
+  - id: rss_swap_peaks
+    type: atomic
+    name: "RSS/Swap 峰值"
+    display:
+      level: summary
+      layer: overview
+      title: "进程 RSS/Swap 峰值"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: samples
+          label: "样本数"
+          type: number
+          format: compact
+        - name: max_rss_mb
+          label: "RSS峰值"
+          type: number
+        - name: max_anon_swap_mb
+          label: "Anon+Swap峰值"
+          type: number
+        - name: max_swap_mb
+          label: "Swap峰值"
+          type: number
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM memory_rss_and_swap_per_process)) AS end_ts
+      )
+      SELECT
+        process_name,
+        COUNT(*) AS samples,
+        ROUND(MAX(rss) / 1024.0 / 1024.0, 2) AS max_rss_mb,
+        ROUND(MAX(anon_rss_and_swap) / 1024.0 / 1024.0, 2) AS max_anon_swap_mb,
+        ROUND(MAX(COALESCE(swap, 0)) / 1024.0 / 1024.0, 2) AS max_swap_mb
+      FROM memory_rss_and_swap_per_process, input
+      WHERE (input.target_process = '' OR process_name GLOB input.target_process || '*')
+        AND ts >= input.start_ts
+        AND ts < input.end_ts
+      GROUP BY process_name
+      ORDER BY max_anon_swap_mb DESC
+      LIMIT 100
+    save_as: rss_swap_peaks
+
+output:
+  format: structured

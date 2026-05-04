@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: memory_growth_detector
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "内存增长检测"
+  description: "基于 linux.memory.process stdlib 比较进程窗口首尾 RSS/Swap，检测持续增长趋势"
+  icon: "trending_up"
+  tags: [memory, rss, swap, growth, leak, runtime, atomic]
+
+triggers:
+  keywords:
+    zh: [内存增长, 内存泄漏, RSS 增长, swap 增长, 泄漏检测]
+    en: [memory growth, memory leak, rss growth, swap growth, leak detection]
+  patterns:
+    - ".*(内存|RSS|swap).*(增长|泄漏).*"
+    - ".*(memory|rss|swap).*(growth|leak).*"
+
+prerequisites:
+  modules:
+    - linux.memory.process
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+  - name: growth_warning_mb
+    type: number
+    required: false
+    description: "增长告警阈值(MB)，默认 50"
+
+steps:
+  - id: memory_growth
+    type: atomic
+    name: "进程内存增长"
+    display:
+      level: summary
+      layer: overview
+      title: "进程内存增长检测"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: samples
+          label: "样本数"
+          type: number
+          format: compact
+        - name: first_rss_mb
+          label: "初始RSS(MB)"
+          type: number
+        - name: last_rss_mb
+          label: "结束RSS(MB)"
+          type: number
+        - name: rss_growth_mb
+          label: "RSS增长(MB)"
+          type: number
+        - name: max_rss_mb
+          label: "RSS峰值(MB)"
+          type: number
+        - name: swap_growth_mb
+          label: "Swap增长(MB)"
+          type: number
+        - name: rating
+          label: "评级"
+          type: string
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${growth_warning_mb}, 50) AS growth_warning_mb,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM memory_rss_and_swap_per_process)) AS end_ts
+      ),
+      samples AS (
+        SELECT
+          process_name,
+          ts,
+          rss,
+          COALESCE(swap, 0) AS swap
+        FROM memory_rss_and_swap_per_process, input
+        WHERE (input.target_process = '' OR process_name GLOB input.target_process || '*')
+          AND ts >= input.start_ts
+          AND ts < input.end_ts
+          AND rss IS NOT NULL
+      ),
+      ranked AS (
+        SELECT
+          *,
+          ROW_NUMBER() OVER (PARTITION BY process_name ORDER BY ts ASC) AS rn_first,
+          ROW_NUMBER() OVER (PARTITION BY process_name ORDER BY ts DESC) AS rn_last
+        FROM samples
+      ),
+      aggregated AS (
+        SELECT
+          process_name,
+          COUNT(*) AS samples,
+          MAX(CASE WHEN rn_first = 1 THEN rss END) AS first_rss,
+          MAX(CASE WHEN rn_last = 1 THEN rss END) AS last_rss,
+          MAX(rss) AS max_rss,
+          MAX(CASE WHEN rn_first = 1 THEN swap END) AS first_swap,
+          MAX(CASE WHEN rn_last = 1 THEN swap END) AS last_swap
+        FROM ranked
+        GROUP BY process_name
+      )
+      SELECT
+        process_name,
+        samples,
+        ROUND(first_rss / 1024.0 / 1024.0, 2) AS first_rss_mb,
+        ROUND(last_rss / 1024.0 / 1024.0, 2) AS last_rss_mb,
+        ROUND((last_rss - first_rss) / 1024.0 / 1024.0, 2) AS rss_growth_mb,
+        ROUND(max_rss / 1024.0 / 1024.0, 2) AS max_rss_mb,
+        ROUND((last_swap - first_swap) / 1024.0 / 1024.0, 2) AS swap_growth_mb,
+        CASE
+          WHEN (last_rss - first_rss) / 1024.0 / 1024.0 > (SELECT growth_warning_mb * 2 FROM input) THEN 'critical'
+          WHEN (last_rss - first_rss) / 1024.0 / 1024.0 > (SELECT growth_warning_mb FROM input) THEN 'warning'
+          WHEN (last_swap - first_swap) > 0 THEN 'notice'
+          ELSE 'normal'
+        END AS rating
+      FROM aggregated
+      WHERE samples >= 2
+      ORDER BY rss_growth_mb DESC
+      LIMIT 100
+    save_as: memory_growth
+
+output:
+  format: structured

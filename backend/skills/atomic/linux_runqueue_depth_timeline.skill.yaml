@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: linux_runqueue_depth_timeline
+version: "1.0"
+type: atomic
+category: kernel
+tier: B
+
+meta:
+  display_name: "Linux Runqueue 深度时间线"
+  description: "基于 sched.thread_level_parallelism stdlib 输出 runnable thread count 时间线和高压区间"
+  icon: "timeline"
+  tags: [linux, runqueue, runnable, scheduler, cpu_contention, atomic]
+
+triggers:
+  keywords:
+    zh: [runqueue, runnable 线程数, CPU 队列, 调度压力]
+    en: [runqueue, runnable thread count, cpu queue, scheduling pressure]
+  patterns:
+    - ".*(runqueue|runnable).*(深度|线程数|压力).*"
+    - ".*(runqueue|runnable).*(depth|count|pressure).*"
+
+prerequisites:
+  required_tables:
+    - thread_state
+  modules:
+    - sched.thread_level_parallelism
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+  - name: pressure_threshold
+    type: number
+    required: false
+    description: "高压 runnable 线程数阈值，默认 4"
+
+steps:
+  - id: runqueue_pressure_summary
+    type: atomic
+    name: "Runqueue 压力汇总"
+    display:
+      level: summary
+      layer: overview
+      title: "Runqueue 压力汇总"
+      columns:
+        - name: samples
+          label: "样本数"
+          type: number
+          format: compact
+        - name: avg_runnable
+          label: "平均Runnable"
+          type: number
+        - name: p95_runnable
+          label: "P95Runnable"
+          type: number
+        - name: max_runnable
+          label: "最大Runnable"
+          type: number
+        - name: pressure_samples
+          label: "高压样本"
+          type: number
+          format: compact
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(${pressure_threshold}, 4) AS pressure_threshold,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM thread_state)) AS end_ts
+      ),
+      rq AS (
+        SELECT
+          ts,
+          runnable_thread_count
+        FROM sched_runnable_thread_count, input
+        WHERE ts >= input.start_ts
+          AND ts < input.end_ts
+      )
+      SELECT
+        COUNT(*) AS samples,
+        ROUND(AVG(runnable_thread_count), 2) AS avg_runnable,
+        ROUND(PERCENTILE(runnable_thread_count, 0.95), 2) AS p95_runnable,
+        MAX(runnable_thread_count) AS max_runnable,
+        SUM(CASE WHEN runnable_thread_count >= (SELECT pressure_threshold FROM input) THEN 1 ELSE 0 END) AS pressure_samples
+      FROM rq
+    save_as: runqueue_pressure_summary
+
+  - id: runqueue_pressure_windows
+    type: atomic
+    name: "Runqueue 高压点"
+    display:
+      level: detail
+      layer: list
+      title: "Runqueue 高压时间点"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_timeline
+        - name: runnable_thread_count
+          label: "Runnable线程数"
+          type: number
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(${pressure_threshold}, 4) AS pressure_threshold,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM thread_state)) AS end_ts
+      )
+      SELECT
+        printf('%d', ts) AS ts,
+        runnable_thread_count
+      FROM sched_runnable_thread_count, input
+      WHERE ts >= input.start_ts
+        AND ts < input.end_ts
+        AND runnable_thread_count >= input.pressure_threshold
+      ORDER BY runnable_thread_count DESC, ts ASC
+      LIMIT 100
+    save_as: runqueue_pressure_windows
+
+output:
+  format: structured

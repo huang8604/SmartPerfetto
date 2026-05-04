@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: native_heap_breakdown
+version: "1.0"
+type: atomic
+category: memory
+tier: B
+
+meta:
+  display_name: "Native Heap 分解"
+  description: "基于 heapprofd summary tree 输出 native heap 未释放和累计分配热点"
+  icon: "account_tree"
+  tags: [memory, native_heap, heapprofd, allocation, leak, atomic]
+
+triggers:
+  keywords:
+    zh: [native heap, heapprofd, native 内存, C++ 内存, malloc 泄漏]
+    en: [native heap, heapprofd, native memory, malloc leak, allocation]
+  patterns:
+    - ".*(native heap|heapprofd|malloc).*(泄漏|增长|热点).*"
+    - ".*(native heap|heapprofd|malloc).*(leak|growth|hotspot).*"
+
+prerequisites:
+  modules:
+    - android.memory.heap_profile.summary_tree
+
+inputs:
+  - name: min_size_mb
+    type: number
+    required: false
+    description: "最小累计未释放大小(MB)，默认 1"
+
+steps:
+  - id: native_heap_hotspots
+    type: atomic
+    name: "Native Heap 热点"
+    display:
+      level: detail
+      layer: list
+      title: "Native Heap Allocation Hotspots"
+      columns:
+        - name: name
+          label: "函数/符号"
+          type: string
+        - name: mapping_name
+          label: "Mapping"
+          type: string
+        - name: cumulative_size_mb
+          label: "累计未释放(MB)"
+          type: number
+        - name: self_size_mb
+          label: "自身未释放(MB)"
+          type: number
+        - name: cumulative_alloc_mb
+          label: "累计分配(MB)"
+          type: number
+        - name: source_file
+          label: "源码"
+          type: string
+    sql: |
+      WITH input AS (
+        SELECT COALESCE(${min_size_mb}, 1) AS min_size_mb
+      )
+      SELECT
+        name,
+        mapping_name,
+        ROUND(cumulative_size / 1024.0 / 1024.0, 2) AS cumulative_size_mb,
+        ROUND(self_size / 1024.0 / 1024.0, 2) AS self_size_mb,
+        ROUND(cumulative_alloc_size / 1024.0 / 1024.0, 2) AS cumulative_alloc_mb,
+        source_file
+      FROM android_heap_profile_summary_tree, input
+      WHERE cumulative_size >= input.min_size_mb * 1024.0 * 1024.0
+      ORDER BY cumulative_size DESC
+      LIMIT 100
+    save_as: native_heap_hotspots
+
+output:
+  format: structured

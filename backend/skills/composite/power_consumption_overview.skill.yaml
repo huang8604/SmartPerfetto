@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Power Consumption Overview
+# =============================================================================
+# Composite entrypoint for power investigations. It keeps rail-level Wattson
+# attribution separate from fallback state/event evidence, so reports can label
+# confidence correctly when trace power data is incomplete.
+
+name: power_consumption_overview
+version: "1.0"
+type: composite
+category: power
+tier: S
+
+meta:
+  display_name: "功耗总览分析"
+  description: "组合 Wattson rail/thread、battery、wakelock、DVFS、GPU work period 等证据，输出功耗问题总览"
+  icon: "battery_charging_full"
+  tags: [power, wattson, battery, wakelock, dvfs, overview, composite]
+
+triggers:
+  keywords:
+    zh: [功耗总览, 耗电总览, 电池分析, rail 归因, wattson, 待机耗电]
+    en: [power overview, battery drain overview, wattson, rail attribution, energy analysis]
+  patterns:
+    - ".*(功耗|耗电|电池).*(总览|归因|分析).*"
+    - ".*(power|battery|energy).*(overview|attribution|analysis).*"
+
+prerequisites:
+  modules:
+    - wattson.aggregation
+    - android.battery
+    - android.kernel_wakelocks
+    - android.dvfs
+    - android.gpu.work_period
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（可选）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+
+steps:
+  - id: wattson_rails
+    type: skill
+    name: "Wattson Rail 能耗归因"
+    skill: wattson_rails_power_breakdown
+    display:
+      level: summary
+    save_as: wattson_rails
+    optional: true
+
+  - id: wattson_threads
+    type: skill
+    name: "Wattson 线程能耗归因"
+    skill: wattson_thread_power_attribution
+    params:
+      package: "${package|${process_name|}}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: wattson_threads
+    optional: true
+
+  - id: battery_charge
+    type: skill
+    name: "电池电量/电流时间线"
+    skill: battery_charge_timeline
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: battery_charge
+    optional: true
+
+  - id: wakelocks
+    type: skill
+    name: "Kernel Wakelock 汇总"
+    skill: android_kernel_wakelock_summary
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: wakelocks
+    optional: true
+
+  - id: dvfs
+    type: skill
+    name: "DVFS 频率统计"
+    skill: android_dvfs_counter_stats
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: dvfs
+    optional: true
+
+  - id: gpu_work_period
+    type: skill
+    name: "GPU Work Period"
+    skill: android_gpu_work_period_track
+    params:
+      package: "${package|${process_name|}}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: gpu_work_period
+    optional: true
+
+  - id: suspend_wakeup
+    type: skill
+    name: "Suspend / Wakeup 链路"
+    skill: suspend_wakeup_analysis
+    params:
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: suspend_wakeup
+    optional: true
+
+output:
+  format: structured

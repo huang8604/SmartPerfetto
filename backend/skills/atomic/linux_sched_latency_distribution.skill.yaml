@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: linux_sched_latency_distribution
+version: "1.0"
+type: atomic
+category: kernel
+tier: B
+
+meta:
+  display_name: "Linux 调度延迟分布"
+  description: "基于 sched.latency stdlib 汇总 Runnable→Running 调度等待分布"
+  icon: "schedule"
+  tags: [linux, sched, latency, runnable, kernel, atomic]
+
+triggers:
+  keywords:
+    zh: [调度延迟, Runnable 等待, runqueue, CPU 争抢, Linux 调度]
+    en: [sched latency, runnable latency, runqueue, cpu contention, linux scheduler]
+  patterns:
+    - ".*(调度|Runnable|runqueue).*(延迟|等待|争抢).*"
+    - ".*(sched|runnable|runqueue).*(latency|wait|contention).*"
+
+prerequisites:
+  required_tables:
+    - thread
+    - process
+    - thread_state
+  modules:
+    - sched.latency
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+
+steps:
+  - id: sched_latency_distribution
+    type: atomic
+    name: "调度延迟分布"
+    display:
+      level: summary
+      layer: overview
+      title: "Linux 调度延迟分布"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: runnable_count
+          label: "等待次数"
+          type: number
+          format: compact
+        - name: total_latency_ms
+          label: "总等待"
+          type: duration
+          format: duration_ms
+        - name: avg_latency_ms
+          label: "平均等待"
+          type: duration
+          format: duration_ms
+        - name: p95_latency_ms
+          label: "P95等待"
+          type: duration
+          format: duration_ms
+        - name: max_latency_ms
+          label: "最大等待"
+          type: duration
+          format: duration_ms
+        - name: severe_waits
+          label: ">8ms"
+          type: number
+          format: compact
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM thread_state)) AS end_ts
+      ),
+      latency AS (
+        SELECT
+          p.name AS process_name,
+          COALESCE(t.name, printf('tid:%d', t.tid)) AS thread_name,
+          sl.latency_dur
+        FROM sched_latency_for_running_interval sl
+        JOIN thread_state ts ON sl.thread_state_id = ts.id
+        JOIN thread t ON sl.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND ts.ts >= i.start_ts
+          AND ts.ts < i.end_ts
+          AND sl.latency_dur > 10000
+      )
+      SELECT
+        process_name,
+        thread_name,
+        COUNT(*) AS runnable_count,
+        ROUND(SUM(latency_dur) / 1e6, 2) AS total_latency_ms,
+        ROUND(AVG(latency_dur) / 1e6, 2) AS avg_latency_ms,
+        ROUND(PERCENTILE(latency_dur, 0.95) / 1e6, 2) AS p95_latency_ms,
+        ROUND(MAX(latency_dur) / 1e6, 2) AS max_latency_ms,
+        SUM(CASE WHEN latency_dur > 8000000 THEN 1 ELSE 0 END) AS severe_waits
+      FROM latency
+      GROUP BY process_name, thread_name
+      HAVING total_latency_ms > 0.1
+      ORDER BY severe_waits DESC, total_latency_ms DESC
+      LIMIT 100
+    save_as: sched_latency_distribution
+
+output:
+  format: structured

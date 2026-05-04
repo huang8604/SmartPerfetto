@@ -1,0 +1,302 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# TextureView Producer Frame Timing
+# =============================================================================
+# Detect producer-side frame cadence for non-Flutter TextureView pipelines.
+# TextureView content is resampled into the host window, so SurfaceFlinger
+# FrameTimeline can miss producer-side stalls or frame swallowing.
+
+name: textureview_producer_frame_timing
+version: "1.0"
+type: atomic
+category: rendering
+tier: B
+
+meta:
+  display_name: "TextureView 生产端帧时序"
+  description: "检测非 Flutter TextureView / SurfaceTexture 生产端 queueBuffer、swapBuffers、onFrameAvailable 的帧间隔异常"
+  icon: "texture"
+  tags: [textureview, surfacetexture, producer, frame_timing, jank, atomic]
+
+triggers:
+  keywords:
+    zh: [TextureView, SurfaceTexture, updateTexImage, onFrameAvailable, 生产端掉帧, 纹理帧间隔]
+    en: [textureview, surfacetexture, updateTexImage, onFrameAvailable, producer frame timing]
+  patterns:
+    - ".*(TextureView|SurfaceTexture).*(卡顿|掉帧|帧间隔|生产端).*"
+    - ".*(textureview|surfacetexture).*(jank|frame timing|producer|gap).*"
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread_track
+    - thread
+    - process
+  modules:
+    - slices.with_context
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+  - name: target_frame_ms
+    type: number
+    required: false
+    description: "目标帧预算(ms)，默认 16.67"
+
+steps:
+  - id: textureview_signal_summary
+    type: atomic
+    name: "TextureView 生产/消费信号概览"
+    display:
+      level: summary
+      layer: overview
+      title: "TextureView / SurfaceTexture 信号概览"
+      columns:
+        - name: signal_role
+          label: "角色"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: event_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: p95_dur_ms
+          label: "P95耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      ),
+      textureview_processes AS (
+        SELECT DISTINCT p.upid
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND COALESCE(t.name, '') NOT GLOB '1.ui*'
+          AND COALESCE(t.name, '') NOT GLOB '1.raster*'
+          AND (
+            s.name GLOB '*SurfaceTexture*' OR
+            s.name GLOB '*updateTexImage*' OR
+            s.name GLOB '*onFrameAvailable*' OR
+            s.name GLOB '*DeferredLayerUpdater*'
+          )
+      ),
+      signals AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name AS slice_name,
+          t.name AS thread_name,
+          p.name AS process_name,
+          CASE
+            WHEN s.name GLOB '*updateTexImage*' OR s.name GLOB '*DeferredLayerUpdater*' THEN 'host_consume_updateTexImage'
+            WHEN s.name GLOB '*onFrameAvailable*' OR s.name GLOB '*SurfaceTexture*' THEN 'producer_frame_available'
+            WHEN s.name GLOB '*queueBuffer*' OR s.name GLOB '*eglSwapBuffers*' OR s.name GLOB '*vkQueuePresent*' THEN 'producer_queue_present'
+            ELSE 'textureview_related'
+          END AS signal_role,
+          ROUND(s.dur / 1e6, 2) AS dur_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND p.upid IN (SELECT upid FROM textureview_processes)
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND s.dur >= 0
+          AND COALESCE(t.name, '') NOT GLOB '1.ui*'
+          AND COALESCE(t.name, '') NOT GLOB '1.raster*'
+          AND (
+            s.name GLOB '*SurfaceTexture*' OR
+            s.name GLOB '*updateTexImage*' OR
+            s.name GLOB '*onFrameAvailable*' OR
+            s.name GLOB '*DeferredLayerUpdater*' OR
+            s.name GLOB '*queueBuffer*' OR
+            s.name GLOB '*eglSwapBuffers*' OR
+            s.name GLOB '*vkQueuePresent*'
+          )
+      )
+      SELECT
+        signal_role,
+        process_name,
+        COALESCE(thread_name, '<unnamed>') AS thread_name,
+        COUNT(*) AS event_count,
+        ROUND(AVG(dur_ms), 2) AS avg_dur_ms,
+        ROUND(PERCENTILE(dur_ms, 0.95), 2) AS p95_dur_ms,
+        ROUND(MAX(dur_ms), 2) AS max_dur_ms
+      FROM signals
+      GROUP BY signal_role, process_name, thread_name
+      ORDER BY event_count DESC, max_dur_ms DESC
+      LIMIT 50
+    save_as: textureview_signal_summary
+
+  - id: textureview_producer_intervals
+    type: atomic
+    name: "TextureView 生产端帧间隔"
+    display:
+      level: detail
+      layer: list
+      title: "TextureView 生产端慢帧间隔"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: interval_ns
+        - name: interval_ns
+          label: "间隔(ns)"
+          type: duration
+          unit: ns
+          hidden: true
+        - name: interval_ms
+          label: "帧间隔"
+          type: duration
+          format: duration_ms
+        - name: vsync_missed
+          label: "疑似漏帧"
+          type: number
+          format: compact
+        - name: event_name
+          label: "事件"
+          type: string
+        - name: previous_event_name
+          label: "前一事件"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: rating
+          label: "评级"
+          type: string
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${target_frame_ms}, 16.67) AS target_frame_ms,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      ),
+      textureview_processes AS (
+        SELECT DISTINCT p.upid
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND COALESCE(t.name, '') NOT GLOB '1.ui*'
+          AND COALESCE(t.name, '') NOT GLOB '1.raster*'
+          AND (
+            s.name GLOB '*SurfaceTexture*' OR
+            s.name GLOB '*updateTexImage*' OR
+            s.name GLOB '*onFrameAvailable*' OR
+            s.name GLOB '*DeferredLayerUpdater*'
+          )
+      ),
+      producer_events AS (
+        SELECT
+          s.ts,
+          s.name AS event_name,
+          t.utid,
+          COALESCE(t.name, '<unnamed>') AS thread_name,
+          p.name AS process_name
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND p.upid IN (SELECT upid FROM textureview_processes)
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND COALESCE(t.name, '') NOT GLOB '1.ui*'
+          AND COALESCE(t.name, '') NOT GLOB '1.raster*'
+          AND (
+            s.name GLOB '*onFrameAvailable*' OR
+            s.name GLOB '*queueBuffer*' OR
+            s.name GLOB '*eglSwapBuffers*' OR
+            s.name GLOB '*vkQueuePresent*'
+          )
+      ),
+      intervals AS (
+        SELECT
+          ts,
+          event_name,
+          LAG(event_name) OVER (PARTITION BY utid ORDER BY ts) AS previous_event_name,
+          ts - LAG(ts) OVER (PARTITION BY utid ORDER BY ts) AS interval_ns,
+          thread_name,
+          process_name
+        FROM producer_events
+      )
+      SELECT
+        printf('%d', ts) AS ts,
+        printf('%d', interval_ns) AS interval_ns,
+        ROUND(interval_ns / 1e6, 2) AS interval_ms,
+        CAST(MAX(0, ROUND(interval_ns / ((SELECT target_frame_ms FROM input) * 1000000.0)) - 1) AS INTEGER) AS vsync_missed,
+        event_name,
+        previous_event_name,
+        thread_name,
+        process_name,
+        CASE
+          WHEN interval_ns > (SELECT target_frame_ms * 4 * 1000000.0 FROM input) THEN 'critical'
+          WHEN interval_ns > (SELECT target_frame_ms * 2 * 1000000.0 FROM input) THEN 'warning'
+          WHEN interval_ns > (SELECT target_frame_ms * 1.5 * 1000000.0 FROM input) THEN 'notice'
+          ELSE 'normal'
+        END AS rating
+      FROM intervals
+      WHERE interval_ns IS NOT NULL
+        AND interval_ns > (SELECT target_frame_ms * 1.5 * 1000000.0 FROM input)
+      ORDER BY interval_ns DESC
+      LIMIT 100
+    save_as: textureview_producer_intervals
+
+output:
+  format: structured

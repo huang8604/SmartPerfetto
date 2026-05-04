@@ -45,6 +45,11 @@ keywords:
   - 不流畅
   - surfaceflinger
   - impeller
+  - textureview
+  - react native
+  - glsurfaceview
+  - nativeactivity
+  - drawfunctor
 
 phase_hints:
   - id: overview
@@ -62,6 +67,11 @@ phase_hints:
     constraints: '需要帧内 CPU/UI/GPU/阻塞调用细分时，优先用 frame_overrun_summary、cpu_time_per_frame、frame_ui_time_breakdown、frame_blocking_calls、android_gpu_work_period_track、mali_gpu_power_state 作为补充证据。缺 gpu_work_period 时必须标注数据不足。'
     critical_tools: ['frame_overrun_summary', 'cpu_time_per_frame', 'frame_ui_time_breakdown', 'frame_blocking_calls', 'android_gpu_work_period_track', 'mali_gpu_power_state']
     critical: false
+  - id: architecture_specific_jank
+    keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', '架构', '生产端']
+    constraints: 'detect_architecture 命中 TextureView/WebView/RN/GL/Compose 时，必须补充对应架构专属 skill。缺专属 trace 信号时标注“不支持该架构证据”，不能只用 FrameTimeline 断言无卡顿。'
+    critical_tools: ['textureview_producer_frame_timing', 'webview_drawfunctor_jank_chain', 'rn_bridge_to_frame_jank', 'rn_fabric_render_jank', 'gl_standalone_swap_jank', 'compose_recomposition_hotspot']
+    critical: false
   - id: conclusion
     keywords: ['结论', 'conclusion', '输出', 'output', '报告', 'report', '总结']
     constraints: '输出必须包含：全帧根因分布表（按 reason_code 聚合）+ 代表帧分析（含四象限+频率+根因推理链）+ 按优先级排序的优化建议。每个 CRITICAL/HIGH 必须有量化证据+因果链。'
@@ -76,6 +86,9 @@ plan_template:
     - id: root_cause_diagnosis
       match_keywords: ['root', 'cause', 'diagnos', '根因', '诊断', '深入', 'deep', 'jank_frame_detail', 'frame_blocking_calls']
       suggestion: '滑动场景建议包含卡顿帧根因分析阶段 (jank_frame_detail / frame_blocking_calls)'
+    - id: architecture_specific_jank
+      match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', '架构']
+      suggestion: '非标准渲染架构必须补充对应架构专属 jank skill，避免只看 FrameTimeline'
 ---
 
 **Android 版本注意**：
@@ -143,10 +156,13 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | 架构 | 调整动作 |
 |------|---------|
 | **Flutter** | 改用 `invoke_skill("flutter_scrolling_analysis")` 代替 `scrolling_analysis`。Flutter 的 1.ui/1.raster 线程模型与标准 RenderThread 不同，jank 帧的根因归属逻辑也不同 |
-| **WebView** | 使用标准 `scrolling_analysis`，但注意 CrRendererMain 线程的 slice 可能是卡顿主因。WebView 场景下，CrRendererMain 线程的阻塞（V8 GC、CSS Layout Thrashing）可能导致帧延迟。可调用 webview_v8_analysis Skill 检查 V8 性能。**⚠️ WebView SurfaceTexture 单 buffer 问题**：如果 WebView 使用 SurfaceTexture 出图，单 buffer 模式下帧可能被覆盖（新帧写入未被消费的 buffer），表现为跳帧而非卡顿。可通过 `frame_production_gap` 检测 |
-| **SurfaceTexture** | 使用标准 `scrolling_analysis`。SurfaceTexture 出图时注意**单 buffer 帧吞噬**：producer 写入新帧覆盖了 consumer 尚未读取的旧帧。表现为帧间 gap 但无 jank 标记。可通过 `invoke_skill("frame_production_gap")` 检测帧生产间隙 |
+| **WebView GL Functor / TextureView** | 使用标准 `scrolling_analysis` 获取宿主帧概览，再调用 `invoke_skill("webview_drawfunctor_jank_chain", {process_name, start_ts, end_ts})` 关联 V8/Chromium/Functor 与宿主帧。若是 WebView SurfaceTexture/X5/UC 内核，补 `textureview_producer_frame_timing` 或 `frame_production_gap` 检查生产端帧吞噬 |
+| **SurfaceTexture / TextureView** | 使用标准 `scrolling_analysis`。SurfaceTexture 出图时注意**单 buffer 帧吞噬**：producer 写入新帧覆盖了 consumer 尚未读取的旧帧。表现为帧间 gap 但无 jank 标记。可调用 `invoke_skill("textureview_producer_frame_timing", {process_name, start_ts, end_ts})` 和 `invoke_skill("frame_production_gap")` 检测生产端帧间隔与宿主消费 gap |
+| **React Native Old Architecture** | 使用标准 `scrolling_analysis`，再调用 `invoke_skill("rn_bridge_to_frame_jank", {process_name, start_ts, end_ts})` 检查 JS/BatchedBridge/UIManager 工作是否与掉帧帧重叠 |
+| **React Native Fabric / JSI** | 使用标准 `scrolling_analysis`，再调用 `invoke_skill("rn_fabric_render_jank", {process_name, start_ts, end_ts})` 检查 Fabric commit、Mounting、JSI/TurboModule 同步工作是否拖慢帧 |
+| **GLSurfaceView / NativeActivity / OpenGL ES** | 标准 FrameTimeline 只能看到消费端；需调用 `invoke_skill("gl_standalone_swap_jank", {process_name, start_ts, end_ts})` 检查应用自管 swap/present 间隔 |
 | **标准 HWUI** | 使用标准 `scrolling_analysis` |
-| **Compose** | 使用标准 `scrolling_analysis`。如果检测到 Compose 架构，注意 Recomposition* slices 可能是卡顿主因。LazyColumn/LazyRow 的 prefetch 和 compose 阶段如果超时会导致掉帧。可调用 compose_recomposition_hotspot Skill 检测过度重组 |
+| **Compose** | 使用标准 `scrolling_analysis`。如果检测到 Compose 架构，注意 Recomposition* slices 可能是卡顿主因。LazyColumn/LazyRow 的 prefetch 和 compose 阶段如果超时会导致掉帧。可调用 `compose_recomposition_hotspot` 检测过度重组；新版会在 FrameTimeline 可用时输出 recomposition→frame 重叠证据 |
 
 **Phase 1.7 — 根因分支深钻（基于 batch_frame_root_cause 的 reason_code 和 jank_responsibility）：**
 

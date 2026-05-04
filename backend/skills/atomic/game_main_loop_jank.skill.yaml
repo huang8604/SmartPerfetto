@@ -1,0 +1,271 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# Game Main Loop Jank
+# =============================================================================
+# Detect long Unity / Unreal / Cocos / Godot main-loop or tick slices.
+# This does not rely on Android FrameTimeline, because many games render through
+# SurfaceView, OpenGL ES, or Vulkan with engine-owned frame pacing.
+
+name: game_main_loop_jank
+version: "1.0"
+type: atomic
+category: rendering
+tier: B
+
+meta:
+  display_name: "游戏主循环卡顿检测"
+  description: "检测 Unity/Unreal/Cocos/Godot 主循环、Tick、渲染线程中的超预算帧切片"
+  icon: "sports_esports"
+  tags: [game, unity, unreal, cocos, main_loop, jank, atomic]
+
+triggers:
+  keywords:
+    zh: [游戏主循环, Unity Update, Unreal Tick, Cocos director, 游戏 Tick, 游戏卡顿]
+    en: [game main loop, unity update, unreal tick, cocos director, game tick]
+  patterns:
+    - ".*(游戏|Unity|Unreal|Cocos).*(主循环|Tick|Update|卡顿).*"
+    - ".*(game|unity|unreal|cocos).*(main loop|tick|update|jank).*"
+
+prerequisites:
+  required_tables:
+    - slice
+    - thread_track
+    - thread
+    - process
+  modules:
+    - slices.with_context
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+  - name: target_frame_ms
+    type: number
+    required: false
+    description: "目标帧预算(ms)，默认 16.67"
+
+steps:
+  - id: engine_loop_summary
+    type: atomic
+    name: "游戏主循环汇总"
+    display:
+      level: summary
+      layer: overview
+      title: "游戏主循环 / Tick 汇总"
+      columns:
+        - name: engine_family
+          label: "引擎"
+          type: string
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: slice_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: total_dur_ms
+          label: "总耗时"
+          type: duration
+          format: duration_ms
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: p95_dur_ms
+          label: "P95耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+        - name: over_budget_count
+          label: "超预算次数"
+          type: number
+          format: compact
+        - name: rating
+          label: "评级"
+          type: string
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${target_frame_ms}, 16.67) AS target_frame_ms,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      ),
+      engine_slices AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name AS slice_name,
+          t.name AS thread_name,
+          p.name AS process_name,
+          CASE
+            WHEN t.name GLOB '*Unity*' OR s.name GLOB '*Unity*' OR s.name GLOB '*PlayerLoop*' THEN 'Unity'
+            WHEN t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR s.name GLOB '*FrameGameThread*' OR s.name GLOB '*Unreal*' THEN 'Unreal'
+            WHEN s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*cocos2d*' OR s.name GLOB '*Cocos*' THEN 'Cocos'
+            WHEN s.name GLOB '*Main::iteration*' OR s.name GLOB '*physics_process*' OR s.name GLOB '*idle_process*' THEN 'Godot'
+            ELSE 'GenericGame'
+          END AS engine_family,
+          CASE
+            WHEN s.name GLOB '*Gfx.WaitForPresent*' OR s.name GLOB '*WaitForPresent*' THEN 'present_wait'
+            WHEN s.name GLOB '*Camera.Render*' OR s.name GLOB '*UnityGfx*' OR s.name GLOB '*RenderingThread*' OR t.name GLOB '*RHIThread*' THEN 'render'
+            WHEN s.name GLOB '*Tick*' OR s.name GLOB '*Update*' OR s.name GLOB '*PlayerLoop*' OR s.name GLOB '*FrameGameThread*' THEN 'tick_update'
+            WHEN s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*Main::iteration*' THEN 'main_loop'
+            ELSE 'engine_work'
+          END AS phase,
+          ROUND(s.dur / 1e6, 2) AS dur_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND s.dur > 0
+          AND (
+            t.name GLOB '*Unity*' OR t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR
+            t.name GLOB '*Unity*' OR t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR
+            t.name GLOB '*GLThread*' OR
+            s.name GLOB '*PlayerLoop*' OR s.name GLOB '*Camera.Render*' OR s.name GLOB '*Gfx.WaitForPresent*' OR
+            s.name GLOB '*FrameGameThread*' OR s.name GLOB '*Unreal*' OR
+            s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*cocos2d*' OR s.name GLOB '*Cocos*' OR
+            s.name GLOB '*Main::iteration*' OR s.name GLOB '*physics_process*' OR s.name GLOB '*idle_process*'
+          )
+      )
+      SELECT
+        engine_family,
+        phase,
+        process_name,
+        COUNT(*) AS slice_count,
+        ROUND(SUM(dur_ms), 2) AS total_dur_ms,
+        ROUND(AVG(dur_ms), 2) AS avg_dur_ms,
+        ROUND(PERCENTILE(dur_ms, 0.95), 2) AS p95_dur_ms,
+        ROUND(MAX(dur_ms), 2) AS max_dur_ms,
+        SUM(CASE WHEN dur_ms > (SELECT target_frame_ms * 1.5 FROM input) THEN 1 ELSE 0 END) AS over_budget_count,
+        CASE
+          WHEN MAX(dur_ms) > (SELECT target_frame_ms * 4 FROM input) THEN 'critical'
+          WHEN PERCENTILE(dur_ms, 0.95) > (SELECT target_frame_ms * 2 FROM input) THEN 'warning'
+          WHEN SUM(CASE WHEN dur_ms > (SELECT target_frame_ms * 1.5 FROM input) THEN 1 ELSE 0 END) > 0 THEN 'notice'
+          ELSE 'normal'
+        END AS rating
+      FROM engine_slices
+      GROUP BY engine_family, phase, process_name
+      ORDER BY over_budget_count DESC, max_dur_ms DESC
+      LIMIT 50
+    save_as: engine_loop_summary
+
+  - id: slow_engine_slices
+    type: atomic
+    name: "慢主循环切片"
+    display:
+      level: detail
+      layer: list
+      title: "慢游戏主循环 / Tick 切片"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur_ns
+        - name: dur_ns
+          label: "耗时(ns)"
+          type: duration
+          unit: ns
+          hidden: true
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: engine_family
+          label: "引擎"
+          type: string
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: slice_name
+          label: "Slice"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${target_frame_ms}, 16.67) AS target_frame_ms,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      )
+      SELECT
+        printf('%d', s.ts) AS ts,
+        printf('%d', s.dur) AS dur_ns,
+        ROUND(s.dur / 1e6, 2) AS dur_ms,
+        CASE
+          WHEN t.name GLOB '*Unity*' OR s.name GLOB '*Unity*' OR s.name GLOB '*PlayerLoop*' THEN 'Unity'
+          WHEN t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR s.name GLOB '*FrameGameThread*' OR s.name GLOB '*Unreal*' THEN 'Unreal'
+          WHEN s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*cocos2d*' OR s.name GLOB '*Cocos*' THEN 'Cocos'
+          WHEN s.name GLOB '*Main::iteration*' OR s.name GLOB '*physics_process*' OR s.name GLOB '*idle_process*' THEN 'Godot'
+          ELSE 'GenericGame'
+        END AS engine_family,
+        CASE
+          WHEN s.name GLOB '*Gfx.WaitForPresent*' OR s.name GLOB '*WaitForPresent*' THEN 'present_wait'
+          WHEN s.name GLOB '*Camera.Render*' OR s.name GLOB '*UnityGfx*' OR s.name GLOB '*RenderingThread*' OR t.name GLOB '*RHIThread*' THEN 'render'
+          WHEN s.name GLOB '*Tick*' OR s.name GLOB '*Update*' OR s.name GLOB '*PlayerLoop*' OR s.name GLOB '*FrameGameThread*' THEN 'tick_update'
+          WHEN s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*Main::iteration*' THEN 'main_loop'
+          ELSE 'engine_work'
+        END AS phase,
+        s.name AS slice_name,
+        t.name AS thread_name,
+        p.name AS process_name
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      JOIN thread t ON tt.utid = t.utid
+      JOIN process p ON t.upid = p.upid
+      CROSS JOIN input i
+      WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+        AND s.ts >= i.start_ts
+        AND s.ts < i.end_ts
+        AND s.dur / 1e6 > i.target_frame_ms * 1.5
+        AND (
+          t.name GLOB '*Unity*' OR t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR
+          t.name GLOB '*Unity*' OR t.name GLOB '*GameThread*' OR t.name GLOB '*RHIThread*' OR
+          t.name GLOB '*GLThread*' OR
+          s.name GLOB '*PlayerLoop*' OR s.name GLOB '*Camera.Render*' OR s.name GLOB '*Gfx.WaitForPresent*' OR
+          s.name GLOB '*FrameGameThread*' OR s.name GLOB '*Unreal*' OR
+          s.name GLOB '*Director::mainLoop*' OR s.name GLOB '*cocos2d*' OR s.name GLOB '*Cocos*' OR
+          s.name GLOB '*Main::iteration*' OR s.name GLOB '*physics_process*' OR s.name GLOB '*idle_process*'
+        )
+      ORDER BY s.dur DESC
+      LIMIT 100
+    save_as: slow_engine_slices
+
+output:
+  format: structured

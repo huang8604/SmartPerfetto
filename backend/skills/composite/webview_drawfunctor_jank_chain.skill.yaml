@@ -1,0 +1,309 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# =============================================================================
+# WebView GL Functor Jank Chain
+# =============================================================================
+# Correlate Chromium/V8 work, WebView GL Functor draw slices, and host frames.
+# This covers the WebView path where content is replayed inside the app
+# RenderThread instead of being visible as an independent SurfaceFlinger layer.
+
+name: webview_drawfunctor_jank_chain
+version: "1.0"
+type: composite
+category: rendering
+tier: A
+
+meta:
+  display_name: "WebView GL Functor 卡顿链路"
+  description: "关联 WebView/Chromium JS 长任务、GL Functor 绘制和宿主帧掉帧窗口"
+  icon: "web"
+  tags: [webview, chromium, drawfunctor, v8, frame, jank, composite]
+
+triggers:
+  keywords:
+    zh: [WebView GL Functor, DrawGL, DrawFunctor, Chromium 卡顿, JS 到帧]
+    en: [webview gl functor, DrawGL, DrawFunctor, chromium jank, javascript to frame]
+  patterns:
+    - ".*(WebView|Chromium).*(DrawGL|DrawFunctor|GL Functor|卡顿|掉帧).*"
+    - ".*(webview|chromium).*(drawgl|drawfunctor|gl functor|jank|frame).*"
+
+prerequisites:
+  required_tables:
+    - actual_frame_timeline_slice
+    - slice
+    - thread_track
+    - thread
+    - process
+  modules:
+    - android.frames.timeline
+    - slices.with_context
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    description: "目标进程名（支持 GLOB）"
+  - name: process_name
+    type: string
+    required: false
+    description: "目标进程名别名；当 package 为空时使用"
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)"
+
+steps:
+  - id: drawfunctor_signal_summary
+    type: atomic
+    name: "WebView Functor 信号概览"
+    display:
+      level: summary
+      layer: overview
+      title: "WebView GL Functor / Chromium 信号概览"
+      columns:
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: slice_count
+          label: "次数"
+          type: number
+          format: compact
+        - name: avg_dur_ms
+          label: "平均耗时"
+          type: duration
+          format: duration_ms
+        - name: p95_dur_ms
+          label: "P95耗时"
+          type: duration
+          format: duration_ms
+        - name: max_dur_ms
+          label: "最大耗时"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      ),
+      webview_slices AS (
+        SELECT
+          s.ts,
+          s.dur,
+          s.name AS slice_name,
+          COALESCE(t.name, '<unnamed>') AS thread_name,
+          p.name AS process_name,
+          CASE
+            WHEN s.name GLOB '*DrawGL*' OR s.name GLOB '*DrawFn_DrawGL*' OR s.name GLOB '*DrawFunctor*' OR s.name GLOB '*AwDrawFn*' THEN 'host_renderthread_functor'
+            WHEN t.name GLOB '*CrRendererMain*' OR s.name GLOB '*Blink*' OR s.name GLOB '*Chromium*' THEN 'chromium_render_main'
+            WHEN s.name GLOB '*v8*' OR s.name GLOB '*V8*' OR s.name GLOB '*JavaScript*' THEN 'javascript_v8'
+            WHEN t.name GLOB '*Compositor*' OR s.name GLOB '*Compositor*' THEN 'chromium_compositor'
+            ELSE 'webview_other'
+          END AS phase,
+          ROUND(s.dur / 1e6, 2) AS dur_ms
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*' OR p.name GLOB '*webview*' OR p.name GLOB '*sandboxed_process*')
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND s.dur > 0
+          AND (
+            t.name GLOB '*CrRendererMain*' OR t.name GLOB '*Compositor*' OR
+            s.name GLOB '*DrawGL*' OR s.name GLOB '*DrawFn_DrawGL*' OR s.name GLOB '*DrawFunctor*' OR s.name GLOB '*AwDrawFn*' OR
+            s.name GLOB '*Blink*' OR s.name GLOB '*Chromium*' OR
+            s.name GLOB '*v8*' OR s.name GLOB '*V8*' OR s.name GLOB '*JavaScript*'
+          )
+      )
+      SELECT
+        phase,
+        process_name,
+        thread_name,
+        COUNT(*) AS slice_count,
+        ROUND(AVG(dur_ms), 2) AS avg_dur_ms,
+        ROUND(PERCENTILE(dur_ms, 0.95), 2) AS p95_dur_ms,
+        ROUND(MAX(dur_ms), 2) AS max_dur_ms
+      FROM webview_slices
+      GROUP BY phase, process_name, thread_name
+      ORDER BY max_dur_ms DESC, slice_count DESC
+      LIMIT 50
+    save_as: drawfunctor_signal_summary
+
+  - id: drawfunctor_frame_overlap
+    type: atomic
+    name: "Functor/JS 与宿主帧重叠"
+    display:
+      level: detail
+      layer: list
+      title: "WebView Functor / JS 工作与宿主帧重叠"
+      columns:
+        - name: ts
+          label: "时间"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur_ns
+        - name: dur_ns
+          label: "耗时(ns)"
+          type: duration
+          unit: ns
+          hidden: true
+        - name: dur_ms
+          label: "耗时"
+          type: duration
+          format: duration_ms
+        - name: phase
+          label: "阶段"
+          type: string
+        - name: slice_name
+          label: "Slice"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: overlapped_frames
+          label: "重叠帧数"
+          type: number
+          format: compact
+        - name: janky_frames
+          label: "掉帧重叠"
+          type: number
+          format: compact
+        - name: max_overlap_ms
+          label: "最大重叠"
+          type: duration
+          format: duration_ms
+        - name: max_frame_dur_ms
+          label: "最大帧耗时"
+          type: duration
+          format: duration_ms
+    sql: |
+      WITH
+      input AS (
+        SELECT
+          COALESCE(NULLIF('${package|}', ''), NULLIF('${process_name|}', ''), '') AS target_process,
+          COALESCE(${start_ts}, 0) AS start_ts,
+          COALESCE(${end_ts}, (SELECT COALESCE(MAX(ts + dur), 0) FROM slice)) AS end_ts
+      ),
+      frame_budget AS (
+        SELECT COALESCE(
+          (SELECT CAST(PERCENTILE(dur, 0.5) AS INTEGER)
+           FROM actual_frame_timeline_slice
+           WHERE dur BETWEEN 5000000 AND 50000000),
+          16666667
+        ) AS budget_ns
+      ),
+      webview_slices AS (
+        SELECT
+          s.id,
+          s.ts,
+          s.dur,
+          s.ts + s.dur AS ts_end,
+          s.name AS slice_name,
+          COALESCE(t.name, '<unnamed>') AS thread_name,
+          p.name AS process_name,
+          p.upid,
+          CASE
+            WHEN s.name GLOB '*DrawGL*' OR s.name GLOB '*DrawFn_DrawGL*' OR s.name GLOB '*DrawFunctor*' OR s.name GLOB '*AwDrawFn*' THEN 'host_renderthread_functor'
+            WHEN t.name GLOB '*CrRendererMain*' OR s.name GLOB '*Blink*' OR s.name GLOB '*Chromium*' THEN 'chromium_render_main'
+            WHEN s.name GLOB '*v8*' OR s.name GLOB '*V8*' OR s.name GLOB '*JavaScript*' THEN 'javascript_v8'
+            WHEN t.name GLOB '*Compositor*' OR s.name GLOB '*Compositor*' THEN 'chromium_compositor'
+            ELSE 'webview_other'
+          END AS phase
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*' OR p.name GLOB '*webview*' OR p.name GLOB '*sandboxed_process*')
+          AND s.ts >= i.start_ts
+          AND s.ts < i.end_ts
+          AND s.dur > 0
+          AND (
+            t.name GLOB '*CrRendererMain*' OR t.name GLOB '*Compositor*' OR
+            s.name GLOB '*DrawGL*' OR s.name GLOB '*DrawFn_DrawGL*' OR s.name GLOB '*DrawFunctor*' OR s.name GLOB '*AwDrawFn*' OR
+            s.name GLOB '*Blink*' OR s.name GLOB '*Chromium*' OR
+            s.name GLOB '*v8*' OR s.name GLOB '*V8*' OR s.name GLOB '*JavaScript*'
+          )
+      ),
+      frames AS (
+        SELECT
+          a.ts,
+          a.dur,
+          a.ts + a.dur AS ts_end,
+          COALESCE(a.display_frame_token, a.surface_frame_token) AS frame_id,
+          COALESCE(a.jank_type, 'None') AS jank_type,
+          a.upid
+        FROM actual_frame_timeline_slice a
+        JOIN process p ON a.upid = p.upid
+        CROSS JOIN input i
+        WHERE (i.target_process = '' OR p.name GLOB i.target_process || '*')
+          AND a.ts >= i.start_ts
+          AND a.ts < i.end_ts
+          AND COALESCE(a.display_frame_token, a.surface_frame_token) IS NOT NULL
+      ),
+      overlaps AS (
+        SELECT
+          ws.*,
+          f.frame_id,
+          f.dur AS frame_dur,
+          f.jank_type,
+          MAX(0, MIN(ws.ts_end, f.ts_end) - MAX(ws.ts, f.ts)) AS overlap_ns
+        FROM webview_slices ws
+        JOIN frames f ON f.upid = ws.upid
+          AND ws.ts < f.ts_end
+          AND ws.ts_end > f.ts
+      )
+      SELECT
+        printf('%d', ts) AS ts,
+        printf('%d', dur) AS dur_ns,
+        ROUND(dur / 1e6, 2) AS dur_ms,
+        phase,
+        slice_name,
+        thread_name,
+        process_name,
+        COUNT(DISTINCT frame_id) AS overlapped_frames,
+        SUM(CASE WHEN jank_type != 'None' OR frame_dur > (SELECT budget_ns * 1.5 FROM frame_budget) THEN 1 ELSE 0 END) AS janky_frames,
+        ROUND(MAX(overlap_ns) / 1e6, 2) AS max_overlap_ms,
+        ROUND(MAX(frame_dur) / 1e6, 2) AS max_frame_dur_ms
+      FROM overlaps
+      WHERE overlap_ns > 0
+      GROUP BY id, ts, dur, phase, slice_name, thread_name, process_name
+      HAVING janky_frames > 0 OR dur_ms > 8
+      ORDER BY janky_frames DESC, dur_ms DESC
+      LIMIT 100
+    save_as: drawfunctor_frame_overlap
+
+  - id: v8_long_tasks
+    type: skill
+    name: "WebView V8 长任务"
+    skill: webview_v8_analysis
+    params:
+      package: "${package|${process_name|}}"
+      start_ts: "${start_ts}"
+      end_ts: "${end_ts}"
+    display:
+      level: detail
+    save_as: v8_long_tasks
+
+output:
+  format: structured

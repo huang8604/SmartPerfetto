@@ -33,11 +33,26 @@ compound_patterns:
   - "game.*jank"
   - "game.*fps"
 
+phase_hints:
+  - id: game_loop_jank
+    keywords: ['game', 'Unity', 'Unreal', 'Cocos', 'Godot', '主循环', 'Tick', 'PlayerLoop', 'GameThread', '帧率', '卡顿']
+    constraints: '游戏/引擎场景必须先用 game_fps_analysis 看整体帧率，再用 game_main_loop_jank 检查引擎主循环/Tick 超预算切片。不要把缺 FrameTimeline 误判成没有掉帧。'
+    critical_tools: ['game_fps_analysis', 'game_main_loop_jank']
+    critical: true
+  - id: game_gpu_power
+    keywords: ['gpu', 'work period', 'mali', 'thermal', '功耗', '发热', '降频']
+    constraints: 'GPU/功耗/发热问题按数据完整度补充 android_gpu_work_period_track、mali_gpu_power_state、thermal_throttling、wattson_thread_power_attribution；缺 capability 时标注证据等级。'
+    critical_tools: ['android_gpu_work_period_track', 'mali_gpu_power_state', 'thermal_throttling', 'wattson_thread_power_attribution']
+    critical: false
+
 plan_template:
   mandatory_aspects:
     - id: fps_and_gpu
       match_keywords: ['game', 'fps', '游戏', 'gpu', 'frame', '帧率']
       suggestion: '游戏场景建议包含帧率分析和 GPU 状态检查阶段'
+    - id: engine_loop_jank
+      match_keywords: ['Unity', 'Unreal', 'Cocos', 'Godot', 'GameThread', 'PlayerLoop', 'Tick', '主循环']
+      suggestion: '游戏引擎场景建议包含 game_main_loop_jank 阶段，检查引擎自管帧循环'
 ---
 
 #### 游戏性能分析（用户提到 游戏、game、帧率、游戏卡顿）
@@ -54,6 +69,14 @@ plan_template:
 invoke_skill("game_fps_analysis", { process_name: "<游戏进程名>" })
 ```
 返回：帧率统计、帧间隔分布、卡顿帧列表。
+
+**Phase 1.5 — 引擎主循环 / Tick 深钻：**
+
+```
+invoke_skill("game_main_loop_jank", { process_name: "<游戏进程名>", start_ts: "<trace_start>", end_ts: "<trace_end>" })
+```
+
+检查 Unity `PlayerLoop` / `Camera.Render` / `Gfx.WaitForPresent`、Unreal `FrameGameThread` / `GameThread` / `RHIThread`、Cocos `Director::mainLoop`、Godot `Main::iteration` 等切片是否超过目标帧预算。该阶段补的是应用生产端节奏，不能用 FrameTimeline 缺失来证明游戏无卡顿。
 
 **Phase 2 — GPU 深度分析（推荐）：**
 
@@ -79,6 +102,7 @@ invoke_skill("mali_gpu_power_state")
 | CPU 调度 | `invoke_skill("cpu_analysis")` | 游戏线程调度到小核会造成帧率波动 |
 | 线程/进程 CPU 利用率 | `invoke_skill("cpu_thread_utilization_period")` / `invoke_skill("cpu_process_utilization_period")` | 判断 UnityMain/GameThread/RenderThread 是否 CPU-bound |
 | 功耗归因 | `invoke_skill("wattson_thread_power_attribution")` | 仅在 power_rails + cpu_freq_idle 可用时做线程能耗归因 |
+| 独立 GL swap 间隔 | `invoke_skill("gl_standalone_swap_jank")` | NativeActivity/GLSurfaceView 或引擎自管 swap 时检查生产端 present 节奏 |
 
 **Phase 4 — 引擎特定分析：**
 
