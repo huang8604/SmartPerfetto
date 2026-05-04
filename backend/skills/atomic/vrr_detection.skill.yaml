@@ -38,6 +38,8 @@ prerequisites:
   required_tables:
     - counter
     - counter_track
+  modules:
+    - counters.intervals
 
 inputs:
   - name: start_ts
@@ -86,13 +88,16 @@ steps:
       -- 从 VSYNC-sf 信号获取 VSync 间隔
       vsync_intervals AS (
         SELECT
-          c.ts,
-          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
-        FROM counter c
-        JOIN counter_track t ON c.track_id = t.id
-        WHERE (t.name GLOB '*VSYNC-sf*' OR t.name = 'VSYNC')
-          AND c.ts >= (SELECT start_ts FROM time_bounds)
-          AND c.ts <= (SELECT end_ts FROM time_bounds)
+          interval.ts,
+          interval.dur as interval_ns
+        FROM counter_leading_intervals!((
+          SELECT c.*
+          FROM counter c
+          JOIN counter_track t ON c.track_id = t.id
+          WHERE (t.name GLOB '*VSYNC-sf*' OR t.name = 'VSYNC')
+        )) AS interval
+        WHERE interval.ts >= (SELECT start_ts FROM time_bounds)
+          AND interval.ts <= (SELECT end_ts FROM time_bounds)
       ),
       -- 将间隔归类到刷新率档位
       interval_buckets AS (
@@ -163,10 +168,13 @@ steps:
       WITH
       vsync_intervals AS (
         SELECT
-          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
-        FROM counter c
-        JOIN counter_track t ON c.track_id = t.id
-        WHERE t.name = 'VSYNC-sf'
+          interval.dur as interval_ns
+        FROM counter_leading_intervals!((
+          SELECT c.*
+          FROM counter c
+          JOIN counter_track t ON c.track_id = t.id
+          WHERE t.name = 'VSYNC-sf'
+        )) AS interval
       ),
       interval_buckets AS (
         SELECT
@@ -233,11 +241,14 @@ steps:
       WITH
       vsync_intervals AS (
         SELECT
-          c.ts,
-          c.ts - LAG(c.ts) OVER (ORDER BY c.ts) as interval_ns
-        FROM counter c
-        JOIN counter_track t ON c.track_id = t.id
-        WHERE t.name = 'VSYNC-sf'
+          interval.ts,
+          interval.dur as interval_ns
+        FROM counter_leading_intervals!((
+          SELECT c.*
+          FROM counter c
+          JOIN counter_track t ON c.track_id = t.id
+          WHERE t.name = 'VSYNC-sf'
+        )) AS interval
       ),
       with_buckets AS (
         SELECT

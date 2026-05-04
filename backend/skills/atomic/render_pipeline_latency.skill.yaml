@@ -26,6 +26,10 @@ meta:
     标准 HWUI input→display；Flutter 1.ui begin→1.raster done→present；
     Game 引擎 swapBuffers→present；Camera HAL processCaptureRequest→preview present。
 
+prerequisites:
+  modules:
+    - android.frames.timeline
+
 inputs:
   - name: start_ts
     type: timestamp

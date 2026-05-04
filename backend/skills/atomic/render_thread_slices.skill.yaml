@@ -36,9 +36,11 @@ inputs:
   - name: start_ts
     type: timestamp
     required: true
+    description: "分析起始时间戳(ns)"
   - name: end_ts
     type: timestamp
     required: true
+    description: "分析结束时间戳(ns)"
   - name: package
     type: string
     required: false
