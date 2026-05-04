@@ -68,9 +68,9 @@ phase_hints:
     critical_tools: ['frame_overrun_summary', 'cpu_time_per_frame', 'frame_ui_time_breakdown', 'frame_blocking_calls', 'android_gpu_work_period_track', 'mali_gpu_power_state']
     critical: false
   - id: architecture_specific_jank
-    keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', '架构', '生产端']
-    constraints: 'detect_architecture 命中 TextureView/WebView/RN/GL/Compose 时，必须补充对应架构专属 skill。缺专属 trace 信号时标注“不支持该架构证据”，不能只用 FrameTimeline 断言无卡顿。'
-    critical_tools: ['textureview_producer_frame_timing', 'webview_drawfunctor_jank_chain', 'rn_bridge_to_frame_jank', 'rn_fabric_render_jank', 'gl_standalone_swap_jank', 'compose_recomposition_hotspot']
+    keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构', '生产端']
+    constraints: 'detect_architecture 命中 TextureView/WebView/RN/GL/Compose/Flutter 或 ANDROID_VIEW_MIXED 时，必须补充对应架构专属 skill。混合出图不能只按 primary pipeline 单路分析，必须分别看 HWUI host 链路和嵌入/独立 producer 链路，再按依赖关系合并。缺专属 trace 信号时标注“不支持该架构证据”，不能只用 FrameTimeline 断言无卡顿。'
+    critical_tools: ['scrolling_analysis', 'flutter_scrolling_analysis', 'textureview_producer_frame_timing', 'webview_drawfunctor_jank_chain', 'rn_bridge_to_frame_jank', 'rn_fabric_render_jank', 'gl_standalone_swap_jank', 'compose_recomposition_hotspot', 'surfaceflinger_analysis']
     critical: false
   - id: conclusion
     keywords: ['结论', 'conclusion', '输出', 'output', '报告', 'report', '总结']
@@ -87,8 +87,8 @@ plan_template:
       match_keywords: ['root', 'cause', 'diagnos', '根因', '诊断', '深入', 'deep', 'jank_frame_detail', 'frame_blocking_calls']
       suggestion: '滑动场景建议包含卡顿帧根因分析阶段 (jank_frame_detail / frame_blocking_calls)'
     - id: architecture_specific_jank
-      match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', '架构']
-      suggestion: '非标准渲染架构必须补充对应架构专属 jank skill，避免只看 FrameTimeline'
+      match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构']
+      suggestion: '非标准/混合渲染架构必须拆成 HWUI host 链路 + producer 链路 + SF 合成链路分别分析，再合并因果，避免只看 FrameTimeline'
 ---
 
 **Android 版本注意**：
@@ -153,14 +153,24 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 
 **Phase 1.5 — 架构感知分支（基于 detect_architecture 结果）：**
 
+`detect_architecture` 的 `primary_pipeline_id` 只是入口，不是单选结论。只要 `candidates_list` / `features_list` 中出现 WebView、Flutter、TextureView、SurfaceView、RN、GL、视频/媒体等次级出图链路，就按 **multi-pipeline** 处理。
+
+**混合出图规则：**
+1. **先分开看 HWUI host 链路**：始终调用 `scrolling_analysis` 获取宿主 App FrameTimeline、MainThread/RenderThread、SF 责任分布。
+2. **再分开看 producer/embedded 链路**：按候选 pipeline 调用对应 skill（Flutter、WebView、TextureView、RN、GL、游戏/媒体）。
+3. **最后合并看链路依赖**：判断 producer 是否阻塞/拖慢 host RT、host 是否吞掉 producer 帧、SF 是否在多 layer 中沿用旧 buffer，或两条链路只是并行同屏但无依赖。
+
+**输出必须分三段**：`HWUI host 证据`、`嵌入/独立 producer 证据`、`合并因果判断`。不能只说“这是 Flutter/WebView/RN 架构所以改用某一个 skill”，也不能只说“FrameTimeline 正常所以无卡顿”。
+
 | 架构 | 调整动作 |
 |------|---------|
-| **Flutter** | 改用 `invoke_skill("flutter_scrolling_analysis")` 代替 `scrolling_analysis`。Flutter 的 1.ui/1.raster 线程模型与标准 RenderThread 不同，jank 帧的根因归属逻辑也不同 |
-| **WebView GL Functor / TextureView** | 使用标准 `scrolling_analysis` 获取宿主帧概览，再调用 `invoke_skill("webview_drawfunctor_jank_chain", {process_name, start_ts, end_ts})` 关联 V8/Chromium/Functor 与宿主帧。若是 WebView SurfaceTexture/X5/UC 内核，补 `textureview_producer_frame_timing` 或 `frame_production_gap` 检查生产端帧吞噬 |
-| **SurfaceTexture / TextureView** | 使用标准 `scrolling_analysis`。SurfaceTexture 出图时注意**单 buffer 帧吞噬**：producer 写入新帧覆盖了 consumer 尚未读取的旧帧。表现为帧间 gap 但无 jank 标记。可调用 `invoke_skill("textureview_producer_frame_timing", {process_name, start_ts, end_ts})` 和 `invoke_skill("frame_production_gap")` 检测生产端帧间隔与宿主消费 gap |
-| **React Native Old Architecture** | 使用标准 `scrolling_analysis`，再调用 `invoke_skill("rn_bridge_to_frame_jank", {process_name, start_ts, end_ts})` 检查 JS/BatchedBridge/UIManager 工作是否与掉帧帧重叠 |
-| **React Native Fabric / JSI** | 使用标准 `scrolling_analysis`，再调用 `invoke_skill("rn_fabric_render_jank", {process_name, start_ts, end_ts})` 检查 Fabric commit、Mounting、JSI/TurboModule 同步工作是否拖慢帧 |
-| **GLSurfaceView / NativeActivity / OpenGL ES** | 标准 FrameTimeline 只能看到消费端；需调用 `invoke_skill("gl_standalone_swap_jank", {process_name, start_ts, end_ts})` 检查应用自管 swap/present 间隔 |
+| **ANDROID_VIEW_MIXED / 多候选 pipeline** | 不做单选。先 `scrolling_analysis` 分析 HWUI host，再对候选链路逐个补 skill：Flutter → `flutter_scrolling_analysis`，WebView → `webview_drawfunctor_jank_chain`，TextureView → `textureview_producer_frame_timing`，RN → RN 专属 skill，GL/Game → GL/Game 专属 skill。最后检查 host/producer/SF 三者是否有依赖 |
+| **Flutter** | 不替代 host 分析。先用 `scrolling_analysis` 看宿主 HWUI/SF，再用 `invoke_skill("flutter_scrolling_analysis")` 看 1.ui/1.raster。Flutter TextureView 还要补 `textureview_producer_frame_timing` 或 `frame_production_gap` 看宿主 RT updateTexImage/帧吞噬 |
+| **WebView GL Functor / TextureView** | 先用 `scrolling_analysis` 获取宿主帧概览，再调用 `invoke_skill("webview_drawfunctor_jank_chain", {process_name, start_ts, end_ts})` 关联 V8/Chromium/Functor 与宿主帧。若是 WebView SurfaceTexture/X5/UC 内核，补 `textureview_producer_frame_timing` 或 `frame_production_gap` 检查生产端帧吞噬 |
+| **SurfaceTexture / TextureView** | 先用 `scrolling_analysis` 看宿主 HWUI。SurfaceTexture 出图时注意**单 buffer 帧吞噬**：producer 写入新帧覆盖了 consumer 尚未读取的旧帧。表现为帧间 gap 但无 jank 标记。可调用 `invoke_skill("textureview_producer_frame_timing", {process_name, start_ts, end_ts})` 和 `invoke_skill("frame_production_gap")` 检测生产端帧间隔与宿主消费 gap |
+| **React Native Old Architecture** | 先用 `scrolling_analysis` 看 HWUI host，再调用 `invoke_skill("rn_bridge_to_frame_jank", {process_name, start_ts, end_ts})` 检查 JS/BatchedBridge/UIManager 工作是否与掉帧帧重叠 |
+| **React Native Fabric / JSI** | 先用 `scrolling_analysis` 看 HWUI host，再调用 `invoke_skill("rn_fabric_render_jank", {process_name, start_ts, end_ts})` 检查 Fabric commit、Mounting、JSI/TurboModule 同步工作是否拖慢帧 |
+| **GLSurfaceView / NativeActivity / OpenGL ES** | 先用 `scrolling_analysis` 看宿主/SF 消费端；再调用 `invoke_skill("gl_standalone_swap_jank", {process_name, start_ts, end_ts})` 检查应用自管 swap/present 间隔 |
 | **标准 HWUI** | 使用标准 `scrolling_analysis` |
 | **Compose** | 使用标准 `scrolling_analysis`。如果检测到 Compose 架构，注意 Recomposition* slices 可能是卡顿主因。LazyColumn/LazyRow 的 prefetch 和 compose 阶段如果超时会导致掉帧。可调用 `compose_recomposition_hotspot` 检测过度重组；新版会在 FrameTimeline 可用时输出 recomposition→frame 重叠证据 |
 
