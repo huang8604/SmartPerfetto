@@ -37,14 +37,16 @@ For direct Anthropic API access, set:
 ANTHROPIC_API_KEY=sk-ant-your-key
 ```
 
-For OpenAI, Gemini, DeepSeek, Kimi, MiMo, Qwen, GLM, Ollama, or other third-party providers, expose an Anthropic-compatible endpoint through one-api/new-api/LiteLLM or your own gateway, then set:
+For providers that expose Claude Code / Anthropic-compatible endpoints, uncomment the provider block in [backend/.env.example](backend/.env.example). The Base URL is already filled in; replace only the API key/token and keep `CLAUDE_MODEL` / `CLAUDE_LIGHT_MODEL` as the SmartPerfetto model fields. Example for DeepSeek:
 
 ```env
-ANTHROPIC_BASE_URL=http://localhost:3000
-ANTHROPIC_API_KEY=sk-proxy-or-provider-token
-CLAUDE_MODEL=your-main-model
-CLAUDE_LIGHT_MODEL=your-light-model
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-your-deepseek-key
+CLAUDE_MODEL=deepseek-v4-pro
+CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
+
+For OpenAI, Gemini, MiMo, Ollama, or other providers that only expose OpenAI-compatible APIs, put one-api/new-api/LiteLLM or your own gateway in front and point `ANTHROPIC_BASE_URL` at that Anthropic-compatible gateway.
 
 SmartPerfetto defaults to Simplified Chinese for AI answers, streamed progress, and generated reports. Set this if the primary users prefer English:
 
@@ -88,7 +90,7 @@ After editing env files, start or restart the backend. For Docker, run `docker c
 
 Use this path if you only want to run SmartPerfetto. You need Docker Desktop/Engine and LLM provider credentials in `.env`; you do not need Node.js, a C++ toolchain, or the `perfetto/` submodule. The Docker Hub image is published nightly from `main` and includes the backend, the pre-built Perfetto UI, and the pinned `trace_processor_shell`, so it also avoids first-run access to Google's artifact bucket on the host.
 
-The container starts without a local `.env` file for health/UI smoke checks, but AI analysis needs `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` plus `ANTHROPIC_API_KEY`.
+The container starts without a local `.env` file for health/UI smoke checks, but AI analysis needs one explicit provider block, for example `ANTHROPIC_API_KEY` for Anthropic direct, or `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` for a Claude Code-compatible provider.
 
 Windows users should use Docker Desktop with the WSL2 backend. The published image is a Linux container image and runs through Docker Desktop; no separate Windows build is required.
 
@@ -96,7 +98,7 @@ Windows users should use Docker Desktop with the WSL2 backend. The published ima
 git clone https://github.com/Gracker/SmartPerfetto.git
 cd SmartPerfetto
 cp backend/.env.example .env
-# Edit .env — set ANTHROPIC_API_KEY, or ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY for a proxy
+# Edit .env — uncomment one provider block and replace only the API key/token
 docker compose -f docker-compose.hub.yml pull
 docker compose -f docker-compose.hub.yml up -d
 ```
@@ -135,7 +137,7 @@ claude
 # Option B: explicit API key or Anthropic-compatible proxy.
 cp backend/.env.example backend/.env
 # Edit backend/.env — set ANTHROPIC_API_KEY (direct) or
-# ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (API proxy)
+# uncomment one Claude Code-compatible provider block
 
 ./start.sh
 ```
@@ -201,16 +203,36 @@ The quick setup above covers where credentials live. Local users whose Claude Co
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ```
 
-Third-party providers can be used through an API proxy that accepts Anthropic Messages requests and forwards them to a provider backend:
+Many third-party providers now expose Claude Code / Anthropic-compatible endpoints directly. Use the prefilled blocks in [backend/.env.example](backend/.env.example); most users should only uncomment one block and replace the key/token:
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:3000
-ANTHROPIC_API_KEY=sk-proxy-xxx
-CLAUDE_MODEL=your-main-model
-CLAUDE_LIGHT_MODEL=your-light-model
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-your-deepseek-key
+CLAUDE_MODEL=deepseek-v4-pro
+CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-Known proxy options include [one-api](https://github.com/songquanpeng/one-api), [new-api](https://github.com/Calcium-Ion/new-api), and [LiteLLM](https://github.com/BerriAI/litellm). The selected model must support streaming and tool/function calling reliably. This is also the recommended path for providers like Xiaomi MiMo when your account exposes an OpenAI-compatible endpoint: connect the provider in the proxy, then point `ANTHROPIC_BASE_URL` at the proxy's Anthropic-compatible endpoint and set `CLAUDE_MODEL` to the mapped MiMo model ID. If your MiMo gateway already exposes an Anthropic-compatible Messages endpoint directly, you can point `ANTHROPIC_BASE_URL` there without an extra proxy. See [backend/.env.example](backend/.env.example) for provider examples and tuning options.
+Prefilled domestic provider presets currently include:
+
+| Provider | Base URL | Primary model | Light model |
+|---|---|---|---|
+| DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `deepseek-v4-flash` |
+| GLM / Z.ai | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.7-flash` |
+| Qwen Bailian | `https://dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
+| Qwen Coding Plan | `https://coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
+| Kimi Code | `https://api.kimi.com/coding/` | `kimi-for-coding` | `kimi-for-coding` |
+| Kimi / Moonshot | `https://api.moonshot.cn/anthropic` | `kimi-k2.6` | `kimi-k2.5` |
+| Doubao / Volcano Ark | `https://ark.cn-beijing.volces.com/api/coding` | `doubao-seed-2.0-code` | `doubao-seed-2.0-code` |
+| MiniMax | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7-highspeed` |
+| Tencent Hunyuan | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/anthropic` | `deepseek-v3.2` | `deepseek-v3.2` |
+| StepFun Step Plan | `https://api.stepfun.com/step_plan` | `step-3.5-flash-2603` | `step-3.5-flash` |
+| SiliconFlow | `https://api.siliconflow.com/` | `Qwen/Qwen3-235B-A22B-Thinking-2507` | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| Huawei ModelArts MaaS | `https://api.modelarts-maas.com/anthropic` | `deepseek-v3.2` | `qwen3-32b` |
+
+Provider docs may use `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`; SmartPerfetto uses `CLAUDE_MODEL` / `CLAUDE_LIGHT_MODEL` because the backend passes the model explicitly into the Claude Agent SDK.
+
+Known proxy options include [one-api](https://github.com/songquanpeng/one-api), [new-api](https://github.com/Calcium-Ion/new-api), and [LiteLLM](https://github.com/BerriAI/litellm). The selected model must support streaming and tool/function calling reliably. This is still the recommended path for providers like Xiaomi MiMo when your account exposes only an OpenAI-compatible endpoint: connect the provider in the proxy, then point `ANTHROPIC_BASE_URL` at the proxy's Anthropic-compatible endpoint and set `CLAUDE_MODEL` to the mapped model ID.
 
 > Note: Claude Code's own local auth/config is the native auth path for the Claude Agent SDK, whether it uses an Anthropic subscription or a Claude Code-configured third-party endpoint. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. Use `ANTHROPIC_BASE_URL` only when the provider is not already available through Claude Code and you want SmartPerfetto to own the proxy config explicitly.
 
@@ -220,7 +242,7 @@ If the local Claude Code path is unavailable, its quota is exhausted, or you wan
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:3000
-ANTHROPIC_API_KEY=sk-proxy-xxx
+ANTHROPIC_AUTH_TOKEN=sk-proxy-xxx
 CLAUDE_MODEL=your-provider-main-model
 CLAUDE_LIGHT_MODEL=your-provider-light-model
 ```

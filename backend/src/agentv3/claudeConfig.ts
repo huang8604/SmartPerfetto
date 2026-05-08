@@ -163,6 +163,7 @@ export function detectBedrock(): BedrockStatus {
 export function hasClaudeCredentials(): boolean {
   return !!(
     process.env.ANTHROPIC_API_KEY ||
+    process.env.ANTHROPIC_AUTH_TOKEN ||
     process.env.ANTHROPIC_BASE_URL ||
     detectBedrock().enabled
   );
@@ -172,6 +173,7 @@ export function getClaudeRuntimeDiagnostics() {
   const bedrock = detectBedrock();
   const credentialSources: string[] = [];
   if (process.env.ANTHROPIC_API_KEY) credentialSources.push('anthropic_api_key');
+  if (process.env.ANTHROPIC_AUTH_TOKEN) credentialSources.push('anthropic_auth_token');
   if (process.env.ANTHROPIC_BASE_URL) credentialSources.push('anthropic_compatible_proxy');
   if (bedrock.enabled) credentialSources.push(`bedrock:${bedrock.authMethod}`);
 
@@ -179,7 +181,7 @@ export function getClaudeRuntimeDiagnostics() {
     ? 'anthropic_compatible_proxy'
     : bedrock.enabled
       ? 'aws_bedrock'
-      : process.env.ANTHROPIC_API_KEY
+      : (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
         ? 'anthropic_direct'
         : 'unconfigured';
 
@@ -205,7 +207,7 @@ export function getClaudeRuntimeDiagnostics() {
     },
     configHint: process.env.ANTHROPIC_BASE_URL
       ? 'Using Anthropic-compatible proxy. Ensure the mapped model supports streaming and tool/function calling.'
-      : 'Set ANTHROPIC_API_KEY for Anthropic direct access, or ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY for a third-party Anthropic-compatible proxy.',
+      : 'Set ANTHROPIC_API_KEY for Anthropic direct access, or ANTHROPIC_BASE_URL plus ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN for a third-party Anthropic-compatible provider.',
   };
 }
 
@@ -226,7 +228,7 @@ export function explainClaudeRuntimeError(message: string): string {
   return `${message}\n\n` +
     'SmartPerfetto is currently using the Claude Agent SDK runtime. ' +
     'If your Claude subscription/API quota is unavailable, configure an Anthropic-compatible proxy instead: ' +
-    'set ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, CLAUDE_MODEL, and CLAUDE_LIGHT_MODEL in backend/.env, then restart the backend. ' +
+    'set ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, CLAUDE_MODEL, and CLAUDE_LIGHT_MODEL in backend/.env, then restart the backend. ' +
     'Provider switchers such as CC Switch manage Claude Code/Codex/Gemini CLI configs, but SmartPerfetto does not automatically read Codex CLI or Gemini CLI credentials.';
 }
 

@@ -12,13 +12,17 @@ echo "=============================================="
 echo "SmartPerfetto (Docker)"
 echo "=============================================="
 
-# Verify API key is configured
+# Verify LLM credentials are configured for Docker runs. Docker cannot use the
+# host's Claude Code login, but health/UI smoke checks still work without AI.
 ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
-if { [ -z "$ANTHROPIC_KEY" ] || [ "$ANTHROPIC_KEY" = "your_anthropic_api_key_here" ] || [ "$ANTHROPIC_KEY" = "sk-ant-xxx" ]; } && \
+ANTHROPIC_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
+if { [ -z "$ANTHROPIC_KEY" ] || [[ "$ANTHROPIC_KEY" == your_* ]] || [ "$ANTHROPIC_KEY" = "sk-ant-xxx" ]; } && \
+   { [ -z "$ANTHROPIC_TOKEN" ] || [[ "$ANTHROPIC_TOKEN" == your_* ]]; } && \
+   [ -z "${AWS_BEARER_TOKEN_BEDROCK:-}" ] && \
    [ "${AI_SERVICE:-}" != "openai" ] && [ "${AI_SERVICE:-}" != "deepseek" ]; then
-  echo "WARNING: ANTHROPIC_API_KEY is missing or still uses the example placeholder."
-  echo "AI analysis will not work without an API key."
-  echo "Set it in .env or pass via: docker compose run -e ANTHROPIC_API_KEY=sk-..."
+  echo "WARNING: LLM credentials are missing or still use an example placeholder."
+  echo "AI analysis needs ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or Bedrock credentials."
+  echo "Set one provider block in .env before running real AI analysis."
   echo ""
 fi
 

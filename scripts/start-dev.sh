@@ -646,9 +646,10 @@ install_ui_deps() {
 # 【S3 Fix】Check for .env file
 if [ ! -f "$PROJECT_ROOT/backend/.env" ]; then
   echo "=============================================="
-  echo "WARNING: backend/.env not found!"
-  echo "AI features may not work without API keys."
-  echo "Please copy .env.example to .env and configure."
+  echo "NOTICE: backend/.env not found."
+  echo "This is OK if Claude Code already works in this terminal."
+  echo "For direct API, Docker, or a different provider:"
+  echo "  cp backend/.env.example backend/.env"
   echo "=============================================="
 fi
 

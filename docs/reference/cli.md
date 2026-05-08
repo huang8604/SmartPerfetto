@@ -315,7 +315,7 @@ npm run cli:dev -- --help
 2. `backend/.env`（默认，自动向上找 5 层）
 3. `~/.smartperfetto/env`
 
-需要 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_BASE_URL`（API proxy 场景）。
+需要 `ANTHROPIC_API_KEY`，或 `ANTHROPIC_BASE_URL` 加 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`（Claude Code 兼容 provider / API proxy 场景）。
 如果你用 proxy 并且 `.env` 里设了 `AI_SERVICE=deepseek`（agentv2 fallback），
 需要显式覆盖：`AI_SERVICE=claude-code smartperfetto ...`（agentv3 走
 Claude Agent SDK；agentv2 路径 CLI 不支持会抛错）。
@@ -435,7 +435,7 @@ smartperfetto report agent-1776414160887-73z8z38c --open
 
 ## 5. CI / 非 TTY 用法
 
-- `list` / `show` / `report` / `rm` 不需要 `ANTHROPIC_API_KEY`，CI 里
+- `list` / `show` / `report` / `rm` 不需要 LLM provider 凭证，CI 里
   只做结果查询安全。
 - `rm` 在非 TTY stdin 下拒绝运行（避免挂在确认 prompt），脚本里必须加
   `--yes`。

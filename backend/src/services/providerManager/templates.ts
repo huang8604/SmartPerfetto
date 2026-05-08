@@ -49,7 +49,7 @@ export const officialTemplates: OfficialProviderTemplate[] = [
       { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', tier: 'light' },
       { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', tier: 'primary' },
     ],
-    defaultConnection: { baseUrl: 'https://api.deepseek.com' },
+    defaultConnection: { baseUrl: 'https://api.deepseek.com/anthropic' },
   },
   {
     type: 'openai',

@@ -13,6 +13,7 @@ import {
 const ORIGINAL_QUICK_MAX_TURNS = process.env.CLAUDE_QUICK_MAX_TURNS;
 const ORIGINAL_ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
 const ORIGINAL_ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ORIGINAL_ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
 const ORIGINAL_CLAUDE_MODEL = process.env.CLAUDE_MODEL;
 const ORIGINAL_CLAUDE_LIGHT_MODEL = process.env.CLAUDE_LIGHT_MODEL;
 const ORIGINAL_CLAUDE_CODE_USE_BEDROCK = process.env.CLAUDE_CODE_USE_BEDROCK;
@@ -32,6 +33,11 @@ afterEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
   } else {
     process.env.ANTHROPIC_API_KEY = ORIGINAL_ANTHROPIC_API_KEY;
+  }
+  if (ORIGINAL_ANTHROPIC_AUTH_TOKEN === undefined) {
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+  } else {
+    process.env.ANTHROPIC_AUTH_TOKEN = ORIGINAL_ANTHROPIC_AUTH_TOKEN;
   }
   if (ORIGINAL_CLAUDE_MODEL === undefined) {
     delete process.env.CLAUDE_MODEL;
@@ -79,6 +85,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
   it('reports Anthropic-compatible proxy mode', () => {
     process.env.ANTHROPIC_BASE_URL = 'http://localhost:3000';
     process.env.ANTHROPIC_API_KEY = 'sk-test';
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
     process.env.CLAUDE_MODEL = 'mimo-main';
     process.env.CLAUDE_LIGHT_MODEL = 'mimo-light';
 
@@ -92,9 +99,22 @@ describe('getClaudeRuntimeDiagnostics', () => {
     expect(diagnostics.credentialSources).toContain('anthropic_compatible_proxy');
   });
 
+  it('treats ANTHROPIC_AUTH_TOKEN as a configured credential source', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic';
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-deepseek-test';
+
+    const diagnostics = getClaudeRuntimeDiagnostics();
+
+    expect(diagnostics.providerMode).toBe('anthropic_compatible_proxy');
+    expect(diagnostics.configured).toBe(true);
+    expect(diagnostics.credentialSources).toContain('anthropic_auth_token');
+  });
+
   it('reports unconfigured mode when no credential source is set', () => {
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
 
     const diagnostics = getClaudeRuntimeDiagnostics();

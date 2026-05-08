@@ -18,26 +18,44 @@ SmartPerfetto 当前主运行时是 agentv3，基于 Claude Agent SDK 编排 MCP
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ```
 
-第三方模型需要通过 Anthropic Messages 兼容代理接入：
+已经提供 Claude Code / Anthropic 兼容端点的第三方模型，可以直接使用 `backend/.env.example` 里的预置 provider block。Base URL 已经写好，只替换 API key/token，并保留 SmartPerfetto 的模型变量名：
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:3000
-ANTHROPIC_API_KEY=sk-proxy-xxx
-CLAUDE_MODEL=your-main-model
-CLAUDE_LIGHT_MODEL=your-light-model
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-your-deepseek-key
+CLAUDE_MODEL=deepseek-v4-pro
+CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-模型必须稳定支持流式输出和 tool/function calling。代理层可以使用 one-api、new-api 或 LiteLLM。
+当前模板内置的国内主流 Anthropic-compatible / Claude Code-compatible 入口包括：
+
+| Provider | `ANTHROPIC_BASE_URL` | 推荐主模型 | 推荐轻模型 |
+|---|---|---|---|
+| DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `deepseek-v4-flash` |
+| GLM / 智谱 | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.7-flash` |
+| Qwen / 百炼按量 | `https://dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
+| Qwen Coding Plan | `https://coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
+| Kimi Code 会员 | `https://api.kimi.com/coding/` | `kimi-for-coding` | `kimi-for-coding` |
+| Kimi / Moonshot 平台 | `https://api.moonshot.cn/anthropic` | `kimi-k2.6` | `kimi-k2.5` |
+| Doubao / 火山方舟 Coding Plan | `https://ark.cn-beijing.volces.com/api/coding` | `doubao-seed-2.0-code` | `doubao-seed-2.0-code` |
+| MiniMax 国内 | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7-highspeed` |
+| 腾讯混元 | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
+| 百度千帆 | `https://qianfan.baidubce.com/anthropic` | `deepseek-v3.2` | `deepseek-v3.2` |
+| 阶跃星辰 Step Plan | `https://api.stepfun.com/step_plan` | `step-3.5-flash-2603` | `step-3.5-flash` |
+| 硅基流动 | `https://api.siliconflow.com/` | `Qwen/Qwen3-235B-A22B-Thinking-2507` | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| 华为云 ModelArts MaaS | `https://api.modelarts-maas.com/anthropic` | `deepseek-v3.2` | `qwen3-32b` |
+
+Provider 官方文档可能写 `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`，但 SmartPerfetto 后端使用 `CLAUDE_MODEL` / `CLAUDE_LIGHT_MODEL`。模型必须稳定支持流式输出和 tool/function calling。只提供 OpenAI 兼容接口的 provider，仍需要通过 one-api、new-api 或 LiteLLM 暴露 Anthropic 兼容入口。
 
 ### 运行时与 Provider 诊断
 
 Claude Code 自己的本地认证/配置是 Claude Agent SDK 的原生认证路径，不管它背后是 Anthropic 订阅还是 Claude Code 里配置好的第三方 endpoint。SmartPerfetto 不会自动读取 Codex CLI、Gemini CLI 或 OpenCode 的登录态；那些工具管理的是各自 CLI 的配置文件。
 
-接入 MiMo、DeepSeek、OpenAI、Kimi、MiniMax 等第三方模型时，请让代理层暴露 Anthropic Messages 兼容接口，然后配置：
+接入 MiMo、OpenAI、Gemini、Ollama 等只提供 OpenAI 兼容接口的第三方模型时，请让代理层暴露 Anthropic Messages 兼容接口，然后配置：
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:3000
-ANTHROPIC_API_KEY=sk-proxy-xxx
+ANTHROPIC_AUTH_TOKEN=sk-proxy-xxx
 CLAUDE_MODEL=your-provider-main-model
 CLAUDE_LIGHT_MODEL=your-provider-light-model
 ```
@@ -52,8 +70,8 @@ curl http://localhost:3000/health
 
 | providerMode | 含义 |
 |---|---|
-| `anthropic_direct` | 使用 `ANTHROPIC_API_KEY` 直连 Anthropic |
-| `anthropic_compatible_proxy` | 使用 `ANTHROPIC_BASE_URL` 接入兼容代理 |
+| `anthropic_direct` | 使用 `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` 且未设置自定义 Base URL |
+| `anthropic_compatible_proxy` | 使用 `ANTHROPIC_BASE_URL` 接入 Claude Code / Anthropic 兼容 provider 或代理 |
 | `aws_bedrock` | 使用 AWS Bedrock |
 | `unconfigured` | 没有显式 env 凭证；如果本机 `claude` 已经能正常请求，SDK 仍可在分析时走 Claude Code 本地 auth/config 路径 |
 

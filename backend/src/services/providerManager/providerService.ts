@@ -179,7 +179,7 @@ export class ProviderService {
         break;
 
       case 'deepseek':
-        env.ANTHROPIC_BASE_URL = provider.connection.baseUrl || 'https://api.deepseek.com';
+        env.ANTHROPIC_BASE_URL = provider.connection.baseUrl || 'https://api.deepseek.com/anthropic';
         if (provider.connection.apiKey) env.ANTHROPIC_API_KEY = provider.connection.apiKey;
         break;
 

@@ -40,7 +40,7 @@ const TESTERS: Record<ProviderType, Tester> = {
   anthropic: testAnthropic,
   bedrock: testBedrock,
   vertex: testVertex,
-  deepseek: testOpenAICompatible,
+  deepseek: testAnthropic,
   openai: testOpenAICompatible,
   ollama: testOllama,
   custom: testOpenAICompatible,

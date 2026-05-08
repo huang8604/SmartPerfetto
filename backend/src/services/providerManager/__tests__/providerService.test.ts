@@ -112,6 +112,22 @@ describe('ProviderService', () => {
       expect(env.AWS_REGION).toBe('us-west-2');
       expect(env.AWS_BEARER_TOKEN_BEDROCK).toBe('tok123');
     });
+
+    it('uses DeepSeek Anthropic-compatible endpoint by default', () => {
+      const p = svc.create({
+        ...validInput,
+        type: 'deepseek',
+        models: { primary: 'deepseek-v4-pro', light: 'deepseek-v4-flash' },
+        connection: { apiKey: 'sk-deepseek-test' },
+      });
+      svc.activate(p.id);
+      const env = svc.getEffectiveEnv()!;
+
+      expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-deepseek-test');
+      expect(env.CLAUDE_MODEL).toBe('deepseek-v4-pro');
+      expect(env.CLAUDE_LIGHT_MODEL).toBe('deepseek-v4-flash');
+    });
   });
 
   describe('getEnvForProvider', () => {

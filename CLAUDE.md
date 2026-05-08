@@ -153,10 +153,12 @@ Note: agentv3 sends `conclusion` first (user sees result immediately), then `ana
 ```bash
 # backend/.env — see .env.example for full provider list (GLM/DeepSeek/Qwen/Kimi/Doubao/OpenAI/Gemini/Ollama...)
 PORT=3000
-ANTHROPIC_API_KEY=sk-ant-xxx              # Anthropic direct, or proxy auth token
-# ANTHROPIC_BASE_URL=http://localhost:3000 # Third-party LLM via API proxy (one-api/new-api/LiteLLM)
-CLAUDE_MODEL=claude-sonnet-4-6            # Optional, default (or provider model name via proxy)
-# CLAUDE_LIGHT_MODEL=claude-haiku-4-5     # Optional, for verifier/classifier/summarizer
+# Local source runs can omit all AI credentials when `claude` already works.
+# ANTHROPIC_API_KEY=sk-ant-xxx              # Anthropic direct (X-Api-Key)
+# ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+# ANTHROPIC_AUTH_TOKEN=sk-provider-xxx      # Claude Code-compatible provider token
+CLAUDE_MODEL=claude-sonnet-4-6             # Optional, or provider main model (e.g. deepseek-v4-pro)
+# CLAUDE_LIGHT_MODEL=claude-haiku-4-5       # Optional, or provider light model (e.g. deepseek-v4-flash)
 # CLAUDE_MAX_TURNS=60                     # Optional, full-mode turn budget
 # CLAUDE_QUICK_MAX_TURNS=10               # Optional, fast-mode turn budget
 # CLAUDE_MAX_BUDGET_USD=5                 # Optional, per-analysis budget cap (Anthropic only)

@@ -26,10 +26,11 @@ claude
 ```bash
 cp backend/.env.example backend/.env
 # 编辑 backend/.env：
-# ANTHROPIC_API_KEY=your_anthropic_api_key_here
+# - Anthropic 直连：解注释 ANTHROPIC_API_KEY
+# - 第三方 Claude Code 兼容 provider：解注释一个 provider block，只替换 API key/token
 ```
 
-也可以通过 `ANTHROPIC_BASE_URL` 接入 one-api、new-api、LiteLLM 等 Anthropic 兼容代理。Docker Hub 镜像使用仓库根目录 `.env`：
+`backend/.env.example` 已经内置 DeepSeek、GLM、Qwen、Kimi、Doubao、MiniMax 等常见 Claude Code 兼容 Base URL 和推荐主/轻模型。Docker Hub 镜像使用仓库根目录 `.env`：
 
 ```bash
 cp backend/.env.example .env

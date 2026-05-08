@@ -413,10 +413,11 @@ async function main(): Promise<void> {
     process.env.DEEPSEEK_API_KEY,
     process.env.OPENAI_API_KEY,
     process.env.ANTHROPIC_API_KEY,
+    process.env.ANTHROPIC_AUTH_TOKEN,
   ].some((value) => typeof value === 'string' && value.trim() !== '');
 
   if (!hasAnyLlmKey && process.env.AI_SERVICE !== 'claude-code') {
-    throw new Error('No LLM API key found (DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY) or set AI_SERVICE=claude-code');
+    throw new Error('No LLM API key found (DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN) or set AI_SERVICE=claude-code');
   }
 
   const app = createVerificationApp();

@@ -25,7 +25,7 @@ import { hasClaudeCredentials } from '../agentv3/claudeConfig';
 export interface BootstrapOptions {
   envFile?: string;
   sessionDir?: string;
-  /** When false, skip the ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL check so
+  /** When false, skip the Anthropic credential check so
    *  purely-local commands (`list`, `show`, `report`, `rm`) stay usable
    *  before the user has configured LLM credentials. Defaults to true. */
   requireLlm?: boolean;
@@ -155,7 +155,7 @@ function assertLlmCredentials(): void {
   throw new Error(
     [
       'Missing Claude credentials.',
-      'Set ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL for proxy, or envs for AWS Bedrock) before running.',
+      'Set ANTHROPIC_API_KEY, or ANTHROPIC_BASE_URL plus ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or envs for AWS Bedrock before running.',
       'The CLI reads backend/.env by default; pass --env-file <path> to override.',
     ].join(' '),
   );
