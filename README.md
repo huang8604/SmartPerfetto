@@ -212,25 +212,32 @@ CLAUDE_MODEL=deepseek-v4-pro
 CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-Prefilled domestic provider presets currently include:
+Prefilled domestic provider presets currently include source-backed examples as
+of 2026-05-08. Provider catalogs and plan entitlements change; if your account
+lists different model IDs, keep the Base URL and override the two model fields.
 
 | Provider | Base URL | Primary model | Light model |
 |---|---|---|---|
 | DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `deepseek-v4-flash` |
-| GLM / Z.ai | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.7-flash` |
+| GLM / Z.ai | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.5-air` |
 | Qwen Bailian | `https://dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
 | Qwen Coding Plan | `https://coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
 | Kimi Code | `https://api.kimi.com/coding/` | `kimi-for-coding` | `kimi-for-coding` |
-| Kimi / Moonshot | `https://api.moonshot.cn/anthropic` | `kimi-k2.6` | `kimi-k2.5` |
+| Kimi / Moonshot | `https://api.moonshot.cn/anthropic` | `kimi-k2.5` | `kimi-k2.5` |
 | Doubao / Volcano Ark | `https://ark.cn-beijing.volces.com/api/coding` | `doubao-seed-2.0-code` | `doubao-seed-2.0-code` |
-| MiniMax | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7-highspeed` |
-| Tencent Hunyuan | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
+| MiniMax | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7` |
+| Tencent TokenHub Token Plan | `https://api.lkeap.cloud.tencent.com/plan/anthropic` | `tc-code-latest` | `tc-code-latest` |
+| Tencent TokenHub Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/anthropic` | `tc-code-latest` | `tc-code-latest` |
+| Tencent Hunyuan legacy | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
 | Baidu Qianfan | `https://qianfan.baidubce.com/anthropic` | `deepseek-v3.2` | `deepseek-v3.2` |
 | StepFun Step Plan | `https://api.stepfun.com/step_plan` | `step-3.5-flash-2603` | `step-3.5-flash` |
 | SiliconFlow | `https://api.siliconflow.com/` | `Qwen/Qwen3-235B-A22B-Thinking-2507` | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
 | Huawei ModelArts MaaS | `https://api.modelarts-maas.com/anthropic` | `deepseek-v3.2` | `qwen3-32b` |
 
 Provider docs may use `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`; SmartPerfetto uses `CLAUDE_MODEL` / `CLAUDE_LIGHT_MODEL` because the backend passes the model explicitly into the Claude Agent SDK.
+If Baidu Qianfan requires a custom `appid` header for your app, use Qianfan's
+default appid or put a custom gateway in front; SmartPerfetto env files do not
+currently inject arbitrary provider headers.
 
 Known proxy options include [one-api](https://github.com/songquanpeng/one-api), [new-api](https://github.com/Calcium-Ion/new-api), and [LiteLLM](https://github.com/BerriAI/litellm). The selected model must support streaming and tool/function calling reliably. This is still the recommended path for providers like Xiaomi MiMo when your account exposes only an OpenAI-compatible endpoint: connect the provider in the proxy, then point `ANTHROPIC_BASE_URL` at the proxy's Anthropic-compatible endpoint and set `CLAUDE_MODEL` to the mapped model ID.
 

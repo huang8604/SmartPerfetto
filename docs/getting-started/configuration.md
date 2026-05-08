@@ -27,25 +27,28 @@ CLAUDE_MODEL=deepseek-v4-pro
 CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-当前模板内置的国内主流 Anthropic-compatible / Claude Code-compatible 入口包括：
+当前模板内置的国内主流 Anthropic-compatible / Claude Code-compatible 入口是截至 2026-05-08 的官方文档来源示例。Provider 模型目录和套餐权限会变化；如果你的账号控制台列出的模型 ID 不同，保留 Base URL，只替换两个模型字段。
 
 | Provider | `ANTHROPIC_BASE_URL` | 推荐主模型 | 推荐轻模型 |
 |---|---|---|---|
 | DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `deepseek-v4-flash` |
-| GLM / 智谱 | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.7-flash` |
+| GLM / 智谱 | `https://open.bigmodel.cn/api/anthropic` | `glm-5.1` | `glm-4.5-air` |
 | Qwen / 百炼按量 | `https://dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
 | Qwen Coding Plan | `https://coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.6-plus` | `qwen3.6-flash` |
 | Kimi Code 会员 | `https://api.kimi.com/coding/` | `kimi-for-coding` | `kimi-for-coding` |
-| Kimi / Moonshot 平台 | `https://api.moonshot.cn/anthropic` | `kimi-k2.6` | `kimi-k2.5` |
+| Kimi / Moonshot 平台 | `https://api.moonshot.cn/anthropic` | `kimi-k2.5` | `kimi-k2.5` |
 | Doubao / 火山方舟 Coding Plan | `https://ark.cn-beijing.volces.com/api/coding` | `doubao-seed-2.0-code` | `doubao-seed-2.0-code` |
-| MiniMax 国内 | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7-highspeed` |
-| 腾讯混元 | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
+| MiniMax 国内 | `https://api.minimaxi.com/anthropic` | `MiniMax-M2.7` | `MiniMax-M2.7` |
+| 腾讯 TokenHub Token Plan | `https://api.lkeap.cloud.tencent.com/plan/anthropic` | `tc-code-latest` | `tc-code-latest` |
+| 腾讯 TokenHub Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/anthropic` | `tc-code-latest` | `tc-code-latest` |
+| 腾讯混元 legacy | `https://api.hunyuan.cloud.tencent.com/anthropic` | `hunyuan-2.0-thinking-20251109` | `hunyuan-2.0-instruct-20251111` |
 | 百度千帆 | `https://qianfan.baidubce.com/anthropic` | `deepseek-v3.2` | `deepseek-v3.2` |
 | 阶跃星辰 Step Plan | `https://api.stepfun.com/step_plan` | `step-3.5-flash-2603` | `step-3.5-flash` |
 | 硅基流动 | `https://api.siliconflow.com/` | `Qwen/Qwen3-235B-A22B-Thinking-2507` | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
 | 华为云 ModelArts MaaS | `https://api.modelarts-maas.com/anthropic` | `deepseek-v3.2` | `qwen3-32b` |
 
 Provider 官方文档可能写 `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`，但 SmartPerfetto 后端使用 `CLAUDE_MODEL` / `CLAUDE_LIGHT_MODEL`。模型必须稳定支持流式输出和 tool/function calling。只提供 OpenAI 兼容接口的 provider，仍需要通过 one-api、new-api 或 LiteLLM 暴露 Anthropic 兼容入口。
+如果百度千帆的自定义应用要求额外 `appid` header，请使用千帆默认 appid，或在前面加一层自定义网关；SmartPerfetto env 文件目前不会注入任意 provider header。
 
 ### 运行时与 Provider 诊断
 
