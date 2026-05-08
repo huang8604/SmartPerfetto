@@ -19,6 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { backendLogPath } from '../../runtimePaths';
 import {
   isKnownCategory,
   type FailureCategory,
@@ -87,7 +88,7 @@ const MAX_TOOL_CHARS = 80;
 const MAX_NOTE_BYTES = 4 * 1024;
 const MAX_FILE_BYTES = 16 * 1024;
 const NOTE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_NOTES_DIR = path.join(process.cwd(), 'logs', 'skill_notes');
+const DEFAULT_NOTES_DIR = backendLogPath('skill_notes');
 
 export interface WriteOptions {
   /** Override notes directory — primarily for tests. */

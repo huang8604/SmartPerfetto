@@ -4,6 +4,7 @@
 import path from 'path';
 import { ProviderService } from './providerService';
 import { officialTemplates } from './templates';
+import { backendDataPath } from '../../runtimePaths';
 
 export type {
   AgentRuntimeKind,
@@ -24,7 +25,7 @@ let instance: ProviderService | null = null;
 
 export function getProviderService(): ProviderService {
   if (!instance) {
-    const dir = process.env.PROVIDER_DATA_DIR_OVERRIDE || path.resolve(process.cwd(), 'data');
+    const dir = process.env.PROVIDER_DATA_DIR_OVERRIDE || backendDataPath();
     const file = path.join(dir, 'providers.json');
     instance = new ProviderService(file);
     const active = instance.list().find(p => p.isActive);

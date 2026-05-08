@@ -24,10 +24,11 @@ Never push SmartPerfetto submodule changes to upstream `origin`.
 5. Commit with a descriptive message.
 6. Push the active branch when the task asks for push/ship.
 
-## Windows EXE Release Workflow
+## Portable Release Workflow
 
-Windows EXE releases are published from the root repository, not from the
-`perfetto/` submodule.
+Portable releases are published from the root repository, not from the
+`perfetto/` submodule. The default release uploads Windows x64, macOS arm64,
+and Linux x64 assets to the same GitHub Release.
 
 Normal public release flow:
 
@@ -36,14 +37,15 @@ Normal public release flow:
 3. Commit `package.json`, `package-lock.json`, `backend/package.json`, and
    `backend/package-lock.json`.
 4. Push `main`.
-5. Run `npm run package:windows-exe`.
-6. Run `npm run release:windows-exe -- <version> --skip-build --no-draft`.
+5. Run `npm run package:portable`.
+6. Run `npm run release:portable -- <version> --skip-build --no-draft`.
 
 Release invariants:
 
-- The release zip and top-level directory must be
-  `smartperfetto-v<version>-windows-x64.zip` and
-  `smartperfetto-v<version>-windows-x64/`.
+- Asset names and top-level directories must be versioned:
+  `smartperfetto-v<version>-windows-x64.zip`,
+  `smartperfetto-v<version>-macos-arm64.zip`, and
+  `smartperfetto-v<version>-linux-x64.tar.gz`.
 - Do not publish the old unversioned `smartperfetto-windows-x64.zip` asset
   name.
 - Do not use `--allow-dirty` for public releases. It is only acceptable for
@@ -52,7 +54,8 @@ Release invariants:
   exact version and commit being released.
 - The release script must verify the package manifest, commit, dirty state,
   remote release target, and uploaded asset before reporting success.
-- `dist/windows-exe/` is generated output; never stage or commit it.
+- `dist/portable/` and `dist/windows-exe/` are generated output; never stage or
+  commit them.
 
 ## Submodule Landing Order
 

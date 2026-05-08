@@ -23,6 +23,7 @@ import * as path from 'path';
 
 import Database from 'better-sqlite3';
 
+import {backendDataPath} from '../runtimePaths';
 import type {CiGateRunRecord} from '../types/ciGateContracts';
 
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -63,7 +64,7 @@ export interface CiGateRunStoreOptions {
 }
 
 function defaultDbPath(): string {
-  return path.join(process.cwd(), 'data', 'ci_gate', 'ci_gate_runs.db');
+  return backendDataPath('ci_gate', 'ci_gate_runs.db');
 }
 
 export interface CiGateRunListOptions {

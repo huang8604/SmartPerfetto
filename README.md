@@ -119,25 +119,35 @@ Stop the container with `docker compose -f docker-compose.hub.yml down`.
 
 Uploads, logs, and Provider Manager profiles are stored in Docker volumes, so they survive container restarts.
 
-### Windows EXE Package
+### Portable Packages
 
-Windows users who do not want Docker can use the maintainer-built `smartperfetto-v<version>-windows-x64.zip`. It is an extract-and-run directory: `SmartPerfetto.exe` starts the backend and the pre-built Perfetto UI, and the directory includes the Windows Node.js 24 runtime, Windows native dependencies, and the pinned `trace_processor_shell.exe`.
+Users who do not want Docker can use maintainer-built portable packages for Windows, macOS, and Linux. Each package includes the Node.js 24 runtime, target-native `node_modules`, the pre-built Perfetto UI, backend runtime files, and the pinned `trace_processor_shell`.
 
-User flow: extract the zip, double-click `SmartPerfetto.exe`, then open [http://localhost:10000](http://localhost:10000). AI analysis needs a Provider profile configured in the UI, or env credentials in `backend\.env` copied from `backend\.env.example`.
+Assets:
+
+- `smartperfetto-v<version>-windows-x64.zip`: extract and double-click `SmartPerfetto.exe`.
+- `smartperfetto-v<version>-macos-arm64.zip`: extract and double-click `SmartPerfetto.app`.
+- `smartperfetto-v<version>-linux-x64.tar.gz`: extract and run `./SmartPerfetto`.
+
+All launchers start the backend and pre-built Perfetto UI, then open [http://localhost:10000](http://localhost:10000). AI analysis needs a Provider profile configured in the UI, or env credentials in the package's user data env file.
 
 Maintainer build command:
 
 ```bash
+npm run package:portable
 npm run package:windows-exe
+npm run package:macos-app
+npm run package:linux
 ```
 
 The root `package.json` is the project version source and is synchronized to `backend/package.json` and lockfiles. For a normal release, run `npm run version:set -- 1.0.1`, commit the version files, then publish:
 
 ```bash
+npm run release:portable -- 1.0.1
 npm run release:windows-exe -- 1.0.1
 ```
 
-The zip is written to `dist/windows-exe/smartperfetto-v<version>-windows-x64.zip`, and the release script uploads it to GitHub Releases. See [Windows EXE Packaging](docs/reference/windows-exe.en.md) for the full build, release, Windows smoke test, and limits.
+Cross-platform assets are written to `dist/portable/`; the Windows-compatible command still writes to `dist/windows-exe/`. See [Portable Packaging](docs/reference/portable-packaging.en.md) for the full build, release, smoke test, and signing notes.
 
 ### Local Script
 

@@ -22,6 +22,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import {backendDataPath} from '../../runtimePaths';
 
 export type SupersedeState =
   | 'pending_review'
@@ -114,7 +115,7 @@ const MIGRATIONS: ReadonlyArray<MigrationStep> = [
 ];
 
 function defaultDbPath(): string {
-  return path.join(process.cwd(), 'data', 'self_improve', 'supersede.db');
+  return backendDataPath('self_improve', 'supersede.db');
 }
 
 export function openSupersedeStore(opts: SupersedeStoreOptions = {}): SupersedeStoreHandle {

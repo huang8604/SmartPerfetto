@@ -25,6 +25,7 @@ import { EnhancedSessionContext } from '../agent/context/enhancedSessionContext'
 import { FocusStore, FocusStoreSnapshot } from '../agent/context/focusStore';
 import { TraceAgentState } from '../agent/state/traceAgentState';
 import type { SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
+import { backendDataPath } from '../runtimePaths';
 
 // DB path is resolved lazily (in the constructor) rather than at module load.
 // Module-load resolution would capture `process.cwd()` at the time of the first
@@ -33,7 +34,7 @@ import type { SessionStateSnapshot } from '../agentv3/sessionStateSnapshot';
 // *after* imports have already resolved. Lazy resolution lets both HTTP (cwd
 // already == backend) and CLI (cwd set by bootstrap) land on the same path.
 function resolveDbDir(): string {
-  return path.join(process.cwd(), 'data', 'sessions');
+  return backendDataPath('sessions');
 }
 
 export class SessionPersistenceService {

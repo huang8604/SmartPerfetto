@@ -8,6 +8,9 @@ This file is part of SmartPerfetto. See LICENSE for details.
 
 [English](windows-exe.en.md) | [中文](windows-exe.md)
 
+> 当前 Windows 命令是跨平台免安装打包流程的兼容入口。完整三平台流程见
+> [免安装包打包](portable-packaging.md)。
+
 SmartPerfetto 的 Windows 包不是单文件二进制。`SmartPerfetto.exe` 是启动器，
 同目录还包含 Windows Node.js 24 runtime、Windows 原生 `node_modules`、
 预构建 Perfetto UI、后端运行时代码和固定版本的 `trace_processor_shell.exe`。
@@ -104,7 +107,7 @@ npm run version:sync -- --check
 1. 解压 `smartperfetto-v1.0.1-windows-x64.zip` 到普通本地目录，例如 `C:\SmartPerfetto`。
 2. 双击 `SmartPerfetto.exe`。
 3. 浏览器通常会自动打开；如果没有，手动打开 [http://localhost:10000](http://localhost:10000)。
-4. AI 分析需要在 UI 里配置 Provider profile，或复制 `backend\.env.example` 为 `backend\.env` 并填写一个 provider block，然后重启 `SmartPerfetto.exe`。
+4. AI 分析需要在 UI 里配置 Provider profile；如需 env 凭证，在解压目录下创建 `data\env` 并填写 provider 配置，然后重启 `SmartPerfetto.exe`。
 5. 使用时保持启动器窗口打开；按 `Ctrl+C` 会停止后端、前端和 trace processor 子进程。
 
 ## 验证

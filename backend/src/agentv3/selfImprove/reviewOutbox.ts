@@ -23,6 +23,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import {backendDataPath} from '../../runtimePaths';
 
 export type JobState = 'pending' | 'leased' | 'done' | 'failed';
 
@@ -109,7 +110,7 @@ const MIGRATIONS: ReadonlyArray<MigrationStep> = [
 ];
 
 function defaultDbPath(): string {
-  return path.join(process.cwd(), 'data', 'self_improve', 'self_improve.db');
+  return backendDataPath('self_improve', 'self_improve.db');
 }
 
 /**

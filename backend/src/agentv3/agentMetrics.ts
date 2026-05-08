@@ -25,6 +25,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { backendLogPath } from '../runtimePaths';
 
 // =============================================================================
 // Types
@@ -274,7 +275,7 @@ export class AgentMetricsCollector {
 // Metrics Persistence
 // =============================================================================
 
-export const METRICS_DIR = path.resolve(__dirname, '../../logs/metrics');
+export const METRICS_DIR = backendLogPath('metrics');
 const METRICS_RETENTION_DAYS = 7;
 
 /** Write session metrics to disk. */

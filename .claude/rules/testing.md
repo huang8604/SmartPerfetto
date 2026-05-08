@@ -25,22 +25,26 @@ and the 6-trace scene regression gate.
 | Strategy/template Markdown | `cd backend && npm run validate:strategies` plus scene trace regression |
 | Frontend generated types | `cd backend && npm run generate:frontend-types` plus relevant tests |
 | AI plugin UI | Browser verification in `start-dev.sh`, relevant `perfetto/ui` tests/typecheck, then `./scripts/update-frontend.sh` |
-| Windows EXE packaging/release | Shell syntax/static checks, Node script syntax checks, full package build, and package manifest verification |
+| Portable packaging/release | Shell syntax/static checks, Node script syntax checks, launcher cross-compile, full package build, and package manifest verification |
 
-## Windows EXE Packaging Verification
+## Portable Packaging Verification
 
-When changing Windows EXE packaging, release scripts, version synchronization,
-Windows trace-processor handling, bundled runtime assets, or docs that define
+When changing portable packaging, release scripts, version synchronization,
+trace-processor handling, bundled runtime assets, or docs that define
 the release process, run:
 
 ```bash
-bash -n scripts/package-windows-exe.sh scripts/release-windows-exe.sh
-shellcheck -x scripts/package-windows-exe.sh scripts/release-windows-exe.sh
-node --check scripts/sync-version.cjs scripts/verify-windows-package.cjs
+bash -n scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
+shellcheck -x scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
+node --check scripts/sync-version.cjs scripts/verify-portable-package.cjs scripts/verify-windows-package.cjs
 npm run version:sync -- --check
-npm run package:windows-exe
-node scripts/verify-windows-package.cjs \
-  --zip "dist/windows-exe/smartperfetto-v<version>-windows-x64.zip" \
+GO111MODULE=off GOOS=windows GOARCH=amd64 go build -o /tmp/smartperfetto-launcher.exe ./scripts/portable-launcher
+GO111MODULE=off GOOS=darwin GOARCH=arm64 go build -o /tmp/SmartPerfetto-macos ./scripts/portable-launcher
+GO111MODULE=off GOOS=linux GOARCH=amd64 go build -o /tmp/SmartPerfetto-linux ./scripts/portable-launcher
+npm run package:portable
+node scripts/verify-portable-package.cjs \
+  --asset "dist/portable/smartperfetto-v<version>-windows-x64.zip" \
+  --target windows-x64 \
   --version "<version>" \
   --commit "$(git rev-parse HEAD)"
 ```

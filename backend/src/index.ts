@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 // Load environment variables FIRST before importing routes
-dotenv.config({ override: true });
+dotenv.config(
+  process.env.SMARTPERFETTO_ENV_FILE
+    ? { path: process.env.SMARTPERFETTO_ENV_FILE, override: true }
+    : { override: true },
+);
 
 import { installEpipeGuard } from './utils/epipeGuard';
 

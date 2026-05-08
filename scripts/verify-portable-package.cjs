@@ -1,0 +1,265 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+'use strict';
+
+const { execFileSync } = require('child_process');
+const path = require('path');
+
+const TARGETS = {
+  'windows-x64': {
+    os: 'windows',
+    arch: 'x64',
+    ext: 'zip',
+    readme: 'README-WINDOWS.txt',
+    binaryKind: 'pe',
+    required: [
+      'PACKAGE-MANIFEST.json',
+      'README-WINDOWS.txt',
+      'SmartPerfetto.exe',
+      'runtime/node/node.exe',
+      'bin/trace_processor_shell.exe',
+      'backend/package.json',
+      'backend/dist/index.js',
+      'backend/dist/version.js',
+      'frontend/index.html',
+      'frontend/server.js',
+      'backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'backend/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe',
+    ],
+    binaryRequired: [
+      'SmartPerfetto.exe',
+      'runtime/node/node.exe',
+      'bin/trace_processor_shell.exe',
+      'backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'backend/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe',
+    ],
+  },
+  'macos-arm64': {
+    os: 'macos',
+    arch: 'arm64',
+    ext: 'zip',
+    readme: 'README-MACOS.txt',
+    binaryKind: 'macho',
+    required: [
+      'PACKAGE-MANIFEST.json',
+      'README-MACOS.txt',
+      'SmartPerfetto.app/Contents/Info.plist',
+      'SmartPerfetto.app/Contents/MacOS/SmartPerfetto',
+      'SmartPerfetto.app/Contents/Resources/PACKAGE-MANIFEST.json',
+      'SmartPerfetto.app/Contents/Resources/runtime/node/bin/node',
+      'SmartPerfetto.app/Contents/Resources/bin/trace_processor_shell',
+      'SmartPerfetto.app/Contents/Resources/backend/package.json',
+      'SmartPerfetto.app/Contents/Resources/backend/dist/index.js',
+      'SmartPerfetto.app/Contents/Resources/backend/dist/version.js',
+      'SmartPerfetto.app/Contents/Resources/frontend/index.html',
+      'SmartPerfetto.app/Contents/Resources/frontend/server.js',
+      'SmartPerfetto.app/Contents/Resources/backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'SmartPerfetto.app/Contents/Resources/backend/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude',
+    ],
+    binaryRequired: [
+      'SmartPerfetto.app/Contents/MacOS/SmartPerfetto',
+      'SmartPerfetto.app/Contents/Resources/runtime/node/bin/node',
+      'SmartPerfetto.app/Contents/Resources/bin/trace_processor_shell',
+      'SmartPerfetto.app/Contents/Resources/backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'SmartPerfetto.app/Contents/Resources/backend/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude',
+    ],
+  },
+  'linux-x64': {
+    os: 'linux',
+    arch: 'x64',
+    ext: 'tar.gz',
+    readme: 'README-LINUX.txt',
+    binaryKind: 'elf',
+    required: [
+      'PACKAGE-MANIFEST.json',
+      'README-LINUX.txt',
+      'SmartPerfetto',
+      'runtime/node/bin/node',
+      'bin/trace_processor_shell',
+      'backend/package.json',
+      'backend/dist/index.js',
+      'backend/dist/version.js',
+      'frontend/index.html',
+      'frontend/server.js',
+      'backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
+    ],
+    binaryRequired: [
+      'SmartPerfetto',
+      'runtime/node/bin/node',
+      'bin/trace_processor_shell',
+      'backend/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      'backend/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
+    ],
+  },
+};
+
+function usage() {
+  console.error([
+    'Usage:',
+    '  node scripts/verify-portable-package.cjs --asset <file> --target <target> --version <version> [options]',
+    '',
+    'Options:',
+    '  --commit <sha>       Require PACKAGE-MANIFEST.json gitCommit to match.',
+    '  --require-clean      Require PACKAGE-MANIFEST.json gitDirty to be false.',
+    '  --package-name NAME  Override expected top-level package directory.',
+  ].join('\n'));
+}
+
+function parseArgs(argv) {
+  const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--help' || arg === '-h') {
+      opts.help = true;
+    } else if (arg === '--asset' || arg === '--target' || arg === '--version' || arg === '--commit' || arg === '--package-name') {
+      if (i + 1 >= argv.length) throw new Error(`${arg} requires a value`);
+      opts[arg.slice(2)] = argv[++i];
+    } else if (arg === '--require-clean') {
+      opts.requireClean = true;
+    } else {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+  }
+  return opts;
+}
+
+function normalizeVersion(raw) {
+  const value = String(raw || '').trim().replace(/^v/, '');
+  const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+  if (!semver.test(value)) throw new Error(`Invalid SemVer version: ${raw}`);
+  return value;
+}
+
+function listEntries(assetPath, ext) {
+  if (ext === 'zip') {
+    return execFileSync('unzip', ['-Z1', assetPath], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      .split(/\r?\n/)
+      .filter(Boolean);
+  }
+  if (ext === 'tar.gz') {
+    return execFileSync('tar', ['-tzf', assetPath], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(entry => entry.replace(/^\.\//, ''));
+  }
+  throw new Error(`Unsupported archive extension: ${ext}`);
+}
+
+function readEntry(assetPath, ext, entry) {
+  if (ext === 'zip') {
+    return execFileSync('unzip', ['-p', assetPath, entry], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  }
+  if (ext === 'tar.gz') {
+    return execFileSync('tar', ['-xOzf', assetPath, entry], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  }
+  throw new Error(`Unsupported archive extension: ${ext}`);
+}
+
+function readEntryBuffer(assetPath, ext, entry) {
+  const maxBuffer = 256 * 1024 * 1024;
+  if (ext === 'zip') {
+    return execFileSync('unzip', ['-p', assetPath, entry], { maxBuffer });
+  }
+  if (ext === 'tar.gz') {
+    return execFileSync('tar', ['-xOzf', assetPath, entry], { maxBuffer });
+  }
+  throw new Error(`Unsupported archive extension: ${ext}`);
+}
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function assertBinaryKind(bytes, label, kind) {
+  const hex = [...bytes.subarray(0, 4)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const ok = kind === 'pe'
+    ? bytes[0] === 0x4d && bytes[1] === 0x5a
+    : kind === 'elf'
+      ? bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46
+      : ['cffaedfe', 'cafebabe', 'feedfacf', 'feedface'].includes(hex);
+  assert(ok, `${label} is not a ${kind} binary`);
+}
+
+function readJsonEntry(assetPath, ext, entry) {
+  try {
+    return JSON.parse(readEntry(assetPath, ext, entry));
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${entry}: ${error.message || error}`);
+  }
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    usage();
+    return;
+  }
+  if (!opts.asset || !opts.target || !opts.version) {
+    usage();
+    process.exit(2);
+  }
+
+  const target = TARGETS[opts.target];
+  if (!target) throw new Error(`Unsupported target: ${opts.target}`);
+
+  const version = normalizeVersion(opts.version);
+  const packageName = opts['package-name'] || `smartperfetto-v${version}-${target.os}-${target.arch}`;
+  const expectedAsset = `${packageName}.${target.ext}`;
+  const assetPath = path.resolve(opts.asset);
+
+  assert(path.basename(assetPath) === expectedAsset, `Asset filename must be ${expectedAsset}, got ${path.basename(assetPath)}`);
+
+  const entries = listEntries(assetPath, target.ext);
+  assert(entries.length > 0, 'Archive is empty');
+  assert(
+    entries.every(entry => entry === `${packageName}/` || entry.startsWith(`${packageName}/`)),
+    `Archive must contain exactly one top-level directory: ${packageName}/`,
+  );
+
+  for (const rel of target.required) {
+    const entry = `${packageName}/${rel}`;
+    assert(entries.includes(entry), `Missing package entry: ${entry}`);
+  }
+  for (const rel of target.binaryRequired) {
+    const entry = `${packageName}/${rel}`;
+    assertBinaryKind(readEntryBuffer(assetPath, target.ext, entry), entry, target.binaryKind);
+  }
+
+  const manifest = readJsonEntry(assetPath, target.ext, `${packageName}/PACKAGE-MANIFEST.json`);
+  assert(manifest.name === 'smartperfetto', `Manifest name mismatch: ${manifest.name}`);
+  assert(manifest.version === version, `Manifest version mismatch: expected ${version}, got ${manifest.version}`);
+  assert(manifest.packageName === packageName, `Manifest packageName mismatch: expected ${packageName}, got ${manifest.packageName}`);
+  assert(manifest.target?.os === target.os, `Manifest target.os mismatch: ${manifest.target?.os}`);
+  assert(manifest.target?.arch === target.arch, `Manifest target.arch mismatch: ${manifest.target?.arch}`);
+  assert(manifest.target?.id === opts.target, `Manifest target.id mismatch: ${manifest.target?.id}`);
+
+  const backendPackageEntry = target.os === 'macos'
+    ? `${packageName}/SmartPerfetto.app/Contents/Resources/backend/package.json`
+    : `${packageName}/backend/package.json`;
+  const backendPackage = readJsonEntry(assetPath, target.ext, backendPackageEntry);
+  assert(backendPackage.name === '@gracker/smartperfetto', `Backend package name mismatch: ${backendPackage.name}`);
+  assert(backendPackage.version === version, `Backend package version mismatch: expected ${version}, got ${backendPackage.version}`);
+
+  const readme = readEntry(assetPath, target.ext, `${packageName}/${target.readme}`);
+  assert(readme.includes(`Version: ${version}`), `${target.readme} does not contain the package version`);
+
+  if (opts.commit) {
+    assert(manifest.gitCommit === opts.commit, `Manifest gitCommit mismatch: expected ${opts.commit}, got ${manifest.gitCommit || '<missing>'}`);
+  }
+  if (opts.requireClean) {
+    assert(manifest.gitDirty === false, 'Package was built from a dirty worktree');
+  }
+
+  console.log(`Portable package verified: ${expectedAsset}`);
+}
+
+try {
+  main();
+} catch (error) {
+  console.error(error.message || error);
+  process.exit(1);
+}

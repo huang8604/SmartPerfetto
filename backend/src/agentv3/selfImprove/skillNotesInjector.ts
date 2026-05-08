@@ -25,6 +25,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { readSkillNotesFile, type SkillNotesFile, type PersistedSkillNote } from './skillNotesWriter';
+import { backendLogPath } from '../../runtimePaths';
 
 export type AnalysisPathMode = 'full' | 'quick' | 'retry';
 
@@ -33,7 +34,7 @@ export const FULL_PATH_PER_SKILL_TOKENS = 200;
 export const QUICK_PATH_DEFAULT_TOTAL_TOKENS = 0;
 export const QUICK_PATH_MAX_TOTAL_TOKENS = 100;
 
-const DEFAULT_RUNTIME_NOTES_DIR = path.join(process.cwd(), 'logs', 'skill_notes');
+const DEFAULT_RUNTIME_NOTES_DIR = backendLogPath('skill_notes');
 const DEFAULT_CURATED_NOTES_DIR = path.join(__dirname, '..', '..', '..', 'skills', 'curated_skill_notes');
 
 /**

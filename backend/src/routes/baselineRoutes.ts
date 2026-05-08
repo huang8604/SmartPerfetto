@@ -22,20 +22,16 @@
  * `createBaselineRoutes()` with no args and gets the default singleton.
  */
 
-import * as path from 'path';
-
 import {Router, type Router as ExpressRouter} from 'express';
 
 import {authenticate} from '../middleware/auth';
 import {BaselineStore} from '../services/baselineStore';
 import type {BaselineRecord} from '../types/sparkContracts';
+import {backendLogPath} from '../runtimePaths';
 
 /** Default storage path. Lives under `backend/logs/` next to the other
  * long-lived agent-state JSON files. */
-const DEFAULT_STORAGE_PATH = path.resolve(
-  __dirname,
-  '../../logs/baselines.json',
-);
+const DEFAULT_STORAGE_PATH = backendLogPath('baselines.json');
 
 let cachedStore: BaselineStore | null = null;
 function getDefaultStore(): BaselineStore {

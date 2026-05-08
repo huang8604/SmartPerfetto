@@ -24,6 +24,7 @@ import type { VerificationResult, VerificationIssue, AnalysisPlanV3, Hypothesis 
 import { expectedToolNames } from './types';
 import type { SceneType } from './sceneClassifier';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
+import { backendLogPath } from '../runtimePaths';
 
 /** Hardcoded known misdiagnosis patterns — common false positives in performance analysis. */
 const HARDCODED_MISDIAGNOSIS_PATTERNS: Array<{
@@ -58,7 +59,7 @@ interface LearnedMisdiagnosisPattern {
   createdAt: number;
 }
 
-const LEARNED_PATTERNS_FILE = path.resolve(__dirname, '../../logs/learned_misdiagnosis_patterns.json');
+const LEARNED_PATTERNS_FILE = backendLogPath('learned_misdiagnosis_patterns.json');
 const MAX_LEARNED_PATTERNS = 30;
 const LEARNED_PATTERN_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 

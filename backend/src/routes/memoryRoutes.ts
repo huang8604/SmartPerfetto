@@ -26,17 +26,13 @@
  * @module memoryRoutes
  */
 
-import * as path from 'path';
-
 import {Router, type Router as ExpressRouter} from 'express';
 
 import {ProjectMemory} from '../agentv3/projectMemory';
 import type {MemoryPromotionPolicy} from '../types/sparkContracts';
+import {backendLogPath} from '../runtimePaths';
 
-const DEFAULT_STORAGE_PATH = path.resolve(
-  __dirname,
-  '../../logs/analysis_project_memory.json',
-);
+const DEFAULT_STORAGE_PATH = backendLogPath('analysis_project_memory.json');
 
 let cachedMemory: ProjectMemory | null = null;
 function getDefaultMemory(): ProjectMemory {

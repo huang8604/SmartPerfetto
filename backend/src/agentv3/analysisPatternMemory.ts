@@ -22,6 +22,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Finding } from '../agent/types';
+import { backendLogPath } from '../runtimePaths';
 import type {
   AnalysisPatternEntry,
   NegativePatternEntry,
@@ -36,9 +37,9 @@ import {
   type SupersedeStoreHandle,
 } from './selfImprove/supersedeStore';
 
-const PATTERNS_FILE = path.resolve(__dirname, '../../logs/analysis_patterns.json');
-const NEGATIVE_PATTERNS_FILE = path.resolve(__dirname, '../../logs/analysis_negative_patterns.json');
-const QUICK_PATTERNS_FILE = path.resolve(__dirname, '../../logs/analysis_quick_patterns.json');
+const PATTERNS_FILE = backendLogPath('analysis_patterns.json');
+const NEGATIVE_PATTERNS_FILE = backendLogPath('analysis_negative_patterns.json');
+const QUICK_PATTERNS_FILE = backendLogPath('analysis_quick_patterns.json');
 const MAX_PATTERNS = 200;
 const MAX_NEGATIVE_PATTERNS = 100;
 const MAX_QUICK_PATTERNS = 100;

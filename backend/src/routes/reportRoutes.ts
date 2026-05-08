@@ -14,10 +14,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/reportCausalMapAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
+import { backendLogPath } from '../runtimePaths';
 
 const router = express.Router();
 
-const REPORTS_DIR = path.resolve(__dirname, '../../logs/reports');
+const REPORTS_DIR = backendLogPath('reports');
 
 // Ensure reports directory exists
 if (!fs.existsSync(REPORTS_DIR)) {

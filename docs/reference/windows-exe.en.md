@@ -8,6 +8,10 @@ This file is part of SmartPerfetto. See LICENSE for details.
 
 [English](windows-exe.en.md) | [中文](windows-exe.md)
 
+> The Windows commands are compatibility entry points for the cross-platform
+> portable packaging flow. See [Portable Packaging](portable-packaging.en.md)
+> for the full three-platform release process.
+
 The Windows distribution is not a single-file binary. `SmartPerfetto.exe` is a
 launcher placed next to the Windows Node.js 24 runtime, Windows native
 `node_modules`, the pre-built Perfetto UI, backend runtime files, and the pinned
@@ -111,7 +115,7 @@ npm run version:sync -- --check
 1. Extract `smartperfetto-v1.0.1-windows-x64.zip` to a normal local path such as `C:\SmartPerfetto`.
 2. Double-click `SmartPerfetto.exe`.
 3. The browser usually opens automatically. If it does not, open [http://localhost:10000](http://localhost:10000).
-4. AI analysis needs a Provider profile in the UI, or env credentials in `backend\.env`. To use env credentials, copy `backend\.env.example` to `backend\.env`, edit one provider block, and restart `SmartPerfetto.exe`.
+4. AI analysis needs a Provider profile in the UI. For env credentials, create `data\env` under the extracted package directory, edit one provider block, and restart `SmartPerfetto.exe`.
 5. Keep the launcher window open while using SmartPerfetto. Press `Ctrl+C` to stop the backend, frontend, and trace processor child processes.
 
 ## Verification

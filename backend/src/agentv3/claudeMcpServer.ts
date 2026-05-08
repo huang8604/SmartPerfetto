@@ -47,6 +47,7 @@ import {
   McpToolRegistry,
   MCP_NAME_PREFIX as REGISTRY_MCP_NAME_PREFIX,
 } from './mcpToolRegistry';
+import { backendLogPath } from '../runtimePaths';
 
 /**
  * Process-wide RagStore singleton, lazily initialized on first MCP tool
@@ -56,10 +57,7 @@ import {
  * Storage path lives next to the existing analysis_*.json files so
  * operators can find every long-lived agent state in one directory.
  */
-const RAG_STORE_PATH = path.resolve(
-  __dirname,
-  '../../logs/rag_store.json',
-);
+const RAG_STORE_PATH = backendLogPath('rag_store.json');
 let cachedRagStore: RagStore | null = null;
 function getRagStore(): RagStore {
   if (!cachedRagStore) cachedRagStore = new RagStore(RAG_STORE_PATH);
@@ -69,10 +67,7 @@ function getRagStore(): RagStore {
 /** Process-wide BaselineStore singleton (Plan 50). Storage lives next
  * to the other long-lived JSON files so operators have one mental
  * model for agent state. */
-const BASELINE_STORE_PATH = path.resolve(
-  __dirname,
-  '../../logs/baselines.json',
-);
+const BASELINE_STORE_PATH = backendLogPath('baselines.json');
 let cachedBaselineStore: BaselineStore | null = null;
 function getBaselineStore(): BaselineStore {
   if (!cachedBaselineStore)
@@ -82,10 +77,7 @@ function getBaselineStore(): BaselineStore {
 
 /** Process-wide ProjectMemory singleton (Plan 44). Independent of the
  * existing `analysisPatternMemory.ts` session-scope store. */
-const PROJECT_MEMORY_PATH = path.resolve(
-  __dirname,
-  '../../logs/analysis_project_memory.json',
-);
+const PROJECT_MEMORY_PATH = backendLogPath('analysis_project_memory.json');
 let cachedProjectMemory: ProjectMemory | null = null;
 function getProjectMemory(): ProjectMemory {
   if (!cachedProjectMemory)
@@ -95,10 +87,7 @@ function getProjectMemory(): ProjectMemory {
 
 /** Process-wide CaseLibrary singleton (Plan 54). Storage path matches
  * the other long-lived agent-state JSON files. */
-const CASE_LIBRARY_PATH = path.resolve(
-  __dirname,
-  '../../logs/case_library.json',
-);
+const CASE_LIBRARY_PATH = backendLogPath('case_library.json');
 let cachedCaseLibrary: CaseLibrary | null = null;
 function getCaseLibrary(): CaseLibrary {
   if (!cachedCaseLibrary)
@@ -147,7 +136,7 @@ function sqlContentTokens(sql: string): Set<string> {
   );
 }
 
-const SQL_ERROR_LOG_DIR = path.resolve(__dirname, '../../logs/sql_learning');
+const SQL_ERROR_LOG_DIR = backendLogPath('sql_learning');
 
 interface SqlErrorFixPair {
   errorSql: string;
@@ -2230,7 +2219,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       // P1-10: Also include verifier's learned misdiagnosis patterns
       let learnedMisdiagnosis: Array<{ keywords: string[]; message: string; occurrences: number }> = [];
       try {
-        const learnedPatternsFile = path.resolve(__dirname, '../../logs/learned_misdiagnosis_patterns.json');
+        const learnedPatternsFile = backendLogPath('learned_misdiagnosis_patterns.json');
         if (fs.existsSync(learnedPatternsFile)) {
           const raw = JSON.parse(fs.readFileSync(learnedPatternsFile, 'utf-8'));
           const cutoff = Date.now() - 60 * 24 * 60 * 60 * 1000; // 60-day TTL

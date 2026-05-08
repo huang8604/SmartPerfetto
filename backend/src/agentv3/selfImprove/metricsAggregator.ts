@@ -24,12 +24,13 @@ import { openSupersedeStore, type SupersedeState } from './supersedeStore';
 import { runSnapshots } from './strategyFingerprint';
 import type { JobState } from './reviewOutbox';
 import type { AnalysisPatternEntry, NegativePatternEntry, PatternStatus } from '../types';
+import { backendLogPath } from '../../runtimePaths';
 
-const PATTERNS_FILE = path.resolve(__dirname, '..', '..', '..', 'logs', 'analysis_patterns.json');
-const NEGATIVE_PATTERNS_FILE = path.resolve(__dirname, '..', '..', '..', 'logs', 'analysis_negative_patterns.json');
-const QUICK_PATTERNS_FILE = path.resolve(__dirname, '..', '..', '..', 'logs', 'analysis_quick_patterns.json');
-const FEEDBACK_FILE = path.resolve(__dirname, '..', '..', '..', 'logs', 'feedback', 'feedback.jsonl');
-const SKILL_NOTES_DIR = path.resolve(__dirname, '..', '..', '..', 'logs', 'skill_notes');
+const PATTERNS_FILE = backendLogPath('analysis_patterns.json');
+const NEGATIVE_PATTERNS_FILE = backendLogPath('analysis_negative_patterns.json');
+const QUICK_PATTERNS_FILE = backendLogPath('analysis_quick_patterns.json');
+const FEEDBACK_FILE = backendLogPath('feedback', 'feedback.jsonl');
+const SKILL_NOTES_DIR = backendLogPath('skill_notes');
 const CURATED_SKILL_NOTES_DIR = path.resolve(__dirname, '..', '..', '..', 'skills', 'curated_skill_notes');
 
 export interface PatternMetrics {

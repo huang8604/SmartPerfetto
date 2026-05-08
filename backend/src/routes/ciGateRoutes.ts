@@ -23,7 +23,6 @@
  */
 
 import * as crypto from 'crypto';
-import * as path from 'path';
 
 import {Router, type Router as ExpressRouter} from 'express';
 
@@ -45,11 +44,9 @@ import {
   type RegressionGateResult,
   makeSparkProvenance,
 } from '../types/sparkContracts';
+import {backendLogPath} from '../runtimePaths';
 
-const DEFAULT_BASELINE_PATH = path.resolve(
-  __dirname,
-  '../../logs/baselines.json',
-);
+const DEFAULT_BASELINE_PATH = backendLogPath('baselines.json');
 
 const MAX_CI_SOURCE_LEN = 64;
 // Allow `/`, `:`, and `@` so qualified provider names common in CI

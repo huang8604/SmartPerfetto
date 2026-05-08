@@ -18,6 +18,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { backendLogPath } from '../runtimePaths';
 
 // =============================================================================
 // Types
@@ -72,7 +73,7 @@ export interface SessionLogSummary {
 // `import` of this module ran — for CLI that's the user's invocation cwd,
 // well before bootstrap gets a chance to redirect it.
 function resolveDefaultLogDir(): string {
-  return path.join(process.cwd(), 'logs', 'sessions');
+  return backendLogPath('sessions');
 }
 const MAX_LOG_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_LOGS_PER_SESSION = 10000;

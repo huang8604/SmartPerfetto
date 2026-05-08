@@ -19,8 +19,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { readSkillNotesFile, type SkillNotesFile, type PersistedSkillNote } from './skillNotesWriter';
+import { backendLogPath } from '../../runtimePaths';
 
-const RUNTIME_DIR = path.join(process.cwd(), 'logs', 'skill_notes');
+const RUNTIME_DIR = backendLogPath('skill_notes');
 const CURATED_DIR = path.resolve(__dirname, '..', '..', '..', 'skills', 'curated_skill_notes');
 
 export interface PromoteResult {

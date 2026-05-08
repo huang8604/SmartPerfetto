@@ -23,8 +23,6 @@
  * @module caseRoutes
  */
 
-import * as path from 'path';
-
 import {Router, type Router as ExpressRouter} from 'express';
 
 import {CaseLibrary} from '../services/caseLibrary';
@@ -35,15 +33,10 @@ import type {
   CaseNode,
   CurationStatus,
 } from '../types/sparkContracts';
+import {backendLogPath} from '../runtimePaths';
 
-const DEFAULT_LIBRARY_PATH = path.resolve(
-  __dirname,
-  '../../logs/case_library.json',
-);
-const DEFAULT_GRAPH_PATH = path.resolve(
-  __dirname,
-  '../../logs/case_graph.json',
-);
+const DEFAULT_LIBRARY_PATH = backendLogPath('case_library.json');
+const DEFAULT_GRAPH_PATH = backendLogPath('case_graph.json');
 
 let cachedLibrary: CaseLibrary | null = null;
 let cachedGraph: CaseGraph | null = null;

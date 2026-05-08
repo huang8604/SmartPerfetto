@@ -19,8 +19,8 @@
  */
 
 import * as fs from 'fs';
-import * as path from 'path';
 import type { AnalysisPatternEntry, NegativePatternEntry, FailedApproach } from '../types';
+import { backendLogPath } from '../../runtimePaths';
 import {
   computeFailureModeHash,
   inferCategoryFromText,
@@ -28,8 +28,8 @@ import {
   FAILURE_CATEGORIES,
 } from './failureTaxonomy';
 
-const PATTERNS_FILE = path.resolve(__dirname, '../../../logs/analysis_patterns.json');
-const NEGATIVE_PATTERNS_FILE = path.resolve(__dirname, '../../../logs/analysis_negative_patterns.json');
+const PATTERNS_FILE = backendLogPath('analysis_patterns.json');
+const NEGATIVE_PATTERNS_FILE = backendLogPath('analysis_negative_patterns.json');
 
 export interface MigrationReport {
   total: number;

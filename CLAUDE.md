@@ -37,15 +37,15 @@ cd backend && npm run build
   `backend/skills/`.
 - Do not manually edit generated files; fix the generator/template and
   regenerate.
-- `frontend/` is consumed by Docker, `./start.sh`, and Windows packages. After
+- `frontend/` is consumed by Docker, `./start.sh`, and portable packages. After
   AI Assistant plugin UI changes, verify in dev mode and run
   `./scripts/update-frontend.sh`.
 - Keep Provider Manager/runtime provider pinning semantics intact.
 - Do not push a root commit that points at a local-only `perfetto/` submodule
   commit.
-- For Windows EXE packaging/release work, keep public releases clean and
+- For portable packaging/release work, keep public releases clean and
   versioned; follow `.claude/rules/git.md`, `.claude/rules/testing.md`, and
-  `docs/reference/windows-exe.md`.
+  `docs/reference/portable-packaging.md`.
 
 ## Detailed Rules
 
