@@ -375,6 +375,69 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(oldOrchestrator.cleanupSession).toHaveBeenCalledWith(existing.sessionId);
   });
 
+  test('appends continuity breaks for consecutive in-memory provider snapshot mismatches', () => {
+    const provider = getProviderService().create({
+      name: 'OpenAI Provider',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-provider-model', light: 'gpt-provider-light' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-provider-openai',
+      },
+    });
+    const originalHash = providerSnapshotHash(provider.id);
+    const existing = createSession('agent-session-1', 'trace-1');
+    existing.orchestrator = {
+      analyze: jest.fn(),
+      on: jest.fn(),
+      off: jest.fn(),
+      cleanupSession: jest.fn(),
+    } as any;
+    existing.providerId = provider.id;
+    existing.providerSnapshotHash = originalHash;
+    assistantAppService.setSession(existing.sessionId, existing);
+
+    getProviderService().update(provider.id, {
+      models: { primary: 'gpt-provider-model-v2' },
+    });
+    const firstHash = providerSnapshotHash(provider.id);
+    const first = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'first follow-up',
+      requestedSessionId: existing.sessionId,
+      options: {},
+    });
+    const firstBreaks = first.session.continuityBreaks?.slice() ?? [];
+
+    getProviderService().update(provider.id, {
+      models: { primary: 'gpt-provider-model-v3' },
+    });
+    const second = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'second follow-up',
+      requestedSessionId: existing.sessionId,
+      options: {},
+    });
+
+    expect(firstHash).not.toBe(originalHash);
+    expect(firstBreaks).toHaveLength(1);
+    expect(firstBreaks[0]).toEqual(expect.objectContaining({
+      previousProviderHash: originalHash,
+      reason: 'provider_snapshot_hash_mismatch',
+      at: expect.any(Number),
+    }));
+    expect(second.session.continuityBreaks).toHaveLength(2);
+    expect(second.session.continuityBreaks?.[1]).toEqual(expect.objectContaining({
+      previousProviderHash: firstHash,
+      reason: 'provider_snapshot_hash_mismatch',
+      at: expect.any(Number),
+    }));
+    expect(second.session.query).toBe('second follow-up');
+    expect(second.session.agentQuery).toContain('provider SDK conversation context was reset');
+    expect(second.session.agentQuery).toContain('second follow-up');
+  });
+
   test('reuses an in-memory session with its pinned provider when active provider changed elsewhere', () => {
     const provider = getProviderService().create({
       name: 'OpenAI Provider',
@@ -610,6 +673,11 @@ describe('AgentAnalyzeSessionService session continuity', () => {
           lastResponseId: 'sdk-response-old',
         },
       },
+      continuityBreaks: [{
+        at: 1710000000000,
+        previousProviderHash: 'older-provider-hash',
+        reason: 'provider_snapshot_hash_mismatch',
+      }],
       runSequence: 0,
       conversationOrdinal: 0,
     });
@@ -628,6 +696,15 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(prepared.session.providerId).toBe(provider.id);
     expect(prepared.session.providerSnapshotHash).toBe(nextHash);
     expect(prepared.session.providerSnapshotChanged).toBe(true);
+    expect(prepared.session.continuityBreaks).toHaveLength(2);
+    expect(prepared.session.continuityBreaks?.[0]?.previousProviderHash).toBe('older-provider-hash');
+    expect(prepared.session.continuityBreaks?.[1]).toEqual(expect.objectContaining({
+      previousProviderHash: originalHash,
+      reason: 'provider_snapshot_hash_mismatch',
+      at: expect.any(Number),
+    }));
+    expect(prepared.session.agentQuery).toContain('provider SDK conversation context was reset');
+    expect(prepared.session.agentQuery).toContain('follow-up');
     expect(prepared.session.tenantId).toBe('tenant-a');
     expect(restoredOrchestrator.restoreFromSnapshot).not.toHaveBeenCalled();
   });

@@ -21,7 +21,7 @@ import { DEFAULT_OUTPUT_LANGUAGE, type OutputLanguage } from './outputLanguage';
  * Chinese characters are ~1.5 tokens each; English words ~1.3 tokens.
  * This approximation is sufficient for budget enforcement.
  */
-function estimateTokens(text: string): number {
+export function estimatePromptTokens(text: string): number {
   let tokens = 0;
   for (const char of text) {
     // CJK characters: ~1.5 tokens each
@@ -34,8 +34,10 @@ function estimateTokens(text: string): number {
   return Math.ceil(tokens);
 }
 
-/** Maximum system prompt token budget. Sections are progressively dropped if exceeded. */
-const MAX_PROMPT_TOKENS = 8000;
+/** M2 hard gate: full-mode system prompt target after core/detail split. */
+export const MAX_PROMPT_TOKENS = 12_000;
+/** M2 hard gate: always-injected scene strategy core budget. */
+export const MAX_SCENE_CORE_TOKENS = 4_000;
 
 function buildOutputLanguageSection(language: OutputLanguage): string {
   const templateName = language === 'en' ? 'prompt-language-en' : 'prompt-language-zh';
@@ -101,35 +103,42 @@ function buildFocusAppSection(
   return `## 焦点应用\n\n以下应用在 trace 期间处于前台：\n${appLines.join('\n')}\n\n默认分析第一个（主焦点）应用。调用 Skill 时，使用 process_name="${focusApps[0].packageName}" 作为参数；系统会在进程级 Skill 执行前自动做身份准入和参数重写。如果准入返回 ambiguous/blocked，先查看候选进程或澄清目标，不要继续基于未验证包名下结论。`;
 }
 
-/**
- * Build scene-specific strategy section based on classified scene type.
- * Strategy content is loaded from external Markdown files in `backend/strategies/`.
- * Only injects the relevant strategy, saving ~3500 tokens for non-scrolling queries.
- */
-function buildSceneStrategySection(sceneType: SceneType | undefined): string {
+interface SceneStrategySections {
+  core: string;
+  reportContract: string;
+}
+
+function buildFinalReportContractSection(sceneType: SceneType | undefined): string {
+  const contract = getFinalReportContract(sceneType || 'general');
+  if (!contract || contract.requiredSections.length === 0) return '';
+
+  return '### Final Report Contract（最终报告必检项）\n\n' +
+    '最终报告必须满足以下场景交付结构；标注条件触发的项目只在用户问题涉及对应证据面时校验：\n' +
+    contract.requiredSections
+      .filter(requirement => requirement.required !== false)
+      .map((requirement, index) => {
+        const description = requirement.description ? `：${requirement.description}` : '';
+        const triggerNote = requirement.triggerPatterns.length > 0 ? '（条件触发）' : '';
+        return `${index + 1}. ${requirement.label}${triggerNote}${description}`;
+      })
+      .join('\n');
+}
+
+function buildSceneStrategySections(sceneType: SceneType | undefined): SceneStrategySections {
   const content = getStrategyContent(sceneType || 'general')
     || getStrategyContent('general')
     || '';
-  if (!content) return '';
 
-  const contract = getFinalReportContract(sceneType || 'general');
-  const contractSection = contract && contract.requiredSections.length > 0
-    ? '\n\n### Final Report Contract（最终报告必检项）\n\n' +
-      '最终报告必须满足以下场景交付结构；标注条件触发的项目只在用户问题涉及对应证据面时校验：\n' +
-      contract.requiredSections
-        .filter(requirement => requirement.required !== false)
-        .map((requirement, index) => {
-          const description = requirement.description ? `：${requirement.description}` : '';
-          const triggerNote = requirement.triggerPatterns.length > 0 ? '（条件触发）' : '';
-          return `${index + 1}. ${requirement.label}${triggerNote}${description}`;
-        })
-        .join('\n')
+  const core = content
+    ? '### 场景策略（必须严格遵循）\n\n' +
+    '对于以下常见场景，已有验证过的分析流水线。**必须完整执行所有阶段**，不可跳过。\n\n---\n\n' +
+    content
     : '';
 
-  return '### 场景策略（必须严格遵循）\n\n' +
-    '对于以下常见场景，已有验证过的分析流水线。**必须完整执行所有阶段**，不可跳过。\n\n---\n\n' +
-    content +
-    contractSection;
+  return {
+    core,
+    reportContract: buildFinalReportContractSection(sceneType),
+  };
 }
 
 /**
@@ -327,6 +336,18 @@ export interface PromptSegment {
   content: string;
   /** Whether the section may be dropped under token pressure. */
   droppable: boolean;
+  /** Whether the section may be shortened under token pressure. */
+  truncatable?: boolean;
+  /** Character count after budget enforcement. */
+  charCount: number;
+  /** Rough token count after budget enforcement. */
+  estimatedTokens: number;
+  /** Character count before truncation, when truncation happened. */
+  originalCharCount?: number;
+  /** Rough token count before truncation, when truncation happened. */
+  originalEstimatedTokens?: number;
+  /** True when this segment was shortened to satisfy the prompt budget. */
+  truncated?: boolean;
 }
 
 export interface SystemPromptParts {
@@ -340,6 +361,58 @@ export interface SystemPromptParts {
   segments: PromptSegment[];
   /** Labels of sections dropped to fit the token budget. */
   droppedLabels: string[];
+  /** Labels of sections truncated to fit the token budget. */
+  truncatedLabels: string[];
+}
+
+function joinSegments(segments: PromptSegment[], tierFilter?: (segment: PromptSegment) => boolean): string {
+  return segments
+    .filter(segment => segment.content.length > 0)
+    .filter(segment => tierFilter ? tierFilter(segment) : true)
+    .map(segment => segment.content)
+    .join('\n\n');
+}
+
+function joinSegmentsWithReplacement(
+  segments: PromptSegment[],
+  replacementIndex: number,
+  replacementContent: string,
+): string {
+  return segments
+    .map((segment, index) => index === replacementIndex ? replacementContent : segment.content)
+    .filter(content => content.length > 0)
+    .join('\n\n');
+}
+
+function splitMethodologyTemplate(template: string): { beforeSceneStrategy: string; afterSceneStrategy: string } {
+  const placeholder = '{{sceneStrategy}}';
+  const placeholderIndex = template.indexOf(placeholder);
+  if (placeholderIndex < 0) {
+    return { beforeSceneStrategy: template.trim(), afterSceneStrategy: '' };
+  }
+  return {
+    beforeSceneStrategy: template.slice(0, placeholderIndex).trim(),
+    afterSceneStrategy: template.slice(placeholderIndex + placeholder.length).trim(),
+  };
+}
+
+function nearestMarkdownBoundary(text: string): string {
+  const minBoundary = Math.min(800, Math.floor(text.length * 0.25));
+  const boundaries = [
+    text.lastIndexOf('\n### '),
+    text.lastIndexOf('\n#### '),
+    text.lastIndexOf('\n\n'),
+  ].filter(index => index > minBoundary);
+  if (boundaries.length === 0) return text.trimEnd();
+  return text.slice(0, Math.max(...boundaries)).trimEnd();
+}
+
+export interface SystemPromptBuildOptions {
+  /**
+   * Enabled by default in M2 after strategy core/detail split. Tests can turn
+   * it off to inspect raw strategy-core size.
+   */
+  truncateSceneCore?: boolean;
 }
 
 /**
@@ -349,12 +422,66 @@ export interface SystemPromptParts {
 export function buildSystemPromptParts(
   context: ClaudeAnalysisContext,
   maxTokens?: number,
+  options: SystemPromptBuildOptions = {},
 ): SystemPromptParts {
   const effectiveMaxTokens = maxTokens ?? MAX_PROMPT_TOKENS;
+  const shouldTruncateSceneCore = options.truncateSceneCore ?? true;
   const segments: PromptSegment[] = [];
 
-  const push = (tier: PromptTier, label: string, content: string, droppable = false): void => {
-    segments.push({ tier, label, content, droppable });
+  const push = (
+    tier: PromptTier,
+    label: string,
+    content: string,
+    droppable = false,
+    opts: { truncatable?: boolean } = {},
+  ): void => {
+    if (!content) return;
+    segments.push({
+      tier,
+      label,
+      content,
+      droppable,
+      ...(opts.truncatable ? { truncatable: true } : {}),
+      charCount: content.length,
+      estimatedTokens: estimatePromptTokens(content),
+    });
+  };
+
+  const replaceSegmentContent = (index: number, content: string, truncated = false): void => {
+    const segment = segments[index];
+    if (!segment) return;
+    if (truncated && !segment.truncated) {
+      segment.originalCharCount = segment.charCount;
+      segment.originalEstimatedTokens = segment.estimatedTokens;
+      segment.truncated = true;
+    }
+    segment.content = content;
+    segment.charCount = content.length;
+    segment.estimatedTokens = estimatePromptTokens(content);
+  };
+
+  const truncateSegmentToTokenBudget = (index: number, tokenBudget: number): boolean => {
+    const segment = segments[index];
+    if (!segment || !segment.truncatable || segment.estimatedTokens <= tokenBudget) return false;
+    const originalContent = segment.content;
+    let bestFit = '';
+    let low = 0;
+    let high = originalContent.length;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const candidate = originalContent.slice(0, mid).trimEnd();
+      if (estimatePromptTokens(candidate) <= tokenBudget) {
+        bestFit = candidate;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const boundedFit = bestFit ? nearestMarkdownBoundary(bestFit) : '';
+    replaceSegmentContent(index, boundedFit, boundedFit.length < originalContent.length);
+    return Boolean(segments[index]?.truncated);
   };
 
   // ── Tier 1: STATIC ───────────────────────────────────────────────────────
@@ -412,15 +539,21 @@ export function buildSystemPromptParts(
   }
 
   // ── Tier 3: PER-QUERY ────────────────────────────────────────────────────
-  const sceneStrategy = buildSceneStrategySection(context.sceneType);
   const methodologyTemplate = loadPromptTemplate('prompt-methodology');
-  push(
-    3,
-    'methodology',
-    methodologyTemplate
-      ? renderTemplate(methodologyTemplate, { sceneStrategy })
-      : `## 分析方法论\n\n${sceneStrategy}`,
-  );
+  const sceneStrategySections = buildSceneStrategySections(context.sceneType);
+  if (methodologyTemplate) {
+    const methodologyParts = splitMethodologyTemplate(methodologyTemplate);
+    const beforeSceneStrategy = renderTemplate(methodologyParts.beforeSceneStrategy, {});
+    const afterSceneStrategy = renderTemplate(methodologyParts.afterSceneStrategy, {});
+    push(3, 'base_methodology', beforeSceneStrategy);
+    push(3, 'scene_strategy_core', sceneStrategySections.core, false, { truncatable: true });
+    push(3, 'report_contract', sceneStrategySections.reportContract);
+    push(3, 'base_methodology_reference', afterSceneStrategy);
+  } else {
+    push(3, 'base_methodology', '## 分析方法论');
+    push(3, 'scene_strategy_core', sceneStrategySections.core, false, { truncatable: true });
+    push(3, 'report_contract', sceneStrategySections.reportContract);
+  }
 
   if (context.codeAwareMode && context.codeAwareMode !== 'off' && context.codebaseIds && context.codebaseIds.length > 0) {
     const codeAwareTemplate = loadPromptTemplate('code-aware');
@@ -428,7 +561,7 @@ export function buildSystemPromptParts(
       push(3, 'code_aware', renderTemplate(codeAwareTemplate, {
         codeAwareMode: context.codeAwareMode,
         codebaseIds: context.codebaseIds.join(', '),
-      }));
+      }), false, { truncatable: true });
     }
   }
 
@@ -466,13 +599,13 @@ export function buildSystemPromptParts(
   // ── Tier 4: PER-INTERACTION DYNAMIC ──────────────────────────────────────
   // User selection — never droppable; user's explicit intent.
   if (context.selectionContext) {
-    push(4, 'selection_context', buildSelectionContextSection(context.selectionContext));
+    push(4, 'selection_context', buildSelectionContextSection(context.selectionContext), false, { truncatable: true });
   }
 
   if (context.comparison) {
-    push(4, 'comparison_context', buildComparisonContextSection(context.comparison, context.packageName));
+    push(4, 'comparison_context', buildComparisonContextSection(context.comparison, context.packageName), false, { truncatable: true });
     const compMethodology = loadPromptTemplate('comparison-methodology');
-    if (compMethodology) push(4, 'comparison_methodology', compMethodology);
+    if (compMethodology) push(4, 'comparison_methodology', compMethodology, false, { truncatable: true });
   }
 
   const hasConversationContext = (context.previousFindings && context.previousFindings.length > 0)
@@ -513,7 +646,7 @@ export function buildSystemPromptParts(
       contextParts.push(`### 对话摘要\n${context.conversationSummary}`);
     }
 
-    push(4, 'conversation_context', contextParts.join('\n\n'));
+    push(4, 'conversation_context', contextParts.join('\n\n'), false, { truncatable: true });
   }
 
   if (context.sqlErrorFixPairs && context.sqlErrorFixPairs.length > 0) {
@@ -529,6 +662,10 @@ export function buildSystemPromptParts(
 
   if (context.negativePatternContext) {
     push(4, 'negative_pattern_context', context.negativePatternContext, true);
+  }
+
+  if (context.caseBackgroundContext) {
+    push(4, 'case_background_context', context.caseBackgroundContext, true);
   }
 
   const allPlans: Array<{ plan: typeof context.previousPlan; label: string }> = [];
@@ -563,12 +700,20 @@ export function buildSystemPromptParts(
     'trace_completeness',
     'pattern_context',
     'negative_pattern_context',
+    'case_background_context',
     'sql_error_pairs',
     'sub_agents',
     'plan_history',
   ];
-  let prompt = segments.map(s => s.content).join('\n\n');
-  let tokens = estimateTokens(prompt);
+  const truncatedLabels: string[] = [];
+  if (shouldTruncateSceneCore) {
+    const sceneCoreIndex = segments.findIndex(s => s.label === 'scene_strategy_core' && s.truncatable);
+    if (sceneCoreIndex >= 0 && truncateSegmentToTokenBudget(sceneCoreIndex, MAX_SCENE_CORE_TOKENS)) {
+      truncatedLabels.push('scene_strategy_core');
+    }
+  }
+  let prompt = joinSegments(segments);
+  let tokens = estimatePromptTokens(prompt);
 
   if (tokens > effectiveMaxTokens) {
     for (const label of dropOrder) {
@@ -577,17 +722,64 @@ export function buildSystemPromptParts(
       if (idx >= 0) {
         segments.splice(idx, 1);
         droppedLabels.push(label);
-        prompt = segments.map(s => s.content).join('\n\n');
-        tokens = estimateTokens(prompt);
+        prompt = joinSegments(segments);
+        tokens = estimatePromptTokens(prompt);
+      }
+    }
+    if (tokens > effectiveMaxTokens && shouldTruncateSceneCore) {
+      const idx = segments.findIndex(s => s.label === 'scene_strategy_core' && s.truncatable);
+      if (idx >= 0) {
+        const originalContent = segments[idx].content;
+        let bestFit = '';
+        let low = 0;
+        let high = originalContent.length;
+
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          const candidate = originalContent.slice(0, mid).trimEnd();
+          const candidateTokens = estimatePromptTokens(joinSegmentsWithReplacement(segments, idx, candidate));
+          if (candidateTokens <= effectiveMaxTokens) {
+            bestFit = candidate;
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+
+        const boundedFit = bestFit ? nearestMarkdownBoundary(bestFit) : '';
+        replaceSegmentContent(idx, boundedFit, boundedFit.length < originalContent.length);
+        if (segments[idx].truncated && !truncatedLabels.includes('scene_strategy_core')) {
+          truncatedLabels.push('scene_strategy_core');
+        }
+        prompt = joinSegments(segments);
+        tokens = estimatePromptTokens(prompt);
       }
     }
     if (tokens > effectiveMaxTokens) {
-      console.warn(`[SystemPrompt] Prompt exceeds budget after trimming: ~${tokens} tokens (budget: ${effectiveMaxTokens})`);
+      const dynamicCaps: Array<{ label: string; tokenBudget: number }> = [
+        { label: 'selection_context', tokenBudget: 1_000 },
+        { label: 'conversation_context', tokenBudget: 1_000 },
+        { label: 'comparison_context', tokenBudget: 800 },
+        { label: 'comparison_methodology', tokenBudget: 800 },
+        { label: 'code_aware', tokenBudget: 700 },
+      ];
+      for (const { label, tokenBudget } of dynamicCaps) {
+        if (tokens <= effectiveMaxTokens) break;
+        const idx = segments.findIndex(s => s.label === label && s.truncatable);
+        if (idx >= 0 && truncateSegmentToTokenBudget(idx, tokenBudget)) {
+          if (!truncatedLabels.includes(label)) truncatedLabels.push(label);
+          prompt = joinSegments(segments);
+          tokens = estimatePromptTokens(prompt);
+        }
+      }
+    }
+    if (tokens > effectiveMaxTokens) {
+      throw new Error(`[SystemPrompt] Prompt exceeds hard budget after trimming: ~${tokens} tokens (budget: ${effectiveMaxTokens})`);
     }
   }
 
-  const stablePrefix = segments.filter(s => s.tier <= 3).map(s => s.content).join('\n\n');
-  const volatileSuffix = segments.filter(s => s.tier === 4).map(s => s.content).join('\n\n');
+  const stablePrefix = joinSegments(segments, s => s.tier <= 3);
+  const volatileSuffix = joinSegments(segments, s => s.tier === 4);
 
   return {
     stablePrefix,
@@ -595,6 +787,7 @@ export function buildSystemPromptParts(
     fullPrompt: prompt,
     segments,
     droppedLabels,
+    truncatedLabels,
   };
 }
 

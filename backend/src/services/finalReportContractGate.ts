@@ -10,6 +10,7 @@ export interface FinalReportContractCompletenessInput {
   query?: string;
   sceneType?: SceneType;
   contractSceneId?: string;
+  caseRecommendations?: Array<Record<string, unknown>>;
 }
 
 export interface FinalReportContractCompletenessResult {
@@ -33,8 +34,18 @@ function requirementSatisfied(text: string, requirement: FinalReportContractRequ
 }
 
 function requirementApplies(input: FinalReportContractCompletenessInput, requirement: FinalReportContractRequirement): boolean {
+  if (requirement.id === 'case_recommendations') {
+    return hasStrongCaseRecommendation(input.caseRecommendations) ||
+      requirement.triggerPatterns.some(pattern => patternMatches(input.query || '', pattern));
+  }
   if (requirement.triggerPatterns.length === 0) return true;
   return requirement.triggerPatterns.some(pattern => patternMatches(input.query || '', pattern));
+}
+
+function hasStrongCaseRecommendation(recommendations: Array<Record<string, unknown>> | undefined): boolean {
+  return (recommendations ?? []).some(hit =>
+    String(hit.matchStrength ?? hit.match_strength ?? '').toLowerCase() === 'strong'
+  );
 }
 
 function normalizeSceneType(value: string | undefined): SceneType | undefined {

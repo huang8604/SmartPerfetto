@@ -1,0 +1,38 @@
+=== FPS Report: /Users/chris/Code/SmartPerfetto/SmartPerfetto/test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace ===
+[window source: structured input, 1 gesture(s)]
+
+-- Overall (press + fling: DOWN -> next DOWN) --
+Screen FPS (display/SF output): 112.3
+Total frames (all sources): 313
+  presented       : 313
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - com.example.wechatfriendforcustomscroller/com.example.wechatfriendforcustomscroller.CustomScrollFeedActivity#2367 fps= 113.0 frames=157 presented=157 dropped=0 janky=0
+  display                                  fps= 112.3 frames=156 presented=156 dropped=0 janky=0
+
+-- Press phase (finger down -> up) --
+Screen FPS (display/SF output): 53.7
+Total frames (all sources): 16
+  presented       : 16
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - com.example.wechatfriendforcustomscroller/com.example.wechatfriendforcustomscroller.CustomScrollFeedActivity#2367 fps=  69.1 frames=9 presented=9 dropped=0 janky=0
+  display                                  fps=  53.7 frames=7 presented=7 dropped=0 janky=0
+
+-- Fling phase (finger up -> next press) --
+Screen FPS (display/SF output): 118.4
+Total frames (all sources): 297
+  presented       : 297
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - com.example.wechatfriendforcustomscroller/com.example.wechatfriendforcustomscroller.CustomScrollFeedActivity#2367 fps= 117.6 frames=148 presented=148 dropped=0 janky=0
+  display                                  fps= 118.4 frames=149 presented=149 dropped=0 janky=0
+
+Per-gesture Screen-FPS (overall / press / fling):
+  gesture 0: overall=112.3  press=53.7  fling=118.4

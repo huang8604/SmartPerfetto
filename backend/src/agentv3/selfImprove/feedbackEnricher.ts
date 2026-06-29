@@ -18,6 +18,7 @@ const MAX_SCENE_TYPE_CHARS = 50;
 const MAX_ARCHITECTURE_CHARS = 50;
 const MAX_PACKAGE_NAME_CHARS = 200;
 const MAX_PATTERN_ID_CHARS = 100;
+const MAX_CASE_CANDIDATE_ID_CHARS = 120;
 const MAX_FINDING_ID_CHARS = 100;
 const MAX_FINDING_IDS_LENGTH = 20;
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -38,6 +39,8 @@ export interface FeedbackInputSchema {
   packageName?: string;
   findingIds?: string[];
   patternId?: string;
+  caseCandidateId?: string;
+  caseCandidateSurfacedAt?: number;
   schemaVersion?: number;
 }
 
@@ -66,6 +69,8 @@ export interface EnrichedFeedbackEntry {
   packageName?: string;
   findingIds?: string[];
   patternId?: string;
+  caseCandidateId?: string;
+  caseCandidateSurfacedAt?: number;
   timestamp: string;
   /** True when at least one field was filled by reverse lookup rather than the client body. */
   enrichedFromSession: boolean;
@@ -75,7 +80,7 @@ export type ValidationResult =
   | { ok: true; value: FeedbackInputSchema }
   | { ok: false; error: string };
 
-type StringFieldKey = 'comment' | 'traceId' | 'sceneType' | 'architecture' | 'packageName' | 'patternId';
+type StringFieldKey = 'comment' | 'traceId' | 'sceneType' | 'architecture' | 'packageName' | 'patternId' | 'caseCandidateId';
 
 const STRING_FIELDS: ReadonlyArray<{ key: StringFieldKey; max: number }> = [
   { key: 'comment', max: MAX_COMMENT_CHARS },
@@ -84,6 +89,7 @@ const STRING_FIELDS: ReadonlyArray<{ key: StringFieldKey; max: number }> = [
   { key: 'architecture', max: MAX_ARCHITECTURE_CHARS },
   { key: 'packageName', max: MAX_PACKAGE_NAME_CHARS },
   { key: 'patternId', max: MAX_PATTERN_ID_CHARS },
+  { key: 'caseCandidateId', max: MAX_CASE_CANDIDATE_ID_CHARS },
 ];
 
 /**
@@ -128,6 +134,17 @@ export function validateFeedbackInput(body: unknown): ValidationResult {
       return { ok: false, error: 'turnIndex must be a non-negative finite number' };
     }
     value.turnIndex = Math.floor(raw.turnIndex);
+  }
+
+  if (raw.caseCandidateSurfacedAt !== undefined) {
+    if (
+      typeof raw.caseCandidateSurfacedAt !== 'number' ||
+      !Number.isFinite(raw.caseCandidateSurfacedAt) ||
+      raw.caseCandidateSurfacedAt < 0
+    ) {
+      return { ok: false, error: 'caseCandidateSurfacedAt must be a non-negative finite number' };
+    }
+    value.caseCandidateSurfacedAt = Math.floor(raw.caseCandidateSurfacedAt);
   }
 
   if (raw.findingIds !== undefined) {
@@ -191,6 +208,8 @@ export function enrichFeedbackEntry(
   if (input.packageName) entry.packageName = input.packageName;
   if (input.findingIds && input.findingIds.length > 0) entry.findingIds = input.findingIds;
   if (input.patternId) entry.patternId = input.patternId;
+  if (input.caseCandidateId) entry.caseCandidateId = input.caseCandidateId;
+  if (input.caseCandidateSurfacedAt !== undefined) entry.caseCandidateSurfacedAt = input.caseCandidateSurfacedAt;
 
   return entry;
 }

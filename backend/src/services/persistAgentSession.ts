@@ -28,6 +28,20 @@ import { SessionPersistenceService } from './sessionPersistenceService';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import { getDefaultCodebaseRegistry } from './codebase/defaultCodebaseServices';
 import { CodeLookupLedger } from './codebase/codeLookupLedger';
+import type { DataEnvelope } from '../types/dataContract';
+import type { SqlResultMessageBundle, SqlResultMessageEntry } from '../models/sessionSchema';
+
+const MAX_SQL_RESULTS_PER_MESSAGE = 5;
+const MAX_SQL_RESULT_ENTRY_BYTES = 100 * 1024;
+const MAX_TRUNCATED_CELL_CHARS = 2048;
+const MAX_TRUNCATED_SQL_CHARS = 4096;
+
+type PersistableSqlEnvelope = DataEnvelope & {
+  sql?: string;
+  traceId?: string;
+  traceSide?: string;
+  stdlibInjectedModules?: string[];
+};
 
 function buildCodebaseSnapshot(codebaseIds: string[] | undefined) {
   if (!codebaseIds || codebaseIds.length === 0) return undefined;
@@ -76,6 +90,102 @@ function buildPersistedAssistantMessage(result: PersistAgentTurnInput['result'])
   return `${warning}${conclusion}`.substring(0, 10000);
 }
 
+function utf8Bytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function truncateString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}…`;
+}
+
+function compactValueForSqlPreview(value: unknown): unknown {
+  if (typeof value === 'string') return truncateString(value, MAX_TRUNCATED_CELL_CHARS);
+  if (Array.isArray(value)) return value.map(compactValueForSqlPreview);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, nested]) => [key, compactValueForSqlPreview(nested)]),
+    );
+  }
+  return value;
+}
+
+function compactSqlDataForPreview(data: unknown): unknown {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const candidate = data as {columns?: unknown; rows?: unknown};
+    if (Array.isArray(candidate.rows)) {
+      return {
+        columns: Array.isArray(candidate.columns) ? candidate.columns : undefined,
+        rowCount: candidate.rows.length,
+        rowsPreview: candidate.rows.slice(0, 3).map(compactValueForSqlPreview),
+      };
+    }
+  }
+  return {preview: truncateString(JSON.stringify(data), MAX_TRUNCATED_CELL_CHARS)};
+}
+
+function hasSqlTablePayload(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const candidate = data as {columns?: unknown; rows?: unknown};
+  return Array.isArray(candidate.columns) && Array.isArray(candidate.rows);
+}
+
+function isSqlResultEnvelope(value: unknown): value is PersistableSqlEnvelope {
+  if (!value || typeof value !== 'object') return false;
+  const envelope = value as {meta?: {type?: unknown}; data?: unknown};
+  if (envelope.meta?.type === 'sql_result') return true;
+  return envelope.meta?.type === 'skill_result' && hasSqlTablePayload(envelope.data);
+}
+
+function buildSqlResultEntry(envelope: PersistableSqlEnvelope): SqlResultMessageEntry {
+  const entry: SqlResultMessageEntry = {
+    title: envelope.display?.title ?? envelope.meta?.source,
+    evidenceRefId: envelope.meta?.evidenceRefId,
+    sourceToolCallId: envelope.meta?.sourceToolCallId,
+    queryHash: envelope.meta?.queryHash,
+    traceId: envelope.meta?.traceId ?? envelope.traceId,
+    traceSide: envelope.meta?.traceSide ?? envelope.traceSide,
+    sql: typeof envelope.sql === 'string'
+      ? truncateString(envelope.sql, MAX_TRUNCATED_SQL_CHARS)
+      : undefined,
+    data: envelope.data,
+    display: envelope.display,
+  };
+
+  const originalBytes = utf8Bytes(entry);
+  if (originalBytes <= MAX_SQL_RESULT_ENTRY_BYTES) return entry;
+
+  return {
+    title: entry.title,
+    evidenceRefId: entry.evidenceRefId,
+    sourceToolCallId: entry.sourceToolCallId,
+    queryHash: entry.queryHash,
+    traceId: entry.traceId,
+    traceSide: entry.traceSide,
+    sql: entry.sql,
+    data: compactSqlDataForPreview(envelope.data),
+    display: entry.display,
+    truncated: true,
+    originalBytes,
+    maxBytes: MAX_SQL_RESULT_ENTRY_BYTES,
+  };
+}
+
+function buildAssistantSqlResult(envelopes: unknown): SqlResultMessageBundle | undefined {
+  if (!Array.isArray(envelopes)) return undefined;
+  const results = envelopes
+    .filter(isSqlResultEnvelope)
+    .slice(-MAX_SQL_RESULTS_PER_MESSAGE)
+    .map(buildSqlResultEntry);
+  if (results.length === 0) return undefined;
+  return {
+    schemaVersion: 'sql_result_message_v1',
+    resultCount: results.length,
+    results,
+  };
+}
+
 export function persistAgentTurn(input: PersistAgentTurnInput): void {
   const { session, sessionId, traceId, query, result, logger } = input;
   const logComponent = input.logComponent ?? 'AgentPersistence';
@@ -101,6 +211,8 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
           hypotheses: session.hypotheses || [],
             agentRuntimeProviderId: session.providerId,
             agentRuntimeProviderSnapshotHash: session.providerSnapshotHash,
+            continuityBreaks: session.continuityBreaks,
+            lineage: session.lineage,
             codeAwareMode: (session as {codeAwareMode?: unknown}).codeAwareMode as any,
             codebaseIds: (session as {codebaseIds?: string[]}).codebaseIds,
             codebaseSnapshot: buildCodebaseSnapshot((session as {codebaseIds?: string[]}).codebaseIds),
@@ -194,6 +306,13 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
     if (sessionContext) {
       try {
         const turnIndex = session.runSequence || 1;
+        const sessionEnvelopes = Array.isArray(session.dataEnvelopes) ? session.dataEnvelopes : [];
+        const snapshotEnvelopes = Array.isArray((snapshot as {dataEnvelopes?: unknown[]} | null)?.dataEnvelopes)
+          ? (snapshot as {dataEnvelopes: unknown[]}).dataEnvelopes
+          : [];
+        const assistantSqlResult = buildAssistantSqlResult(
+          sessionEnvelopes.some(isSqlResultEnvelope) ? sessionEnvelopes : snapshotEnvelopes,
+        );
         persistenceService.appendMessages(sessionId, [
           {
             id: `msg-${sessionId}-turn${turnIndex}-user`,
@@ -206,6 +325,7 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
             role: 'assistant',
             content: buildPersistedAssistantMessage(result),
             timestamp: Date.now(),
+            sqlResult: assistantSqlResult,
           },
         ]);
       } catch (msgErr) {

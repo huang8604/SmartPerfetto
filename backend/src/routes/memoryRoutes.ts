@@ -9,6 +9,7 @@
  * Endpoints (all under `/api/memory`):
  *   GET    /                   list project + world entries
  *   GET    /audit              read-only promotion audit log
+ *   POST   /sweep-confirm      manually auto-confirm ripe analysis patterns
  *   POST   /promote            advance an entry across scopes
  *                              (the `consolidate_to_world_memory`
  *                              admin function from §4.5 lives here)
@@ -30,6 +31,7 @@ import {Router, type Router as ExpressRouter} from 'express';
 
 import {authenticate, requireRequestContext} from '../middleware/auth';
 import {ProjectMemory} from '../agentv3/projectMemory';
+import {sweepAutoConfirm} from '../agentv3/analysisPatternMemory';
 import {recordEnterpriseAuditEventForContext} from '../services/enterpriseAuditService';
 import {hasRbacPermission, sendForbidden} from '../services/rbac';
 import {knowledgeScopeFromRequestContext} from '../services/scopedKnowledgeStore';
@@ -92,6 +94,31 @@ export function createMemoryRoutes(memory?: ProjectMemory): ExpressRouter {
     requireRequestContext(_req);
     const audit = m.getPromotionAudit();
     res.json({success: true, audit, count: audit.length});
+  });
+
+  /**
+   * POST /api/memory/sweep-confirm
+   *
+   * Operator-triggered sweep for provisional analysis patterns that aged past
+   * the no-negative-feedback confirmation window. The background process runs
+   * this hourly; this endpoint exists for admin repair and verification.
+   */
+  router.post('/sweep-confirm', async (req, res) => {
+    const storageScope = knowledgeScopeFromRequestContext(requireRequestContext(req));
+    try {
+      const result = await sweepAutoConfirm(Date.now(), storageScope);
+      return res.status(200).json({
+        success: true,
+        promoted: result.totalPromoted,
+        result,
+      });
+    } catch (err) {
+      console.error('[MemoryRoutes] sweep-confirm failed:', err);
+      return res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   /**

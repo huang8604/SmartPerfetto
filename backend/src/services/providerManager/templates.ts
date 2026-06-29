@@ -19,11 +19,17 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'bedrock',
     displayName: 'AWS Bedrock',
     requiredFields: [],
-    defaultModels: { primary: 'claude-sonnet-4-6', light: 'claude-haiku-4-5' },
+    // Bedrock requires model IDs in the cross-region inference format
+    // (us.anthropic.<model>-<date>-v1:0). Anthropic-style short IDs like
+    // 'claude-sonnet-4-6' are rejected with 400 invalid model identifier.
+    defaultModels: {
+      primary: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      light: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+    },
     availableModels: [
-      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', tier: 'primary' },
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', tier: 'primary' },
-      { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', tier: 'light' },
+      { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', name: 'Claude Opus 4.5 (cross-region)', tier: 'primary' },
+      { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', name: 'Claude Sonnet 4.5 (cross-region)', tier: 'primary' },
+      { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', name: 'Claude Haiku 4.5 (cross-region)', tier: 'light' },
     ],
     defaultConnection: { awsRegion: 'us-east-1' },
   },

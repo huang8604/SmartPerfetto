@@ -35,6 +35,7 @@ import {
   analyzeSqlStdlibDependencySequence,
   moduleCoveredByStdlibDeclaration,
 } from '../../services/sqlStdlibDependencyAnalyzer';
+import {validateCaseKnowledgeFiles} from '../../services/caseSchemaValidator';
 
 // ANSI color codes (fallback for chalk ESM issues)
 const colors = {
@@ -73,6 +74,7 @@ interface VendorOverrideDefinition {
 }
 
 const SKILLS_DIR = path.join(__dirname, '../../../skills');
+const CASES_DIR = path.join(__dirname, '../../../knowledge/cases');
 const STRATEGIES_DIR = path.join(__dirname, '../../../strategies');
 const STRATEGY_FRONTMATTER_RE = /^(?:\s*<!--[\s\S]*?-->\s*)*---\n([\s\S]*?)\n---\n?/;
 const VERIFIER_MISDIAGNOSIS_SEVERITIES = new Set(['warning', 'info']);
@@ -1155,8 +1157,33 @@ export const validateCommand = new Command('validate')
   .option('-a, --all', 'Validate all skills including vendor overrides')
   .option('-c, --contracts', 'Run contract checks (input types, condition refs, iterator sources)')
   .option('-s, --strategies', 'Validate strategy files: check invoke_skill references exist in skill registry')
+  .option('--cases', 'Validate curated Markdown case knowledge files')
+  .option('--cases-dir <path>', 'Case knowledge directory (defaults to backend/knowledge/cases)')
   .option('-v, --verbose', 'Show detailed validation output')
-  .action((skillId: string | undefined, options: { all?: boolean; contracts?: boolean; strategies?: boolean; verbose?: boolean }) => {
+  .action((skillId: string | undefined, options: { all?: boolean; contracts?: boolean; strategies?: boolean; cases?: boolean; casesDir?: string; verbose?: boolean }) => {
+    if (options.cases) {
+      if (skillId || options.contracts || options.strategies || options.all) {
+        console.log(colors.red('--cases must be used without skillId, --all, --contracts, or --strategies'));
+        process.exit(1);
+      }
+      const casesDir = path.resolve(options.casesDir ?? CASES_DIR);
+      console.log(colors.bold('\nSmartPerfetto Case Knowledge Validator\n'));
+      console.log(`Cases: ${colors.gray(casesDir)}\n`);
+      const result = validateCaseKnowledgeFiles(casesDir);
+      if (result.ok) {
+        console.log(`${colors.green('PASS')} ${result.cases.length} case file(s)`);
+        process.exit(0);
+      }
+      for (const issue of result.issues) {
+        console.log(`${colors.red('FAIL')} ${issue.filePath}`);
+        console.log(`  ${colors.red('ERROR:')} ${issue.message}`);
+      }
+      console.log(colors.bold('\nCase Knowledge Validation Summary:'));
+      console.log(`  Case files: ${result.cases.length}`);
+      console.log(`  Errors: ${colors.red(String(result.issues.length))}`);
+      process.exit(1);
+    }
+
     // Strategy-only mode: just validate strategy → skill references
     if (options.strategies && !skillId && !options.contracts) {
       console.log(colors.bold('\nSmartPerfetto Strategy Validator\n'));

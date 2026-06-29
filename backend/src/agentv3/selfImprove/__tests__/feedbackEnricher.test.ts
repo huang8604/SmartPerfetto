@@ -75,6 +75,8 @@ describe('validateFeedbackInput', () => {
       packageName: 'com.tencent.mm',
       findingIds: ['f1', 'f2', 'f3'],
       patternId: 'pattern_abc',
+      caseCandidateId: 'cand-feedback-1',
+      caseCandidateSurfacedAt: 1710000000000,
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -84,6 +86,8 @@ describe('validateFeedbackInput', () => {
       expect(result.value.packageName).toBe('com.tencent.mm');
       expect(result.value.findingIds).toEqual(['f1', 'f2', 'f3']);
       expect(result.value.patternId).toBe('pattern_abc');
+      expect(result.value.caseCandidateId).toBe('cand-feedback-1');
+      expect(result.value.caseCandidateSurfacedAt).toBe(1710000000000);
     }
   });
 

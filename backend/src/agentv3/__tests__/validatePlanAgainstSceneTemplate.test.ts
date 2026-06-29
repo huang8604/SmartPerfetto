@@ -55,8 +55,11 @@ describe('validatePlanAgainstSceneTemplate', () => {
         minimalPhase({
           name: '帧渲染分析',
           goal: '获取卡顿帧分布',
-          expectedTools: ['invoke_skill'],
-          expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }],
+          expectedTools: ['invoke_skill', 'fetch_artifact'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+            { tool: 'fetch_artifact' },
+          ],
         }),
         minimalPhase({
           name: '根因诊断',
@@ -71,7 +74,8 @@ describe('validatePlanAgainstSceneTemplate', () => {
         minimalPhase({
           name: '架构确认',
           goal: '确认是否存在 TextureView/WebView/Flutter/Compose/mixed 混合渲染链路',
-          expectedTools: ['execute_sql'],
+          expectedTools: ['invoke_skill', 'execute_sql'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' }],
         }),
       ],
       'scrolling',
@@ -108,8 +112,11 @@ describe('validatePlanAgainstSceneTemplate', () => {
         minimalPhase({
           name: '帧渲染分析',
           goal: '调用 scrolling_analysis 获取卡顿帧分布',
-          expectedTools: ['invoke_skill'],
-          expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }],
+          expectedTools: ['invoke_skill', 'fetch_artifact'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+            { tool: 'fetch_artifact' },
+          ],
         }),
         minimalPhase({
           name: '根因诊断',
@@ -120,7 +127,8 @@ describe('validatePlanAgainstSceneTemplate', () => {
         minimalPhase({
           name: '架构确认',
           goal: '确认是否存在 TextureView/WebView/Flutter/Compose/mixed 混合渲染链路',
-          expectedTools: ['execute_sql'],
+          expectedTools: ['invoke_skill', 'execute_sql'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' }],
         }),
       ],
       'scrolling',
@@ -128,9 +136,125 @@ describe('validatePlanAgainstSceneTemplate', () => {
     expect(result.missingAspectIds).toEqual(['root_cause_diagnosis']);
   });
 
+  it('enforces conditional aspects only when their trigger keywords appear in the plan', () => {
+    const basePhases = [
+      minimalPhase({
+        name: '帧渲染分析',
+        goal: '调用 scrolling_analysis 获取卡顿帧分布',
+        expectedTools: ['invoke_skill', 'fetch_artifact'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+          { tool: 'fetch_artifact' },
+        ],
+      }),
+      minimalPhase({
+        name: '根因诊断',
+        goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+        expectedTools: ['invoke_skill'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+          { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+          { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+        ],
+      }),
+    ];
+
+    expect(validatePlanAgainstSceneTemplate(basePhases, 'scrolling').missingAspectIds)
+      .not.toContain('architecture_specific_jank');
+
+    const triggered = validatePlanAgainstSceneTemplate([
+      ...basePhases,
+      minimalPhase({
+        name: 'Flutter TextureView 架构分析',
+        goal: '确认 Flutter producer 链路',
+        expectedTools: ['execute_sql'],
+      }),
+    ], 'scrolling');
+
+    expect(triggered.missingAspectIds).toContain('architecture_specific_jank');
+  });
+
+  it('uses external trigger context for detected architecture without treating it as coverage', () => {
+    const basePhases = [
+      minimalPhase({
+        name: '帧渲染分析',
+        goal: '调用 scrolling_analysis 获取卡顿帧分布',
+        expectedTools: ['invoke_skill', 'fetch_artifact'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+          { tool: 'fetch_artifact' },
+        ],
+      }),
+      minimalPhase({
+        name: '根因诊断',
+        goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+        expectedTools: ['invoke_skill'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+          { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+          { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+        ],
+      }),
+    ];
+
+    const result = validatePlanAgainstSceneTemplate(
+      basePhases,
+      'scrolling',
+      undefined,
+      { triggerContext: ['FLUTTER', 'TEXTUREVIEW'] },
+    );
+
+    expect(result.missingAspectIds).toContain('architecture_specific_jank');
+    expect(result.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+  });
+
+  it('does not allow waivers to bypass non-waivable architecture expected calls', () => {
+    const phases = [
+      minimalPhase({
+        name: '帧渲染分析',
+        goal: '调用 scrolling_analysis 获取卡顿帧分布',
+        expectedTools: ['invoke_skill', 'fetch_artifact'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+          { tool: 'fetch_artifact' },
+        ],
+      }),
+      minimalPhase({
+        name: '根因诊断',
+        goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+        expectedTools: ['invoke_skill'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+          { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+          { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+        ],
+      }),
+      minimalPhase({
+        name: 'Flutter TextureView 架构专项',
+        goal: '拆分 HWUI host + Flutter producer + SF 合成链路，但缺少结构化 Flutter skill expectedCall',
+        expectedTools: ['invoke_skill', 'execute_sql'],
+      }),
+    ];
+
+    const result = validatePlanAgainstSceneTemplate(phases, 'scrolling', [
+      {
+        aspectId: 'architecture_specific_jank',
+        reason: 'trace 数据里没有足够的 Flutter 专属信号，因此尝试用 SQL 手工拆分管线，但这个理由不能绕过结构化 expectedCall。',
+      },
+    ]);
+
+    expect(result.missingAspectIds).toContain('architecture_specific_jank');
+    expect(result.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+  });
+
   it('matches keywords case-insensitively across name/goal/expectedTools', () => {
     const result = validatePlanAgainstSceneTemplate(
-      [minimalPhase({ name: 'ANR Diagnosis', goal: 'find DEADLOCK', expectedTools: [] })],
+      [minimalPhase({
+        name: 'ANR Diagnosis',
+        goal: 'find DEADLOCK',
+        expectedTools: ['invoke_skill'],
+        expectedCalls: [{ tool: 'invoke_skill', skillId: 'anr_analysis' }],
+      })],
       'anr',
     );
     expect(result.warnings).toEqual([]);

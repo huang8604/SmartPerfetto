@@ -126,6 +126,7 @@ import {
 import {
   AgentAnalyzeSessionService,
   AnalyzeSessionPreparationError,
+  buildAgentQueryWithContinuityNotice,
   type AnalyzeSessionRunContext,
 } from '../assistant/application/agentAnalyzeSessionService';
 import { buildAssistantResultContract } from '../assistant/contracts/assistantResultContract';
@@ -157,6 +158,25 @@ import {
 } from '../agentv3/toolNarration';
 import { applyFeedbackToPattern } from '../agentv3/analysisPatternMemory';
 import { backendLogPath } from '../runtimePaths';
+import { CaseLibrary } from '../services/caseLibrary';
+import { saveCaseCandidates } from '../services/caseEvolution/saveCaseCandidates';
+import { openCaseCandidateOutbox } from '../services/caseEvolution/caseCandidateOutbox';
+import { recordCaseCandidateFeedback } from '../services/caseEvolution/caseCandidateFeedback';
+import {
+  attachCaseHitsToContractSync,
+  projectEvidenceSignaturesByCluster,
+  verifyAndPruneCaseRecommendations,
+} from '../services/caseEvolution/attachCaseHitsToContract';
+import {
+  isCaseEvolutionCaptureEnabled,
+  isCaseEvolutionRetrieveEnabled,
+  loadCaseEvolutionConfig,
+} from '../services/caseEvolution/caseEvolutionConfig';
+import {
+  knowledgeScopeFromRequestContext,
+  type KnowledgeScope,
+} from '../services/scopedKnowledgeStore';
+import type { CaseCandidateCaptureInput, CaseEvolutionConfig } from '../types/caseEvolution';
 
 const COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION = 1;
 
@@ -712,6 +732,8 @@ interface AnalysisSession {
   providerSnapshotHash?: string | null;
   providerSnapshotChanged?: boolean;
   providerSnapshotChangeReason?: string;
+  agentQuery?: string;
+  continuityBreaks?: import('../agentv3/sessionStateSnapshot').ProviderContinuityBreak[];
   codeAwareMode?: import('../services/codebase/codeAwareFeature').CodeAwareMode;
   codebaseIds?: string[];
   /** Reference trace ID for comparison mode (dual-trace analysis) */
@@ -1858,6 +1880,7 @@ async function handleAnalyzeRequest(
         analysisMode: options.analysisMode,
         blockedStrategyIds,
         owner: ownerFieldsFromContext(requestContext),
+        knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
       }).catch((error) => {
         const session = assistantAppService.getSession(sessionId);
         if (session) {
@@ -2045,6 +2068,7 @@ async function handleAnalyzeRequest(
       referenceTraceId: effectiveReferenceTraceId,
       traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
       providerId: sessionForRun.providerId !== undefined ? sessionForRun.providerId : providerId,
+      knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
       traceProcessorLease: agentRunLease
         ? {
           traceId,
@@ -2655,10 +2679,33 @@ router.post('/:sessionId/feedback', async (req, res) => {
     }
   }
 
+  let caseCandidateFeedbackAdded: boolean | null = null;
+  if (validated.value.caseCandidateId) {
+    let outbox: ReturnType<typeof openCaseCandidateOutbox> | null = null;
+    try {
+      outbox = openCaseCandidateOutbox();
+      const feedbackResult = applyCaseCandidateFeedbackForRoute({
+        candidateId: validated.value.caseCandidateId,
+        sessionId,
+        rating: validated.value.rating,
+        surfacedAt: validated.value.caseCandidateSurfacedAt,
+        receivedAt: Date.parse(entry.timestamp),
+        outbox,
+        library: new CaseLibrary(backendLogPath('case_library.json')),
+      });
+      caseCandidateFeedbackAdded = feedbackResult.added;
+    } catch (err) {
+      console.warn('[Feedback] Case candidate state update failed:', (err as Error).message);
+    } finally {
+      try { outbox?.close(); } catch { /* ignore */ }
+    }
+  }
+
   res.json({
     success: true,
     schemaVersion: entry.schemaVersion,
     patternStatus: patternStatusAfter,
+    caseCandidateFeedbackAdded,
   });
 });
 
@@ -2974,6 +3021,7 @@ async function runSmartAnalysis(
     analysisMode?: AnalyzeMode;
     blockedStrategyIds?: string[];
     owner: ResourceOwnerFields;
+    knowledgeScope?: KnowledgeScope;
   },
 ): Promise<void> {
   const session = assistantAppService.getSession(sessionId);
@@ -3107,6 +3155,7 @@ async function runSmartAnalysis(
       packageName: dispatch.packageName,
       analysisMode: resolveSmartDeepDiveAnalysisMode(options.analysisMode),
       generateTracks: false,
+      knowledgeScope: options.knowledgeScope,
     });
   } catch (error: any) {
     if (isSessionRunCancelled(session, runId) || isStaleRun(session, runId)) {
@@ -3670,6 +3719,165 @@ registerAgentReportRoutes(router, {
 // Agent-Driven Analysis Helper Functions (Phase 2-4)
 // ============================================================================
 
+type CaseCandidateSaveFn = (input: CaseCandidateCaptureInput) => Promise<unknown>;
+
+interface ApplyCaseCandidateFeedbackForRouteInput {
+  candidateId: string;
+  sessionId: string;
+  rating: 'positive' | 'negative';
+  surfacedAt?: number;
+  receivedAt: number;
+  outbox: ReturnType<typeof openCaseCandidateOutbox>;
+  library: CaseLibrary;
+  recordFeedback?: typeof recordCaseCandidateFeedback;
+}
+
+export function applyCaseCandidateFeedbackForRoute(
+  input: ApplyCaseCandidateFeedbackForRouteInput,
+): ReturnType<typeof recordCaseCandidateFeedback> {
+  const recordFeedback = input.recordFeedback ?? recordCaseCandidateFeedback;
+  return recordFeedback({
+    candidateId: input.candidateId,
+    sourceSessionId: input.sessionId,
+    rating: input.rating,
+    surfacedAt: input.surfacedAt,
+    receivedAt: input.receivedAt,
+    outbox: input.outbox,
+    library: input.library,
+  });
+}
+
+export interface CaptureCaseCandidatesAfterQualityArtifactsInput {
+  sessionId: string;
+  traceId: string;
+  session: AnalysisSession;
+  result: AgentRuntimeAnalysisResult;
+  normalizedConclusionContract?: ConclusionContract;
+  sceneIdHint?: string;
+  runIdForAnalysis: string;
+  knowledgeScope?: KnowledgeScope;
+  caseEvolutionConfig?: CaseEvolutionConfig;
+  computeTraceHash?: (traceId: string) => Promise<string | null>;
+  saveCandidates?: CaseCandidateSaveFn;
+  /**
+   * Returns the set of `${scene}::${rootCause}` keys already covered by
+   * published cases, used to dedupe capture against the live library
+   * (§1.2 flooding guard). Defaults to scanning the real CaseLibrary.
+   */
+  listPublishedSceneRootCauses?: (scope?: KnowledgeScope) => Set<string>;
+  logger: Pick<SessionLogger, 'info' | 'warn'>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function resolveCaseEvolutionTurnIndex(session: AnalysisSession): number {
+  const activeSequence = session.activeRun?.sequence;
+  if (typeof activeSequence === 'number' && Number.isFinite(activeSequence)) {
+    return activeSequence;
+  }
+  if (typeof session.runSequence === 'number' && Number.isFinite(session.runSequence)) {
+    return session.runSequence;
+  }
+  if (typeof session.conversationOrdinal === 'number' && Number.isFinite(session.conversationOrdinal)) {
+    return session.conversationOrdinal;
+  }
+  return 0;
+}
+
+export function buildCaseEvolutionSnapshotPath(sessionId: string): string {
+  return `session-persistence://sessions/${sessionId}/metadata/sessionStateSnapshot`;
+}
+
+export function resolveCaseEvolutionArchitectureType(
+  session: Pick<AnalysisSession, 'orchestrator'>,
+  traceId: string,
+): string {
+  try {
+    const cachedArchitecture = session.orchestrator.getCachedArchitecture?.(traceId);
+    const type = cachedArchitecture?.type;
+    return typeof type === 'string' && type.trim() ? type.trim() : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Build the dedupe set of `${scene}::${rootCause}` keys covered by published
+ * cases in the live CaseLibrary (curated + learned). Used by the §1.2 capture
+ * flooding guard so a recurring trace whose root cause already has published
+ * guidance does not re-enqueue candidates. Failures are non-fatal: an empty
+ * set means "no dedupe" (the candidate still goes through the qualification
+ * gate), never a blocked capture.
+ */
+export function collectPublishedSceneRootCauses(scope: KnowledgeScope | undefined): Set<string> {
+  const keys = new Set<string>();
+  try {
+    const library = new CaseLibrary(backendLogPath('case_library.json'));
+    const published = library.listCases({status: 'published'}, scope);
+    for (const node of published) {
+      const knowledge = node.knowledge;
+      if (!knowledge) continue;
+      const scene = knowledge.scene;
+      const rootCause = knowledge.taxonomy?.primary_root_cause;
+      if (scene && rootCause) keys.add(`${scene}::${rootCause}`);
+    }
+  } catch {
+    // Library read is best-effort for dedupe; never block capture on it.
+  }
+  return keys;
+}
+
+export async function captureCaseCandidatesAfterQualityArtifacts(
+  input: CaptureCaseCandidatesAfterQualityArtifactsInput,
+): Promise<void> {
+  try {
+    const config = input.caseEvolutionConfig || loadCaseEvolutionConfig();
+    if (!isCaseEvolutionCaptureEnabled(config)) return;
+
+    const computeTraceHash = input.computeTraceHash || ((traceId) =>
+      computeTraceContentHash(getTraceProcessorService(), traceId));
+    const traceContentHash = await computeTraceHash(input.traceId);
+    // §1.2 flooding guard: build the set of (scene::rootCause) keys the
+    // published library already covers, so capture skips clusters that
+    // already have published guidance. Defaults to scanning the live library.
+    const listPublishedSceneRootCauses = input.listPublishedSceneRootCauses
+      ?? ((scope?: KnowledgeScope) => collectPublishedSceneRootCauses(scope ?? input.knowledgeScope));
+    const existingPublishedSceneRootCauses = listPublishedSceneRootCauses(input.knowledgeScope);
+    const saveCandidates = input.saveCandidates || ((captureInput: CaseCandidateCaptureInput) =>
+      saveCaseCandidates(captureInput, {
+        logger: input.logger,
+        config,
+        existingPublishedSceneRootCauses,
+      }));
+
+    await saveCandidates({
+      result: input.result,
+      conclusionContract: input.normalizedConclusionContract,
+      claimVerificationResult: input.result.claimVerificationResult,
+      dataEnvelopes: input.session.dataEnvelopes || [],
+      sceneType: input.sceneIdHint || 'general',
+      architectureType: resolveCaseEvolutionArchitectureType(input.session, input.traceId),
+      knowledgeScope: input.knowledgeScope,
+      snapshotPath: buildCaseEvolutionSnapshotPath(input.sessionId),
+      provenance: {
+        sessionId: input.sessionId,
+        runId: input.runIdForAnalysis,
+        turnIndex: resolveCaseEvolutionTurnIndex(input.session),
+        engine: 'claude',
+        traceContentHash,
+      },
+    });
+  } catch (error) {
+    input.logger.warn('CaseEvolution', 'Candidate capture failed (non-fatal)', {
+      sessionId: input.sessionId,
+      runId: input.runIdForAnalysis,
+      error: errorMessage(error),
+    });
+  }
+}
+
 async function runAgentDrivenAnalysis(
   sessionId: string,
   query: string,
@@ -3725,6 +3933,9 @@ async function runAgentDrivenAnalysis(
   if (!runIdForAnalysis) {
     throw new Error(`Missing run id for session ${sessionId}`);
   }
+  const agentQuery = session.agentQuery && session.query === query
+    ? session.agentQuery
+    : buildAgentQueryWithContinuityNotice(query, session.continuityBreaks);
 
   // Track generation is a lightweight derivation step from DataEnvelopes.
   // Enable by default (unless explicitly disabled) so `/api/agent/v1/analyze` can
@@ -3884,7 +4095,7 @@ async function runAgentDrivenAnalysis(
   try {
     console.log('[AgentRoutes.AgentDriven] Starting orchestrator.analyze...');
     const result = await logger.timed('AgentDrivenAnalysis', 'analyze', async () => {
-      const analyze = () => session.orchestrator.analyze(query, sessionId, traceId, {
+      const analyze = () => session.orchestrator.analyze(agentQuery, sessionId, traceId, {
         traceProcessorService: options.traceProcessorService,
         packageName: options.packageName,
         timeRange: options.timeRange,
@@ -3945,12 +4156,16 @@ async function runAgentDrivenAnalysis(
     }
 
     if (result.success || result.partial === true) {
+      // Read the case-evolution config ONCE per request so the attach-flag
+      // and capture-flag decisions see the same snapshot (MINOR-2). Both the
+      // retriever-attach gate below and the capture call below consume this.
+      const caseEvolutionConfig = loadCaseEvolutionConfig();
       const sceneIdHint = resolveConclusionSceneIdHint({
         sessionId,
         query,
         findings: result.findings,
       });
-      const normalizedConclusionContract = (
+      let normalizedConclusionContract = (
         deriveEvidenceBackedConclusionContractForNarrative(result.conclusion, session.dataEnvelopes || [], {
           existingContract: result.conclusionContract as ConclusionContract | undefined,
           mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
@@ -3959,9 +4174,51 @@ async function runAgentDrivenAnalysis(
         undefined
       ) as ConclusionContract | undefined;
       if (normalizedConclusionContract) {
+        if (isCaseEvolutionRetrieveEnabled(caseEvolutionConfig)) {
+          const attached = attachCaseHitsToContractSync({
+            conclusionContract: normalizedConclusionContract,
+            dataEnvelopes: session.dataEnvelopes || [],
+            sceneType: sceneIdHint,
+            architectureType: resolveCaseEvolutionArchitectureType(session, traceId),
+            knowledgeScope: options.knowledgeScope,
+          });
+          normalizedConclusionContract = attached.contract;
+        }
         result.conclusionContract = normalizedConclusionContract;
       }
       ensureAnalysisQualityArtifacts(session, normalizedConclusionContract, result);
+      if (normalizedConclusionContract?.caseRecommendations?.length) {
+        const pruned = verifyAndPruneCaseRecommendations({
+          contract: normalizedConclusionContract,
+          evidenceSignaturesByCluster: projectEvidenceSignaturesByCluster(
+            session.dataEnvelopes || [],
+            normalizedConclusionContract,
+          ),
+          narrative: result.conclusion,
+          scope: options.knowledgeScope,
+        });
+        normalizedConclusionContract = pruned.contract;
+        result.conclusionContract = normalizedConclusionContract;
+        if (pruned.issues.length > 0) {
+          result.claimVerificationResult = mergeCaseRecommendationVerificationIssues(
+            result.claimVerificationResult,
+            pruned.issues,
+          );
+          session.claimVerificationResult = result.claimVerificationResult;
+        }
+      }
+      void captureCaseCandidatesAfterQualityArtifacts({
+        sessionId,
+        traceId,
+        session,
+        result,
+        normalizedConclusionContract,
+        sceneIdHint,
+        runIdForAnalysis,
+        knowledgeScope: options.knowledgeScope,
+        caseEvolutionConfig,
+        logger,
+      });
     }
 
     completeAgentDrivenSessionWithResult({
@@ -4016,6 +4273,28 @@ async function runAgentDrivenAnalysis(
     }
     modelRouter.off('llmTelemetry', onLlmTelemetry);
   }
+}
+
+function mergeCaseRecommendationVerificationIssues(
+  existing: ClaimVerificationResult | undefined,
+  issues: ClaimVerificationResult['issues'],
+): ClaimVerificationResult {
+  if (existing) {
+    return {
+      ...existing,
+      issues: [...existing.issues, ...issues],
+    };
+  }
+  return {
+    schemaVersion: 'claim_verifier@1',
+    status: 'partial',
+    policy: 'record_only',
+    passed: false,
+    checkedClaimCount: 0,
+    unsupportedClaimCount: 0,
+    claimResults: [],
+    issues,
+  };
 }
 
 function sanitizeConversationText(value: unknown, maxLen = 240): string {

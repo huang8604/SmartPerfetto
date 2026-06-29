@@ -30,6 +30,32 @@ function maskCodeBlocksForFindingScan(text: string): string {
   return text.replace(/```[\s\S]*?```/g, block => block.replace(/[^\n]/g, ' '));
 }
 
+function maskMarkdownTableRowsForFindingScan(text: string): string {
+  return text
+    .split('\n')
+    .map(line => isMarkdownTableRow(line) ? line.replace(/[^\n]/g, ' ') : line)
+    .join('\n');
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) return false;
+  if (/^(?:#{1,6}\s+|[-*+]\s+|\d+\.\s+)/.test(trimmed)) return false;
+
+  const cells = trimmed
+    .split('|')
+    .map(cell => cell.trim())
+    .filter(Boolean);
+  if (cells.length >= 3) return true;
+  if ((trimmed.startsWith('|') || trimmed.endsWith('|')) && cells.length >= 2) return true;
+
+  return isMarkdownTableSeparatorRow(trimmed);
+}
+
+function isMarkdownTableSeparatorRow(line: string): boolean {
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line.trim());
+}
+
 function findNextSeverityMarkerIndex(scanText: string, startIndex: number): number | undefined {
   NEXT_SEVERITY_REGEX.lastIndex = startIndex;
   const next = NEXT_SEVERITY_REGEX.exec(scanText);
@@ -46,7 +72,7 @@ export function extractFindingsFromText(text: string): Finding[] {
 
   // Mask code blocks to avoid extracting findings from Mermaid/SQL/code content
   // while preserving indices so evidence can still be read from the original text.
-  const scanText = maskCodeBlocksForFindingScan(text);
+  const scanText = maskMarkdownTableRowsForFindingScan(maskCodeBlocksForFindingScan(text));
 
   SEVERITY_REGEX.lastIndex = 0;
 
@@ -58,13 +84,13 @@ export function extractFindingsFromText(text: string): Finding[] {
     const sectionEnd = findNextSeverityMarkerIndex(scanText, afterTitleStart) ?? text.length;
     const afterTitle = text.substring(afterTitleStart, Math.min(sectionEnd, afterTitleStart + 1600));
     const afterTitleWithoutCode = stripCodeBlocks(afterTitle);
-    const evidence = extractEvidence(afterTitle);
+    const evidence = extractEvidence(afterTitle) ?? extractInlineHeadingEvidence(title);
 
     findings.push({
       id: `claude-${uuidv4().slice(0, 8)}`,
       severity,
       title: title.substring(0, 200),
-      description: extractDescription(afterTitleWithoutCode) || title,
+      description: extractDescription(afterTitleWithoutCode) || evidence || title,
       source: 'claude-agent',
       confidence: severityToConfidence(severity),
       evidence: evidence ? [{ text: evidence }] : undefined,
@@ -128,8 +154,15 @@ function extractDescription(text: string): string {
   const descMatch = text.match(/(?:描述[：:]|Description:)\s*(.+?)(?=\n(?:证据|建议|Evidence|Suggestion|\*\*\[)|$)/s);
   if (descMatch) return descMatch[1].trim().substring(0, 500);
 
-  const firstLine = text.split('\n').find(l => l.trim().length > 0);
+  const firstLine = text.split('\n').find(l => {
+    const trimmed = l.trim();
+    return trimmed.length > 0 && !isListMarkerFragment(trimmed);
+  });
   return firstLine?.trim().substring(0, 500) || '';
+}
+
+function isListMarkerFragment(text: string): boolean {
+  return /^(?:[-*+]|\d+[.)])\s*\*{0,2}$/.test(text);
 }
 
 function extractEvidence(text: string): string | undefined {
@@ -154,11 +187,57 @@ function extractEvidence(text: string): string | undefined {
     return fencedMetricBlock[1].trim().substring(0, 500);
   }
 
+  const markdownTable = extractMarkdownTableEvidence(text);
+  if (markdownTable) return markdownTable;
+
   return undefined;
 }
 
+function extractInlineHeadingEvidence(title: string): string | undefined {
+  const inline = title.match(/\s+[—-]\s+(.{20,})$/s);
+  if (!inline) return undefined;
+
+  const evidence = inline[1].trim();
+  if (!looksLikeEvidenceMetricBlock(evidence)) return undefined;
+  return evidence.substring(0, 500);
+}
+
+function extractMarkdownTableEvidence(text: string): string | undefined {
+  const lines = text.split('\n');
+  let start = 0;
+  while (start < lines.length && lines[start].trim().length === 0) start += 1;
+  if (start >= lines.length || !isMarkdownTableRow(lines[start])) return undefined;
+
+  const separator = start + 1;
+  if (!isMarkdownTableSeparatorRow(lines[separator] ?? '')) return undefined;
+
+  const evidenceLines = [lines[start].trimEnd(), lines[separator].trimEnd()];
+  let cursor = separator + 1;
+  for (; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    if (line.trim().length === 0) break;
+    if (!isMarkdownTableRow(line)) break;
+    evidenceLines.push(line.trimEnd());
+  }
+
+  while (cursor < lines.length && lines[cursor].trim().length === 0) cursor += 1;
+  if (isCausalEvidenceLine(lines[cursor] ?? '')) {
+    evidenceLines.push('');
+    evidenceLines.push(lines[cursor].trim());
+  }
+
+  const evidence = evidenceLines.join('\n').trim();
+  if (!looksLikeEvidenceMetricBlock(evidence)) return undefined;
+  return evidence.substring(0, 500);
+}
+
+function isCausalEvidenceLine(line: string): boolean {
+  return /^\*{0,2}(?:因果链|根因推理链|证据|Evidence|Root\s+Cause(?:\s+Chain)?)\*{0,2}\s*[：:]/i
+    .test(line.trim());
+}
+
 function looksLikeEvidenceMetricBlock(text: string): boolean {
-  return /(?:帧耗时|VSync|MainThread|RenderThread|CPU\s*频率|CPU频率|Binder|GC|IO|frame\s*duration|evidence_ref_id|source_ref|\d+(?:\.\d+)?\s*ms)/i
+  return /(?:帧耗时|掉帧|VSync|vsync_missed|MainThread|RenderThread|Choreographer|CPU\s*频率|CPU频率|Binder|GC|IO|FPS|frame\s*duration|evidence_ref_id|source_ref|\d+(?:\.\d+)?\s*(?:ms|%|GHz)|\d+\s*帧)/i
     .test(text);
 }
 

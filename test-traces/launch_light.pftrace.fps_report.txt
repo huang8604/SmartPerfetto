@@ -1,0 +1,51 @@
+=== FPS Report: /Users/chris/Code/SmartPerfetto/SmartPerfetto/test-traces/launch_light.pftrace ===
+[window source: structured input, 1 gesture(s)]
+
+-- Overall (press + fling: DOWN -> next DOWN) --
+Screen FPS (display/SF output): 109.0
+Total frames (all sources): 416
+  presented       : 416
+  dropped         : 0  (never on screen)
+  janky           : 2  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - Splash Screen com.example.androidappdemo#412 fps=  48.9 frames=44 presented=44 dropped=0 janky=0
+  TX - Surface(name=Task=1)/@0x14294a2_transition-leash#418 fps=  67.8 frames=61 presented=61 dropped=0 janky=0
+  TX - Surface(name=Task=2093)/@0xa7be084_transition-leash#417 fps=  67.8 frames=61 presented=61 dropped=0 janky=0
+  TX - Surface(name=c61695f com.example.androidappdemo/com.example.androidappdemo.MainActivity)/@0x82952ae - animation-leash of starting_reveal#424 fps=  47.8 frames=43 presented=43 dropped=0 janky=0
+  TX - Surface(name=d5d859f Splash Screen com.example.androidappdemo)/@0xc65c35e - animation-leash of window_animation#426 fps=  21.1 frames=19 presented=19 dropped=0 janky=0
+  TX - Taskbar#86                          fps=   4.4 frames=4 presented=4 dropped=0 janky=0
+  TX - com.example.androidappdemo/com.example.androidappdemo.MainActivity#421 fps=  20.0 frames=18 presented=18 dropped=0 janky=2
+  TX - com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity#386 fps=  75.6 frames=68 presented=68 dropped=0 janky=0
+  display                                  fps= 109.0 frames=98 presented=98 dropped=0 janky=0
+
+-- Press phase (finger down -> up) --
+Screen FPS (display/SF output): 0.0
+Total frames (all sources): 0
+  presented       : 0
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  (single source)
+
+-- Fling phase (finger up -> next press) --
+Screen FPS (display/SF output): 117.2
+Total frames (all sources): 416
+  presented       : 416
+  dropped         : 0  (never on screen)
+  janky           : 2  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - Splash Screen com.example.androidappdemo#412 fps=  52.6 frames=44 presented=44 dropped=0 janky=0
+  TX - Surface(name=Task=1)/@0x14294a2_transition-leash#418 fps=  73.0 frames=61 presented=61 dropped=0 janky=0
+  TX - Surface(name=Task=2093)/@0xa7be084_transition-leash#417 fps=  73.0 frames=61 presented=61 dropped=0 janky=0
+  TX - Surface(name=c61695f com.example.androidappdemo/com.example.androidappdemo.MainActivity)/@0x82952ae - animation-leash of starting_reveal#424 fps=  51.4 frames=43 presented=43 dropped=0 janky=0
+  TX - Surface(name=d5d859f Splash Screen com.example.androidappdemo)/@0xc65c35e - animation-leash of window_animation#426 fps=  22.7 frames=19 presented=19 dropped=0 janky=0
+  TX - Taskbar#86                          fps=   4.8 frames=4 presented=4 dropped=0 janky=0
+  TX - com.example.androidappdemo/com.example.androidappdemo.MainActivity#421 fps=  21.5 frames=18 presented=18 dropped=0 janky=2
+  TX - com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity#386 fps=  81.4 frames=68 presented=68 dropped=0 janky=0
+  display                                  fps= 117.2 frames=98 presented=98 dropped=0 janky=0
+
+Per-gesture Screen-FPS (overall / press / fling):
+  gesture 0: overall=109.0  press=0.0  fling=117.2

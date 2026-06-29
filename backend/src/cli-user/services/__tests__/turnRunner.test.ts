@@ -5,8 +5,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { sessionPaths, type CliPaths } from '../../io/paths';
-import { buildResumeContextQuery, truncateAtBoundary } from '../turnRunner';
+import { ensureSessionLayout, sessionPaths, type CliPaths } from '../../io/paths';
+import { writeConfig } from '../../io/sessionStore';
+import { buildResumeContextQuery, continueSession, truncateAtBoundary } from '../turnRunner';
+import type { CliAnalyzeService, RunTurnOutput } from '../cliAnalyzeService';
+import type { Renderer } from '../../repl/renderer';
+import type { CliSessionConfig } from '../../types';
 
 describe('truncateAtBoundary', () => {
   test('returns text unchanged when shorter than max', () => {
@@ -116,5 +120,152 @@ describe('buildResumeContextQuery', () => {
     const sp = sessionPaths(paths, 'agent-3');
     const query = buildResumeContextQuery(sp, 'plain question');
     expect(query).toBe('plain question');
+  });
+});
+
+describe('continueSession Level-3 lineage', () => {
+  let tmpDir: string;
+  let paths: CliPaths;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turn-runner-lineage-test-'));
+    paths = {
+      home: tmpDir,
+      sessionsRoot: path.join(tmpDir, 'sessions'),
+      tracesRoot: path.join(tmpDir, 'traces'),
+      indexFile: path.join(tmpDir, 'index.json'),
+    };
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeRenderer(): Renderer {
+    return {
+      format: 'text',
+      onEvent: jest.fn(),
+      printConclusion: jest.fn(),
+      printError: jest.fn(),
+      printCompletion: jest.fn(),
+    };
+  }
+
+  function makeRunTurnOutput(sessionId: string, traceId: string): RunTurnOutput {
+    return {
+      sessionId,
+      traceId,
+      sdkSessionId: `sdk-${sessionId}`,
+      providerId: null,
+      agentRuntimeKind: 'claude-agent-sdk',
+      providerSnapshotHash: 'hash-next',
+      model: 'claude-test',
+      reportHtml: '<html><body>report</body></html>',
+      result: {
+        sessionId,
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: '新结论：继续分析完成。',
+        confidence: 0.8,
+        rounds: 1,
+        totalDurationMs: 1200,
+      },
+    };
+  }
+
+  function seedSession(config: Partial<CliSessionConfig> & {lineage?: any} = {}): ReturnType<typeof sessionPaths> {
+    const sp = sessionPaths(paths, 'agent-1');
+    ensureSessionLayout(sp);
+    writeConfig(sp, {
+      sessionId: 'agent-1',
+      backendSessionId: 'backend-old',
+      tracePath: path.join(tmpDir, 'trace.pftrace'),
+      traceId: 'trace-old',
+      providerId: null,
+      agentRuntimeKind: 'claude-agent-sdk',
+      providerSnapshotHash: 'hash-old',
+      sdkSessionId: 'sdk-old',
+      model: 'claude-test',
+      createdAt: 1_700_000_000_000,
+      lastTurnAt: 1_700_000_001_000,
+      turnCount: 1,
+      ...config,
+    });
+    fs.writeFileSync(sp.conclusion, '上一轮结论：主线程阻塞。', 'utf-8');
+    fs.writeFileSync(sp.transcript, [
+      JSON.stringify({
+        turn: 1,
+        timestamp: 1_700_000_001_000,
+        question: '分析启动',
+        conclusionMd: '上一轮结论：主线程阻塞。',
+      }),
+      '',
+    ].join('\n'));
+    return sp;
+  }
+
+  it('records lineage when Level-3 degraded resume creates a fresh backend session', async () => {
+    const sp = seedSession();
+    const service = {
+      reloadTraceById: jest.fn(async () => false),
+      loadTrace: jest.fn(async () => 'trace-new'),
+      runTurn: jest.fn(async (input: any) => {
+        input.onSessionReady?.('backend-new');
+        return makeRunTurnOutput('backend-new', 'trace-new');
+      }),
+    } as unknown as CliAnalyzeService;
+
+    const result = await continueSession(
+      {paths, service, renderer: makeRenderer()},
+      {sessionId: 'agent-1', query: '继续分析'},
+    );
+
+    const saved = JSON.parse(fs.readFileSync(sp.config, 'utf-8')) as any;
+    const turnMarkdown = fs.readFileSync(path.join(sp.turnsDir, '002.md'), 'utf-8');
+
+    expect(result.degraded).toBe(true);
+    expect(saved.backendSessionId).toBe('backend-new');
+    expect(saved.lineage).toMatchObject({
+      previousBackendSessionId: 'backend-old',
+      reason: 'cli-level3-degraded',
+    });
+    expect(typeof saved.lineage?.at).toBe('number');
+    const runInput = (service.runTurn as any).mock.calls[0][0];
+    expect(runInput.sessionId).toBeUndefined();
+    expect(runInput.lineage).toMatchObject({
+      previousBackendSessionId: 'backend-old',
+      reason: 'cli-level3-degraded',
+    });
+    expect(turnMarkdown).toContain('此会话因 trace 重载已从原会话降级续接');
+    expect(turnMarkdown).toContain('backend-old');
+  });
+
+  it('keeps showing the lineage notice on later resumes after the degraded bridge exists', async () => {
+    const sp = seedSession({
+      lineage: {
+        previousBackendSessionId: 'backend-original',
+        reason: 'cli-level3-degraded',
+        at: 1_700_000_002_000,
+      },
+    });
+    const service = {
+      reloadTraceById: jest.fn(async () => true),
+      loadTrace: jest.fn(),
+      runTurn: jest.fn(async (input: any) => {
+        input.onSessionReady?.('backend-old');
+        return makeRunTurnOutput('backend-old', 'trace-old');
+      }),
+    } as unknown as CliAnalyzeService;
+
+    const result = await continueSession(
+      {paths, service, renderer: makeRenderer()},
+      {sessionId: 'agent-1', query: '继续追问'},
+    );
+
+    const turnMarkdown = fs.readFileSync(path.join(sp.turnsDir, '002.md'), 'utf-8');
+    expect(result.degraded).toBe(false);
+    expect(turnMarkdown).toContain('此会话因 trace 重载已从原会话降级续接');
+    expect(turnMarkdown).toContain('backend-original');
   });
 });

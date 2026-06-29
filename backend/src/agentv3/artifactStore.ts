@@ -16,6 +16,7 @@
  * - full: complete original data structure
  */
 
+import type { TraceProcessorQueryProvenance } from '../services/traceProcessorConnectionModel';
 import type { IdentityResolutionV1 } from '../types/identityContract';
 
 export interface StoredArtifact {
@@ -38,6 +39,8 @@ export interface StoredArtifact {
   identityResolution?: IdentityResolutionV1;
   /** In comparison mode, which trace this artifact came from (provenance tracking) */
   sourceTrace?: import('./types').TraceSource;
+  /** Trace processor provenance for SQL/artifact-backed evidence. */
+  traceProvenance?: TraceProcessorQueryProvenance;
 }
 
 export interface ArtifactSummary {
@@ -74,6 +77,8 @@ export interface CompactArtifactSummary {
   /** Origin phase for explaining why this artifact/table exists. */
   planPhaseId?: string;
   planPhaseTitle?: string;
+  traceSide?: TraceProcessorQueryProvenance['traceSide'];
+  traceId?: string;
 }
 
 export class ArtifactStore {
@@ -103,6 +108,7 @@ export class ArtifactStore {
     sourceToolCallId?: string;
     paramsHash?: string;
     identityResolution?: IdentityResolutionV1;
+    traceProvenance?: TraceProcessorQueryProvenance;
   }): string {
     const id = `art-${++this.counter}`;
     const now = Date.now();
@@ -178,6 +184,7 @@ export class ArtifactStore {
   generateCompactSummary(id: string): CompactArtifactSummary | undefined {
     const full = this.generateSummary(id);
     if (!full) return undefined;
+    const artifact = this.artifacts.get(id);
 
     let preview: Record<string, any> | undefined;
     if (full.sampleRow && full.columns.length > 0) {
@@ -196,6 +203,8 @@ export class ArtifactStore {
       ...(full.diagnosticCount > 0 ? { diagnosticCount: full.diagnosticCount } : {}),
       ...(full.planPhaseId ? { planPhaseId: full.planPhaseId } : {}),
       ...(full.planPhaseTitle ? { planPhaseTitle: full.planPhaseTitle } : {}),
+      ...(artifact?.traceProvenance?.traceSide ? { traceSide: artifact.traceProvenance.traceSide } : {}),
+      ...(artifact?.traceProvenance?.traceId ? { traceId: artifact.traceProvenance.traceId } : {}),
     };
   }
 
@@ -234,6 +243,9 @@ export class ArtifactStore {
           sourceToolCallId: artifact.sourceToolCallId,
           paramsHash: artifact.paramsHash,
           identityResolution: artifact.identityResolution,
+          traceSide: artifact.traceProvenance?.traceSide,
+          traceId: artifact.traceProvenance?.traceId,
+          traceProvenance: artifact.traceProvenance,
         };
       }
       case 'full': {
@@ -258,6 +270,9 @@ export class ArtifactStore {
           sourceToolCallId: artifact.sourceToolCallId,
           paramsHash: artifact.paramsHash,
           identityResolution: artifact.identityResolution,
+          traceSide: artifact.traceProvenance?.traceSide,
+          traceId: artifact.traceProvenance?.traceId,
+          traceProvenance: artifact.traceProvenance,
           ...(truncatedFull ? { truncated: true, totalRows: fullRows.length, hint: 'Use detail="rows" with offset/limit for complete data' } : {}),
         };
       }

@@ -3,6 +3,8 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {describe, it, expect} from '@jest/globals';
+import fs from 'fs';
+import path from 'path';
 import {
   buildColumnDefinitions,
   createDataEnvelope,
@@ -12,6 +14,12 @@ import {
 } from '../dataContract';
 
 describe('dataContract column inference', () => {
+  it('declares terminalRunStatus on analysis_completed payloads', () => {
+    const source = fs.readFileSync(path.resolve(__dirname, '../dataContract.ts'), 'utf8');
+
+    expect(source).toContain("terminalRunStatus?: 'completed' | 'quota_exceeded'");
+  });
+
   it('infers start timestamp columns as range-navigable', () => {
     const start = inferColumnDefinition('start_ts');
 

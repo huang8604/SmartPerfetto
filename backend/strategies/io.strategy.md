@@ -84,11 +84,55 @@ plan_template:
     - id: io_evidence_ladder
       match_keywords: ['block_io_analysis', 'io_pressure', 'main_thread_file_io_in_range', 'page_fault_in_range', 'D-state', 'fsync', '存储', '磁盘', '页缺失']
       suggestion: 'I/O 场景必须先区分 block I/O、D-state、主线程文件 I/O、页缺失和外部存储/容量证据'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: block_io_analysis
+        - tool: invoke_skill
+          skill_id: io_pressure
+        - tool: invoke_skill
+          skill_id: main_thread_file_io_in_range
+        - tool: invoke_skill
+          skill_id: page_fault_in_range
     - id: app_api_boundary
       match_keywords: ['SQLite', 'Room', 'SharedPreferences', 'QueuedWork', 'ContentProvider', 'CursorWindow', 'MediaProvider', '数据库', 'Provider', 'blocking_chain_analysis']
       suggestion: 'I/O 场景需要证明或明确缺失 SQLite/Room、SharedPreferences/QueuedWork、ContentProvider/CursorWindow 等 app API 边界'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: main_thread_file_io_in_range
+        - tool: invoke_skill
+          skill_id: blocking_chain_analysis
 ---
 
+#### io Core Strategy
+
+**Route card**: io / i/o / disk / storage / filesystem / block io / fsync / fdatasync / page fault / sqlite
+
+**Capabilities**: required=[none], optional=[disk_io, binder_ipc, cpu_scheduling]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- io_evidence_ladder: I/O 场景必须先区分 block I/O、D-state、主线程文件 I/O、页缺失和外部存储/容量证据 (requires one of: invoke_skill(block_io_analysis), invoke_skill(io_pressure), invoke_skill(main_thread_file_io_in_range), invoke_skill(page_fault_in_range))
+- app_api_boundary: I/O 场景需要证明或明确缺失 SQLite/Room、SharedPreferences/QueuedWork、ContentProvider/CursorWindow 等 app API 边界 (requires one of: invoke_skill(main_thread_file_io_in_range), invoke_skill(blocking_chain_analysis))
+
+**Phase reminders**
+- io_evidence_ladder: 先区分 block I/O、D-state 等待、主线程文件 I/O、page fault、容量/损坏/外部存储线索。缺少路径、线程、栈或 block 层证据时只能写数据缺口，不能把系统 I/O 压力直接升级为业务根因。 工具: block_io_analysis, io_pressure, main_thread_file_io_in_range, page_fault_in_range
+- sqlite_sharedprefs_provider_boundary: SQLite/Room、SharedPreferences/QueuedWork、ContentProvider/CursorWindow/MediaProvider 是不同证明路径。必须有 slice/stack/Binder/provider-side evidence 才能命名；只有 D-state/fsync 时写成候选和补证建议。 工具: blocking_chain_analysis, main_thread_file_io_in_range, binder_analysis
+
+**Final report contract summary**
+- I/O 证据类型
+- 文件/数据库/Provider 边界
+- 置信度与补证
+
+
+**Detail ref**
+- `io:full`: I/O / Storage / SQLite 分析 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="io full strategy detail" keywords="io,io,i/o,disk,storage,filesystem,block io,fsync,fdatasync,page fault,sqlite,sqliteopenhelper,room,I/O / Storage / SQLite 分析,detail,full" default="true" -->
 #### I/O / Storage / SQLite 分析
 
 I/O 场景的第一原则：先分证据类型，再命名根因。`D-state`、`fsync`、`page fault`、block layer 延迟、主线程文件 I/O、SQLite/Room、SharedPreferences/QueuedWork、ContentProvider/MediaProvider 是不同证据路径。
@@ -151,3 +195,4 @@ ContentProvider 相关问题必须区分 caller 侧等待、provider 侧 Binder 
 3. **阻塞链路**：caller thread、provider/server thread、block device、waker 或 lock owner。
 4. **根因与置信度**：直接证据、候选、不可证明项分开写；不要把 D-state/fsync 自动升级为 DB 根因。
 5. **下一步补证**：需要补采路径、Java/native stack、SQLite/Room trace、provider-side trace、block I/O、设备存储状态或 APM/IO Canary 证据。
+<!-- /strategy-detail -->

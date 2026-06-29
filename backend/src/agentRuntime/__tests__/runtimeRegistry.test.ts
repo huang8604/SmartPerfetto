@@ -34,6 +34,7 @@ function fakeCapabilities(kind = 'fake-runtime'): EngineCapabilities {
     displayName: 'Fake Runtime',
     production: false,
     publicRuntime: false,
+    promptCache: { systemPromptDynamicBoundary: false },
   };
 }
 
@@ -78,24 +79,28 @@ describe('runtime registry', () => {
       displayName: 'Claude Agent SDK',
       production: true,
       publicRuntime: true,
+      promptCache: { systemPromptDynamicBoundary: true },
     });
     expect(openai).toEqual({
       kind: 'openai-agents-sdk',
       displayName: 'OpenAI Agents SDK',
       production: true,
       publicRuntime: true,
+      promptCache: { systemPromptDynamicBoundary: false },
     });
     expect(pi).toEqual({
       kind: 'pi-agent-core',
       displayName: 'Pi Agent Core',
       production: true,
       publicRuntime: true,
+      promptCache: { systemPromptDynamicBoundary: false },
     });
     expect(opencode).toEqual({
       kind: 'opencode',
       displayName: 'OpenCode',
       production: true,
       publicRuntime: true,
+      promptCache: { systemPromptDynamicBoundary: false },
     });
     for (const capabilities of [claude, openai, pi, opencode]) {
       expect(capabilities).not.toHaveProperty('toolTransport');

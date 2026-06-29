@@ -215,6 +215,29 @@ describe('Provider connection tester', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('fails Vertex connection tests on unauthenticated 401 or 403 responses', async () => {
+    globalThis.fetch = jest.fn(async () => jsonResponse({
+      error: { message: 'Request had invalid authentication credentials.' },
+    }, 401)) as any;
+
+    const result = await testProviderConnection({
+      ...openAIProvider(),
+      type: 'vertex',
+      connection: {
+        gcpProjectId: 'demo-project',
+        gcpRegion: 'us-central1',
+      },
+      models: {
+        primary: 'claude-sonnet-4@20250514',
+        light: 'claude-haiku-4@20250514',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.modelVerified).toBe(false);
+    expect(result.error).toContain('Vertex auth failed (401)');
+  });
+
   it('fails custom Pi Agent Core providers with invalid model JSON', async () => {
     const result = await testProviderConnection(customPiProvider({
       connection: {

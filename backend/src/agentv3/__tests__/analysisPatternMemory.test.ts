@@ -23,6 +23,10 @@ import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals
 let mockPatterns: any[] = [];
 let mockNegativePatterns: any[] = [];
 let mockQuickPatterns: any[] = [];
+let mockPatternFileRaw: string | undefined;
+let mockNegativePatternFileRaw: string | undefined;
+let mockQuickPatternFileRaw: string | undefined;
+let mockCorruptBackups: Array<{ src: string; dest: string }> = [];
 const originalEnterprise = process.env.SMARTPERFETTO_ENTERPRISE;
 
 // Temporary storage for atomic write simulation (writeFile to .tmp, then rename)
@@ -40,20 +44,34 @@ jest.mock('fs', () => {
     ...actual,
     existsSync: jest.fn((...args: unknown[]) => {
       const p = args[0] as string;
-      if (typeof p !== 'string' || p.endsWith('.tmp')) return false;
-      if (isNegativeFile(p)) return mockNegativePatterns.length > 0;
-      if (isQuickFile(p)) return mockQuickPatterns.length > 0;
-      if (isPositiveFile(p)) return mockPatterns.length > 0;
+      if (typeof p !== 'string' || p.includes('.tmp')) return false;
+      if (isNegativeFile(p)) return mockNegativePatternFileRaw !== undefined || mockNegativePatterns.length > 0;
+      if (isQuickFile(p)) return mockQuickPatternFileRaw !== undefined || mockQuickPatterns.length > 0;
+      if (isPositiveFile(p)) return mockPatternFileRaw !== undefined || mockPatterns.length > 0;
       return false;
     }),
     readFileSync: jest.fn((...args: unknown[]) => {
       const p = args[0] as string;
-      if (typeof p === 'string' && isNegativeFile(p)) return JSON.stringify(mockNegativePatterns);
-      if (typeof p === 'string' && isQuickFile(p)) return JSON.stringify(mockQuickPatterns);
-      if (typeof p === 'string' && isPositiveFile(p)) return JSON.stringify(mockPatterns);
+      if (typeof p === 'string' && isNegativeFile(p)) {
+        return mockNegativePatternFileRaw ?? JSON.stringify(mockNegativePatterns);
+      }
+      if (typeof p === 'string' && isQuickFile(p)) {
+        return mockQuickPatternFileRaw ?? JSON.stringify(mockQuickPatterns);
+      }
+      if (typeof p === 'string' && isPositiveFile(p)) {
+        return mockPatternFileRaw ?? JSON.stringify(mockPatterns);
+      }
       return '[]';
     }),
     mkdirSync: jest.fn(),
+    renameSync: jest.fn((...args: unknown[]) => {
+      const src = args[0] as string;
+      const dest = args[1] as string;
+      mockCorruptBackups.push({ src, dest });
+      if (isNegativeFile(src)) mockNegativePatternFileRaw = undefined;
+      if (isQuickFile(src)) mockQuickPatternFileRaw = undefined;
+      if (isPositiveFile(src)) mockPatternFileRaw = undefined;
+    }),
     promises: {
       writeFile: jest.fn(async (...args: unknown[]) => {
         const p = args[0] as string;
@@ -67,10 +85,13 @@ jest.mock('fs', () => {
         if (data) {
           if (typeof dest === 'string' && isNegativeFile(dest)) {
             mockNegativePatterns = JSON.parse(data);
+            mockNegativePatternFileRaw = undefined;
           } else if (typeof dest === 'string' && isQuickFile(dest)) {
             mockQuickPatterns = JSON.parse(data);
+            mockQuickPatternFileRaw = undefined;
           } else if (typeof dest === 'string' && isPositiveFile(dest)) {
             mockPatterns = JSON.parse(data);
+            mockPatternFileRaw = undefined;
           }
           tmpWriteBuffer.delete(src);
         }
@@ -95,6 +116,7 @@ import {
   buildNegativePatternSection,
   setSupersedeStoreForTesting,
 } from '../analysisPatternMemory';
+import { bucketPackageDomain } from '../../services/caseEvolution/domainBucket';
 
 // ── Setup ────────────────────────────────────────────────────────────────
 
@@ -102,6 +124,11 @@ beforeEach(() => {
   mockPatterns = [];
   mockNegativePatterns = [];
   mockQuickPatterns = [];
+  mockPatternFileRaw = undefined;
+  mockNegativePatternFileRaw = undefined;
+  mockQuickPatternFileRaw = undefined;
+  mockCorruptBackups = [];
+  tmpWriteBuffer = new Map();
   // Disable the real SQLite supersede store for fs-mocked tests; PR9b's
   // own integration tests cover the live store behaviour.
   setSupersedeStoreForTesting(null);
@@ -131,6 +158,7 @@ describe('extractTraceFeatures', () => {
   it('should extract domain from package name', () => {
     const features = extractTraceFeatures({ packageName: 'com.tencent.mm' });
     expect(features).toContain('domain:tencent');
+    expect(features).toContain(`domain:${bucketPackageDomain('com.tencent.mm')}`);
   });
 
   it('should extract category tags from finding categories', () => {
@@ -400,6 +428,76 @@ describe('saveAnalysisPattern', () => {
     expect(mockPatterns[0].keyInsights).toContain('Old insight');
     expect(mockPatterns[0].keyInsights).toContain('New insight');
   });
+
+  it('serializes concurrent writes so both new patterns survive', async () => {
+    const fs = require('fs');
+
+    await Promise.all([
+      saveAnalysisPattern(['arch:STANDARD', 'scene:startup'], ['startup insight'], 'startup', 'STANDARD'),
+      saveAnalysisPattern(['arch:FLUTTER', 'scene:scrolling'], ['scrolling insight'], 'scrolling', 'FLUTTER'),
+    ]);
+
+    expect(mockPatterns.map(p => p.keyInsights[0]).sort()).toEqual([
+      'scrolling insight',
+      'startup insight',
+    ]);
+    expect(() => JSON.parse(JSON.stringify(mockPatterns))).not.toThrow();
+
+    const tmpPaths = fs.promises.writeFile.mock.calls.map((call: unknown[]) => call[0]);
+    expect(new Set(tmpPaths).size).toBe(tmpPaths.length);
+    expect(tmpPaths.every((p: string) => p.includes(`.tmp-${process.pid}-`))).toBe(true);
+  });
+
+  it('backs up corrupt positive store, logs an error, and falls back to last known good patterns', () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const features = ['arch:STANDARD', 'scene:scrolling'];
+    mockPatterns = [{
+      id: 'pat-good',
+      traceFeatures: features,
+      sceneType: 'scrolling',
+      keyInsights: ['cached insight'],
+      confidence: 0.8,
+      createdAt: Date.now(),
+      matchCount: 0,
+      status: 'confirmed',
+    }];
+
+    expect(matchPatterns(features)).toHaveLength(1);
+
+    mockPatternFileRaw = '{"not valid json"';
+    const matches = matchPatterns(features);
+
+    expect(matches).toHaveLength(1);
+    expect(matches[0].id).toBe('pat-good');
+    expect(mockCorruptBackups.some(b => b.dest.includes('analysis_patterns.json.corrupt-'))).toBe(true);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('keeps last known good patterns after a corrupt store is quarantined and then missing', () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const features = ['arch:STANDARD', 'scene:scrolling'];
+    mockPatterns = [{
+      id: 'pat-good',
+      traceFeatures: features,
+      sceneType: 'scrolling',
+      keyInsights: ['cached insight'],
+      confidence: 0.8,
+      createdAt: Date.now(),
+      matchCount: 0,
+      status: 'confirmed',
+    }];
+
+    expect(matchPatterns(features)).toHaveLength(1);
+
+    mockPatternFileRaw = '{"not valid json"';
+    expect(matchPatterns(features).map(match => match.id)).toEqual(['pat-good']);
+
+    mockPatterns = [];
+    expect(matchPatterns(features).map(match => match.id)).toEqual(['pat-good']);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
 });
 
 describe('saveNegativePattern', () => {
@@ -432,6 +530,17 @@ describe('saveNegativePattern', () => {
     expect(mockNegativePatterns.length).toBe(1);
     expect(mockNegativePatterns[0].failedApproaches).toHaveLength(2);
     expect(mockNegativePatterns[0].matchCount).toBe(1);
+  });
+
+  it('backs up corrupt negative store, logs an error, and returns an empty cold-cache result', () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(matchNegativePatterns(['arch:NO_FILE', 'scene:missing'])).toEqual([]);
+    mockNegativePatternFileRaw = '{definitely not json';
+
+    expect(matchNegativePatterns(['arch:STANDARD', 'scene:scrolling'])).toEqual([]);
+    expect(mockCorruptBackups.some(b => b.dest.includes('analysis_negative_patterns.json.corrupt-'))).toBe(true);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
 
@@ -651,6 +760,45 @@ describe('quick-path bucket', () => {
     expect(matches.length).toBe(1);
   });
 
+  it('injects quick-path matches into the prompt when full-path memory has no match', () => {
+    mockQuickPatterns = [{
+      id: 'quick',
+      traceFeatures: ['arch:FLUTTER', 'scene:scrolling'],
+      sceneType: 'scrolling',
+      keyInsights: ['quick fallback insight'],
+      confidence: 0.3,
+      createdAt: Date.now(),
+      matchCount: 0,
+      status: 'confirmed',
+    }];
+
+    const section = buildPatternContextSection(['arch:FLUTTER', 'scene:scrolling']);
+
+    expect(section).toContain('历史分析经验');
+    expect(section).toContain('quick fallback insight');
+    expect(section).toContain('相似度 30%');
+  });
+
+  it('does not read quick-path fallback when full-path memory already matches', () => {
+    mockPatterns = [{
+      id: 'long',
+      traceFeatures: ['arch:FLUTTER', 'scene:scrolling'],
+      sceneType: 'scrolling',
+      keyInsights: ['long-term insight'],
+      confidence: 0.9,
+      createdAt: Date.now(),
+      matchCount: 0,
+      status: 'confirmed',
+    }];
+    mockQuickPatternFileRaw = '{not valid json';
+
+    const section = buildPatternContextSection(['arch:FLUTTER', 'scene:scrolling']);
+
+    expect(section).toContain('long-term insight');
+    expect(section).not.toContain('quick fallback insight');
+    expect(mockCorruptBackups).toHaveLength(0);
+  });
+
   it('quick-path matches score lower than long-term confirmed for same features', async () => {
     const now = Date.now();
     mockPatterns = [{
@@ -845,5 +993,77 @@ describe('sweepAutoConfirm', () => {
     await sweepAutoConfirm(now);
     expect(mockPatterns.find(p => p.id === 'conf').status).toBe('confirmed');
     expect(mockPatterns.find(p => p.id === 'rej').status).toBe('rejected');
+  });
+
+  it('promotes only patterns in the requested enterprise scope', async () => {
+    process.env.SMARTPERFETTO_ENTERPRISE = 'true';
+    const now = 1_700_000_000_000;
+    const old = now - 2 * 24 * 60 * 60 * 1000;
+    const scopeA = {tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'user-a'};
+    mockPatterns = [
+      { id: 'pos-a', traceFeatures: ['x'], sceneType: 's', keyInsights: ['a'], confidence: 0.5,
+        createdAt: old, matchCount: 0, status: 'provisional',
+        provenance: {sourceTenantId: 'tenant-a', sourceWorkspaceId: 'workspace-a'} },
+      { id: 'pos-b', traceFeatures: ['x'], sceneType: 's', keyInsights: ['b'], confidence: 0.5,
+        createdAt: old, matchCount: 0, status: 'provisional',
+        provenance: {sourceTenantId: 'tenant-b', sourceWorkspaceId: 'workspace-b'} },
+    ];
+    mockNegativePatterns = [
+      { id: 'neg-a', traceFeatures: ['x'], sceneType: 's', failedApproaches: [],
+        createdAt: old, matchCount: 0, status: 'provisional',
+        provenance: {sourceTenantId: 'tenant-a', sourceWorkspaceId: 'workspace-a'} },
+      { id: 'neg-b', traceFeatures: ['x'], sceneType: 's', failedApproaches: [],
+        createdAt: old, matchCount: 0, status: 'provisional',
+        provenance: {sourceTenantId: 'tenant-b', sourceWorkspaceId: 'workspace-b'} },
+    ];
+
+    const result = await sweepAutoConfirm(now, scopeA);
+
+    expect(result).toEqual({
+      positivePromoted: 1,
+      negativePromoted: 1,
+      totalPromoted: 2,
+    });
+    expect(mockPatterns.find(p => p.id === 'pos-a').status).toBe('confirmed');
+    expect(mockPatterns.find(p => p.id === 'pos-b').status).toBe('provisional');
+    expect(mockNegativePatterns.find(p => p.id === 'neg-a').status).toBe('confirmed');
+    expect(mockNegativePatterns.find(p => p.id === 'neg-b').status).toBe('provisional');
+  });
+});
+
+describe('startPatternMemoryAutoConfirmSweep', () => {
+  it('registers an hourly background sweep and logs tick failures without throwing', async () => {
+    const patternMemoryModule = require('../analysisPatternMemory');
+    expect(typeof patternMemoryModule.startPatternMemoryAutoConfirmSweep).toBe('function');
+
+    let tick: (() => Promise<void> | void) | undefined;
+    const timer = {unref: jest.fn()};
+    const setIntervalFn = jest.fn((fn: () => Promise<void> | void, _ms: number) => {
+      tick = fn;
+      return timer;
+    });
+    const clearIntervalFn = jest.fn();
+    const sweep = jest
+      .fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(new Error('sweep failed'))
+      .mockResolvedValueOnce({positivePromoted: 0, negativePromoted: 0, totalPromoted: 0});
+    const logger = {error: jest.fn()};
+
+    const handle = patternMemoryModule.startPatternMemoryAutoConfirmSweep({
+      sweep,
+      logger,
+      setIntervalFn,
+      clearIntervalFn,
+    });
+
+    expect(setIntervalFn).toHaveBeenCalledWith(expect.any(Function), 60 * 60 * 1000);
+    expect(timer.unref).toHaveBeenCalled();
+    await tick?.();
+    expect(logger.error).toHaveBeenCalled();
+    await tick?.();
+    expect(sweep).toHaveBeenCalledTimes(2);
+
+    handle.stop();
+    expect(clearIntervalFn).toHaveBeenCalledWith(timer);
   });
 });

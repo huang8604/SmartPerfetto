@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import { AssistantApplicationService } from '../../assistant/application/assistantApplicationService';
 import {
   AgentAnalyzeSessionService,
+  buildAgentQueryWithContinuityNotice,
   type AnalyzeManagedSession,
 } from '../../assistant/application/agentAnalyzeSessionService';
 import { getTraceProcessorService } from '../../services/traceProcessorService';
@@ -58,7 +59,7 @@ import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
 import type { QueryResult } from '../../services/traceProcessorService';
 import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
 import { validateDataEnvelope, type DataEnvelope } from '../../types/dataContract';
-import type { CliAnalysisMode } from '../types';
+import type { CliAnalysisMode, CliSessionLineage } from '../types';
 
 export interface RunTurnInput {
   tracePath?: string;
@@ -69,6 +70,8 @@ export interface RunTurnInput {
   analysisMode?: CliAnalysisMode;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
+  /** Backend-session ancestry for CLI Level-3 degraded resume bridges. */
+  lineage?: CliSessionLineage;
   /** Receives every StreamingUpdate from the orchestrator in real time. */
   onEvent: (update: StreamingUpdate) => void;
   /**
@@ -184,6 +187,9 @@ export class CliAnalyzeService {
       requestedSessionId: input.sessionId,
       referenceTraceId: input.referenceTraceId,
     });
+    if (input.lineage) {
+      session.lineage = input.lineage;
+    }
     const effectiveReferenceTraceId = input.referenceTraceId ?? session.referenceTraceId;
 
     // Bump runSequence for this turn. HTTP route gets the incremented value
@@ -217,8 +223,11 @@ export class CliAnalyzeService {
     orchestrator.on('update', handler);
 
     let result: AnalysisResult;
+    const agentQuery = session.agentQuery && session.query === input.query
+      ? session.agentQuery
+      : buildAgentQueryWithContinuityNotice(input.query, session.continuityBreaks);
     try {
-      result = await orchestrator.analyze(input.query, sessionId, traceId, {
+      result = await orchestrator.analyze(agentQuery, sessionId, traceId, {
         providerId: session.providerId,
         referenceTraceId: effectiveReferenceTraceId,
         analysisMode: input.analysisMode,

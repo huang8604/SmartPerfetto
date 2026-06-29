@@ -306,7 +306,13 @@ export class HypothesisExecutor implements AnalysisExecutor {
       });
 
       if (lastStrategy.strategy === 'conclude') {
-        emitter.log('Strategy: conclude - ending analysis');
+        stopReason = 'Strategy concluded';
+        emitter.log(`Strategy: conclude - ${stopReason}`);
+        emitter.emitUpdate('progress', {
+          phase: 'early_stop',
+          reason: stopReason,
+          message: `提前终止: ${stopReason}`,
+        });
         break;
       }
 
@@ -339,7 +345,11 @@ export class HypothesisExecutor implements AnalysisExecutor {
       // Handle deep_dive
       if (lastStrategy.strategy === 'deep_dive' && lastStrategy.focusArea) {
         emitter.log(`Strategy: deep_dive - focusing on ${lastStrategy.focusArea}`);
-        ctx.sharedContext.focusedTimeRange = ctx.options.timeRange;
+        const focusedTimeRange = ctx.sharedContext.focusedTimeRange
+          ?? this.getFocusedTimeRangeFromUserFocus(topFocuses);
+        if (focusedTimeRange) {
+          ctx.sharedContext.focusedTimeRange = focusedTimeRange;
+        }
 
         const deepDiveHypothesis = createHypothesis(
           `深入分析 ${lastStrategy.focusArea} 领域`, 0.6
@@ -499,6 +509,17 @@ export class HypothesisExecutor implements AnalysisExecutor {
     });
 
     return `用户当前关注点:\n${descriptions.join('\n')}`;
+  }
+
+  private getFocusedTimeRangeFromUserFocus(
+    topFocuses: UserFocus[]
+  ): SharedAgentContext['focusedTimeRange'] | undefined {
+    const focus = topFocuses.find(item => item.type === 'timeRange' && item.target.timeRange);
+    if (!focus?.target.timeRange) return undefined;
+    return {
+      start: String(focus.target.timeRange.start),
+      end: String(focus.target.timeRange.end),
+    };
   }
 
   /**

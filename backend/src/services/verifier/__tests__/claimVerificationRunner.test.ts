@@ -79,6 +79,31 @@ describe('runClaimVerification', () => {
     expect(result.identityResolutions).toHaveLength(1);
   });
 
+  it('treats small floating point drift as a verified numeric reference', () => {
+    const envelope = createDataEnvelope({
+      columns: ['blocked_ms'],
+      rows: [[120.0000000001]],
+    }, {
+      type: 'skill_result',
+      source: 'startup_main_thread_blocking',
+      title: 'Main thread blocking',
+      layer: 'overview',
+      format: 'table',
+      evidenceRefId: 'data:skill:test',
+      sourceToolCallId: 'invoke_skill:test',
+      traceId: 'trace-a',
+      traceSide: 'current',
+    });
+
+    const result = runClaimVerification({
+      conclusionContract: contract(120),
+      dataEnvelopes: [envelope],
+    });
+
+    expect(result.claimSupport[0].supportLevel).toBe('verified');
+    expect(result.claimVerificationResult.status).toBe('passed');
+  });
+
   it('fails deterministic verifier when a cited cell value does not match the claim reference', () => {
     const envelope = createDataEnvelope({
       columns: ['blocked_ms'],

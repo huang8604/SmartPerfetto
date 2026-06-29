@@ -4344,6 +4344,38 @@ export class HTMLReportGenerator {
     .claim-source-status.found { background: #dcfce7; color: #166534; }
     .claim-source-status.missing { background: #fee2e2; color: #991b1b; }
     .claim-source-status.ambiguous { background: #fef3c7; color: #92400e; }
+    .case-rec-grid { display: grid; gap: 12px; }
+    .case-rec-card {
+      border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff;
+      overflow: hidden;
+    }
+    .case-rec-header {
+      padding: 12px 14px; background: #eff6ff; border-bottom: 1px solid #dbeafe;
+      display: grid; gap: 6px;
+    }
+    .case-rec-title { font-weight: 700; color: #1e3a8a; }
+    .case-rec-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: #475569; }
+    .case-rec-pill {
+      display: inline-block; border-radius: 999px; padding: 2px 8px;
+      background: #dbeafe; color: #1d4ed8; font-weight: 600;
+    }
+    .case-rec-pill.strong { background: #dcfce7; color: #166534; }
+    .case-rec-pill.partial { background: #fef3c7; color: #92400e; }
+    .case-rec-pill.background { background: #e5e7eb; color: #374151; }
+    .case-rec-body { padding: 12px 14px; display: grid; gap: 12px; }
+    .case-rec-gap {
+      border: 1px solid #fde68a; background: #fffbeb; color: #78350f;
+      border-radius: 6px; padding: 8px 10px; font-size: 12px; line-height: 1.5;
+    }
+    .case-rec-audience-title { font-weight: 700; color: #1f2937; margin-bottom: 6px; }
+    .case-rec-list { display: grid; gap: 8px; }
+    .case-rec-item { border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; padding: 9px 10px; }
+    .case-rec-action { font-weight: 600; color: #111827; margin-bottom: 5px; }
+    .case-rec-detail { font-size: 12px; color: #4b5563; line-height: 1.5; }
+    .case-field-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px; color: #374151; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 4px; padding: 1px 4px;
+    }
     .code-aware-grid { display: grid; gap: 10px; }
     .code-ref-card, .patch-card {
       border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 12px;
@@ -4564,6 +4596,8 @@ export class HTMLReportGenerator {
     ${this.renderFindingsSection(result.findings, dataEnvelopes)}
 
     ${this.renderCodeAwareReferencesSection(result.conclusionContract, outputLanguage)}
+
+    ${this.renderCaseRecommendationsSection(result.conclusionContract, outputLanguage)}
 
     <div class="section">
       <h2 class="section-title">${localize(outputLanguage, '分析结论', 'Analysis Conclusion')}</h2>
@@ -4889,6 +4923,223 @@ export class HTMLReportGenerator {
     const end = record.end ?? record.line_end;
     if (start === undefined || end === undefined) return '';
     return `:${this.escapeHtml(String(start))}-${this.escapeHtml(String(end))}`;
+  }
+
+  private renderCaseRecommendationsSection(
+    contract: unknown,
+    outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
+  ): string {
+    const contractRecord = this.asReportRecord(contract);
+    if (!contractRecord) return '';
+
+    const hits = this.readReportAliasedRecords(contractRecord, [
+      'caseRecommendations',
+      'case_recommendations',
+      'caseAnchors',
+      'case_anchors',
+      'similarCases',
+      'similar_cases',
+    ]);
+    if (hits.length === 0) return '';
+
+    const visibleHits = hits.slice(0, 8);
+    const omittedHits = hits.length - visibleHits.length;
+    const cards = visibleHits
+      .map(hit => this.renderCaseRecommendationCard(hit, outputLanguage))
+      .filter(Boolean)
+      .join('');
+    if (!cards) return '';
+
+    return `
+    <div class="section">
+      <h2 class="section-title">${localize(outputLanguage, '相似案例与优化建议', 'Case-Based Recommendations')}</h2>
+      <div class="claim-source-note">
+        ${this.escapeHtml(localize(
+          outputLanguage,
+          '以下建议来自结构化 case recommendation hit。只有 strong 匹配会作为直接优化建议；partial/background 会明确标注证据缺口。',
+          'The recommendations below come from structured case recommendation hits. Only strong matches are direct guidance; partial/background matches show an explicit evidence gap.',
+        ))}
+      </div>
+      <div class="case-rec-grid">
+        ${cards}
+      </div>
+      ${omittedHits > 0 ? `<div class="claim-source-note">${this.escapeHtml(localize(outputLanguage, `还有 ${omittedHits} 个相似案例未展开`, `${omittedHits} more case hits omitted`))}</div>` : ''}
+    </div>`;
+  }
+
+  private renderCaseRecommendationCard(
+    hit: Record<string, unknown>,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const caseId = this.readReportAliasedString(hit, ['caseId', 'case_id', 'id']);
+    if (!caseId) return '';
+    const title = this.readReportAliasedString(hit, ['title', 'caseTitle', 'case_title']) || caseId;
+    const scene = this.readReportAliasedString(hit, ['scene']);
+    const rootCause = this.readReportAliasedString(hit, [
+      'primaryRootCause',
+      'primary_root_cause',
+      'rootCause',
+      'root_cause',
+    ]);
+    const matchStrength = this.normalizeCaseMatchStrength(
+      this.readReportAliasedString(hit, ['matchStrength', 'match_strength', 'strength']),
+    );
+    const evidenceGap = this.readReportAliasedString(hit, [
+      'evidenceGap',
+      'evidence_gap',
+      'gap',
+      'evidenceLimit',
+      'evidence_limit',
+    ]);
+    const recommendationsRecord =
+      this.asReportRecord(this.readReportAliasedValue(hit, ['recommendations'])) ?? hit;
+    const appRecommendations = this.readReportAliasedRecords(recommendationsRecord, [
+      'app',
+      'appRecommendations',
+      'app_recommendations',
+    ]);
+    const oemRecommendations = this.readReportAliasedRecords(recommendationsRecord, [
+      'oem',
+      'oemRecommendations',
+      'oem_recommendations',
+      'vendor',
+      'vendorRecommendations',
+      'vendor_recommendations',
+    ]);
+    const evidenceRefs = this.readReportAliasedStringArray(hit, [
+      'evidenceRefs',
+      'evidence_refs',
+      'evidenceRefIds',
+      'evidence_ref_ids',
+    ]);
+    const learnedBadge = this.renderLearnedCaseProvenanceBadge(
+      this.asReportRecord(this.readReportAliasedValue(hit, ['learnedProvenance', 'learned_provenance'])),
+      outputLanguage,
+    );
+
+    const matchLabel = this.caseMatchLabel(matchStrength, outputLanguage);
+    const guidanceLabel = matchStrength === 'strong'
+      ? localize(outputLanguage, '可作为直接建议', 'Direct guidance')
+      : localize(outputLanguage, '仅作背景参考', 'Context only');
+    const metaParts = [
+      `<span class="case-rec-pill ${matchStrength}">${this.escapeHtml(matchLabel)}</span>`,
+      `<span class="case-rec-pill">${this.escapeHtml(guidanceLabel)}</span>`,
+      learnedBadge,
+      scene ? `<span>${this.escapeHtml(localize(outputLanguage, '场景', 'Scene'))}: ${this.escapeHtml(scene)}</span>` : '',
+      rootCause ? `<span>${this.escapeHtml(localize(outputLanguage, '根因', 'Root cause'))}: ${this.escapeHtml(rootCause)}</span>` : '',
+      evidenceRefs.length ? `<span>${this.escapeHtml(localize(outputLanguage, '证据', 'Evidence'))}: ${evidenceRefs.map(ref => `<code>${this.escapeHtml(ref)}</code>`).join(', ')}</span>` : '',
+    ].filter(Boolean);
+    const gapText = evidenceGap ||
+      localize(
+        outputLanguage,
+        '当前 trace 未满足该案例的必需证据签名，不能作为直接优化建议。',
+        'The current trace does not satisfy this case\'s required evidence signatures, so this is not direct guidance.',
+      );
+    const gapHtml = matchStrength === 'strong'
+      ? ''
+      : `<div class="case-rec-gap"><span class="case-field-name">evidence_gap</span>: ${this.escapeHtml(gapText)}</div>`;
+
+    return `
+      <div class="case-rec-card">
+        <div class="case-rec-header">
+          <div class="case-rec-title">${this.escapeHtml(title)}</div>
+          <div class="case-rec-meta">
+            <span><span class="case-field-name">case_id</span>: <code>${this.escapeHtml(caseId)}</code></span>
+            ${metaParts.join('')}
+          </div>
+        </div>
+        <div class="case-rec-body">
+          ${gapHtml}
+          ${this.renderCaseRecommendationAudience(
+            localize(outputLanguage, 'App 侧建议', 'App Recommendations'),
+            appRecommendations,
+            outputLanguage,
+          )}
+          ${this.renderCaseRecommendationAudience(
+            localize(outputLanguage, 'OEM/厂商侧建议', 'OEM Recommendations'),
+            oemRecommendations,
+            outputLanguage,
+          )}
+        </div>
+      </div>`;
+  }
+
+  private renderLearnedCaseProvenanceBadge(
+    provenance: Record<string, unknown> | null,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (!provenance) return '';
+    const supportingEvidence = Number(provenance.supportingEvidence ?? provenance.supporting_evidence ?? 0);
+    const supported = provenance.supported === true;
+    const label = supported && Number.isFinite(supportingEvidence) && supportingEvidence > 0
+      ? localize(outputLanguage, `学习案例 · ${supportingEvidence} 次正向反馈`, `Learned case · ${supportingEvidence} positive feedback`)
+      : localize(outputLanguage, '学习案例（未验证）', 'Learned case (unverified)');
+    return `<span class="case-rec-pill">${this.escapeHtml(label)}</span>`;
+  }
+
+  private renderCaseRecommendationAudience(
+    title: string,
+    recommendations: Array<Record<string, unknown>>,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (recommendations.length === 0) return '';
+    return `
+      <div>
+        <div class="case-rec-audience-title">${this.escapeHtml(title)}</div>
+        <div class="case-rec-list">
+          ${recommendations.map(rec => this.renderCaseRecommendationItem(rec, outputLanguage)).join('')}
+        </div>
+      </div>`;
+  }
+
+  private renderCaseRecommendationItem(
+    rec: Record<string, unknown>,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const id = this.readReportAliasedString(rec, ['id', 'recommendationId', 'recommendation_id']);
+    const priority = this.readReportAliasedString(rec, ['priority']);
+    const action = this.readReportAliasedString(rec, ['action', 'text', 'statement']);
+    const appliesWhen = this.readReportAliasedString(rec, ['applies_when', 'appliesWhen', 'condition']);
+    const risks = this.readReportAliasedString(rec, ['risks', 'risk']);
+    const actionPrefix = [priority, id].filter(Boolean).join(' · ');
+    return `
+      <div class="case-rec-item">
+        <div class="case-rec-action">${this.escapeHtml(actionPrefix ? `${actionPrefix}: ${action}` : action)}</div>
+        ${appliesWhen ? `<div class="case-rec-detail"><span class="case-field-name">applies_when</span>: ${this.escapeHtml(appliesWhen)}</div>` : ''}
+        ${risks ? `<div class="case-rec-detail"><span class="case-field-name">risks</span>: ${this.escapeHtml(risks)}</div>` : ''}
+      </div>`;
+  }
+
+  private normalizeCaseMatchStrength(value: string): 'strong' | 'partial' | 'background' {
+    if (value === 'strong' || value === 'partial' || value === 'background') {
+      return value;
+    }
+    return 'background';
+  }
+
+  private caseMatchLabel(
+    matchStrength: 'strong' | 'partial' | 'background',
+    outputLanguage: OutputLanguage,
+  ): string {
+    switch (matchStrength) {
+      case 'strong':
+        return localize(outputLanguage, 'strong 匹配', 'strong match');
+      case 'partial':
+        return localize(outputLanguage, 'partial 匹配', 'partial match');
+      case 'background':
+        return localize(outputLanguage, 'background 匹配', 'background match');
+    }
+  }
+
+  private readReportAliasedStringArray(
+    record: Record<string, unknown> | null,
+    keys: string[],
+  ): string[] {
+    const value = this.readReportAliasedValue(record, keys);
+    if (!Array.isArray(value)) return [];
+    return value
+      .map(item => String(item ?? '').trim())
+      .filter(Boolean);
   }
 
   private renderConclusionClaimSourcesSection(

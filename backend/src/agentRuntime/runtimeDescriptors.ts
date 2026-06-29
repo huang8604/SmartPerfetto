@@ -40,12 +40,14 @@ const CUSTOM_ONLY_PROVIDER_TYPES = ['custom'] as const;
 function createCapabilities<K extends AgentRuntimeKind>(
   kind: K,
   displayName: string,
+  systemPromptDynamicBoundary: boolean,
 ): RuntimeEngineDescriptor<K>['capabilities'] {
   return {
     kind,
     displayName,
     production: true,
     publicRuntime: true,
+    promptCache: { systemPromptDynamicBoundary },
   };
 }
 
@@ -56,7 +58,7 @@ export const PRODUCTION_RUNTIME_DESCRIPTORS = [
     production: true,
     publicRuntime: true,
     providerTypes: CLAUDE_PROVIDER_TYPES,
-    capabilities: createCapabilities(CLAUDE_AGENT_RUNTIME_KIND, 'Claude Agent SDK'),
+    capabilities: createCapabilities(CLAUDE_AGENT_RUNTIME_KIND, 'Claude Agent SDK', true),
     createOrchestrator: ({ traceProcessorService, selection }) => {
       // Lazy load to keep providerManager runtime matrix imports cycle-free.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -79,7 +81,7 @@ export const PRODUCTION_RUNTIME_DESCRIPTORS = [
     production: true,
     publicRuntime: true,
     providerTypes: OPENAI_PROVIDER_TYPES,
-    capabilities: createCapabilities(OPENAI_AGENT_RUNTIME_KIND, 'OpenAI Agents SDK'),
+    capabilities: createCapabilities(OPENAI_AGENT_RUNTIME_KIND, 'OpenAI Agents SDK', false),
     createOrchestrator: ({ traceProcessorService, selection }) => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { createOpenAIRuntime } = require('./engines/openai') as typeof import('./engines/openai');
@@ -100,7 +102,7 @@ export const PRODUCTION_RUNTIME_DESCRIPTORS = [
     production: true,
     publicRuntime: true,
     providerTypes: CUSTOM_ONLY_PROVIDER_TYPES,
-    capabilities: createCapabilities(PI_AGENT_CORE_RUNTIME_KIND, 'Pi Agent Core'),
+    capabilities: createCapabilities(PI_AGENT_CORE_RUNTIME_KIND, 'Pi Agent Core', false),
     createOrchestrator: input => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { createPiAgentCoreRuntime } = require('./engines/pi/piAgentCoreRuntime') as typeof import('./engines/pi/piAgentCoreRuntime');
@@ -118,7 +120,7 @@ export const PRODUCTION_RUNTIME_DESCRIPTORS = [
     production: true,
     publicRuntime: true,
     providerTypes: CUSTOM_ONLY_PROVIDER_TYPES,
-    capabilities: createCapabilities(OPENCODE_RUNTIME_KIND, 'OpenCode'),
+    capabilities: createCapabilities(OPENCODE_RUNTIME_KIND, 'OpenCode', false),
     createOrchestrator: input => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { OpenCodeRuntime } = require('./engines/opencode/openCodeRuntime') as typeof import('./engines/opencode/openCodeRuntime');

@@ -181,6 +181,7 @@ describe('AnalysisRunSpec shadow mode', () => {
       displayName: 'OpenAI Agents SDK',
       production: true,
       publicRuntime: true,
+      promptCache: { systemPromptDynamicBoundary: false },
     });
   });
 });

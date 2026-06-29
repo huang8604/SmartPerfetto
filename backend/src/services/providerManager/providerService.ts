@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { uuidv4 } from '../../utils/uuid';
+import logger from '../../utils/logger';
 import { ProviderStore } from './providerStore';
 import type {
   AgentRuntimeKind,
@@ -17,6 +18,7 @@ import {
   DUAL_SURFACE_PROVIDER_TYPES,
   isAgentRuntimeKind,
   isDualSurfaceProviderType,
+  normalizeBedrockModelId,
   resolveProviderAgentRuntime,
   sharedKeyShouldUseClaudeAuthToken,
   supportsAgentRuntimeType,
@@ -256,6 +258,24 @@ export class ProviderService {
     return provider.connection.claudeBaseUrl || provider.connection.baseUrl || defaultBaseUrl;
   }
 
+  /**
+   * Normalize a bedrock provider's model ID, warning when a short Anthropic
+   * name had to be mapped to a Bedrock cross-region ID. Delegates the actual
+   * mapping to normalizeBedrockModelId so the provider env builder and the
+   * connection tester agree. See GitHub issue #179.
+   */
+  private normalizeBedrockModelWithWarn(model: string, providerName: string): string {
+    const normalized = normalizeBedrockModelId(model);
+    if (normalized !== model) {
+      logger.warn(
+        'ProviderManager',
+        `Bedrock provider "${providerName}": model "${model}" is not a valid Bedrock ID; ` +
+          `normalizing to "${normalized}". Set a Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-5-20250929-v1:0) to silence this.`,
+      );
+    }
+    return normalized;
+  }
+
   private applyClaudeAuth(env: Record<string, string>, provider: ProviderConfig): void {
     if (provider.connection.claudeApiKey) env.ANTHROPIC_API_KEY = provider.connection.claudeApiKey;
     if (provider.connection.claudeAuthToken) env.ANTHROPIC_AUTH_TOKEN = provider.connection.claudeAuthToken;
@@ -416,8 +436,19 @@ export class ProviderService {
       env.OPENAI_MODEL = provider.models.primary;
       env.OPENAI_LIGHT_MODEL = provider.models.light;
     } else {
-      env.CLAUDE_MODEL = provider.models.primary;
-      env.CLAUDE_LIGHT_MODEL = provider.models.light;
+      // Bedrock requires cross-region inference model IDs; normalize short
+      // Anthropic names so an existing bedrock provider configured with a
+      // short name (e.g. via API or before the template fix) still works.
+      // See normalizeBedrockModelId for the full rationale.
+      const isBedrock = provider.type === 'bedrock';
+      const primary = isBedrock
+        ? this.normalizeBedrockModelWithWarn(provider.models.primary, provider.name)
+        : provider.models.primary;
+      const light = isBedrock
+        ? this.normalizeBedrockModelWithWarn(provider.models.light, provider.name)
+        : provider.models.light;
+      env.CLAUDE_MODEL = primary;
+      env.CLAUDE_LIGHT_MODEL = light;
       if (provider.models.subAgent) env.CLAUDE_SUB_AGENT_MODEL = provider.models.subAgent;
     }
 

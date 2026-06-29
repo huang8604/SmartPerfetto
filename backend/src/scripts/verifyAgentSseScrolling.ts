@@ -605,6 +605,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function normalizeDispatchedToolName(toolName: string): string {
+  const match = toolName.match(/^mcp__.+?__(.+)$/);
+  return match?.[1] ?? toolName;
+}
+
+function recordToolCall(summary: SseSummary, toolName: string): void {
+  summary.toolCallCounts[toolName] = (summary.toolCallCounts[toolName] ?? 0) + 1;
+  const normalized = normalizeDispatchedToolName(toolName);
+  if (normalized !== toolName) {
+    summary.toolCallCounts[normalized] = (summary.toolCallCounts[normalized] ?? 0) + 1;
+  }
+}
+
 function recordClaimVerifierSummary(summary: SseSummary, payload: Record<string, unknown> | null): void {
   const direct = asRecord(payload?.claimVerificationResult);
   const nested = asRecord(asRecord(payload?.qualityArtifacts)?.claimVerificationResult);
@@ -836,7 +849,7 @@ async function collectSseSummary(
             case 'agent_task_dispatched':
               summary.agentTaskDispatchedCount += 1;
               if (typeof payload?.toolName === 'string') {
-                summary.toolCallCounts[payload.toolName] = (summary.toolCallCounts[payload.toolName] ?? 0) + 1;
+                recordToolCall(summary, payload.toolName);
               }
               {
                 const args = asRecord(payload?.args);

@@ -43,11 +43,44 @@ plan_template:
     - id: snapshot_scope
       match_keywords: ['snapshot', 'analysis result', '结果', 'baseline', 'candidate']
       suggestion: '分析结果对比必须先确认 snapshot 范围、baseline 和 candidates'
+      required_expected_calls:
+        - tool: get_comparison_context
     - id: comparison_matrix
       match_keywords: ['matrix', 'metric', 'delta', 'fps', 'jank', 'startup', '启动', '帧率']
       suggestion: '分析结果对比必须构造 ComparisonMatrix，并基于结构化 metric 输出 delta'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: multi_trace_result_comparison
 ---
 
+#### multi_trace_result_comparison Core Strategy
+
+**Route card**: 分析结果对比 / 结果对比 / 多 Trace 对比 / 多 trace 对比 / 多个 Trace 对比 / 两个 Trace 对比 / 另一个 Trace / 另外一个 Trace / analysis result comparison / result comparison
+
+**Capabilities**: required=[none], optional=[none]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- snapshot_scope: 分析结果对比必须先确认 snapshot 范围、baseline 和 candidates (required: get_comparison_context)
+- comparison_matrix: 分析结果对比必须构造 ComparisonMatrix，并基于结构化 metric 输出 delta (required: invoke_skill(multi_trace_result_comparison))
+
+**Phase reminders**
+- result_snapshot_selection: 必须先确认要对比的是 AnalysisResultSnapshot，而不是旧的 referenceTraceId raw trace 对比。候选不唯一时必须让用户选择 baseline 和 candidates。
+- matrix_first: 定量结论只能来自 ComparisonMatrix 的 normalized metrics。缺失 metric 要标注 missing reason；只有允许回填时才请求 trace backfill。
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `multi_trace_result_comparison:full`: 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="multi_trace_result_comparison full strategy detail" keywords="multi_trace_result_comparison,分析结果对比,结果对比,多 Trace 对比,多 trace 对比,多个 Trace 对比,两个 Trace 对比,另一个 Trace,另外一个 Trace,analysis result comparison,result comparison,multi trace comparison,compare snapshots,分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果）,detail,full" default="true" -->
 #### 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果）
 
 这是新的多窗口/多用户结果快照对比，不是旧的单窗口 `referenceTraceId` 双 Trace raw data 对比。
@@ -94,3 +127,4 @@ plan_template:
 - 使用旧 `execute_sql_on("reference")` 路线替代结果快照对比。
 - 对单侧缺失 metric 给出百分比变化。
 - 用报告正文里的描述覆盖 normalized metric。
+<!-- /strategy-detail -->

@@ -14,6 +14,8 @@ type QueryImplementation = (params: any) => AsyncIterable<any>;
 const queryCalls: any[] = [];
 let queryImplementation: QueryImplementation | undefined;
 
+export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__';
+
 async function* emptyGenerator(): AsyncGenerator<any, void> {
   // No-op in tests by default.
 }

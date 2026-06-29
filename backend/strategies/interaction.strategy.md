@@ -88,11 +88,52 @@ plan_template:
     - id: input_latency_stage_breakdown
       match_keywords: ['dispatch', 'handling', 'ACK', 'FINISHED', 'click_response_analysis', 'input_events_in_range', '输入延迟', '阶段拆分']
       suggestion: '交互输入场景必须拆分 dispatch、handling、ACK，并说明 total_latency_dur 是否只覆盖 dispatch-to-ACK'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: click_response_analysis
+        - tool: invoke_skill
+          skill_id: input_events_in_range
     - id: focus_stale_channel_boundary
       match_keywords: ['stale', 'focused window', 'target window', 'InputChannel', 'WindowInfosListener', 'wait queue', 'wq', 'dumpsys', 'logcat', '焦点', '窗口']
       suggestion: '交互输入场景需要覆盖或明确缺失 stale、focus/window、InputChannel、iq/oq/wq 和 FINISHED ACK 证据边界'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: click_response_detail
+        - tool: invoke_skill
+          skill_id: input_events_in_range
 ---
 
+#### interaction Core Strategy
+
+**Route card**: 点击 / 触摸 / 输入延迟 / 响应延迟 / 点击慢 / 响应慢 / 点击卡顿 / click / tap / touch
+
+**Capabilities**: required=[input_latency, frame_rendering], optional=[cpu_scheduling, binder_ipc, surfaceflinger]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- input_latency_stage_breakdown: 交互输入场景必须拆分 dispatch、handling、ACK，并说明 total_latency_dur 是否只覆盖 dispatch-to-ACK (requires one of: invoke_skill(click_response_analysis), invoke_skill(input_events_in_range))
+- focus_stale_channel_boundary: 交互输入场景需要覆盖或明确缺失 stale、focus/window、InputChannel、iq/oq/wq 和 FINISHED ACK 证据边界 (requires one of: invoke_skill(click_response_detail), invoke_skill(input_events_in_range))
+
+**Phase reminders**
+- input_ack_queue_boundary: 先区分 completed android.input 事件的 dispatch/handling/ACK 总耗时与未完成 FINISHED 的队列背压。wq 增长只能说明目标连接尚未 ACK；必须结合 App 主线程、InputDispatcher、dumpsys/logcat 或窗口证据，不能直接命名 Binder、App 代码或 InputDispatcher 根因。 工具: click_response_analysis, click_response_detail, input_events_in_range
+- focus_window_stale_boundary: stale drop、no-focused-window、InputChannel 创建/断连和 target-window 选择是不同对象。trace 只含 completed input events 时要写成证据缺口；需要 WindowManager/InputDispatcher logcat、dumpsys input 或窗口拓扑证据才能定因。 工具: input_events_in_range
+- display_present_boundary: total_latency_dur 是 dispatch-to-ACK，不是 input-to-present。只有 end_to_end_latency_dur、frame_id/FrameTimeline、RenderThread/SF present 证据可用时，才能写上屏或可见反馈延迟；否则只报告 dispatch/ACK 或首帧候选。 工具: click_response_analysis, input_to_frame_latency, scroll_response_latency
+
+**Final report contract summary**
+- 输入阶段拆分
+- ACK/焦点/窗口边界
+- 置信度与缺失证据
+
+
+**Detail ref**
+- `interaction:full`: 点击/触摸响应分析（用户提到 点击、触摸、tap、click、input latency） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="interaction full strategy detail" keywords="interaction,点击,触摸,输入延迟,响应延迟,点击慢,响应慢,点击卡顿,click,tap,touch,input latency,response time,点击/触摸响应分析（用户提到 点击、触摸、tap、click、input latency）,detail,full" default="true" -->
 #### 点击/触摸响应分析（用户提到 点击、触摸、tap、click、input latency）
 
 **Phase 1 — 概览 + 慢事件列表（1 次调用）：**
@@ -221,3 +262,4 @@ execute_sql("WITH downs AS (SELECT read_time AS ts, LAG(read_time) OVER (ORDER B
 4. **优化建议**：按影响面排序，区分系统侧 vs 应用侧建议
 
 5. **证据边界**：列出 `android.input` completed-event、InputDispatcher/dumpsys/logcat、WindowManager/focus、FrameTimeline/present 哪些可用，哪些缺失；对 `wq`、stale、focus/window、InputChannel 只在证据闭环时定因。
+<!-- /strategy-detail -->

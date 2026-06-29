@@ -62,8 +62,38 @@ plan_template:
     - id: anr_root_cause
       match_keywords: ['anr', 'deadlock', 'block', '死锁', '阻塞', 'not_responding', 'anr_analysis']
       suggestion: 'ANR 场景建议包含 ANR 原因定位阶段 (anr_analysis)'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: anr_analysis
 ---
 
+#### anr Core Strategy
+
+**Route card**: anr / 无响应 / 应用无响应 / 主线程无响应 / deadlock / not responding / 死锁 / watchdog / broadcast timeout / input dispatching
+
+**Capabilities**: required=[anr, cpu_scheduling], optional=[binder_ipc, lock_contention, gc_memory]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- anr_root_cause: ANR 场景建议包含 ANR 原因定位阶段 (anr_analysis) (required: invoke_skill(anr_analysis))
+
+**Phase reminders**
+- freeze_verdict: freeze_verdict 是第一优先级门控。system freeze → 系统原因排查；app_specific → 进入 App 根因决策树（5 步子流程）。禁止在未确认 freeze_verdict 前直接分析 App 代码。 工具: anr_analysis
+- anr_diagnostic_api_boundary: ApplicationExitInfo、ProfilingTrigger 产物、Play/Android Vitals、客户端 watchdog 都只能补充 ANR 证据。必须说明 API/Android 版本、reason/trigger type、record/artifact 时间、事件窗口对齐；根因仍需 Perfetto ANR window、direct_blocker、logcat、Binder/lock/IO/GC/scheduler 证据闭环。 工具: anr_analysis, lookup_knowledge
+
+**Final report contract summary**
+- ANR 诊断 API/外部聚合边界
+
+
+**Detail ref**
+- `anr:full`: ANR 分析（用户提到 ANR、无响应、not responding、死锁、冻屏） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="anr full strategy detail" keywords="anr,anr,无响应,应用无响应,主线程无响应,deadlock,not responding,死锁,watchdog,broadcast timeout,input dispatching,冻屏,freeze,ANR 分析（用户提到 ANR、无响应、not responding、死锁、冻屏）,detail,full" default="true" -->
 #### ANR 分析（用户提到 ANR、无响应、not responding、死锁、冻屏）
 
 **⚠️ 核心原则：**
@@ -267,3 +297,4 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
 - 把 stale drop、no-focused-window、InputChannel 失败、`wq`/FINISHED timeout 混成同一种 input ANR 根因
 - 多 ANR 场景中混用不同 `error_id` 的日志、Binder、锁竞争和调度证据
 - 对 Binder/锁/CPU/IO/内存压力只给单点证据，不说明还缺的 peer/owner/system/context 证据
+<!-- /strategy-detail -->

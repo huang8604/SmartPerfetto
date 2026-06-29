@@ -24,7 +24,7 @@ import * as path from 'path';
 import type { CliPaths, SessionPaths } from '../io/paths';
 import { ensureSessionLayout, sessionPaths } from '../io/paths';
 import type { Renderer } from '../repl/renderer';
-import type { CliSessionConfig, CliTranscriptTurn } from '../types';
+import type { CliSessionConfig, CliSessionLineage, CliTranscriptTurn } from '../types';
 import type { CliAnalyzeService, RunTurnOutput } from './cliAnalyzeService';
 import { commitTurnOutputs } from './turnPersistence';
 import { loadSession } from '../io/sessionStore';
@@ -39,6 +39,7 @@ import type {CliAnalysisMode, TraceCaptureResult} from '../types';
 const RESUME_CONTEXT_MAX_CHARS = 4000;
 const RESUME_TURN_MAX_CHARS = 1200;
 const RESUME_MAX_TURNS = 3;
+const CLI_LEVEL3_LINEAGE_REASON = 'cli-level3-degraded' as const;
 
 export interface TurnRunnerContext {
   paths: CliPaths;
@@ -222,19 +223,26 @@ export async function continueSession(
 
   const nextTurn = existingConfig.turnCount + 1;
   const streamFile = sp.stream;
+  const previousBackendSessionId = existingConfig.backendSessionId || userSessionId;
 
   logText(ctx, `Resuming session ${userSessionId} (turn ${nextTurn})`);
+  const existingLineageNotice = buildLineageNotice(existingConfig.lineage);
+  if (existingLineageNotice) {
+    logText(ctx, existingLineageNotice);
+  }
   const reloaded = await ctx.service.reloadTraceById(existingConfig.traceId);
 
   let effectiveTraceId: string;
   let effectiveQuery: string;
   let requestedSessionId: string | undefined;
   let degraded = false;
+  let degradedPreviousBackendSessionId: string | undefined;
+  let pendingLineage: CliSessionLineage | undefined = existingConfig.lineage;
 
   if (reloaded) {
     effectiveTraceId = existingConfig.traceId;
     effectiveQuery = buildResumeContextQuery(sp, input.query);
-    requestedSessionId = existingConfig.backendSessionId || userSessionId;
+    requestedSessionId = previousBackendSessionId;
     logText(ctx, `Trace reloaded (traceId=${effectiveTraceId.slice(0, 8)}…)`);
   } else {
     logText(ctx, '(trace evicted from cache — loading fresh and replaying conclusion as preamble)');
@@ -242,6 +250,8 @@ export async function continueSession(
     effectiveQuery = buildResumeContextQuery(sp, input.query);
     requestedSessionId = undefined;
     degraded = true;
+    degradedPreviousBackendSessionId = previousBackendSessionId;
+    pendingLineage = createCliLevel3Lineage(previousBackendSessionId);
   }
 
   let effectiveReferenceTraceId = existingConfig.referenceTraceId;
@@ -268,6 +278,7 @@ export async function continueSession(
     codeAwareMode: existingConfig.codeAwareMode,
     codebaseIds: existingConfig.codebaseIds,
     analysisMode: existingConfig.analysisMode,
+    lineage: pendingLineage,
     onSessionReady: () => {
       ensureSessionLayout(sp);
     },
@@ -283,18 +294,25 @@ export async function continueSession(
     if (!requestedSessionId || !isTraceIdMismatchError(err)) throw err;
     logText(ctx, '(persisted backend session no longer matches this trace — starting a fresh backend turn with CLI transcript context)');
     degraded = true;
+    degradedPreviousBackendSessionId = requestedSessionId;
+    pendingLineage = createCliLevel3Lineage(requestedSessionId);
     requestedSessionId = undefined;
     result = await ctx.service.runTurn({
       ...runInput,
       sessionId: undefined,
+      lineage: pendingLineage,
     });
   }
 
   const now = Date.now();
+  const lineage = degraded
+    ? pendingLineage ?? createCliLevel3Lineage(degradedPreviousBackendSessionId ?? previousBackendSessionId)
+    : existingConfig.lineage;
   const updatedConfig: CliSessionConfig = {
     ...existingConfig,
     sessionId: userSessionId,
     backendSessionId: result.sessionId,
+    lineage,
     traceId: effectiveTraceId,
     referenceTraceId: effectiveReferenceTraceId,
     providerId: result.providerId ?? existingConfig.providerId,
@@ -318,7 +336,14 @@ export async function continueSession(
     query: input.query,
     result,
     config: updatedConfig,
-    turnMarkdown: formatTurnMarkdown(nextTurn, input.query, result.result.conclusion || '', result.result, degraded),
+    turnMarkdown: formatTurnMarkdown(
+      nextTurn,
+      input.query,
+      result.result.conclusion || '',
+      result.result,
+      degraded,
+      buildLineageNotice(updatedConfig.lineage),
+    ),
     indexEntry: {
       sessionId: userSessionId,
       createdAt: prev?.createdAt ?? existingConfig.createdAt,
@@ -332,7 +357,8 @@ export async function continueSession(
   });
 
   if (degraded) {
-    logText(ctx, '\nnote: SDK context was unavailable — replayed prior conclusion as preamble.');
+    const notice = buildLineageNotice(updatedConfig.lineage);
+    logText(ctx, `\nnote: ${notice ?? 'SDK context was unavailable — replayed prior conclusion as preamble.'}`);
   }
 
   return {
@@ -350,6 +376,19 @@ function isTraceIdMismatchError(err: unknown): boolean {
 
 function logText(ctx: TurnRunnerContext, message: string): void {
   if (ctx.renderer.format === 'text') console.log(message);
+}
+
+function buildLineageNotice(lineage: CliSessionConfig['lineage']): string | undefined {
+  if (!lineage || lineage.reason !== CLI_LEVEL3_LINEAGE_REASON) return undefined;
+  return `此会话因 trace 重载已从原会话降级续接（previous backend session: ${lineage.previousBackendSessionId}）。`;
+}
+
+function createCliLevel3Lineage(previousBackendSessionId: string): CliSessionLineage {
+  return {
+    previousBackendSessionId,
+    reason: CLI_LEVEL3_LINEAGE_REASON,
+    at: Date.now(),
+  };
 }
 
 export function buildResumeContextQuery(sp: SessionPaths, userQuery: string): string {
@@ -455,6 +494,7 @@ function formatTurnMarkdown(
   conclusion: string,
   result: { confidence: number; rounds: number; totalDurationMs: number },
   degraded: boolean,
+  lineageNotice?: string,
 ): string {
   const lines: string[] = [
     `# Turn ${turn}`,
@@ -464,6 +504,9 @@ function formatTurnMarkdown(
     `**Confidence**: ${(result.confidence * 100).toFixed(0)}%  ·  **Rounds**: ${result.rounds}  ·  **Duration**: ${(result.totalDurationMs / 1000).toFixed(1)}s`,
     ``,
   ];
+  if (lineageNotice) {
+    lines.push(`> _${lineageNotice}_`, ``);
+  }
   if (degraded) {
     lines.push(`> _Note: SDK context was unavailable for this turn — prior conclusion was replayed as preamble._`, ``);
   }

@@ -77,7 +77,7 @@ jest.mock('../focusAppDetector', () => ({
   formatDurationNs: jest.fn((ns: number) => `${(ns / 1e6).toFixed(1)}ms`),
 }));
 
-import { buildQuickSystemPrompt, buildSystemPrompt, buildSystemPromptParts } from '../claudeSystemPrompt';
+import { buildQuickSystemPrompt, buildSystemPrompt, buildSystemPromptParts, estimatePromptTokens } from '../claudeSystemPrompt';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -385,6 +385,36 @@ describe('buildSystemPrompt', () => {
       }));
       expect(prompt).toContain('历史踩坑记录');
     });
+
+    it('should inject case background context as a droppable prompt segment', () => {
+      const parts = buildSystemPromptParts(makeContext({
+        caseBackgroundContext: '## 可能相关的历史案例（case library — 待证据验证）\n\n- learned:case-1 — shader compile',
+      }));
+
+      expect(parts.fullPrompt).toContain('可能相关的历史案例');
+      expect(parts.segments.find(segment => segment.label === 'case_background_context')).toMatchObject({
+        droppable: true,
+      });
+    });
+
+    it('should drop case background before SQL error pairs when both exceed budget', () => {
+      const oversizedCaseContext = `## 可能相关的历史案例（case library — 待证据验证）\n\n${'case hint '.repeat(6000)}`;
+      const parts = buildSystemPromptParts(makeContext({
+        caseBackgroundContext: oversizedCaseContext,
+        sqlErrorFixPairs: Array.from({ length: 10 }, (_, i) => ({
+          errorSql: `SELECT * FROM bad_${i}`,
+          errorMessage: `no such table: bad_${i}`,
+          fixedSql: `SELECT * FROM good_${i}`,
+        })),
+      }), 4500);
+
+      const caseDropIndex = parts.droppedLabels.indexOf('case_background_context');
+      const sqlDropIndex = parts.droppedLabels.indexOf('sql_error_pairs');
+      expect(caseDropIndex).toBeGreaterThanOrEqual(0);
+      if (sqlDropIndex >= 0) {
+        expect(caseDropIndex).toBeLessThan(sqlDropIndex);
+      }
+    });
   });
 
   /**
@@ -522,6 +552,22 @@ describe('buildSystemPrompt', () => {
       expect(role!.tier).toBe(1);
     });
 
+    it('splits methodology into base, scene core, and report contract segments', () => {
+      const parts = buildSystemPromptParts(makeContext({ sceneType: 'scrolling' }));
+      const labels = parts.segments.map(s => s.label);
+      expect(labels).toContain('base_methodology');
+      expect(labels).toContain('scene_strategy_core');
+      expect(labels).toContain('report_contract');
+
+      const sceneCore = parts.segments.find(s => s.label === 'scene_strategy_core');
+      const reportContract = parts.segments.find(s => s.label === 'report_contract');
+      expect(sceneCore?.truncatable).toBe(true);
+      expect(sceneCore?.estimatedTokens).toBeGreaterThan(0);
+      expect(sceneCore?.charCount).toBe(sceneCore?.content.length);
+      expect(reportContract?.droppable).toBe(false);
+      expect(reportContract?.truncatable).toBeFalsy();
+    });
+
     it('drops a known low-priority label first when the budget is tight', () => {
       const parts = buildSystemPromptParts(makeContext({
         sceneType: 'scrolling',
@@ -538,6 +584,17 @@ describe('buildSystemPrompt', () => {
       // Default fixture is comfortably under MAX_PROMPT_TOKENS (4500), so
       // nothing should be dropped.
       expect(parts.droppedLabels).toEqual([]);
+    });
+
+    it('truncates oversized dynamic context instead of exceeding the hard budget', () => {
+      const parts = buildSystemPromptParts(makeContext({
+        sceneType: 'scrolling',
+        conversationSummary: 'previous analysis '.repeat(10_000),
+      }), 12_000);
+
+      expect(parts.truncatedLabels).toContain('conversation_context');
+      expect(estimatePromptTokens(parts.fullPrompt)).toBeLessThanOrEqual(12_000);
+      expect(parts.fullPrompt).toContain('全帧根因分布');
     });
   });
 });

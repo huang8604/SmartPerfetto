@@ -76,6 +76,13 @@ final_report_contract:
       pattern_groups:
         - ['真实掉帧', 'real[_\s-]?jank']
         - ['最长帧', 'longest frame', '峰值']
+    - id: case_recommendations
+      label: 相似案例引用
+      description: '当 typed caseRecommendations 中存在 strong 匹配时，报告需引用对应 case_id，并说明它是证据验证后的相似案例。'
+      trigger_patterns:
+        - 'case recommendation|caseRecommendations|相似案例|案例引用'
+      pattern_groups:
+        - ['case_id', '相似案例', '案例引用', 'case recommendation', 'case[-\s]?based']
 
 phase_hints:
   - id: overview
@@ -127,6 +134,11 @@ plan_template:
       required_expected_calls:
         - tool: invoke_skill
           skill_id: scrolling_analysis
+    - id: frame_artifact_fetch
+      match_keywords: ['fetch_artifact', 'batch_frame_root_cause', 'artifact', '全帧根因分布', '代表帧', 'reason_code']
+      suggestion: '滑动场景必须计划读取 scrolling_analysis 返回的 batch/root-cause artifact；缺失或无掉帧时执行阶段标记 skipped 并说明'
+      required_expected_calls:
+        - tool: fetch_artifact
     - id: root_cause_diagnosis
       match_keywords: ['root', 'cause', 'diagnos', '根因', '诊断', '深入', 'deep', 'jank_frame_detail', 'frame_blocking_calls']
       suggestion: '滑动场景建议包含完整卡顿帧根因分析阶段 (jank_frame_detail + frame_blocking_calls + blocking_chain_analysis)'
@@ -138,10 +150,60 @@ plan_template:
         - tool: invoke_skill
           skill_id: blocking_chain_analysis
     - id: architecture_specific_jank
+      waivable: false
+      trigger_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合']
       match_keywords: ['TextureView', 'SurfaceTexture', 'WebView', 'DrawFunctor', 'React Native', 'RN', 'Fabric', 'JSI', 'GLSurfaceView', 'NativeActivity', 'OpenGL', 'Compose', 'Flutter', 'mixed', '混合', '架构']
-      suggestion: '非标准/混合渲染架构必须拆成 HWUI host 链路 + producer 链路 + SF 合成链路分别分析，再合并因果，避免只看 FrameTimeline'
+      suggestion: '非标准/混合渲染架构必须在 plan.expectedCalls 声明对应专属 skill；Flutter/TextureView 用 invoke_skill(flutter_scrolling_analysis)，其他架构用对应 producer/SF skill。执行时拆 HWUI host 链路 + producer 链路 + SF 合成链路，再合并因果，避免只看 FrameTimeline'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: flutter_scrolling_analysis
+        - tool: invoke_skill
+          skill_id: textureview_producer_frame_timing
+        - tool: invoke_skill
+          skill_id: webview_drawfunctor_jank_chain
+        - tool: invoke_skill
+          skill_id: rn_bridge_to_frame_jank
+        - tool: invoke_skill
+          skill_id: rn_fabric_render_jank
+        - tool: invoke_skill
+          skill_id: gl_standalone_swap_jank
+        - tool: invoke_skill
+          skill_id: compose_recomposition_hotspot
+        - tool: invoke_skill
+          skill_id: surfaceflinger_analysis
 ---
 
+#### Scrolling Core Strategy
+
+**Route card**: 滑动 / 卡顿 / 掉帧 / jank / scroll / fps / list / fling
+
+**Execution contract**
+- `submit_plan` 必须覆盖 frontmatter mandatory aspects；detail 仅 informational，不能替代 Skill/SQL/artifact 证据。
+- 条件项只在用户问题、plan 或 trace 证据命中 trigger 时强制；无数据用 `skipped` + reason/waiver。
+- 核心链路：`scrolling_analysis` → `fetch_artifact` 读 root-cause/frame artifact → 代表帧深钻。
+
+**Required phases**
+1. Overview: 调用 `scrolling_analysis`，区分 real jank、buffer stuffing 假阳性、隐形缺帧和 scroll session 边界。
+2. Artifact read: 用 `fetch_artifact` 读取 batch/root-cause/代表帧 artifact；summary 或前 50 行不足以定根因。
+3. Root-cause drill: 对主要 reason_code 选最严重代表帧，执行 `jank_frame_detail` + `frame_blocking_calls` + `blocking_chain_analysis`；workload_heavy 只能最后兜底。
+4. Conditional branches: TextureView/WebView/RN/GL/Compose/Flutter/mixed 命中时，`submit_plan` 必须在 `expectedCalls` 写入对应 producer/embedded/SF skill（Flutter 用 `invoke_skill(flutter_scrolling_analysis)`）；缺信号时执行阶段再 `skipped + reason`，不能在 plan 阶段 waiver 掉。
+5. Display boundary: BufferQueue/Fence/SF/HWC/刷新率相关时拆 App/RT、queue/dequeue/latch、SF commit/composite/present、fence；不要默认 16.6ms。
+
+**Final report must include**
+- 必须显式出现 `### 全帧根因分布`：reason_code/责任方、帧数、占比。
+- 必须显式出现 `### 代表帧分析`：耗时、超预算、vsync_missed、四象限/频率、关键 slice/阻塞点、因果链。
+- 必须显式出现 `### 峰值/口径指标`：真实掉帧、假阳性、最长帧、最长连续丢帧；缺数据时写缺失来源和降级口径。
+- 必须显式分层给出 App/系统建议。
+
+**Detail refs**
+- `scrolling:overview_artifacts`: scrolling_analysis、artifact 字段、全局上下文和身份确认。
+- `scrolling:architecture_branches`: Flutter/TextureView/WebView/RN/GL/Compose/mixed 分支。
+- `scrolling:root_cause_drill`: reason_code 深钻、frame_blocking_calls、blocking_chain_analysis、display pipeline 边界。
+- `scrolling:missing_frame_gap`: frame_production_gap 触发和缺帧解释。
+- `scrolling:final_report_and_sql_fallback`: 结论结构和 SQL fallback。
+
+
+<!-- strategy-detail id="overview_artifacts" title="滑动概览、artifact、全局上下文和身份确认" keywords="overview,scrolling_analysis,fetch_artifact,batch_frame_root_cause,scroll_sessions,process_identity_resolver" default="true" -->
 **Android 版本注意**：
 - FrameTimeline 数据需要 Android 12+ (API 31)
 - blocked_functions 需要 trace 包含 `sched/sched_blocked_reason`，并且设备 tracepoint / 符号化可用；缺失时不要只归因 CONFIG_SCHEDSTATS
@@ -206,7 +268,9 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 | `background_cpu_heavy = 1` | 非 App 大核占比 >60% | ⚠️ **后台 CPU 干扰**：{non_app_big_core_pct}% 的大核 CPU 被非前台进程占用。需用 `execute_sql` 查询 top 占用进程 |
 
 ⚠️ 全局上下文标志**不改变 reason_code 分类**，仅在结论概述段增加修饰标注。多个标志同时为 1 时全部标注。
+<!-- /strategy-detail -->
 
+<!-- strategy-detail id="architecture_branches" title="滑动混合架构和 producer 分支" keywords="Flutter,TextureView,WebView,React Native,GLSurfaceView,Compose,mixed,architecture" -->
 **Phase 1.5 — 架构感知分支（基于 detect_architecture 结果）：**
 
 `detect_architecture` 的 `primary_pipeline_id` 只是入口，不是单选结论。只要 `candidates_list` / `features_list` 中出现 WebView、Flutter、TextureView、SurfaceView、RN、GL、视频/媒体等次级出图链路，就按 **multi-pipeline** 处理。
@@ -248,7 +312,9 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 - 使用 resolver 第一名候选的 `recommended_process_name_param` 作为后续 `scrolling_analysis` / `jank_frame_detail` / `frame_blocking_calls` 的 `process_name`
 - 在结论中把 `canonical_package_name` 当作用户可读的目标应用身份；不要把它和旧 Skill 的 `process_name` 参数混为一谈
 - 如果 resolver 只有 `weak_match` 或提示 shared UID，多抓取候选行并说明身份不确定性；必要时先不传 `process_name` 跑全量概览，再按 `upid`/线程/layer 过滤
+<!-- /strategy-detail -->
 
+<!-- strategy-detail id="root_cause_drill" title="滑动根因分支深钻和 display pipeline 边界" keywords="root cause,reason_code,jank_frame_detail,frame_blocking_calls,blocking_chain_analysis,SurfaceFlinger,Fence,BufferQueue" -->
 **Phase 1.7 — 根因分支深钻（基于 batch_frame_root_cause 的 reason_code 和 jank_responsibility）：**
 
 | 条件 | 深钻动作 | 目标 |
@@ -336,7 +402,9 @@ invoke_skill("scrolling_analysis", { start_ts: "<trace_start>", end_ts: "<trace_
 **WHY 链深度要求：** 每个 [CRITICAL]/[HIGH] 发现的根因推理链必须至少 2 级：
 - ✅ Level 1: "帧超时" → Level 2: "Binder 阻塞" → Level 3: "服务端 system_server monitor_contention"
 - ❌ 仅 Level 1: "帧超时 45ms，workload_heavy"（缺少机制解释）
+<!-- /strategy-detail -->
 
+<!-- strategy-detail id="missing_frame_gap" title="缺帧检测和 production gap" keywords="frame_production_gap,missing frame,缺帧,production gap,Buffer Stuffing" -->
 **Phase 1.95 — 缺帧检测（满足以下任一条件时执行）：**
 
 | 触发条件 | 说明 |
@@ -365,7 +433,9 @@ invoke_skill("frame_production_gap", { process_name: "<包名>", start_ts: "<滑
 | `production_gap` | 其他原因的帧中断 | 进程被冻结（后台化）、ANR 状态、系统低内存 killing | 检查进程状态和系统级事件 |
 
 ⚠️ 缺帧和肥帧可以同时存在。**先分析 batch_frame_root_cause（肥帧），再用 frame_production_gap（缺帧）补充**。
+<!-- /strategy-detail -->
 
+<!-- strategy-detail id="final_report_and_sql_fallback" title="滑动最终报告结构和 SQL 回退方案" keywords="conclusion,final report,SQL,fallback,全帧根因分布,代表帧" -->
 **Phase 2 — 补充深钻（可选，仅在 Phase 1.9 深钻后仍需更多细节时执行）：**
 Phase 1 的 `batch_frame_root_cause` 已包含每帧的**完整统计数据**（但统计数据 ≠ 根因，Phase 1.9 的工具调用深钻不可省略）：
 - MainThread 四象限（Q1 大核运行 / Q2 小核运行 / Q3 调度等待 / Q4 休眠）
@@ -402,7 +472,7 @@ invoke_skill("jank_frame_detail", {
 
 **Phase 3 — 综合结论（基于全量帧数据）：**
 
-**输出结构必须遵循：**
+**输出结构必须遵循。以下三个小节标题必须显式出现在最终报告中：`### 全帧根因分布`、`### 代表帧分析`、`### 峰值/口径指标`。**
 
 1. **概览**（必须包含以下数据）：
    - 总帧数、**总真实掉帧数 = SUM(所有 jank_type 行的 real_jank_count)**
@@ -421,6 +491,8 @@ invoke_skill("jank_frame_detail", {
    - 如果存在隐形掉帧（`jank_type=None` 但 `real_jank_count > 0`），**必须在概览中明确标注**：
      "其中 N 帧为隐形掉帧（框架未标记但消费端检测到真实掉帧），可能与 SurfaceFlinger 合成延迟、管线积压或跨进程 Binder 阻塞有关"
    - ⚠️ **`App Deadline Missed` 不等于全部真实掉帧**。例如 135 帧 App Deadline Missed + 165 帧隐形掉帧 = 300 总真实掉帧
+
+   最终报告中必须把上述峰值体验和指标口径整理到 `### 峰值/口径指标` 小节，不能只散落在概览或建议里。
 
 2. **各滑动区间运行特征**（from scroll_sessions 展开行，或兼容数据源 session_quadrant_summary / session_cpu_freq / session_thread_core_affinity）：
    - 对每个滑动区间分别报告（如有多个区间，逐区间列出）：
@@ -535,3 +607,4 @@ invoke_skill("jank_frame_detail", { start_ts: "<帧的start_ts>", end_ts: "<帧�
 ```
 
 **不执行逐帧分析就直接出结论是不允许的。**
+<!-- /strategy-detail -->

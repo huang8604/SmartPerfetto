@@ -451,4 +451,102 @@ describe('SessionPersistenceService - Phase 3 Features', () => {
       expect(loaded!.getFrame('2')?.jank_type).toBe('Type B');
     });
   });
+
+  describe('SQL result message persistence', () => {
+    const testSessionId = `test_sql_result_message_${Date.now()}`;
+
+    afterEach(() => {
+      service.deleteSession(testSessionId);
+    });
+
+    test('appendMessages stores and getSession restores sqlResult payloads', () => {
+      service.saveSession(createTestSession(testSessionId));
+      const sqlResult = {
+        schemaVersion: 'sql_result_message_v1',
+        resultCount: 1,
+        results: [{
+          title: 'SQL Query (1 rows)',
+          data: {columns: ['dur_ms'], rows: [[42]]},
+          sql: 'SELECT 42 AS dur_ms',
+        }],
+      };
+
+      service.appendMessages(testSessionId, [{
+        id: `${testSessionId}-assistant-sql`,
+        role: 'assistant',
+        content: 'SQL done',
+        timestamp: Date.now(),
+        sqlResult,
+      }]);
+
+      const restored = service.getSession(testSessionId);
+      const assistant = restored?.messages.find(message => message.id === `${testSessionId}-assistant-sql`);
+      expect(assistant?.sqlResult).toEqual(sqlResult);
+    });
+
+    test('loadSessionContext hydrates recent SQL results into resumed prompt context', () => {
+      service.saveSession(createTestSession(testSessionId));
+      const context = new EnhancedSessionContext(testSessionId, `trace_${testSessionId}`);
+      expect(service.saveSessionContext(testSessionId, context)).toBe(true);
+
+      service.appendMessages(testSessionId, [{
+        id: `${testSessionId}-assistant-sql-context`,
+        role: 'assistant',
+        content: 'SQL done',
+        timestamp: Date.now(),
+        sqlResult: {
+          schemaVersion: 'sql_result_message_v1',
+          resultCount: 1,
+          results: [{
+            title: 'Recent raw SQL',
+            sql: 'SELECT 42 AS dur_ms',
+            data: {columns: ['dur_ms'], rows: [[42]]},
+          }],
+        },
+      }]);
+
+      const restored = service.loadSessionContext(testSessionId);
+      const promptContext = restored?.generatePromptContext(2000);
+
+      expect(promptContext).toContain('Recent raw SQL');
+      expect(promptContext).toContain('SELECT 42 AS dur_ms');
+      expect(promptContext).toContain('dur_ms');
+      expect(promptContext).toContain('42');
+    });
+
+    test('saveSessionStateSnapshot mirrors lineage into list-session metadata', () => {
+      const sessionId = `${testSessionId}_lineage`;
+      const lineage = {
+        previousBackendSessionId: 'backend-before-level3',
+        reason: 'cli-level3-degraded' as const,
+        at: 1_780_000_000_000,
+      };
+
+      service.saveSessionStateSnapshot(sessionId, {
+        version: 1,
+        snapshotTimestamp: 1_780_000_000_100,
+        sessionId,
+        traceId: `trace_${sessionId}`,
+        lineage,
+        conversationSteps: [],
+        queryHistory: [{turn: 1, query: '继续分析', timestamp: 1_780_000_000_000}],
+        conclusionHistory: [],
+        agentDialogue: [],
+        agentResponses: [],
+        dataEnvelopes: [],
+        hypotheses: [],
+        analysisNotes: [],
+        analysisPlan: null,
+        planHistory: [],
+        uncertaintyFlags: [],
+        runSequence: 1,
+        conversationOrdinal: 0,
+      });
+
+      const listed = service.listSessions({traceId: `trace_${sessionId}`}).sessions[0];
+      expect(listed.metadata?.lineage).toEqual(lineage);
+
+      service.deleteSession(sessionId);
+    });
+  });
 });

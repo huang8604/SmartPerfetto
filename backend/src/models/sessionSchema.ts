@@ -23,14 +23,37 @@ export interface StoredMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
-  sqlResult?: SqlQueryResult;
+  sqlResult?: StoredSqlResult;
 }
+
+export type StoredSqlResult = SqlQueryResult | SqlResultMessageBundle;
 
 export interface SqlQueryResult {
   columns: string[];
   rows: any[][];
   rowCount: number;
   query?: string;
+}
+
+export interface SqlResultMessageBundle {
+  schemaVersion: 'sql_result_message_v1';
+  resultCount: number;
+  results: SqlResultMessageEntry[];
+}
+
+export interface SqlResultMessageEntry {
+  title?: string;
+  evidenceRefId?: string;
+  sourceToolCallId?: string;
+  queryHash?: string;
+  traceId?: string;
+  traceSide?: string;
+  sql?: string;
+  data: unknown;
+  display?: unknown;
+  truncated?: boolean;
+  originalBytes?: number;
+  maxBytes?: number;
 }
 
 export interface SessionMetadata {
@@ -85,6 +108,13 @@ export interface SessionMetadata {
    * @see SessionStateSnapshot in backend/src/agentv3/sessionStateSnapshot.ts
    */
   sessionStateSnapshot?: import('../agentv3/sessionStateSnapshot').SessionStateSnapshot;
+
+  /**
+   * Backend-session ancestry when a user-visible session had to bridge to a
+   * fresh backend session. Duplicated from sessionStateSnapshot for catalog
+   * visibility.
+   */
+  lineage?: import('../agentv3/sessionStateSnapshot').SessionLineage;
 
   /**
    * @deprecated Use sessionStateSnapshot instead. Kept for backward-compatible reads of old sessions.

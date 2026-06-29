@@ -179,6 +179,7 @@ interface AnalysisQualitySyncExpectation {
   analysisCompletedHasIdentityResolutions: boolean;
   analysisCompletedHasTerminationReason: boolean;
   analysisCompletedHasTerminationMessage: boolean;
+  analysisCompletedHasTerminalRunStatus: boolean;
   claimReferencesHaveArtifactIds: boolean;
 }
 
@@ -248,6 +249,7 @@ function extractAnalysisQualityExpectations(content: string): AnalysisQualitySyn
     analysisCompletedHasIdentityResolutions: /\bidentityResolutions\s*\?:\s*IdentityResolutionV1\[\]\s*;/.test(analysisCompletedBlock),
     analysisCompletedHasTerminationReason: /\bterminationReason\s*\?:\s*string\s*;/.test(analysisCompletedBlock),
     analysisCompletedHasTerminationMessage: /\bterminationMessage\s*\?:\s*string\s*;/.test(analysisCompletedBlock),
+    analysisCompletedHasTerminalRunStatus: /\bterminalRunStatus\s*\?:\s*'completed'\s*\|\s*'quota_exceeded'\s*;/.test(analysisCompletedBlock),
     claimReferencesHaveArtifactIds:
       /\bartifactId\s*\?:\s*string\s*;/.test(claimRefBlock) &&
       /\bsourceArtifactId\s*\?:\s*string\s*;/.test(claimRefBlock),

@@ -23,6 +23,7 @@ import type {
   EvidenceTimeRangeV1,
   TraceTimestampNs,
 } from '../../types/evidenceContract';
+import { evidenceValuesMatch } from './valueComparison';
 
 export interface BuildEvidenceContractInput {
   conclusionContract?: ConclusionContract | null;
@@ -94,14 +95,7 @@ function scalarEquals(a: unknown, b: unknown): boolean {
 }
 
 function valuesMatch(expected: unknown, actual: unknown): boolean {
-  if (actual === undefined) return false;
-  if (expected === actual) return true;
-  const expectedNumber = typeof expected === 'number' ? expected : Number(expected);
-  const actualNumber = typeof actual === 'number' ? actual : Number(actual);
-  if (Number.isFinite(expectedNumber) && Number.isFinite(actualNumber)) {
-    return Math.abs(expectedNumber - actualNumber) <= Number.EPSILON;
-  }
-  return String(expected) === String(actual);
+  return evidenceValuesMatch(expected, actual);
 }
 
 function evidenceCellCheckStatus(cell: EvidenceCellV1): 'matched' | 'mismatch' | 'not_checked' {

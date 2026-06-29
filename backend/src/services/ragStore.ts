@@ -92,6 +92,13 @@ export interface RagStoreSearchOptions {
   languages?: RagChunk['language'][];
 }
 
+export interface RagStoreListOptions {
+  kind?: RagSourceKind;
+  registryOrigin?: RagChunk['registryOrigin'];
+  uriPrefix?: string;
+  scope?: KnowledgeScope;
+}
+
 /** Per-kind index summary returned by `getStats()`. */
 export type RagStoreStats = Record<
   RagSourceKind,
@@ -258,6 +265,28 @@ export class RagStore {
     }
     this.load();
     return this.chunks.get(chunkId);
+  }
+
+  /** List chunks for rebuild/maintenance callers without changing search semantics. */
+  listChunks(opts: RagStoreListOptions = {}): RagChunk[] {
+    this.load();
+    let chunks = enterpriseKnowledgeStoreEnabled()
+      ? listScopedKnowledgeRecords<RagChunk>(
+          KNOWLEDGE_KIND,
+          opts.scope,
+          {rowScopePrefix: RAG_ROW_SCOPE_PREFIX, includeSystem: true},
+        ).map(row => row.record)
+      : Array.from(this.chunks.values());
+    if (opts.kind) chunks = chunks.filter(chunk => chunk.kind === opts.kind);
+    if (opts.registryOrigin) {
+      chunks = chunks.filter(chunk => chunk.registryOrigin === opts.registryOrigin);
+    }
+    const uriPrefix = opts.uriPrefix;
+    if (uriPrefix) {
+      chunks = chunks.filter(chunk => chunk.uri.startsWith(uriPrefix));
+    }
+    chunks.sort((a, b) => a.chunkId.localeCompare(b.chunkId));
+    return chunks;
   }
 
   /** Per-kind chunk counts plus the freshest indexedAt seen for each. */

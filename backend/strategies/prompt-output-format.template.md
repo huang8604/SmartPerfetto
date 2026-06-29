@@ -4,122 +4,60 @@
 <!-- No template variables — static content -->
 ## 输出格式
 
-### 通用分析规则（所有场景适用）
-
-#### Slice 嵌套与 Exclusive Time
-当分析主线程热点 slice 时，数据包含两组指标：
-- **total_ms / percent**（wall time）：包含子 slice 时间，父子会重叠
-- **self_ms / self_percent**（exclusive time）：仅自身独占时间，不含子 slice
-
-**规则**：根因归因和优化收益估算必须基于 self_ms。嵌套 slice 的 wall time 不能简单相加（会导致百分比超过 100%）。根因分析树中的 slice 必须体现父子嵌套关系。
-
-#### 测试/基准应用检测
-当热点 slice 名称包含 `Benchmark`、`StressTest`、`TestRunner`、`Simulator`、`Mock`、`Synthetic` 等特征词，或非标准 AOSP 框架 slice 占据大量时间时，在概览中标注这是测试/基准应用，并调整分析措辞：描述模拟负载的性能特征，而不是给出通用的生产环境优化建议。
-
-#### CPU 频率估算
-- 均频是加权平均值，不代表恒定频率（min/max 可能差异很大）
-- CPU-bound 耗时与频率不是简单线性反比关系
-- **禁止**给出精确的百分比节省估算（如"升至满频可降低 28%"）。只应定性描述（如"频率未达峰值，CPU-bound 任务可能受影响"）
-- Thermal 限频需要额外数据确认，不要仅凭均频<峰频就断定
-
-#### 证据来源、置信度与版本边界
-- 每个关键结论先标明证据类型：`trace_direct`（Perfetto 时间线/Skill 直接量化）、`derived_metric`（由 Skill/SQL 聚合推导）、`log_or_snapshot`、`external_aggregate`（Play/Vitals/APM/实验平台）、`diagnostic_api`（ApplicationExitInfo/ProfilingManager 等）、`user_context`、`missing_evidence`。
-- 置信度必须跟证据强度一致。直接 trace 证据可以支撑当前 trace 内的因果判断；外部聚合或用户描述只能作为上下文，不能单独证明当前 trace 根因。
-- 版本敏感结论必须写明 Android/API/数据源边界，或明确标注“版本边界未知，需按目标设备确认”。不要把某个 Android 版本、设备、渠道或 28 天窗口的结论写成普适事实。
-- 空表或缺数据只能说明“当前 trace 未采集/未命中该证据”，不能写成“没有该问题”。需要给出下一次采集或线上补证的最高信息增益动作。
+### 通用规则
+- 用 `self_ms` / exclusive time 归因和估收益；wall time 可说明体感，父子 slice 不并列相加。
+- 测试/基准/mock/synthetic/非生产 trace 要在概览标注并调整建议口径。
+- CPU 频率只做定性/区间判断；thermal/policy 需额外证据，不承诺精确收益。
+- 关键结论标明证据类型、置信度、版本/采集边界；缺数据时写最高信息增益的下一步采集。
+- 证据来源、置信度与版本边界必须显式写出；blocked reason 相关结论要标注 `thread-state-blocked-reason` 能力边界。
 
 ### 发现格式
-每个发现使用以下格式：
+每个发现使用：
 
 **[SEVERITY] 标题**
-描述：具体问题描述
-根因：**不能只报告"耗时XXms"——必须解释 WHY**。交叉引用四象限、CPU 频率、线程状态、Binder/GC 等数据，定位真正的原因（是 CPU-bound？是被阻塞？是跑小核？是频率不够？是 Binder/IO/锁等待？）
-证据：引用具体的数据（时间戳、数值、四象限分布、频率、阻塞来源）
-证据类型/置信度：说明是直接 trace、派生指标、日志/快照、外部聚合、诊断 API 还是缺失证据；给出高/中/低置信原因
-版本/适用边界：若涉及 FrameTimeline、monitor_contention、input events、power/vitals、ProfilingManager 等版本敏感能力，写明适用边界或未知
-建议：可操作的优化建议
+描述：现象和影响。
+根因：WHY 链，至少“症状 → 机制”，CRITICAL/HIGH 尽量追到源头。
+证据：时间戳、耗时、比例、线程/进程、artifact/SQL/Skill 来源。
+证据类型/置信度：trace_direct / derived_metric / diagnostic_api / external_aggregate / missing_evidence。
+边界：FrameTimeline、monitor_contention、input、power、diagnostic API 等版本/能力边界。
+建议：按 [App 层] / [系统/ROM 层] 分层，先给 App 可执行动作。
 
-严重程度定义：
-- [CRITICAL]: 严重性能问题，必须修复（如 ANR、严重卡顿 >100ms）
-- [HIGH]: 明显性能问题，强烈建议修复（如频繁掉帧、高 CPU 占用）
-- [MEDIUM]: 值得关注的性能问题（如偶发卡顿、内存波动）
-- [LOW]: 轻微性能问题或优化建议
-- [INFO]: 性能特征描述，非问题
-
-### 根因推理链格式（[CRITICAL] 和 [HIGH] 必须包含）
-
-每个高严重度发现必须包含至少 2 级深的根因推理链：
-
-```
-**[CRITICAL] 主线程 XXX 耗时 YYms**
-根因推理链：
-  ① 症状：XXX 耗时 YYms（预算 ZZms），self_ms=AAms
-  ② 机制：hot_slice_states 显示 Running=BBms + S=CCms
-  ③ 阻塞原因：blocking_chain/binder_root_cause 追踪到具体阻塞源
-  ④ 系统因素：CPU 频率/thermal/调度等系统级上下文
-  ⑤ 背景知识：[来自 lookup_knowledge 的机制解释]
-```
-
-### 背景知识注入规则
-
-当报告以下类型的根因时，使用 `lookup_knowledge` 获取背景知识并在结论中包含：
-
-| 根因类型 | lookup_knowledge 参数 | 输出位置 |
-|---------|---------------------|---------|
-| Binder 阻塞 | `binder-ipc` | 在 Binder 相关发现后 |
-| GC 导致卡顿 | `gc-dynamics` | 在 GC 发现后 |
-| CPU 频率/调度 | `cpu-scheduler` | 在频率/小核发现后 |
-| 热节流 | `thermal-throttling` | 在 thermal 发现后 |
-| 锁竞争 | `lock-contention` | 在锁等待发现后 |
-| D-state / io_wait / blocked_function | `thread-state-blocked-reason` | 在 blocked_function、不可中断等待或 IO wait 相关发现后 |
-| 帧渲染管线 | `rendering-pipeline` | 首次解释帧延迟时 |
-
-背景知识必须**与当前 trace 数据关联**，不能是纯理论解释。格式：
-```
-> 📚 **背景知识：[主题]**
-> [2-3 句话解释机制] + [当前 trace 中的具体体现]
-```
-
-### 因果链可视化（跨线程/跨进程根因时）
-
-当根因涉及跨线程或跨进程因果关系时，用 Mermaid 流程图展示因果链：
-
-```mermaid
-graph LR
-    A[主线程 操作<br/>XXms] -->|阻塞| B[Binder 事务<br/>→ 服务进程]
-    B -->|服务端慢| C[根因<br/>锁/GC/IO]
-    style A fill:#ff6b6b,color:#fff
-    style C fill:#ffa07a,color:#fff
-```
+严重度：
+- [CRITICAL] 必须修复：ANR、严重卡顿、重大启动阻塞等。
+- [HIGH] 强烈建议修复：频繁掉帧、高 CPU/IO/锁/Binder 阻塞等。
+- [MEDIUM] 值得关注：偶发或贡献因素。
+- [LOW] 轻微优化。
+- [INFO] 性能特征或边界说明。
 
 ### 结论结构
-结论必须完整但克制：优先输出能支撑决策的证据链，避免把已经展示过的大表逐行搬进最终报告。如果证据很多，用聚合表和证据索引压缩，降低重复信息密度；不要为了压缩长度裁剪关键结论或证据，也不要生成会在 token 上限处截断的超长报告。
+第一行必须是 `## 综合结论`（英文为 `## Final Conclusion`）。报告完整但克制：
+1. 概览：一句话结论 + 关键指标 + 置信度/边界。
+2. 关键发现：按严重度排序，包含 WHY 链和证据。
+3. 根因分析：必要时用 Mermaid/简表展示跨线程/跨进程因果链。
+4. 优化建议：按收益/风险排序，明确 [App 层] 与 [系统/ROM 层]。
+5. 置信度与限制：缺失数据、版本/设备边界、外部指标边界、下一步采集建议。
+6. 逐句数据引用（结构化来源）：最多 12 条，覆盖关键数值、比例、根因判断和建议。
 
-1. **概览**: 一句话总结性能状况。如果架构检测置信度 < 80%，在概览中标注（如"⚠️ 架构检测置信度 50%，分析策略可能不完全匹配"），帮助用户理解分析的局限性
-2. **关键发现**: 按严重程度排列的发现列表（含根因推理链 + 📚 背景知识）
-3. **根因分析**: 因果链可视化（Mermaid 图）
-4. **优化建议**: 可操作的建议，按优先级排列。**必须分层标注可操作范围**：
-   - **[App 层]**：App 开发者可直接实施（优先级最高，建议要具体到代码模式/API 调用）
-   - **[系统/ROM 层]**：需要厂商协同或系统级权限（标注"需系统级能力"，仅作补充参考）
-   - 避免把需要 root 权限、内核调优、或厂商定制的建议当作 App 层建议
-5. **置信度与限制**: 汇总证据类型、缺失数据、版本/设备边界、外部指标是否只是上下文，以及下一步补证动作。
-6. **逐句数据引用（结构化来源）**: 只列关键结论、根因判断和建议所依赖的数据来源；不要为概览里重复出现的同一指标反复建引用。该段用于系统生成可核对的来源索引，不能省略关键可核对数据。
+### 逐句数据引用
+必须追加机器可解析段：
 
-### 逐句数据引用格式（必须机器可解析）
-
-当结论中出现关键数值、百分比、耗时、帧数、线程/进程名、表格聚合判断时，必须在报告末尾追加：
-
-```
+```text
 ## 逐句数据引用（结构化来源）
 - Q1 / C1: <结论中的可核对断言原文>
-  - evidence_ref_id=<data:* 或 ev_* 证据 ID>; source_ref=<表 1/摘要 1>; source_tool_call_id=<工具调用 ID，如可见>; row_index=<0-based 行号，如可见>; row_selector=<行号不稳定时的筛选条件>; column=<列名>; value=<原始值>
+  - evidence_ref_id=<data:* 或 ev_* 证据 ID>; source_ref=<表/摘要/证据块标题>; source_tool_call_id=<工具调用 ID，如可见>; row_index=<0-based 行号，如可见>; row_selector=<行号不稳定时使用>; column=<原始列名>; value=<原始值>
 ```
 
 规则：
-- 总量上限：最多 12 条断言引用；同一张表的同类指标优先合并成一条断言，并用多个 `row_selector` / `column` 引用支撑。
-- `Q1/Q2...` 是断言编号；`C1/C2...` 对齐“关键发现”或结论排序。
-- `source_ref` 必须对应本轮已展示给用户的表格、摘要或证据块标题。
-- `row_index` 使用 0-based 行号；如果行号不稳定，改用 `row_selector`（例如 `frame_id=123`）。
-- `column` 和 `value` 必须保留原始列名与原始值；不要只写自然语言转述。
-- 同一个断言可引用多行来源；每行一个 `- evidence_ref_id=...`。
-- 找不到精确来源时，不要伪造行列值；在“不确定性与反例”说明缺口，并在该断言的引用里只保留能确认的字段。
+- 同类指标合并引用，避免重复堆同一张表。
+- 找不到精确行列值时不要伪造；限制中说明缺口，只引用能确认的字段。
+- 外部指标、诊断 API、日志/快照必须标注来源类型和时间/版本/窗口边界。
+
+### 背景知识
+只有当前 trace 已命中对应机制时才添加背景知识：
+
+```text
+> 背景知识：[主题]
+> [2-3 句话解释机制] + [当前 trace 中的具体体现]
+```
+
+背景知识不能替代 trace 证据，不能引入未被当前数据支持的根因。

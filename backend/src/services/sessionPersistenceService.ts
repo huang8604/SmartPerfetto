@@ -395,7 +395,9 @@ export class SessionPersistenceService {
         return null;
       }
 
-      return EnhancedSessionContext.deserialize(session.metadata.sessionContextSnapshot);
+      const context = EnhancedSessionContext.deserialize(session.metadata.sessionContextSnapshot);
+      context.hydrateRecentSqlResultsFromMessages(session.messages);
+      return context;
     } catch (error) {
       console.error('[SessionPersistence] Failed to load SessionContext:', error);
       return null;
@@ -681,6 +683,9 @@ export class SessionPersistenceService {
       metadata.sessionStateSnapshot = snapshot;
       metadata.referenceTraceId = snapshot.referenceTraceId;
       metadata.comparisonSource = snapshot.comparisonSource;
+      if (snapshot.lineage) {
+        metadata.lineage = snapshot.lineage;
+      }
 
       // Backward-compat dual-write: also populate runtimeArraysSnapshot
       metadata.runtimeArraysSnapshot = {

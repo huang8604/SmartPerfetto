@@ -635,6 +635,107 @@ describe('HTMLReportGenerator', () => {
     expect(html).toContain("querySelector: 'pre.mermaid[data-render-mode=\"mermaid\"]'");
   });
 
+  test('renders case recommendations with strong guidance and partial evidence gaps', () => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-case-rec',
+      query: '分析滑动掉帧',
+      timestamp: Date.now(),
+      hypotheses: [],
+      dialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      result: {
+        sessionId: 'session-case-rec',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'shader compile 是主要根因。',
+        conclusionContract: {
+          schemaVersion: 'conclusion_contract_v1',
+          mode: 'initial_report',
+          conclusions: [],
+          clusters: [],
+          evidenceChain: [],
+          caseRecommendations: [
+            {
+              caseId: 'scroll_shader_compile_pixel8_001',
+              title: '首次滑动 RenderThread shader compile',
+              scene: 'scrolling',
+              primaryRootCause: 'shader_compile',
+              matchStrength: 'strong',
+              evidenceRefs: ['ev_shader_compile'],
+              learnedProvenance: {
+                candidateId: 'cand-html-1',
+                supportingEvidence: 3,
+                contradictingEvidence: 0,
+                supported: true,
+              },
+              recommendations: {
+                app: [{
+                  id: 'app.precompile_shader',
+                  priority: 'P0',
+                  action: '提前 warm-up / precompile shader，避免首次滑动同步编译。',
+                  applies_when: 'RenderThread 出现 shader/makePipeline 编译且与掉帧窗口重叠',
+                  risks: '预热会增加启动或首屏内存/CPU，需要选择低影响窗口',
+                }],
+                oem: [{
+                  id: 'oem.gpu_cpu_boost',
+                  priority: 'P1',
+                  action: '检查 GPU/CPU 频率响应和 RenderThread 调度优先级。',
+                  applies_when: 'shader 编译不可完全消除，且同帧存在低频或调度延迟证据',
+                  risks: '频率策略会影响功耗，需要按场景白名单或短时 boost',
+                }],
+              },
+            },
+            {
+              case_id: 'scroll_scheduler_freq_mixed_001',
+              title: '滑动线程调度与频率响应混合问题',
+              scene: 'scrolling',
+              primary_root_cause: 'sched_delay_in_slice',
+              match_strength: 'partial',
+              evidence_gap: '缺少 CPU 频率 ramp 与掉帧窗口重叠证据。',
+              recommendations: {
+                app: [{
+                  id: 'app.reduce_ui_work',
+                  priority: 'P1',
+                  action: '减少 UI 线程同步工作。',
+                  applies_when: 'UI 线程已经存在 workload_heavy 或 sched_delay 证据',
+                  risks: '拆分任务可能改变交互时序，需要 A/B 验证',
+                }],
+                oem: [],
+              },
+            },
+          ],
+          uncertainties: [],
+          nextSteps: [],
+        },
+        confidence: 0.8,
+        rounds: 1,
+        totalDurationMs: 1000,
+      },
+    });
+
+    expect(html).toContain('相似案例与优化建议');
+    expect(html).toContain('case_id');
+    expect(html).toContain('scroll_shader_compile_pixel8_001');
+    expect(html).toContain('学习案例');
+    expect(html).toContain('3 次正向反馈');
+    expect(html).toContain('strong 匹配');
+    expect(html).toContain('可作为直接建议');
+    expect(html).toContain('App 侧建议');
+    expect(html).toContain('OEM/厂商侧建议');
+    expect(html).toContain('applies_when');
+    expect(html).toContain('RenderThread 出现 shader/makePipeline 编译且与掉帧窗口重叠');
+    expect(html).toContain('risks');
+    expect(html).toContain('预热会增加启动或首屏内存/CPU');
+    expect(html).toContain('scroll_scheduler_freq_mixed_001');
+    expect(html).toContain('partial 匹配');
+    expect(html).toContain('仅作背景参考');
+    expect(html).toContain('evidence_gap');
+    expect(html).toContain('缺少 CPU 频率 ramp 与掉帧窗口重叠证据。');
+  });
+
   test('renders agent-driven report shell in English when configured', () => {
     process.env.SMARTPERFETTO_OUTPUT_LANGUAGE = 'en';
     const generator = new HTMLReportGenerator();

@@ -107,4 +107,38 @@ describe('recordPlanToolCall', () => {
     expect(record?.matchedPhaseId).toBe('p4');
     expect(findCompletedPhaseEvidenceGaps(plan)).toHaveLength(1);
   });
+
+  it('does not let informational strategy detail lookups satisfy evidence gaps', () => {
+    const plan: AnalysisPlanV3 = {
+      phases: [{
+        id: 'p1',
+        name: '策略细节读取',
+        goal: '读取 on-demand detail，但不能把它当 trace 证据',
+        expectedTools: ['lookup_strategy_detail'],
+        expectedCalls: [{ tool: 'lookup_strategy_detail' }],
+        status: 'completed',
+        completedAt: 100,
+        summary: '只读取了策略说明，没有采集 trace 证据。',
+      }],
+      successCriteria: 'Detail lookup must remain informational',
+      submittedAt: 1,
+      toolCallLog: [],
+    };
+
+    const record = recordPlanToolCall(plan, {
+      toolName: 'lookup_strategy_detail',
+      input: { detailRef: 'scrolling:architecture' },
+      resultText: '{"success":true,"informational":true,"planPhaseId":"p1"}',
+      timestamp: 10,
+    });
+
+    expect(record?.matchedPhaseId).toBeUndefined();
+    expect(findCompletedPhaseEvidenceGaps(plan)).toEqual([
+      expect.objectContaining({
+        phase: plan.phases[0],
+        matchedCalls: [],
+        missingExpectedCalls: [{ tool: 'lookup_strategy_detail' }],
+      }),
+    ]);
+  });
 });

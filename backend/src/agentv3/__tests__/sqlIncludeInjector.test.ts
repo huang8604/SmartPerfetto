@@ -198,25 +198,26 @@ describe('sqlIncludeInjector - Tier-0 race safety', () => {
 });
 
 describe('sqlIncludeInjector - completeness gate', () => {
-  // Bidirectional: every backtick-fenced lowercase identifier inside the
-  // "Perfetto SQL Stdlib" section of prompt-methodology.template.md must
-  // resolve to either a prelude builtin (no INCLUDE needed) or a module
-  // path. Auto-extracts both directions, so the gate self-maintains as
-  // the prompt evolves.
+  // Bidirectional: every backtick-fenced lowercase identifier advertised as a
+  // SQL/stdlib helper in prompt surfaces must resolve to either a prelude
+  // builtin (no INCLUDE needed) or a module path. Auto-extracts both
+  // directions, so the gate self-maintains as strategy markdown evolves.
+  const STRATEGIES_DIR = path.resolve(__dirname, '../../../strategies');
   const METHODOLOGY_PATH = path.resolve(
-    __dirname,
-    '../../../strategies/prompt-methodology.template.md',
+    STRATEGIES_DIR,
+    'prompt-methodology.template.md',
   );
-  const SECTION_HEADER = '### Perfetto SQL Stdlib';
-  const SECTION_FOOTER = '### SQL 错误自纠正';
+  const SQL_DISCIPLINE_HEADER = '### SQL Discipline';
+  const SQL_DISCIPLINE_FOOTER = '### Reasoning And State';
 
   // Identifiers in the prompt that are deliberately not stdlib symbols
   // (e.g. MCP tool names, frontmatter literals). Listed explicitly so the
   // gate fails loudly on genuinely new advertised names.
   const NON_STDLIB_NAMES = new Set<string>([
     'list_stdlib_modules',
-    'execute_sql', 'execute_sql_on', 'lookup_sql_schema',
+    'execute_sql', 'execute_sql_on', 'fetch_artifact', 'lookup_sql_schema',
     'invoke_skill', 'list_skills', 'query_perfetto_source',
+    'ts', 'dur', 'name',
     'cpufreq',
     'thread_name', 'process_name',
     'unknown', 'awake',
@@ -224,24 +225,46 @@ describe('sqlIncludeInjector - completeness gate', () => {
     'weighted_missed_frames',
     'weighted_missed_app_frames',
     'weighted_missed_sf_frames',
+    'batch_frame_root_cause',
+    'big_avg_freq_mhz',
+    'cpu_freq_clusters_json',
+    'device_peak_freq_mhz',
+    'page_fault',
   ]);
 
-  const extractAdvertisedNames = () => {
+  const extractSqlDisciplineSection = () => {
     const md = fs.readFileSync(METHODOLOGY_PATH, 'utf-8');
-    const start = md.indexOf(SECTION_HEADER);
-    const end = md.indexOf(SECTION_FOOTER, start);
+    const start = md.indexOf(SQL_DISCIPLINE_HEADER);
+    const end = md.indexOf(SQL_DISCIPLINE_FOOTER, start);
     if (start < 0 || end < 0) {
       throw new Error(
         `Section markers not found in ${METHODOLOGY_PATH}. ` +
-        `Looking for "${SECTION_HEADER}" -> "${SECTION_FOOTER}".`,
+        `Looking for "${SQL_DISCIPLINE_HEADER}" -> "${SQL_DISCIPLINE_FOOTER}".`,
       );
     }
-    const section = md.slice(start, end);
+    return md.slice(start, end);
+  };
+
+  const extractStrategySqlRecommendationText = () => {
+    return fs
+      .readdirSync(STRATEGIES_DIR)
+      .filter(file => file.endsWith('.strategy.md'))
+      .map(file => fs.readFileSync(path.join(STRATEGIES_DIR, file), 'utf-8'))
+      .flatMap(md => md.split(/\r?\n/))
+      .filter(line => line.includes('execute_sql') && line.includes('`'))
+      .join('\n');
+  };
+
+  const extractAdvertisedNames = () => {
+    const promptText = [
+      extractSqlDisciplineSection(),
+      extractStrategySqlRecommendationText(),
+    ].join('\n');
     const out = new Set<string>();
     // Backtick-fenced lowercase identifier, optionally followed by
-    // `(args)` (function/macro form) or `.column` (column reference).
-    const re = /`([a-z][a-z0-9_]+)(?:\([^`]*\)|\.\w+)?`/g;
-    for (const m of section.matchAll(re)) {
+    // `(args)` / `!(args)` (function/macro form) or `.column`.
+    const re = /`([a-z][a-z0-9_]+)(?:!?\([^`]*\)|\.\w+)?`/g;
+    for (const m of promptText.matchAll(re)) {
       const name = m[1];
       if (!NON_STDLIB_NAMES.has(name)) out.add(name);
     }
@@ -261,7 +284,7 @@ describe('sqlIncludeInjector - completeness gate', () => {
     if (missing.length) {
       throw new Error(
         `Methodology drift: ${missing.length}/${advertised.size} stdlib ` +
-        `name(s) advertised in prompt-methodology.template.md cannot be ` +
+        `name(s) advertised in strategy prompt surfaces cannot be ` +
         `resolved by the injector:\n` +
         missing.map(n => `  - ${n}`).join('\n') +
         `\n\nEither (a) the prompt advertises a name with a typo, ` +

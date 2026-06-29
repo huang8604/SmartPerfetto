@@ -10,6 +10,7 @@ import type {
   ClaimVerificationPolicy,
   ClaimVerificationResult,
 } from '../../types/claimVerification';
+import { evidenceValuesMatch } from '../evidence/valueComparison';
 
 export interface DeterministicClaimVerifierInput {
   claimSupport?: ClaimSupportV1[];
@@ -17,14 +18,7 @@ export interface DeterministicClaimVerifierInput {
 }
 
 function valuesMatch(expected: unknown, actual: unknown): boolean {
-  if (actual === undefined) return false;
-  if (expected === actual) return true;
-  const expectedNumber = typeof expected === 'number' ? expected : Number(expected);
-  const actualNumber = typeof actual === 'number' ? actual : Number(actual);
-  if (Number.isFinite(expectedNumber) && Number.isFinite(actualNumber)) {
-    return Math.abs(expectedNumber - actualNumber) <= Number.EPSILON;
-  }
-  return String(expected) === String(actual);
+  return evidenceValuesMatch(expected, actual);
 }
 
 function verifyAnchor(anchor: EvidenceAnchorV1): ClaimReferenceVerificationResult[] {

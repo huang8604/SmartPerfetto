@@ -53,8 +53,41 @@ plan_template:
     - id: sched_or_linux_signal
       match_keywords: ['linux_sched_latency_distribution', 'linux_runqueue_depth_timeline', 'sched', 'runqueue', '调度']
       suggestion: 'Linux 调度问题需要包含 sched latency 或 runqueue 深度分析'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: linux_sched_latency_distribution
+        - tool: invoke_skill
+          skill_id: linux_runqueue_depth_timeline
 ---
 
+#### linux Core Strategy
+
+**Route card**: linux / kernel / sched / runqueue / runnable / pmu / perf / cache miss / branch miss / rss
+
+**Capabilities**: required=[cpu_scheduling], optional=[cpu_freq_idle, perf_samples]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- sched_or_linux_signal: Linux 调度问题需要包含 sched latency 或 runqueue 深度分析 (requires one of: invoke_skill(linux_sched_latency_distribution), invoke_skill(linux_runqueue_depth_timeline))
+
+**Phase reminders**
+- sched_latency: 调度问题优先调用 linux_sched_latency_distribution 和 linux_runqueue_depth_timeline；如果用户给定时间窗必须传 start_ts/end_ts。 工具: linux_sched_latency_distribution, linux_runqueue_depth_timeline
+- pmu_perf: PMU 问题调用 linux_perf_counter_hotspots。无 perf sample/counter 数据时必须说明 trace 未启用 PMU，不能给 cache/branch 结论。 工具: linux_perf_counter_hotspots
+- linux_memory: Linux 进程内存问题调用 linux_process_rss_swap_timeline；page fault/reclaim 仍用 page_fault_in_range 做窗口级阻塞证据。 工具: linux_process_rss_swap_timeline, page_fault_in_range
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `linux:full`: Linux 内核 / 调度 / PMU 分析 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="linux full strategy detail" keywords="linux,linux,kernel,sched,runqueue,runnable,pmu,perf,cache miss,branch miss,rss,swap,内核,Linux 内核 / 调度 / PMU 分析,detail,full" default="true" -->
 #### Linux 内核 / 调度 / PMU 分析
 
 Linux 场景必须先判断 trace 是否包含对应数据源：sched 基础数据通常存在，PMU/perf counter 需要额外 trace_config，RSS/swap 需要内存 counters。
@@ -84,3 +117,4 @@ invoke_skill("page_fault_in_range", { package: "<包名>", start_ts: "<start>", 
 ```
 
 RSS/swap 是容量证据，page fault/reclaim 是阻塞证据，不能互相替代。
+<!-- /strategy-detail -->

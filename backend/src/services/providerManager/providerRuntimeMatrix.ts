@@ -77,18 +77,31 @@ export function resolveProviderAgentRuntime(
 }
 
 export function sharedKeyShouldUseClaudeAuthToken(type: ProviderType): boolean {
-  return [
-    'deepseek',
-    'qwen',
-    'qwen_coding',
-    'kimi',
-    'doubao',
-    'minimax',
-    'tencent_token_plan',
-    'tencent_coding_plan',
-    'hunyuan',
-    'qianfan',
-    'stepfun',
-    'huawei',
-  ].includes(type);
+  return isDualSurfaceProviderType(type);
+}
+
+/**
+ * Bedrock cross-region inference model IDs keyed by Anthropic-style short name.
+ *
+ * Bedrock rejects short names like 'claude-sonnet-4-6' with HTTP 400 invalid
+ * model identifier; it requires the cross-region format
+ * (us.anthropic.<model>-<date>-v1:0). Kept in one place so the provider env
+ * builder and the connection tester agree. See GitHub issue #179.
+ */
+export const BEDROCK_MODEL_MAP: Record<string, string> = {
+  'claude-opus-4-6': 'us.anthropic.claude-opus-4-5-20251101-v1:0',
+  'claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  'claude-haiku-4-5': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+};
+
+/**
+ * Normalize a model ID for Bedrock. Short Anthropic names are mapped to their
+ * cross-region IDs; anything that already looks like a Bedrock ID (contains a
+ * '.') is passed through unchanged so user-provided region prefixes
+ * (us./eu./apac.) and direct IDs are preserved — keeping Provider
+ * Manager/runtime provider pinning semantics intact.
+ */
+export function normalizeBedrockModelId(model: string): string {
+  if (model.includes('.')) return model;
+  return BEDROCK_MODEL_MAP[model] ?? model;
 }

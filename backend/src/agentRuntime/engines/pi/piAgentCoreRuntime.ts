@@ -299,6 +299,7 @@ export function getPiAgentCoreEngineCapabilities(
     displayName: publicRuntime ? 'Pi Agent Core' : 'Experimental Pi Agent Core',
     production: publicRuntime,
     publicRuntime,
+    promptCache: { systemPromptDynamicBoundary: false },
   };
 }
 
@@ -1432,6 +1433,7 @@ export class PiAgentCoreRuntime extends EventEmitter implements IOrchestrator {
     const { toolDefinitions } = createClaudeMcpServer({
       sessionId,
       traceId,
+      userQuery: query,
       traceProcessorService: this.traceProcessorService,
       skillExecutor,
       packageName: effectivePackageName,

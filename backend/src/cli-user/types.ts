@@ -10,6 +10,7 @@
  */
 
 import type { BackendAgentRuntimeKind } from '../agentRuntime/runtimeSelection';
+import type { SessionLineage } from '../agentv3/sessionStateSnapshot';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
 
 export type CapturePresetId =
@@ -80,12 +81,18 @@ export interface TraceCaptureResult {
   };
 }
 
+export interface CliSessionLineage extends SessionLineage {
+  reason: 'cli-level3-degraded';
+}
+
 /** Written to `<sessionDir>/config.json`. Source of truth for resume. */
 export interface CliSessionConfig {
   /** CLI-local session id (same as backend session id — no separate namespace). */
   sessionId: string;
   /** Backend agent session id used for runtime persistence; may differ after degraded CLI resume. */
   backendSessionId?: string;
+  /** Backend-session ancestry when the CLI-visible session had to bridge to a fresh backend session. */
+  lineage?: CliSessionLineage;
   /** Trace path the user passed on first analyze. Used to re-load on traceId eviction. */
   tracePath: string;
   /** Trace id assigned by TraceProcessorService (may change across processes). */

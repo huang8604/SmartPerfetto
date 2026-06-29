@@ -283,6 +283,7 @@ export function registerAgentResumeRoutes(
         providerSnapshotChangeReason: providerSnapshotChanged
           ? 'provider_snapshot_hash_mismatch'
           : undefined,
+        lineage: snapshot?.lineage ?? persistedSession.metadata?.lineage,
         referenceTraceId: snapshot?.referenceTraceId,
         comparisonSource: snapshot?.comparisonSource,
         comparisonReportSection: snapshot?.comparisonReportSection,

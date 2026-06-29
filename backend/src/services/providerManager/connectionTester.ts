@@ -3,6 +3,7 @@
 
 import type { OpenAIProtocol, ProviderConfig, ProviderType, TestResult } from './types';
 import {
+  normalizeBedrockModelId,
   resolveProviderAgentRuntime,
   sharedKeyShouldUseClaudeAuthToken,
 } from './providerRuntimeMatrix';
@@ -185,7 +186,7 @@ async function testBedrockWithBearer(
   provider: ProviderConfig,
   baseUrl: string,
 ): Promise<Omit<TestResult, 'latencyMs'>> {
-  const model = provider.models.primary || 'anthropic.claude-sonnet-4-20250514-v1:0';
+  const model = normalizeBedrockModelId(provider.models.primary || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0');
   const url = `${baseUrl.replace(/\/+$/, '')}/model/${model}/invoke`;
 
   const res = await fetchWithTimeout(url, {
@@ -214,7 +215,7 @@ async function testBedrockWithSigV4(
   baseUrl: string,
   region: string,
 ): Promise<Omit<TestResult, 'latencyMs'>> {
-  const model = provider.models.primary || 'anthropic.claude-sonnet-4-20250514-v1:0';
+  const model = normalizeBedrockModelId(provider.models.primary || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0');
   const payload = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 1,
@@ -267,9 +268,12 @@ async function testVertex(provider: ProviderConfig): Promise<Omit<TestResult, 'l
         messages: [{ role: 'user', content: 'hi' }],
       }),
     });
-    // 401/403 means endpoint reachable but auth needed — partial success
     if (res.status === 401 || res.status === 403) {
-      return { success: true, modelVerified: false, error: 'Endpoint reachable but OAuth required (run gcloud auth)' };
+      return {
+        success: false,
+        modelVerified: false,
+        error: `Vertex auth failed (${res.status}) — check GCP project, region, and OAuth credentials`,
+      };
     }
     if (res.ok) return { success: true, modelVerified: true };
     const body = await safeJson(res);

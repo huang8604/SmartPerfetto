@@ -6,6 +6,7 @@ import {
   expectedCallMatchesRecord,
   expectedToolNames,
   formatExpectedCall,
+  isEvidenceCapableToolName,
   phaseMatchesCall,
   type AnalysisPlanV3,
   type ExpectedCall,
@@ -104,6 +105,7 @@ export function recordPlanToolCall(
     plan.toolCallLog = [];
   }
   const shortName = shortToolName(input.toolName);
+  const canSatisfyEvidence = isEvidenceCapableToolName(shortName);
   const callSummary = summarizeToolCallInput(shortName, input.input);
   const candidate: ToolCallRecord = {
     toolName: input.toolName,
@@ -111,24 +113,24 @@ export function recordPlanToolCall(
     ...callSummary,
   };
 
-  const expectedGapPhase = findBestPhaseForExpectedCallGap(plan, candidate);
+  const expectedGapPhase = canSatisfyEvidence ? findBestPhaseForExpectedCallGap(plan, candidate) : undefined;
   const toolReturnedPhaseId = extractPlanPhaseIdFromToolResult(input.resultText);
   let matchedPhaseId = expectedGapPhase?.id;
 
-  if (!matchedPhaseId) {
+  if (!matchedPhaseId && canSatisfyEvidence) {
     matchedPhaseId = toolReturnedPhaseId &&
       plan.phases.some(p => p.id === toolReturnedPhaseId)
       ? toolReturnedPhaseId
       : undefined;
   }
 
-  if (!matchedPhaseId) {
+  if (!matchedPhaseId && canSatisfyEvidence) {
     const activePhase = plan.phases.find(p => p.status === 'in_progress');
     if (activePhase && phaseMatchesCall(activePhase, candidate)) {
       matchedPhaseId = activePhase.id;
     }
   }
-  if (!matchedPhaseId) {
+  if (!matchedPhaseId && canSatisfyEvidence) {
     const pendingMatch = plan.phases.find(p =>
       p.status === 'pending' && phaseMatchesCall(p, candidate),
     );

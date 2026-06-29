@@ -28,9 +28,13 @@ export interface ScenePlanTemplateAspect {
    */
   id?: string;
   matchKeywords: string[];
+  /** Enforce this aspect only when the submitted plan mentions one of these terms. */
+  triggerKeywords?: string[];
   suggestion: string;
   requiredExpectedCalls?: ExpectedCall[];
   alternativeExpectedCalls?: ExpectedCall[];
+  /** Defaults to true. Set false in strategy frontmatter for hard plan gates. */
+  waivable?: boolean;
 }
 
 export interface ScenePlanTemplate {
@@ -163,6 +167,18 @@ export interface PlanValidationResult {
    * same aspects keep recurring across attempts.
    */
   missingAspectIds: string[];
+  /** Missing aspects that explicitly disallow plan-level waivers/force-accept. */
+  nonWaivableMissingAspectIds?: string[];
+}
+
+export interface PlanValidationOptions {
+  /**
+   * Extra text outside the submitted plan that should trigger conditional
+   * aspects, e.g. user query keywords or cached architecture detection.
+   * It is not used to mark an aspect as covered; only phase text and
+   * expectedCalls can cover the aspect.
+   */
+  triggerContext?: string | readonly string[];
 }
 
 /** Minimum justification length for a waiver to be accepted. */
@@ -189,7 +205,7 @@ function formatExpectedCallForPlanText(call: ExpectedCall): string {
  * `phases` array fails to mention. Returns empty arrays for scenes without
  * a template or when all aspects are covered.
  *
- * `waivers` is an optional set of agent-declared opt-outs; an aspect with
+ * `waivers` is an optional set of agent-declared opt-outs; a waivable aspect with
  * a matching `aspectId` and a `reason` of at least
  * {@link MIN_WAIVER_REASON_CHARS} characters is treated as covered.
  *
@@ -201,6 +217,7 @@ export function validatePlanAgainstSceneTemplate(
   phases: ReadonlyArray<{ name: string; goal: string; expectedTools?: string[]; expectedCalls?: ExpectedCall[] }>,
   scene: SceneType | undefined,
   waivers?: ReadonlyArray<{ aspectId: string; reason: string }>,
+  options: PlanValidationOptions = {},
 ): PlanValidationResult {
   const template = scene ? getScenePlanTemplate(scene) : undefined;
   if (!template) return { warnings: [], missingAspectIds: [] };
@@ -209,6 +226,10 @@ export function validatePlanAgainstSceneTemplate(
     .map(p => `${p.name} ${p.goal} ${(p.expectedTools ?? []).join(' ')} ${(p.expectedCalls ?? []).map(formatExpectedCallForPlanText).join(' ')}`)
     .join(' ')
     .toLowerCase();
+  const triggerContext = Array.isArray(options.triggerContext)
+    ? options.triggerContext.join(' ')
+    : options.triggerContext || '';
+  const triggerText = `${planText} ${triggerContext}`.toLowerCase();
   const declaredExpectedCalls = phases.flatMap(p => p.expectedCalls ?? []);
 
   const acceptedWaiverIds = new Set(
@@ -219,9 +240,15 @@ export function validatePlanAgainstSceneTemplate(
 
   const warnings: string[] = [];
   const missingAspectIds: string[] = [];
+  const nonWaivableMissingAspectIds: string[] = [];
   for (const aspect of template.mandatoryAspects) {
     const aspectId = aspect.id || aspect.matchKeywords[0];
-    if (acceptedWaiverIds.has(aspectId)) continue;
+    const waivable = aspect.waivable !== false;
+    if (waivable && acceptedWaiverIds.has(aspectId)) continue;
+    if ((aspect.triggerKeywords ?? []).length > 0 &&
+      !aspect.triggerKeywords!.some(kw => triggerText.includes(kw.toLowerCase()))) {
+      continue;
+    }
     const covered = aspect.matchKeywords.some(kw => planText.includes(kw.toLowerCase()));
     const missingRequiredCalls = (aspect.requiredExpectedCalls ?? [])
       .filter(required => !declaredExpectedCalls.some(declared =>
@@ -235,7 +262,12 @@ export function validatePlanAgainstSceneTemplate(
     if (!covered || missingRequiredCalls.length > 0 || missingAlternative) {
       warnings.push(aspect.suggestion);
       missingAspectIds.push(aspectId);
+      if (!waivable) nonWaivableMissingAspectIds.push(aspectId);
     }
   }
-  return { warnings, missingAspectIds };
+  return {
+    warnings,
+    missingAspectIds,
+    ...(nonWaivableMissingAspectIds.length > 0 ? { nonWaivableMissingAspectIds } : {}),
+  };
 }

@@ -356,6 +356,7 @@ export function getOpenCodeEngineCapabilities(
     displayName: publicRuntime ? 'OpenCode' : 'Experimental OpenCode',
     production: publicRuntime,
     publicRuntime,
+    promptCache: { systemPromptDynamicBoundary: false },
   };
 }
 
@@ -1123,9 +1124,52 @@ function collectOpenCodeAssistantMessages(value: unknown, output: Record<string,
   }
 }
 
-function getLatestOpenCodeAssistantMessage(value: unknown): Record<string, unknown> | undefined {
+function getOpenCodeAssistantMessages(value: unknown): Record<string, unknown>[] {
   const messages: Record<string, unknown>[] = [];
   collectOpenCodeAssistantMessages(value, messages);
+  return messages;
+}
+
+function getOpenCodeAssistantMessageSignature(message: Record<string, unknown>): string {
+  const info = isRecord(message.info) ? message.info : message;
+  const id = typeof info.id === 'string'
+    ? info.id
+    : typeof message.id === 'string'
+      ? message.id
+      : undefined;
+  if (id) return `id:${id}`;
+
+  const time = isRecord(info.time) ? info.time : undefined;
+  const completed = typeof time?.completed === 'number' ? time.completed : '';
+  const finish = typeof info.finish === 'string' ? info.finish : '';
+  return `content:${completed}:${finish}:${extractTextParts(message).trim()}`;
+}
+
+function getOpenCodeAssistantMessagesAfterBaseline(
+  messagesResponse: unknown,
+  baselineSignatures: readonly string[],
+): Record<string, unknown>[] {
+  const messages = getOpenCodeAssistantMessages(messagesResponse);
+  if (baselineSignatures.length === 0) return messages;
+
+  const lastBaselineSignature = baselineSignatures[baselineSignatures.length - 1];
+  let lastBaselineIndex = -1;
+  messages.forEach((message, index) => {
+    if (getOpenCodeAssistantMessageSignature(message) === lastBaselineSignature) {
+      lastBaselineIndex = index;
+    }
+  });
+
+  if (lastBaselineIndex >= 0) return messages.slice(lastBaselineIndex + 1);
+  return messages.slice(Math.min(baselineSignatures.length, messages.length));
+}
+
+function openCodeAssistantMessagesResponse(messages: Record<string, unknown>[]): unknown {
+  return { data: messages };
+}
+
+function getLatestOpenCodeAssistantMessage(value: unknown): Record<string, unknown> | undefined {
+  const messages = getOpenCodeAssistantMessages(value);
   return messages[messages.length - 1];
 }
 
@@ -1166,6 +1210,14 @@ export async function runOpenCodePrompt(
   const { sessionId, projectDir, timeoutMs, isAborted } = options;
   if (opencode.client.session.promptAsync && opencode.client.session.messages) {
     if (isAborted?.()) throw new Error('OpenCode prompt aborted');
+    const baselineMessagesResponse = unwrapSdkData(await opencode.client.session.messages({
+      path: { id: sessionId },
+      query: { directory: projectDir, limit: 50, order: 'asc' },
+    }), 'OpenCode messages');
+    if (isAborted?.()) throw new Error('OpenCode prompt aborted');
+    const baselineSignatures = getOpenCodeAssistantMessages(baselineMessagesResponse)
+      .map(getOpenCodeAssistantMessageSignature);
+
     assertSdkSuccess(
       await opencode.client.session.promptAsync(promptInput),
       'OpenCode async prompt',
@@ -1181,9 +1233,14 @@ export async function runOpenCodePrompt(
         query: { directory: projectDir, limit: 50, order: 'asc' },
       }), 'OpenCode messages');
       if (isAborted?.()) throw new Error('OpenCode prompt aborted');
-      const latestAssistant = getLatestOpenCodeAssistantMessage(messagesResponse);
+      const newAssistantMessages = getOpenCodeAssistantMessagesAfterBaseline(
+        messagesResponse,
+        baselineSignatures,
+      );
+      const currentTurnMessagesResponse = openCodeAssistantMessagesResponse(newAssistantMessages);
+      const latestAssistant = newAssistantMessages[newAssistantMessages.length - 1];
       if (isOpenCodeAssistantMessageComplete(latestAssistant)) {
-        return { messagesResponse };
+        return { messagesResponse: currentTurnMessagesResponse };
       }
       if (opencode.client.session.status) {
         const statusResponse = await opencode.client.session.status({
@@ -1191,8 +1248,11 @@ export async function runOpenCodePrompt(
         });
         if (isAborted?.()) throw new Error('OpenCode prompt aborted');
         assertSdkSuccess(statusResponse, 'OpenCode session status');
-        if (isOpenCodeSessionIdle(statusResponse, sessionId) && extractOpenCodeAssistantText(messagesResponse)) {
-          return { messagesResponse };
+        if (
+          isOpenCodeSessionIdle(statusResponse, sessionId) &&
+          extractOpenCodeAssistantText(currentTurnMessagesResponse)
+        ) {
+          return { messagesResponse: currentTurnMessagesResponse };
         }
       }
     }
@@ -1867,6 +1927,7 @@ export class OpenCodeRuntime extends EventEmitter implements IOrchestrator {
     const { toolDefinitions } = createClaudeMcpServer({
       sessionId,
       traceId,
+      userQuery: query,
       traceProcessorService: this.input.traceProcessorService,
       skillExecutor,
       packageName: effectivePackageName,

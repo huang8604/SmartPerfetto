@@ -11,6 +11,32 @@ optional_capabilities: []
 keywords: []
 ---
 
+#### general Core Strategy
+
+**Route card**: general
+
+**Capabilities**: required=[cpu_scheduling], optional=[none]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- 此场景未声明 mandatory aspects；仍需 submit_plan 并按证据推进。
+
+**Phase reminders**
+- 无额外 phase hint。
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `general:full`: 通用分析 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="general full strategy detail" keywords="general,通用分析,detail,full" default="true" -->
 #### 通用分析
 
 当前查询未匹配到特定场景策略。请根据用户关注的方向，使用以下决策树选择合适的分析路径。
@@ -46,3 +72,4 @@ keywords: []
 #### 通用场景关键 Stdlib 表
 
 写 execute_sql 时优先使用（完整列表见方法论模板）：`slice_self_dur`、`cpu_utilization_in_interval(ts, dur)`、`cpu_frequency_counters`、`android_garbage_collection_events`、`android_oom_adj_intervals`、`android_screen_state`、`android_dvfs_counters`、`wattson_rails_aggregation`、`android_battery_charge`
+<!-- /strategy-detail -->

@@ -95,8 +95,43 @@ plan_template:
     - id: memory_trend_and_gc
       match_keywords: ['memory', 'oom', 'gc', '内存', 'heap', 'lmk', 'memory_analysis']
       suggestion: '内存场景建议包含内存使用趋势和 GC 分析阶段 (memory_analysis)'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: memory_analysis
 ---
 
+#### memory Core Strategy
+
+**Route card**: 内存 / memory / oom / 泄漏 / leak / lmk / 内存压力 / 内存不足 / low memory / out of memory
+
+**Capabilities**: required=[gc_memory, memory_pressure], optional=[cpu_scheduling, binder_ipc, battery_counters]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- memory_trend_and_gc: 内存场景建议包含内存使用趋势和 GC 分析阶段 (memory_analysis) (required: invoke_skill(memory_analysis))
+
+**Phase reminders**
+- memory_evidence_gate: 先确认 memory_analysis/lmk/GC/heap graph/dmabuf 等证据哪些存在。结论必须按证据类型分层；缺失 Native/SO/匿名 mmap/thread stack/ApplicationExitInfo/MemoryLimiter 等来源时只写数据缺口，不能当成已证明。 工具: memory_analysis
+- lmk_freezer_oom_boundary: LMK、freezer、Java OOM、Native OOM、Android 17 MemoryLimiter 是不同机制。只有对应事件、ApplicationExitInfo 或进程状态证据存在时才能命名；否则写成候选或采集建议。 工具: lmk_analysis, lmk_kill_attribution, oom_adjuster_score_timeline
+- gc_churn_boundary: GC 与卡顿/ANR 重叠只能说明相关性。必须结合 GC pause、allocation churn、线程状态或帧/ANR窗口证据，避免把后台 GC 或普通回收直接写成根因。 工具: memory_analysis, gc_analysis
+- memory_diagnostic_api_boundary: ApplicationExitInfo、ProfilingManager/ProfilingTrigger、heap dump/profile、KOOM/APM 都是补充证据。必须说明 API/Android 版本、record/artifact 时间、进程身份、reason/result file、与当前 trace 的对齐关系；不得把高内存直接等同泄漏，也不得把缺少退出记录写成没有 OOM/LMK。 工具: memory_analysis, lmk_analysis, lookup_knowledge
+
+**Final report contract summary**
+- 内存证据范围
+- 内存类型拆分
+- 置信度与缺失证据
+- 内存诊断 API/剖析产物边界
+
+
+**Detail ref**
+- `memory:full`: 内存分析（用户提到 内存、memory、OOM、泄漏、LMK） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="memory full strategy detail" keywords="memory,内存,memory,oom,泄漏,leak,lmk,内存压力,内存不足,low memory,out of memory,dmabuf,内存占用,内存分析（用户提到 内存、memory、OOM、泄漏、LMK）,detail,full" default="true" -->
 #### 内存分析（用户提到 内存、memory、OOM、泄漏、LMK）
 
 **核心原则：**
@@ -182,3 +217,4 @@ invoke_skill("memory_rss_high_watermark")
 7. **根因分析**：泄漏、分配突增、缓存、GC churn、图形/Native 占用、系统压力之间的证据边界和置信度
 8. **采集缺口**：按缺失证据给出下一次 trace 配置建议，例如 `linux.process_stats` 更短轮询、`kmem/rss_stat`、`mm_event/mm_event_record`、`lowmemorykiller/lowmemory_kill`、`oom/oom_score_adj_update`、`android.heapprofd`、`android.java_hprof`、`android.java_hprof.oom`、smaps/dmabuf
 9. **优化建议**：按内存类型和证据强度分类；把缺失证据转化为具体采集建议
+<!-- /strategy-detail -->

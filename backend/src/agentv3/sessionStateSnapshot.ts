@@ -106,6 +106,22 @@ export interface SnapshotEngineProviderState {
   providerSnapshotHash?: string | null;
 }
 
+export type ProviderContinuityBreakReason = 'provider_snapshot_hash_mismatch';
+
+export interface ProviderContinuityBreak {
+  at: number;
+  previousProviderHash: string;
+  reason: ProviderContinuityBreakReason;
+}
+
+export type SessionLineageReason = 'cli-level3-degraded';
+
+export interface SessionLineage {
+  previousBackendSessionId: string;
+  reason: SessionLineageReason;
+  at: number;
+}
+
 export interface ClaudeSnapshotEngineState {
   sdkSessionId?: string;
   sdkSessionMode?: 'full';
@@ -504,6 +520,10 @@ export interface SessionStateSnapshot {
    * current resolved provider snapshot.
    */
   agentRuntimeProviderSnapshotHash?: string | null;
+  /** Append-only provider/runtime continuity breaks that forced fresh SDK context. */
+  continuityBreaks?: ProviderContinuityBreak[];
+  /** Backend-session ancestry when a user-visible session had to bridge to a fresh backend session. */
+  lineage?: SessionLineage;
   /** OpenAI Agents SDK history for cross-restart multi-turn continuation. */
   openAIHistory?: unknown[];
   /** Last provider response ID from the OpenAI Agents SDK run. */
@@ -566,6 +586,10 @@ export interface SessionFieldsForSnapshot {
   agentRuntimeProviderId?: string | null;
   /** Non-secret hash of the resolved provider/runtime configuration. */
   agentRuntimeProviderSnapshotHash?: string | null;
+  /** Append-only provider/runtime continuity breaks that forced fresh SDK context. */
+  continuityBreaks?: ProviderContinuityBreak[];
+  /** Backend-session ancestry when a user-visible session had to bridge to a fresh backend session. */
+  lineage?: SessionLineage;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
   codebaseSnapshot?: SessionStateSnapshot['codebaseSnapshot'];

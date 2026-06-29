@@ -13,6 +13,10 @@ export interface EngineCapabilities {
   displayName: string;
   production: boolean;
   publicRuntime: boolean;
+  promptCache: {
+    /** Supports SDK-level split between cacheable system prompt prefix and dynamic suffix. */
+    systemPromptDynamicBoundary: boolean;
+  };
 }
 
 export interface RuntimeFactoryInput {

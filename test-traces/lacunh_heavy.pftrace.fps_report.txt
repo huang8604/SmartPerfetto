@@ -1,0 +1,52 @@
+=== FPS Report: /Users/chris/Code/SmartPerfetto/SmartPerfetto/test-traces/lacunh_heavy.pftrace ===
+[window source: structured input, 1 gesture(s)]
+
+-- Overall (press + fling: DOWN -> next DOWN) --
+Screen FPS (display/SF output): 46.4
+Total frames (all sources): 362
+  presented       : 362
+  dropped         : 0  (never on screen)
+  janky           : 2  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - Miui Bottom Caption of Task=1#5868  fps=   6.5 frames=22 presented=22 dropped=0 janky=0
+  TX - Miui Bottom Caption of Task=416#5898 fps=   8.2 frames=28 presented=28 dropped=0 janky=0
+  TX - NavigationBar0#162                  fps=   0.3 frames=1 presented=1 dropped=0 janky=0
+  TX - StatusBar#163                       fps=   0.3 frames=1 presented=1 dropped=0 janky=0
+  TX - StatusBar1#165                      fps=   5.3 frames=18 presented=18 dropped=0 janky=0
+  TX - Surface(name=97f7d7e Splash Screen com.example.launch.aosp.heavy#5884)/@0x4d669f5 - animation-leash of window_animation#5905 fps=   5.6 frames=19 presented=19 dropped=0 janky=0
+  TX - com.example.launch.aosp.heavy/com.example.launch.aosp.MainActivity#5900 fps=   2.9 frames=10 presented=10 dropped=0 janky=1
+  TX - com.miui.home/com.miui.home.launcher.Launcher#5858 fps=  30.9 frames=105 presented=105 dropped=0 janky=1
+  display                                  fps=  46.4 frames=158 presented=158 dropped=0 janky=0
+
+-- Press phase (finger down -> up) --
+Screen FPS (display/SF output): 86.8
+Total frames (all sources): 21
+  presented       : 21
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - com.miui.home/com.miui.home.launcher.Launcher#5858 fps=  95.5 frames=11 presented=11 dropped=0 janky=0
+  display                                  fps=  86.8 frames=10 presented=10 dropped=0 janky=0
+
+-- Fling phase (finger up -> next press) --
+Screen FPS (display/SF output): 45.0
+Total frames (all sources): 341
+  presented       : 341
+  dropped         : 0  (never on screen)
+  janky           : 2  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  TX - Miui Bottom Caption of Task=1#5868  fps=   6.7 frames=22 presented=22 dropped=0 janky=0
+  TX - Miui Bottom Caption of Task=416#5898 fps=   8.5 frames=28 presented=28 dropped=0 janky=0
+  TX - NavigationBar0#162                  fps=   0.3 frames=1 presented=1 dropped=0 janky=0
+  TX - StatusBar#163                       fps=   0.3 frames=1 presented=1 dropped=0 janky=0
+  TX - StatusBar1#165                      fps=   5.5 frames=18 presented=18 dropped=0 janky=0
+  TX - Surface(name=97f7d7e Splash Screen com.example.launch.aosp.heavy#5884)/@0x4d669f5 - animation-leash of window_animation#5905 fps=   5.8 frames=19 presented=19 dropped=0 janky=0
+  TX - com.example.launch.aosp.heavy/com.example.launch.aosp.MainActivity#5900 fps=   3.0 frames=10 presented=10 dropped=0 janky=1
+  TX - com.miui.home/com.miui.home.launcher.Launcher#5858 fps=  28.6 frames=94 presented=94 dropped=0 janky=1
+  display                                  fps=  45.0 frames=148 presented=148 dropped=0 janky=0
+
+Per-gesture Screen-FPS (overall / press / fling):
+  gesture 0: overall=46.4  press=86.8  fling=45.0

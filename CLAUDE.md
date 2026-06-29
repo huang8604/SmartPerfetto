@@ -68,6 +68,11 @@ logic, use Plan -> independent read-only review -> Revise -> Execute.
   Codex read-only review.
 - If the primary agent is Codex, do not call Codex to review itself. Prefer a
   read-only reviewer sub-agent/tool.
+- In ZCode/OpenCode, invoke the `codex` MCP tool for this gate. It exposes
+  `codex` (start a read-only review session; pass a review prompt with
+  `sandbox: "read-only"` and `approval-policy: "never"`) and `codex-reply`
+  (continue a session by `threadId`). Registered as `mcp.codex` in
+  `~/.zcode/v2/config.json`, backed by `codex mcp-server`.
 - If no stable reviewer is available, or the reviewer times out twice, use a
   structured self-review plus post-diff review, note the fallback, and rely on
   the relevant verification tier from `.claude/rules/testing.md`.

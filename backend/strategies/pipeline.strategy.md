@@ -103,11 +103,51 @@ plan_template:
     - id: architecture_detection
       match_keywords: ['detect_architecture', 'architecture', '架构', '检测', 'detection']
       suggestion: '管线识别场景建议包含架构自动检测阶段 (detect_architecture)'
+      required_expected_calls:
+        - tool: detect_architecture
     - id: pipeline_skill_invocation
       match_keywords: ['pipeline', '管线', 'mermaid', 'thread', '线程', 'teaching', '教学', 'invoke_skill']
       suggestion: '管线识别场景建议包含管线教学内容展示阶段 (pipeline skill invocation)'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: rendering_pipeline_detection
+        - tool: invoke_skill
+          skill_id: render_pipeline_latency
+        - tool: invoke_skill
+          skill_id: scene_reconstruction
 ---
 
+#### pipeline Core Strategy
+
+**Route card**: 管线识别 / pipeline识别 / 渲染路径 / 渲染管线检测 / 管线类型 / pipeline detection / rendering pipeline / render path / architecture detection / 渲染架构检测
+
+**Capabilities**: required=[frame_rendering], optional=[surfaceflinger, gpu]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- architecture_detection: 管线识别场景建议包含架构自动检测阶段 (detect_architecture) (required: detect_architecture)
+- pipeline_skill_invocation: 管线识别场景建议包含管线教学内容展示阶段 (pipeline skill invocation) (requires one of: invoke_skill(rendering_pipeline_detection), invoke_skill(render_pipeline_latency), invoke_skill(scene_reconstruction))
+
+**Phase reminders**
+- buffer_fence_lifecycle: BufferQueue/Fence 问题必须拆 producer queue/dequeue、BLAST transaction、SF acquire/latch、HWC present、release fence。queueBuffer 只证明 producer submission；HWC 不是 BufferQueue consumer，SF 才消费 buffer 后再交给 HWC/RenderEngine。 工具: buffer_transaction_lifecycle, fence_wait_decomposition, surfaceflinger_analysis, present_fence_timing
+- refresh_policy_boundary: 刷新率/ARR/VRR 是 policy/ranking 与设备能力问题。不要默认 16.6ms；先用 vsync_config / vsync_phase_alignment / FrameTimeline 识别实际 VSync 周期，再说明 setFrameRate/View.setRequestedFrameRate 只是 hint/vote。 工具: vsync_config, vsync_phase_alignment, surfaceflinger_analysis
+- graphics_memory_boundary: GraphicBuffer/dma-buf 是图形物理内存证据面，不能和 BufferQueue 槽位、queue depth 或 fence backpressure 混用。只有 meminfo/dma-buf/SurfaceFlinger dumpsys/heap/counter 等证据存在时才能写图形内存占用；Perfetto slice 只能支持队列/同步/背压候选。 工具: memory_analysis
+
+**Final report contract summary**
+- 渲染/显示阶段拆分
+- BufferQueue/Fence 边界
+- 图形内存/刷新策略边界
+
+
+**Detail ref**
+- `pipeline:full`: 渲染管线识别与教学分析（用户提到 管线识别、pipeline 检测、渲染路径、渲染架构检测） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="pipeline full strategy detail" keywords="pipeline,管线识别,pipeline识别,渲染路径,渲染管线检测,管线类型,pipeline detection,rendering pipeline,render path,architecture detection,渲染架构检测,帧渲染路径,frame path,渲染管线识别与教学分析（用户提到 管线识别、pipeline 检测、渲染路径、渲染架构检测）,detail,full" default="true" -->
 #### 渲染管线识别与教学分析（用户提到 管线识别、pipeline 检测、渲染路径、渲染架构检测）
 
 **核心目标：** 识别 trace 中应用使用的渲染管线类型，展示管线架构图，并路由到对应的分析策略。
@@ -299,3 +339,4 @@ ORDER BY slice_cnt DESC
 5. **推荐后续分析路径**：
    - 基于检测到的管线类型，建议用户可以进一步分析的方向
    - 例如："检测到 Flutter SurfaceView (Impeller) 管线，可以问'分析滑动卡顿'查看 Flutter 帧渲染性能"
+<!-- /strategy-detail -->

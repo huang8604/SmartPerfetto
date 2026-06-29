@@ -26,6 +26,7 @@ const fakeCapabilities: EngineCapabilities = {
   displayName: 'Fake Third-Party Runtime',
   production: false,
   publicRuntime: false,
+  promptCache: { systemPromptDynamicBoundary: false },
 };
 
 describe('fake third-party runtime contract', () => {

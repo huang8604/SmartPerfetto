@@ -954,6 +954,7 @@ export interface AnalysisCompletedEvent {
     partial?: boolean;
     terminationReason?: string;
     terminationMessage?: string;
+    terminalRunStatus?: 'completed' | 'quota_exceeded';
     findings: DiagnosticFinding[];
     suggestions: string[];
   };

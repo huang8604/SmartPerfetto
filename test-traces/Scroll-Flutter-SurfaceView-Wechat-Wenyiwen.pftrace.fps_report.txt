@@ -1,0 +1,35 @@
+=== FPS Report: /Users/chris/Code/SmartPerfetto/SmartPerfetto/test-traces/Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace ===
+[window source: atrace ACTION slices, 1 gesture(s)]
+
+-- Overall (press + fling: DOWN -> next DOWN) --
+Screen FPS (display/SF output): 118.5
+Total frames (all sources): 382
+  presented       : 382
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  display                                  fps= 118.5 frames=382 presented=382 dropped=0 janky=0
+
+-- Press phase (finger down -> up) --
+Screen FPS (display/SF output): 79.9
+Total frames (all sources): 11
+  presented       : 11
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  display                                  fps=  79.9 frames=11 presented=11 dropped=0 janky=0
+
+-- Fling phase (finger up -> next press) --
+Screen FPS (display/SF output): 120.3
+Total frames (all sources): 371
+  presented       : 371
+  dropped         : 0  (never on screen)
+  janky           : 0  (presented late)
+Drop rate         : 0.00%
+Per-frame-source breakdown:
+  display                                  fps= 120.3 frames=371 presented=371 dropped=0 janky=0
+
+Per-gesture Screen-FPS (overall / press / fling):
+  gesture 0: overall=118.5  press=79.9  fling=120.3

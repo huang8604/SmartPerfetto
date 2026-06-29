@@ -102,6 +102,8 @@ export interface ClaudeAnalysisContext {
   patternContext?: string;
   /** Cross-session negative pattern context (P1: 负面记忆) */
   negativePatternContext?: string;
+  /** Background-only case library hints; must be evidence-verified before use */
+  caseBackgroundContext?: string;
   /** Previous turn's analysis plan for multi-turn context (P1-G12) */
   previousPlan?: AnalysisPlanV3;
   /** Recent plan history (max 3) for deeper cross-turn context (P1-B1) */
@@ -340,6 +342,18 @@ function shortToolName(toolName: string): string {
   return toolName.startsWith(MCP_PREFIX) ? toolName.slice(MCP_PREFIX.length) : toolName;
 }
 
+const INFORMATIONAL_TOOL_NAMES = new Set([
+  'lookup_strategy_detail',
+]);
+
+export function isInformationalToolName(toolName: string): boolean {
+  return INFORMATIONAL_TOOL_NAMES.has(shortToolName(toolName));
+}
+
+export function isEvidenceCapableToolName(toolName: string): boolean {
+  return !isInformationalToolName(toolName);
+}
+
 const ATTRIBUTION_SUPPORT_SKILL_IDS = new Set([
   // Identity resolution supports the current phase after the process gate reports
   // ambiguous/blocked identity, but it must not satisfy the phase's key skill.
@@ -353,6 +367,7 @@ export function formatExpectedCall(call: ExpectedCall): string {
 
 export function expectedCallMatchesRecord(call: ExpectedCall, record: ToolCallRecord): boolean {
   const shortTool = shortToolName(record.toolName);
+  if (!isEvidenceCapableToolName(call.tool) || !isEvidenceCapableToolName(shortTool)) return false;
   if (shortToolName(call.tool) !== shortTool) return false;
   if (call.skillId && call.skillId !== record.skillId) return false;
   return true;
@@ -364,6 +379,7 @@ export function phaseMatchesExpectedCall(phase: PlanPhase, record: ToolCallRecor
 
 export function phaseMatchesCall(phase: PlanPhase, record: ToolCallRecord): boolean {
   const shortTool = shortToolName(record.toolName);
+  if (!isEvidenceCapableToolName(shortTool)) return false;
   const expectedToolSet = new Set(phase.expectedTools.map(shortToolName));
   const structuredCallsForTool = (phase.expectedCalls ?? [])
     .filter(call => shortToolName(call.tool) === shortTool);

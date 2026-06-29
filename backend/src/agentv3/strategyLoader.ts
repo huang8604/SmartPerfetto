@@ -33,6 +33,25 @@ export interface PhaseHint {
   critical: boolean;
 }
 
+/** On-demand strategy detail section parsed from Markdown comment blocks. */
+export interface StrategyDetailSection {
+  /** Stable id local to the scene, e.g. `overview` or `root_cause_drill`. */
+  id: string;
+  /** Fully-qualified ref returned to the agent, e.g. `scrolling:overview`. */
+  ref: string;
+  title: string;
+  keywords: string[];
+  content: string;
+  /** Preferred fallback when keyword matching is weak. */
+  default: boolean;
+}
+
+export interface StrategyDetailMatch {
+  detail: StrategyDetailSection;
+  score: number;
+  matchedKeywords: string[];
+}
+
 /**
  * A single mandatory aspect a plan must touch — sourced from a scene's
  * `plan_template.mandatory_aspects` frontmatter. The submit_plan /
@@ -43,11 +62,15 @@ export interface PlanMandatoryAspect {
   /** Stable identifier for diff-friendly tracking (e.g. `frame_jank_analysis`). */
   id: string;
   matchKeywords: string[];
+  /** If present, this aspect is enforced only when the submitted plan mentions one of these terms. */
+  triggerKeywords?: string[];
   suggestion: string;
   /** Calls that must be declared on at least one matching plan phase. */
   requiredExpectedCalls?: ExpectedCall[];
   /** At least one of these calls must be declared on a matching plan phase. */
   alternativeExpectedCalls?: ExpectedCall[];
+  /** When false, submit_plan must cover this aspect in the plan; waivers are ignored. */
+  waivable?: boolean;
 }
 
 /** Plan template loaded from a strategy's `plan_template:` frontmatter. */
@@ -122,7 +145,14 @@ export interface StrategyDefinition {
    */
   finalReportContract: FinalReportContract | null;
   verifierMisdiagnosisPatterns: VerifierMisdiagnosisPattern[];
+  /**
+   * Core strategy content injected into the system prompt. If the source file
+   * contains `strategy-detail` blocks, those blocks are stripped from `content`
+   * and exposed through `detailSections`.
+   */
   content: string;
+  /** Detail sections loaded on demand via plan-tool responses or lookup_strategy_detail. */
+  detailSections: StrategyDetailSection[];
   /**
    * Absolute path to the source `*.strategy.md` file. Required because the
    * scene id (e.g. `touch_tracking`) is not always the file basename
@@ -136,6 +166,8 @@ export interface StrategyDefinition {
 const STRATEGIES_DIR = path.resolve(__dirname, '../../strategies');
 /** Tolerates leading `<!-- -->` blocks (e.g. SPDX/license headers) before the frontmatter. */
 const FRONTMATTER_RE = /^(?:\s*<!--[\s\S]*?-->\s*)*---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
+const STRATEGY_DETAIL_RE = /<!--\s*strategy-detail\b([^>]*)-->\s*([\s\S]*?)\s*<!--\s*\/strategy-detail\s*-->/g;
+const DEFAULT_STRATEGY_DETAIL_EXCERPT_CHARS = 1600;
 /** In dev mode, skip caching so .strategy.md / .template.md edits take effect without restart. */
 const DEV_MODE = process.env.NODE_ENV !== 'production';
 
@@ -156,6 +188,103 @@ function parseExpectedCalls(value: unknown): ExpectedCall[] {
       return tool ? { tool, ...(skillId ? { skillId } : {}) } : null;
     })
     .filter((entry): entry is ExpectedCall => entry !== null);
+}
+
+function parseDetailAttributes(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const attrRe = /(\w+)="([^"]*)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRe.exec(raw)) !== null) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+function parseCsv(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/[，,]/g)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function firstMarkdownHeading(markdown: string): string | undefined {
+  const heading = markdown.match(/^#{1,6}\s+(.+)$/m)?.[1]?.trim();
+  return heading ? heading.replace(/#+\s*$/, '').trim() : undefined;
+}
+
+function slugifyDetailId(value: string, fallback: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, '')
+    .replace(/[^a-z0-9_\-\u4e00-\u9fff]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return slug || fallback;
+}
+
+function parseStrategyDetails(scene: string, markdown: string): { coreContent: string; detailSections: StrategyDetailSection[] } {
+  const detailSections: StrategyDetailSection[] = [];
+  let detailOrdinal = 0;
+  const coreContent = markdown.replace(STRATEGY_DETAIL_RE, (_full, rawAttrs: string, rawContent: string) => {
+    detailOrdinal++;
+    const attrs = parseDetailAttributes(rawAttrs);
+    const content = rawContent.trim();
+    const fallbackId = `detail_${detailOrdinal}`;
+    const id = slugifyDetailId(attrs.id || firstMarkdownHeading(content) || fallbackId, fallbackId);
+    const title = (attrs.title || firstMarkdownHeading(content) || id).trim();
+    const keywords = [
+      ...parseCsv(attrs.keywords),
+      id,
+      title,
+    ].filter(Boolean);
+    detailSections.push({
+      id,
+      ref: `${scene}:${id}`,
+      title,
+      keywords,
+      content,
+      default: attrs.default === 'true' || attrs.default === '1',
+    });
+    return '\n';
+  }).trim();
+
+  return { coreContent, detailSections };
+}
+
+function normalizeLookupText(value: string | undefined): string {
+  return (value || '').toLowerCase();
+}
+
+function phaseLikeToText(phase: {
+  id?: string;
+  name?: string;
+  goal?: string;
+  expectedTools?: string[];
+  expectedCalls?: ExpectedCall[];
+}): string {
+  return [
+    phase.id,
+    phase.name,
+    phase.goal,
+    ...(phase.expectedTools || []),
+    ...(phase.expectedCalls || []).map(call => call.skillId || call.tool),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function detailMatchScore(detail: StrategyDetailSection, phaseText: string): StrategyDetailMatch {
+  const matchedKeywords: string[] = [];
+  let score = detail.default ? 1 : 0;
+  for (const keyword of detail.keywords) {
+    const normalized = normalizeLookupText(keyword);
+    if (!normalized) continue;
+    if (phaseText.includes(normalized)) {
+      matchedKeywords.push(keyword);
+      score += normalized === detail.id.toLowerCase() ? 8 : 4;
+    }
+  }
+  if (phaseText.includes(detail.title.toLowerCase())) score += 6;
+  return { detail, score, matchedKeywords };
 }
 
 function parseStrategyFile(filePath: string): StrategyDefinition | null {
@@ -183,13 +312,20 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
   if (rawPlanTemplate) {
     const aspects = (rawPlanTemplate.mandatory_aspects as Array<Record<string, unknown>> | undefined) || [];
     planTemplate = {
-      mandatoryAspects: aspects.map(a => ({
-        id: (a.id as string) || '',
-        matchKeywords: (a.match_keywords as string[]) || [],
-        suggestion: (a.suggestion as string) || '',
-        requiredExpectedCalls: parseExpectedCalls(a.required_expected_calls),
-        alternativeExpectedCalls: parseExpectedCalls(a.required_expected_call_alternatives),
-      })),
+      mandatoryAspects: aspects.map(a => {
+        const triggerKeywords = Array.isArray(a.trigger_keywords)
+          ? a.trigger_keywords as string[]
+          : [];
+        return {
+          id: (a.id as string) || '',
+          matchKeywords: (a.match_keywords as string[]) || [],
+          ...(triggerKeywords.length > 0 ? { triggerKeywords } : {}),
+          suggestion: (a.suggestion as string) || '',
+          requiredExpectedCalls: parseExpectedCalls(a.required_expected_calls),
+          alternativeExpectedCalls: parseExpectedCalls(a.required_expected_call_alternatives),
+          waivable: (a.waivable as boolean | undefined) ?? true,
+        };
+      }),
     };
   }
 
@@ -249,6 +385,7 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
   const strategyKind: StrategyKind = rawStrategyKind === 'contract_only'
     ? 'contract_only'
     : 'normal';
+  const parsedContent = parseStrategyDetails(frontmatter.scene as string, content);
 
   return {
     scene: frontmatter.scene as string,
@@ -263,7 +400,8 @@ function parseStrategyFile(filePath: string): StrategyDefinition | null {
     planTemplate,
     finalReportContract,
     verifierMisdiagnosisPatterns,
-    content,
+    content: parsedContent.coreContent,
+    detailSections: parsedContent.detailSections,
     sourcePath: filePath,
   };
 }
@@ -288,6 +426,68 @@ export function loadStrategies(): Map<string, StrategyDefinition> {
 export function getStrategyContent(scene: string): string | undefined {
   const def = loadStrategies().get(scene);
   return def?.strategyKind === 'contract_only' ? undefined : def?.content;
+}
+
+export function getStrategyDetails(scene: string): StrategyDetailSection[] {
+  const def = loadStrategies().get(scene);
+  if (def?.strategyKind === 'contract_only') return [];
+  return def?.detailSections || [];
+}
+
+export function getStrategyDetailByRef(
+  detailRef: string,
+  fallbackScene?: string,
+): StrategyDetailSection | undefined {
+  const trimmed = detailRef.trim();
+  if (!trimmed) return undefined;
+  const [sceneFromRef, idFromRef] = trimmed.includes(':')
+    ? trimmed.split(':', 2)
+    : [fallbackScene || '', trimmed];
+  if (!sceneFromRef || !idFromRef) return undefined;
+  return getStrategyDetails(sceneFromRef)
+    .find(detail => detail.id === idFromRef || detail.ref === `${sceneFromRef}:${idFromRef}`);
+}
+
+export function matchStrategyDetailForPhase(
+  scene: string | undefined,
+  phase: {
+    id?: string;
+    name?: string;
+    goal?: string;
+    expectedTools?: string[];
+    expectedCalls?: ExpectedCall[];
+  } | undefined,
+): StrategyDetailMatch | undefined {
+  if (!scene || !phase) return undefined;
+  const details = getStrategyDetails(scene);
+  if (details.length === 0) return undefined;
+  const phaseText = phaseLikeToText(phase);
+  const scored = details
+    .map(detail => detailMatchScore(detail, phaseText))
+    .sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (best && best.score > 0) return best;
+  const fallback = details.find(detail => detail.default) || details[0];
+  return { detail: fallback, score: 0, matchedKeywords: [] };
+}
+
+export function buildStrategyDetailExcerpt(
+  detail: StrategyDetailSection,
+  maxChars = DEFAULT_STRATEGY_DETAIL_EXCERPT_CHARS,
+): { excerpt: string; truncated: boolean; maxChars: number } {
+  const content = detail.content.trim();
+  if (content.length <= maxChars) {
+    return { excerpt: content, truncated: false, maxChars };
+  }
+
+  const clipped = content.slice(0, maxChars);
+  const boundary = Math.max(
+    clipped.lastIndexOf('\n### '),
+    clipped.lastIndexOf('\n#### '),
+    clipped.lastIndexOf('\n\n'),
+  );
+  const excerpt = clipped.slice(0, boundary > Math.floor(maxChars * 0.35) ? boundary : maxChars).trimEnd();
+  return { excerpt, truncated: excerpt.length < content.length, maxChars };
 }
 
 export function getRegisteredScenes(): StrategyDefinition[] {

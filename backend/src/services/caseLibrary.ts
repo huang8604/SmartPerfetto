@@ -64,6 +64,8 @@ export interface ListOptions {
 export interface PublishOptions {
   /** Reviewer name. Stamped onto `curatedBy` and `curatedAt`. */
   reviewer: string;
+  /** Preserve an existing curation timestamp during rebuild-style writes. */
+  curatedAt?: number;
 }
 
 export interface ArchiveOptions {
@@ -218,7 +220,7 @@ export class CaseLibrary {
       ...existing,
       status: 'published',
       curatedBy: trimmedReviewer,
-      curatedAt: Date.now(),
+      curatedAt: opts.curatedAt ?? Date.now(),
     };
     if (legacyKnowledgeFilesystemWritesEnabled()) {
       this.cases.set(caseId, published);

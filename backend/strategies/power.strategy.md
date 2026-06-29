@@ -114,17 +114,82 @@ plan_template:
     - id: power_data_availability
       match_keywords: ['power', 'battery', 'wattson', '功耗', '耗电', '电池', '数据完整度', '采集']
       suggestion: '功耗场景必须先确认 power_rails/battery_counters/cpu_freq_idle/gpu_work_period 是否可用'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: power_rails_energy_breakdown
+        - tool: invoke_skill
+          skill_id: battery_charge_timeline
+        - tool: invoke_skill
+          skill_id: android_dvfs_counter_stats
+        - tool: invoke_skill
+          skill_id: android_gpu_work_period_track
     - id: power_attribution_or_fallback
       match_keywords: ['wattson', 'rail', 'thread', 'wakelock', 'doze', '归因', '唤醒', '降频']
       suggestion: '功耗场景需要包含 Wattson 归因或状态事件 fallback 分析阶段'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: wattson_thread_power_attribution
+        - tool: invoke_skill
+          skill_id: wattson_rails_power_breakdown
+        - tool: invoke_skill
+          skill_id: wakelock_tracking
+        - tool: invoke_skill
+          skill_id: device_state_timeline
     - id: power_composite_entrypoint
       match_keywords: ['power_consumption_overview', 'battery_drain_attribution', 'thermal_throttling_chain', '总览', '掉电', '温控链路']
       suggestion: '复杂功耗问题建议先用 power_consumption_overview / battery_drain_attribution / thermal_throttling_chain 建立统一证据链'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: power_consumption_overview
+        - tool: invoke_skill
+          skill_id: battery_drain_attribution
+        - tool: invoke_skill
+          skill_id: thermal_throttling_chain
     - id: power_vitals_threshold_context
       match_keywords: ['wakelock', 'vitals', 'excessive', 'stuck', 'P90', 'P99', '后台']
       suggestion: 'Wakelock 阈值必须说明时间基准：24h 累计 >=2h excessive，单后台 wakelock >=1h stuck，P90/P99 >60min 重点排查；短 trace 只能作为局部证据或换算参考'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: wakelock_tracking
+        - tool: lookup_knowledge
 ---
 
+#### power Core Strategy
+
+**Route card**: 功耗 / 耗电 / 电池 / 掉电 / 发热 / wattson / power / battery / drain / energy
+
+**Capabilities**: required=[cpu_scheduling], optional=[power_rails, battery_counters, cpu_freq_idle, gpu_work_period, thermal_throttling, device_state]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- power_data_availability: 功耗场景必须先确认 power_rails/battery_counters/cpu_freq_idle/gpu_work_period 是否可用 (requires one of: invoke_skill(power_rails_energy_breakdown), invoke_skill(battery_charge_timeline), invoke_skill(android_dvfs_counter_stats), invoke_skill(android_gpu_work_period_track))
+- power_attribution_or_fallback: 功耗场景需要包含 Wattson 归因或状态事件 fallback 分析阶段 (requires one of: invoke_skill(wattson_thread_power_attribution), invoke_skill(wattson_rails_power_breakdown), invoke_skill(wakelock_tracking), invoke_skill(device_state_timeline))
+- power_composite_entrypoint: 复杂功耗问题建议先用 power_consumption_overview / battery_drain_attribution / thermal_throttling_chain 建立统一证据链 (requires one of: invoke_skill(power_consumption_overview), invoke_skill(battery_drain_attribution), invoke_skill(thermal_throttling_chain))
+- power_vitals_threshold_context: Wakelock 阈值必须说明时间基准：24h 累计 >=2h excessive，单后台 wakelock >=1h stuck，P90/P99 >60min 重点排查；短 trace 只能作为局部证据或换算参考 (requires one of: invoke_skill(wakelock_tracking), lookup_knowledge)
+
+**Phase reminders**
+- power_data_gate: 先检查 Trace 数据完整度中的 power_rails、battery_counters、cpu_freq_idle、gpu_work_period。缺失时必须输出数据采集建议，禁止把空表解释为“没有功耗问题”。需要总览时优先调用 power_consumption_overview；拆开看时先调用 power_rails_energy_breakdown 和 battery_drain_rate_summary。 工具: power_consumption_overview, power_rails_energy_breakdown, battery_drain_rate_summary, lookup_knowledge
+- wattson_attribution: Wattson 是估算，不是 ODPM 实测。只有 power_rails/cpu_freq_idle 数据可用时才用 Wattson 归因。先用 power_rails_energy_breakdown 看硬件 rail，再用 wattson_rails_power_breakdown / wattson_thread_power_attribution 做 CPU/线程估算；启动窗口问题再加 wattson_app_startup_power。 工具: wattson_rails_power_breakdown, wattson_thread_power_attribution, wattson_app_startup_power
+- battery_drain_chain: 用户问掉电/待机耗电时优先调用 battery_drain_attribution，把 battery drain rate、Doze、suspend/wakeup、wakelock、screen-off CPU、job、network 串起来；缺 rail 数据时只能给事件链归因。 工具: battery_drain_attribution, wakeup_frequency_summary, screen_off_background_cpu_attribution, modem_network_correlation_summary
+- background_execution_governance: 后台执行治理必须把 JobScheduler pending reason（为何未运行）与 JobParameters/WorkInfo stop reason（为何停止）分开。Perfetto 的 job event 只能证明执行窗口；Android 15/16 quota、FGS timeout、UIDT 和 standby bucket 结论必须标注版本、target/app state、app 日志/API 或 dumpsys 证据缺口。 工具: battery_drain_attribution, android_job_scheduler_events, android_kernel_wakelock_summary, battery_doze_state_timeline, screen_off_background_cpu_attribution, suspend_wakeup_analysis, lookup_knowledge
+- alarm_wakeup_boundary: Alarm/wakeup 只能从本地 trace 证明唤醒、wakelock、suspend/Doze 现象；不能仅凭 wakeup 反推 AlarmManager API、exact-alarm 权限或 Play Vitals 违规。Vitals 需要 24h/聚合窗口，短 trace 只能写局部参考。 工具: wakeup_frequency_summary, suspend_wakeup_analysis, android_kernel_wakelock_summary, battery_drain_attribution, lookup_knowledge
+- thermal_chain: 用户问发热、降频、热导致卡顿时优先调用 thermal_throttling_chain；同时说明温度传感器/DVFS/GPU work period 哪些数据存在，哪些缺失。 工具: thermal_throttling_chain
+- fallback_state_power: 如果 Wattson 前置数据缺失，退化为状态/事件链分析：battery_drain_rate_summary、battery_charge_timeline、battery_doze_state_timeline、wakeup_frequency_summary、android_kernel_wakelock_summary、screen_off_background_cpu_attribution、android_dvfs_counter_stats、suspend_wakeup_analysis。结论必须标注这是定性分析，不是 rail 级能耗归因。 工具: battery_drain_rate_summary, battery_charge_timeline, battery_doze_state_timeline, wakeup_frequency_summary, android_kernel_wakelock_summary, screen_off_background_cpu_attribution, android_dvfs_counter_stats, suspend_wakeup_analysis
+
+**Final report contract summary**
+- Job/Work/FGS 治理边界
+- Alarm/Wakeup/Vitals 边界
+
+
+**Detail ref**
+- `power:full`: 功耗 / 电池 / Wattson 分析（用户提到 功耗、耗电、电池、掉电、wattson） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="power full strategy detail" keywords="power,功耗,耗电,电池,掉电,发热,wattson,power,battery,drain,energy,thermal,allow-while-idle,功耗 / 电池 / Wattson 分析（用户提到 功耗、耗电、电池、掉电、wattson）,detail,full" default="true" -->
 #### 功耗 / 电池 / Wattson 分析（用户提到 功耗、耗电、电池、掉电、wattson）
 
 功耗分析的第一原则：**先判数据能不能支撑结论**。Wattson/rail 级归因依赖 `android.power`、power rails、CPU freq/idle、GPU work period 等采集源。缺失这些数据时，不能把空结果解释为“没有耗电”；只能输出采集建议，或退化为状态/事件链分析。
@@ -268,3 +333,4 @@ invoke_skill("thermal_throttling_chain", { package: "<包名>" })
 5. **后台执行治理边界**（仅相关时）：Job pending reason vs stop reason、WorkManager/JobScheduler/FGS/UIDT、Alarm/wakeup/Vitals 的证据来源、版本边界和缺失数据
 6. **结论可信度**：hardware_power_rails / wattson_estimate / battery_counter_trend / event_chain_fallback / external_policy_or_aggregate / insufficient_data
 7. **采集建议**：缺哪些数据就给具体 Perfetto 配置方向，不泛泛而谈；CLI 可建议 `smp capture android --preset power --app <pkg> --duration <sec>`
+<!-- /strategy-detail -->

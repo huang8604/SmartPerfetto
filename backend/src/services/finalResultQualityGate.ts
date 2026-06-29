@@ -340,9 +340,16 @@ export function assessFinalResultQuality(input: {
   sceneType?: string;
 }): FinalResultQualityIssue | undefined {
   const { result, query, sceneType } = input;
-  if (!result.success || result.partial === true) return undefined;
+  if (!result.success) return undefined;
 
   const conclusion = result.conclusion.trim();
+  if (result.partial === true) {
+    if (looksLikeAnalysisQuery(query)) {
+      return assessKernelBlockingClaimBoundary(conclusion);
+    }
+    return undefined;
+  }
+
   if (!conclusion) {
     return {
       code: 'empty_conclusion',
@@ -400,6 +407,7 @@ export function assessFinalResultQuality(input: {
       query,
       sceneType,
       contractSceneId: result.conclusionContract?.metadata?.sceneId,
+      caseRecommendations: result.conclusionContract?.caseRecommendations as Array<Record<string, unknown>> | undefined,
     });
     if (contractIssue) {
       const missingText = contractIssue.missingLabels.join('、');

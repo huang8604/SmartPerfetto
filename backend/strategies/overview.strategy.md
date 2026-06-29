@@ -39,8 +39,37 @@ plan_template:
     - id: scene_detection_and_drill
       match_keywords: ['scene', 'overview', '场景', '概览', 'detect', '检测', 'timeline']
       suggestion: '概览场景建议包含场景检测和问题场景深钻阶段'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: scene_reconstruction
 ---
 
+#### overview Core Strategy
+
+**Route card**: 发生了什么 / 有什么问题 / 概览 / 整体分析 / 场景还原 / 场景分析 / what happened / overview / analyze the trace / scene reconstruction
+
+**Capabilities**: required=[cpu_scheduling, device_state], optional=[frame_rendering, startup, binder_ipc, gc_memory, thermal_throttling, power_rails, battery_counters]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- scene_detection_and_drill: 概览场景建议包含场景检测和问题场景深钻阶段 (required: invoke_skill(scene_reconstruction))
+
+**Phase reminders**
+- 无额外 phase hint。
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `overview:full`: 概览 / 场景还原分析（用户提到 发生了什么、概览、overview、场景还原） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="overview full strategy detail" keywords="overview,发生了什么,有什么问题,概览,整体分析,场景还原,场景分析,what happened,overview,analyze the trace,scene reconstruction,全局分析,概览 / 场景还原分析（用户提到 发生了什么、概览、overview、场景还原）,detail,full" default="true" -->
 #### 概览 / 场景还原分析（用户提到 发生了什么、概览、overview、场景还原）
 
 本策略将 trace 当作一段用户操作的"故事"来解读：先检测发生了哪些场景，再对有问题的场景做针对性深钻。
@@ -137,3 +166,4 @@ fetch_artifact(artifactId, detail="rows", offset=0, limit=50)
    - 如果启动慢："可以问'分析启动性能'获取详细根因"
    - 如果滑动卡顿："可以问'分析滑动卡顿'获取逐帧分析"
    - 如果点击慢："可以问'分析点击响应'获取逐事件分析"
+<!-- /strategy-detail -->

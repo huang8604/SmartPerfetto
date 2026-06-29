@@ -69,12 +69,31 @@ jest.mock('../artifactStore', () => ({
         rowCount: artifact.data?.rows?.length ?? 0,
         ...(artifact.planPhaseId ? { planPhaseId: artifact.planPhaseId } : {}),
         ...(artifact.planPhaseTitle ? { planPhaseTitle: artifact.planPhaseTitle } : {}),
+        ...(artifact.traceProvenance?.traceSide ? { traceSide: artifact.traceProvenance.traceSide } : {}),
+        ...(artifact.traceProvenance?.traceId ? { traceId: artifact.traceProvenance.traceId } : {}),
       };
     }),
     fetch: jest.fn(function(this: any, id: string, detail: string, offset?: number, limit?: number) {
       const artifact = this._artifacts.get(id);
       const rows = artifact?.data?.rows || [[1], [2]];
       const columns = artifact?.data?.columns || ['value'];
+      if (detail === 'summary') {
+        return {
+          id,
+          skillId: artifact?.skillId,
+          stepId: artifact?.stepId,
+          title: artifact?.title,
+          rowCount: rows.length,
+          columns,
+          sampleRow: rows[0],
+          diagnosticCount: Array.isArray(artifact?.diagnostics) ? artifact.diagnostics.length : 0,
+          planPhaseId: artifact?.planPhaseId,
+          planPhaseTitle: artifact?.planPhaseTitle,
+          planPhaseGoal: artifact?.planPhaseGoal,
+          sourceToolCallId: artifact?.sourceToolCallId,
+          identityResolution: artifact?.identityResolution,
+        };
+      }
       const effectiveOffset = offset ?? 0;
       const effectiveLimit = limit ?? 50;
       return {
@@ -96,6 +115,9 @@ jest.mock('../artifactStore', () => ({
         sourceToolCallId: artifact?.sourceToolCallId,
         paramsHash: artifact?.paramsHash,
         identityResolution: artifact?.identityResolution,
+        traceSide: artifact?.traceProvenance?.traceSide,
+        traceId: artifact?.traceProvenance?.traceId,
+        traceProvenance: artifact?.traceProvenance,
       };
     }),
     get: jest.fn(function(this: any, id: string) {
@@ -111,11 +133,11 @@ jest.mock('../artifactStore', () => ({
 }));
 
 jest.mock('../sqlSummarizer', () => ({
-  summarizeSqlResult: jest.fn(() => ({
-    totalRows: 10,
-    columns: ['col1'],
+  summarizeSqlResult: jest.fn((columns: string[] = ['col1'], rows: any[][] = [[1]]) => ({
+    totalRows: rows.length,
+    columns,
     columnStats: {},
-    sampleRows: [[1]],
+    sampleRows: rows.slice(0, 10),
   })),
 }));
 
@@ -173,12 +195,23 @@ import {
   normalizeOptionalToolString,
 } from '../claudeMcpServer';
 import { ArtifactStore } from '../artifactStore';
+import { createArchitectureDetector } from '../../agent/detectors/architectureDetector';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 type ToolDef = { name: string; schema?: Record<string, any>; handler: (...args: any[]) => any };
 
-function createTestServer(options: { referenceTraceId?: string; sceneType?: any; lightweight?: boolean } = {}) {
+function createTestServer(options: {
+  referenceTraceId?: string;
+  sceneType?: any;
+  lightweight?: boolean;
+  userQuery?: string;
+  cachedArchitecture?: any;
+  codeAwareMode?: any;
+  codebaseIds?: string[];
+  caseLibrary?: any;
+  ragStore?: any;
+} = {}) {
   const analysisNotes: AnalysisNote[] = [];
   const hypotheses: Hypothesis[] = [];
   const uncertaintyFlags: UncertaintyFlag[] = [];
@@ -216,8 +249,9 @@ function createTestServer(options: { referenceTraceId?: string; sceneType?: any;
     registerSkill: jest.fn(),
   };
 
-  const { server, allowedTools } = createClaudeMcpServer({
+  const { server, allowedTools, toolDefinitions } = createClaudeMcpServer({
     traceId: 'test-trace-123',
+    userQuery: options.userQuery,
     traceProcessorService: mockTpService as any,
     skillExecutor: mockSkillExecutor as any,
     analysisNotes,
@@ -227,6 +261,11 @@ function createTestServer(options: { referenceTraceId?: string; sceneType?: any;
     artifactStore: new ArtifactStore() as any,
     emitUpdate: (u: any) => emittedUpdates.push(u),
     sceneType: options.sceneType,
+    cachedArchitecture: options.cachedArchitecture,
+    codeAwareMode: options.codeAwareMode,
+    codebaseIds: options.codebaseIds,
+    caseLibrary: options.caseLibrary,
+    ragStore: options.ragStore,
     ...(options.lightweight ? { lightweight: true } : { analysisPlan }),
     ...(options.referenceTraceId ? {
       referenceTraceId: options.referenceTraceId,
@@ -249,6 +288,7 @@ function createTestServer(options: { referenceTraceId?: string; sceneType?: any;
   return {
     tools,
     allowedTools,
+    toolDefinitions,
     analysisNotes,
     hypotheses,
     uncertaintyFlags,
@@ -339,6 +379,70 @@ describe('createClaudeMcpServer', () => {
       }
     });
 
+    it('enhances recall_similar_case with optional evidence signatures while preserving the old tag path', async () => {
+      const caseNode = {
+        schemaVersion: 1,
+        source: 'curated_markdown_case',
+        createdAt: 1,
+        caseId: 'case-shader',
+        title: 'Shader case',
+        status: 'published',
+        redactionState: 'redacted',
+        tags: ['shader_compile', 'scrolling'],
+        findings: [],
+        knowledge: {
+          sourceFile: 'cases/case-shader.md',
+          body: '',
+          quality: 'curated',
+          scene: 'scrolling',
+          domainPack: 'scrolling.v1',
+          taxonomy: {
+            primary_root_cause: 'shader_compile',
+            secondary_root_causes: [],
+            responsibility: 'app',
+            severity: 'warning',
+          },
+          context: {},
+          evidenceSignatures: {
+            required: [{ field: 'reason_code', op: 'eq', value: 'shader_compile' }],
+            supportive: [{ field: 'render_slices', op: 'contains_any', value: ['makePipeline'] }],
+          },
+          recommendations: { app: [], oem: [] },
+        },
+      };
+      const caseLibrary = {
+        listCases: jest.fn(() => [caseNode]),
+      };
+      const ragStore = {
+        search: jest.fn(() => ({
+          results: [{
+            score: 1,
+            chunk: {
+              uri: 'case://case-shader',
+            },
+          }],
+        })),
+      };
+      const { tools } = createTestServer({ sceneType: 'scrolling', caseLibrary, ragStore });
+
+      const legacy = await callTool(tools, 'recall_similar_case', { tags: ['shader_compile'] });
+      expect(legacy.hits[0]).toMatchObject({ caseId: 'case-shader', score: 1 });
+
+      const structured = await callTool(tools, 'recall_similar_case', {
+        scene: 'scrolling',
+        domain_pack: 'scrolling.v1',
+        root_cause: 'shader_compile',
+        evidence_signatures: {
+          reason_code: 'shader_compile',
+          render_slices: ['makePipeline'],
+        },
+      });
+      expect(structured.hits[0]).toMatchObject({
+        caseId: 'case-shader',
+        matchStrength: 'strong',
+      });
+    });
+
     it('should auto-derive allowedTools matching registered tools (P2-G1)', () => {
       const { tools, allowedTools } = createTestServer();
       // Every tool should have a matching allowedTools entry (with prefix)
@@ -373,6 +477,122 @@ describe('createClaudeMcpServer', () => {
       ]);
       expect(allowedTools).toContain(MCP_NAME_PREFIX + 'fetch_artifact');
       expect(tools.has('submit_plan')).toBe(false);
+    });
+
+    it('compacts registered tool descriptions before exposing runtime definitions', () => {
+      const { tools, toolDefinitions } = createTestServer({
+        referenceTraceId: 'reference-trace-456',
+        codeAwareMode: 'metadata_only',
+        codebaseIds: ['app-codebase'],
+      });
+
+      const runtimeDescriptions = toolDefinitions.map(def => def.shared.description);
+      const sdkDescriptions = [...tools.values()].map(tool => String((tool as any).description ?? ''));
+      const totalChars = runtimeDescriptions.reduce((sum, description) => sum + description.length, 0);
+      const descriptionByName = new Map(toolDefinitions.map(def => [def.name, def.shared.description]));
+
+      expect(runtimeDescriptions.length).toBeGreaterThanOrEqual(25);
+      expect(sdkDescriptions).toEqual(runtimeDescriptions);
+      expect(totalChars).toBeLessThanOrEqual(13_000);
+      for (const description of runtimeDescriptions) {
+        expect(description.length).toBeLessThanOrEqual(1100);
+        expect(description).not.toMatch(/\n\nExamples:/);
+      }
+      expect(runtimeDescriptions.join('\n')).toContain('SQL safety rules');
+      expect(runtimeDescriptions.join('\n')).toContain('expectedCalls');
+
+      for (const name of ['execute_sql', 'execute_sql_on']) {
+        const description = descriptionByName.get(name) ?? '';
+        expect(description).toContain('s.name AS slice_name');
+        expect(description).not.toContain('s. name');
+        expect(description).toContain('FrameTimeline rows expose upid');
+        expect(description).toContain('is_main_thread');
+      }
+      expect(descriptionByName.get('execute_sql')).toContain('batch_frame_root_cause');
+      expect(descriptionByName.get('execute_sql')).toContain('use fetch_artifact');
+    });
+
+    it('keeps critical tool families available under the broadest scoped request', () => {
+      const { tools, allowedTools, toolDefinitions } = createTestServer({
+        referenceTraceId: 'reference-trace-456',
+        codeAwareMode: 'metadata_only',
+        codebaseIds: ['app-codebase'],
+      });
+
+      const runtimeNames = new Set(toolDefinitions.map(def => def.name));
+      const requiredTools = [
+        'fetch_artifact',
+        'submit_plan',
+        'update_plan_phase',
+        'revise_plan',
+        'lookup_strategy_detail',
+        'compare_skill',
+        'execute_sql_on',
+        'get_comparison_context',
+        'list_codebases',
+        'lookup_app_source',
+        'lookup_kernel_source',
+        'resolve_symbol',
+        'propose_patch',
+      ];
+
+      for (const name of requiredTools) {
+        expect(tools.has(name)).toBe(true);
+        expect(runtimeNames.has(name)).toBe(true);
+        expect(allowedTools).toContain(MCP_NAME_PREFIX + name);
+      }
+    });
+
+    it.each([
+      {
+        label: 'full default',
+        options: {},
+        present: ['fetch_artifact', 'submit_plan', 'update_plan_phase', 'revise_plan'],
+        absent: ['compare_skill', 'execute_sql_on', 'get_comparison_context', 'list_codebases', 'lookup_app_source'],
+      },
+      {
+        label: 'full with code-aware disabled',
+        options: { codeAwareMode: 'off', codebaseIds: ['app-codebase'] },
+        present: ['fetch_artifact', 'submit_plan', 'update_plan_phase', 'revise_plan'],
+        absent: ['list_codebases', 'lookup_app_source', 'lookup_kernel_source', 'resolve_symbol', 'propose_patch'],
+      },
+      {
+        label: 'full with code-aware metadata',
+        options: { codeAwareMode: 'metadata_only', codebaseIds: ['app-codebase'] },
+        present: ['fetch_artifact', 'submit_plan', 'list_codebases', 'lookup_app_source', 'lookup_kernel_source', 'resolve_symbol', 'propose_patch'],
+        absent: ['compare_skill', 'execute_sql_on', 'get_comparison_context'],
+      },
+      {
+        label: 'full comparison',
+        options: { referenceTraceId: 'reference-trace-456' },
+        present: ['fetch_artifact', 'submit_plan', 'compare_skill', 'execute_sql_on', 'get_comparison_context'],
+        absent: ['list_codebases', 'lookup_app_source', 'lookup_kernel_source'],
+      },
+      {
+        label: 'lightweight broad request',
+        options: {
+          lightweight: true,
+          referenceTraceId: 'reference-trace-456',
+          codeAwareMode: 'metadata_only',
+          codebaseIds: ['app-codebase'],
+        },
+        present: ['execute_sql', 'invoke_skill', 'lookup_sql_schema', 'fetch_artifact'],
+        absent: ['submit_plan', 'update_plan_phase', 'compare_skill', 'execute_sql_on', 'list_codebases', 'lookup_app_source'],
+      },
+    ])('keeps scoped registry expectations stable for $label', ({ options, present, absent }) => {
+      const { tools, allowedTools, toolDefinitions } = createTestServer(options as any);
+      const runtimeNames = new Set(toolDefinitions.map(def => def.name));
+
+      for (const name of present) {
+        expect(tools.has(name)).toBe(true);
+        expect(runtimeNames.has(name)).toBe(true);
+        expect(allowedTools).toContain(MCP_NAME_PREFIX + name);
+      }
+      for (const name of absent) {
+        expect(tools.has(name)).toBe(false);
+        expect(runtimeNames.has(name)).toBe(false);
+        expect(allowedTools).not.toContain(MCP_NAME_PREFIX + name);
+      }
     });
   });
 
@@ -766,6 +986,80 @@ describe('createClaudeMcpServer', () => {
       });
     });
 
+    it('auto-summarizes large raw SQL results and exposes paginated artifact rows with provenance', async () => {
+      const { tools, emittedUpdates, mockTpService } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [{ id: 'p1', name: 'Collect', goal: 'Collect SQL evidence', expectedTools: ['execute_sql', 'fetch_artifact'] }],
+        successCriteria: 'Large SQL rows remain fetchable without bloating tool context',
+      });
+      await callTool(tools, 'update_plan_phase', { phaseId: 'p1', status: 'in_progress' });
+
+      const rows = Array.from({ length: 75 }, (_, i) => [i, `slice-${i}`]);
+      (mockTpService.query as any).mockResolvedValueOnce({
+        columns: ['id', 'slice_name'],
+        rows,
+        rowCount: rows.length,
+        durationMs: 7,
+      });
+
+      const result = await callTool(tools, 'execute_sql', {
+        sql: 'SELECT id, name AS slice_name FROM slice ORDER BY id',
+      });
+
+      const envelope = emittedUpdates
+        .filter((u: any) => u.type === 'data')
+        .flatMap((u: any) => u.content ?? [])
+        .find((env: any) => env.display?.format === 'summary' && env.sql?.includes('FROM slice'));
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('summary');
+      expect(result.autoSummarized).toBe(true);
+      expect(result.rows).toBeUndefined();
+      expect(result.artifactId).toBe('art-1');
+      expect(result.rowsAvailableViaArtifact).toBe(true);
+      expect(envelope).toMatchObject({
+        display: { format: 'summary', layer: 'overview' },
+        meta: {
+          artifactId: 'art-1',
+          sourceArtifactId: 'art-1',
+          traceSide: 'current',
+          traceId: 'test-trace-123',
+          planPhaseId: 'p1',
+          intent: 'ad_hoc_sql_summary',
+        },
+      });
+
+      const summaryFetch = await callTool(tools, 'fetch_artifact', {
+        artifactId: result.artifactId,
+        purpose: 'Confirm default artifact summary stays compact',
+      });
+      expect(summaryFetch.success).toBe(true);
+      expect(summaryFetch.detail).toBe('summary');
+      expect(summaryFetch.traceSide).toBeUndefined();
+      expect(summaryFetch.traceId).toBeUndefined();
+      expect(summaryFetch.traceProvenance).toBeUndefined();
+      expect(summaryFetch.rows).toBeUndefined();
+      expect(summaryFetch.sourceArtifactId).toBe('art-1');
+
+      const fetched = await callTool(tools, 'fetch_artifact', {
+        artifactId: result.artifactId,
+        detail: 'rows',
+        offset: 50,
+        limit: 10,
+        purpose: 'Inspect the second page of large SQL rows',
+      });
+
+      expect(fetched.success).toBe(true);
+      expect(fetched.rows).toHaveLength(10);
+      expect(fetched.rows[0]).toEqual([50, 'slice-50']);
+      expect(fetched.totalRows).toBe(75);
+      expect(fetched.hasMore).toBe(true);
+      expect(fetched.traceSide).toBe('current');
+      expect(fetched.traceId).toBe('test-trace-123');
+      expect(fetched.traceProvenance.databaseScope.processorKey).toBe('test-trace-123');
+      expect(fetched.sourceArtifactId).toBe('art-1');
+    });
+
     it('blocks artifact pseudo-tables before executing raw SQL', async () => {
       const { tools, emittedUpdates, mockTpService } = createTestServer({ lightweight: true });
 
@@ -1096,6 +1390,64 @@ describe('createClaudeMcpServer', () => {
       expect(envelope?.data?.summary?.metrics).toEqual(expect.arrayContaining([
         expect.objectContaining({ label: 'total_rows' }),
       ]));
+    });
+
+    it('auto-summarizes large execute_sql_on reference results and preserves reference provenance in artifacts', async () => {
+      const { tools, emittedUpdates, mockTpService } = createTestServer({ referenceTraceId: 'ref-trace-456' });
+      await callTool(tools, 'submit_plan', {
+        phases: [{ id: 'p1', name: 'Compare', goal: 'Collect large reference SQL evidence', expectedTools: ['execute_sql_on', 'fetch_artifact'] }],
+        successCriteria: 'Reference SQL artifact keeps trace-side provenance',
+      });
+      await callTool(tools, 'update_plan_phase', { phaseId: 'p1', status: 'in_progress' });
+
+      const rows = Array.from({ length: 61 }, (_, i) => [i, i * 2]);
+      (mockTpService.query as any).mockResolvedValueOnce({
+        columns: ['frame_id', 'dur_ms'],
+        rows,
+        rowCount: rows.length,
+        durationMs: 9,
+      });
+
+      const result = await callTool(tools, 'execute_sql_on', {
+        trace: 'reference',
+        sql: 'SELECT frame_id, dur_ms FROM frame_metrics ORDER BY dur_ms DESC',
+      });
+
+      const envelope = emittedUpdates
+        .filter((u: any) => u.type === 'data')
+        .flatMap((u: any) => u.content ?? [])
+        .find((env: any) => env.display?.format === 'summary' && env.sql?.includes('frame_metrics'));
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('summary');
+      expect(result.autoSummarized).toBe(true);
+      expect(result.rows).toBeUndefined();
+      expect(result.artifactId).toBe('art-1');
+      expect(result.artifact.traceSide).toBe('reference');
+      expect(result.artifact.traceId).toBe('ref-trace-456');
+      expect(envelope).toMatchObject({
+        meta: {
+          artifactId: 'art-1',
+          sourceArtifactId: 'art-1',
+          traceSide: 'reference',
+          traceId: 'ref-trace-456',
+          planPhaseId: 'p1',
+          intent: 'ad_hoc_sql_summary',
+        },
+      });
+
+      const fetched = await callTool(tools, 'fetch_artifact', {
+        artifactId: result.artifactId,
+        detail: 'rows',
+        limit: 5,
+        purpose: 'Inspect reference SQL artifact rows',
+      });
+
+      expect(fetched.rows).toEqual(rows.slice(0, 5));
+      expect(fetched.totalRows).toBe(61);
+      expect(fetched.traceSide).toBe('reference');
+      expect(fetched.traceId).toBe('ref-trace-456');
+      expect(fetched.traceProvenance.databaseScope.traceSide).toBe('reference');
     });
 
     it('auto-starts a unique pending phase when no phase is active', async () => {
@@ -2053,6 +2405,95 @@ describe('createClaudeMcpServer', () => {
       expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['invoke_skill', 'fetch_artifact']);
     });
 
+    it('accepts provider schema aliases without dropping expected calls', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      const toolDef = tools.get('submit_plan');
+      const aliasedPhase = {
+        phase_id: 1,
+        title: 'Collect',
+        objective: 'Get startup data',
+        expected_tools: 'invoke_skill, fetch_artifact',
+        expected_calls: 'invoke_skill:startup_analysis, fetch_artifact',
+      };
+
+      expect(toolDef?.schema?.phases?.safeParse(JSON.stringify([aliasedPhase])).success).toBe(true);
+      expect(toolDef?.schema?.phases?.safeParse([aliasedPhase]).success).toBe(true);
+      expect(toolDef?.schema?.success_criteria?.safeParse('Identify startup root cause').success).toBe(true);
+
+      const result = await callTool(tools, 'submit_plan', {
+        phases: [aliasedPhase],
+        success_criteria: 'Identify startup root cause',
+      });
+
+      expect(result.success).toBe(true);
+      expect(analysisPlan.current?.successCriteria).toBe('Identify startup root cause');
+      expect(analysisPlan.current?.phases[0]).toMatchObject({
+        id: '1',
+        name: 'Collect',
+        goal: 'Get startup data',
+        expectedTools: ['invoke_skill', 'fetch_artifact'],
+        expectedCalls: [
+          { tool: 'invoke_skill', skillId: 'startup_analysis' },
+          { tool: 'fetch_artifact' },
+        ],
+      });
+    });
+
+    it('rejects informational expectations even when submitted via aliases and strings', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      const result = await callTool(tools, 'submit_plan', {
+        phases: [{
+          id: 'p1',
+          name: 'Detail lookup',
+          goal: 'Read strategy detail only',
+          expected_tools: 'lookup_strategy_detail',
+          expected_calls: 'lookup_strategy_detail',
+        }],
+        successCriteria: 'Informational tools must not count as evidence',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.invalidExpectations).toEqual([
+        'p1.expectedTools includes informational tool "lookup_strategy_detail"',
+        'p1.expectedCalls includes informational tool "lookup_strategy_detail"',
+      ]);
+      expect(analysisPlan.current).toBeNull();
+    });
+
+    it('rejects malformed expectedCalls instead of silently deleting them', async () => {
+      const badCalls = [
+        { skill_id: 'startup_analysis' },
+        {},
+        { tool: '' },
+      ];
+
+      for (const badCall of badCalls) {
+        const { tools, analysisPlan } = createTestServer();
+        const toolDef = tools.get('submit_plan');
+        const phase = {
+          id: 'p1',
+          name: 'Collect',
+          goal: 'Get startup data',
+          expectedTools: ['invoke_skill'],
+          expected_calls: [badCall],
+        };
+
+        expect(toolDef?.schema?.phases?.safeParse([phase]).success).toBe(false);
+
+        const result = await callTool(tools, 'submit_plan', {
+          phases: JSON.stringify([phase]),
+          successCriteria: 'Malformed expectedCalls must be rejected',
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.action_required).toBe('submit_plan');
+        expect(result.invalidExpectedCalls).toEqual([
+          'p1.expectedCalls[0] must include a non-empty tool/toolName/tool_name/name',
+        ]);
+        expect(analysisPlan.current).toBeNull();
+      }
+    });
+
     it('treats null-like waiver strings as empty waivers from OpenAI-compatible callers', async () => {
       const { tools, analysisPlan } = createTestServer();
       const result = await callTool(tools, 'submit_plan', {
@@ -2123,6 +2564,28 @@ describe('createClaudeMcpServer', () => {
       ]);
     });
 
+    it('rejects informational tools in submitted expected calls', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      const result = await callTool(tools, 'submit_plan', {
+        phases: [{
+          id: 'p1',
+          name: 'Detail lookup',
+          goal: 'Read strategy detail only',
+          expectedTools: ['lookup_strategy_detail'],
+          expectedCalls: [{ tool: 'lookup_strategy_detail' }],
+        }],
+        successCriteria: 'Informational tools must not count as evidence',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.invalidExpectations).toEqual([
+        'p1.expectedTools includes informational tool "lookup_strategy_detail"',
+        'p1.expectedCalls includes informational tool "lookup_strategy_detail"',
+      ]);
+      expect(result.action_required).toBe('submit_plan');
+      expect(analysisPlan.current).toBeNull();
+    });
+
     it('moves conclusion-like phases after later data-collection phases', async () => {
       const { tools, analysisPlan } = createTestServer();
       const result = await callTool(tools, 'submit_plan', {
@@ -2186,8 +2649,23 @@ describe('createClaudeMcpServer', () => {
       const { tools } = createTestServer({ sceneType: 'scrolling' });
       await callTool(tools, 'submit_plan', {
         phases: [
-          { id: 'p1', name: 'TextureView 架构检测', goal: '确认混合渲染架构类型，判断是否为 TextureView producer 场景', expectedTools: ['invoke_skill'] },
-          { id: 'p2', name: '滑动帧卡顿概览', goal: '获取 scroll frame jank 帧统计和掉帧分布', expectedTools: ['invoke_skill'], expectedCalls: [{ tool: 'invoke_skill', skillId: 'scrolling_analysis' }] },
+          {
+            id: 'p1',
+            name: 'TextureView 架构检测',
+            goal: '确认混合渲染架构类型，判断是否为 TextureView producer 场景',
+            expectedTools: ['invoke_skill'],
+            expectedCalls: [{ tool: 'invoke_skill', skillId: 'textureview_producer_frame_timing' }],
+          },
+          {
+            id: 'p2',
+            name: '滑动帧卡顿概览',
+            goal: '获取 scroll frame jank 帧统计和掉帧分布并读取 artifact',
+            expectedTools: ['invoke_skill', 'fetch_artifact'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+              { tool: 'fetch_artifact' },
+            ],
+          },
           {
             id: 'p3',
             name: '根因诊断深钻',
@@ -2580,6 +3058,353 @@ describe('createClaudeMcpServer', () => {
 
       expect(result.success).toBe(true);
       expect(analysisPlan.current?.phases[0].expectedTools).toEqual(['execute_sql', 'fetch_artifact']);
+    });
+
+    it('accepts provider aliases while preserving revised expected calls', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [
+          { id: 'p1', name: 'Phase 1', goal: 'G1', expectedTools: ['execute_sql'] },
+        ],
+        successCriteria: 'Initial success criteria',
+      });
+
+      const toolDef = tools.get('revise_plan');
+      const revisedPhase = {
+        phaseId: 'p1',
+        phaseName: 'Phase 1 revised',
+        description: 'Collect SQL and startup evidence',
+        expected_tools: 'execute_sql, invoke_skill',
+        expected_calls: [
+          { tool_name: 'execute_sql' },
+          { tool: 'invoke_skill', skill_id: 'startup_analysis' },
+        ],
+      };
+      expect(toolDef?.schema?.updatedPhases?.safeParse(JSON.stringify([revisedPhase])).success).toBe(true);
+      expect(toolDef?.schema?.updated_phases?.safeParse([revisedPhase]).success).toBe(true);
+
+      const result = await callTool(tools, 'revise_plan', {
+        updated_phases: [revisedPhase],
+        updated_success_criteria: 'Revised success criteria',
+        reason_text: 'Provider emitted snake_case arguments',
+      });
+
+      expect(result.success).toBe(true);
+      expect(analysisPlan.current?.successCriteria).toBe('Revised success criteria');
+      expect(analysisPlan.current?.revisionHistory?.[0].reason).toBe('Provider emitted snake_case arguments');
+      expect(analysisPlan.current?.phases[0]).toMatchObject({
+        id: 'p1',
+        name: 'Phase 1 revised',
+        goal: 'Collect SQL and startup evidence',
+        expectedTools: ['execute_sql', 'invoke_skill'],
+        expectedCalls: [
+          { tool: 'execute_sql' },
+          { tool: 'invoke_skill', skillId: 'startup_analysis' },
+        ],
+      });
+    });
+
+    it('rejects malformed revised expectedCalls instead of applying a weakened plan', async () => {
+      const badCalls = [
+        { skill_id: 'startup_analysis' },
+        {},
+        { tool: '' },
+      ];
+
+      for (const badCall of badCalls) {
+        const { tools, analysisPlan } = createTestServer();
+        await callTool(tools, 'submit_plan', {
+          phases: [
+            { id: 'p1', name: 'Phase 1', goal: 'G1', expectedTools: ['execute_sql'] },
+          ],
+          successCriteria: 'Initial success criteria',
+        });
+
+        const toolDef = tools.get('revise_plan');
+        const revisedPhase = {
+          id: 'p1',
+          name: 'Phase 1 revised',
+          goal: 'Collect startup evidence',
+          expectedTools: ['invoke_skill'],
+          expected_calls: [badCall],
+        };
+
+        expect(toolDef?.schema?.updatedPhases?.safeParse([revisedPhase]).success).toBe(false);
+
+        const result = await callTool(tools, 'revise_plan', {
+          updatedPhases: JSON.stringify([revisedPhase]),
+          reason: 'Malformed expectedCalls should not weaken the plan',
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.action_required).toBe('revise_plan');
+        expect(result.invalidExpectedCalls).toEqual([
+          'p1.expectedCalls[0] must include a non-empty tool/toolName/tool_name/name',
+        ]);
+        expect(analysisPlan.current?.phases[0]).toMatchObject({
+          id: 'p1',
+          name: 'Phase 1',
+          expectedTools: ['execute_sql'],
+        });
+        expect(analysisPlan.current?.revisionHistory).toBeUndefined();
+      }
+    });
+
+    it('rejects revisions that try to make strategy detail lookup an expected evidence call', async () => {
+      const { tools, analysisPlan } = createTestServer();
+      await callTool(tools, 'submit_plan', {
+        phases: [
+          { id: 'p1', name: 'Phase 1', goal: 'Collect SQL evidence', expectedTools: ['execute_sql'] },
+        ],
+        successCriteria: 'Done',
+      });
+
+      const result = await callTool(tools, 'revise_plan', {
+        updatedPhases: [{
+          id: 'p1',
+          name: 'Phase 1',
+          goal: 'Read detail instead of collecting evidence',
+          expectedTools: ['execute_sql'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'lookup_strategy_detail' }],
+        }],
+        reason: 'Attempt to count detail lookup as evidence',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.invalidExpectations).toEqual([
+        'p1.expectedCalls references informational tool "lookup_strategy_detail" as skillId',
+      ]);
+      expect(result.action_required).toBe('revise_plan');
+      expect(analysisPlan.current?.phases[0].expectedCalls).toBeUndefined();
+    });
+
+    it('rejects revisions that remove non-waivable architecture expectedCalls', async () => {
+      const { tools, analysisPlan } = createTestServer({
+        sceneType: 'scrolling',
+        cachedArchitecture: {
+          type: 'FLUTTER',
+          confidence: 0.95,
+          evidence: [{ type: 'slice', value: 'Flutter TextureView', weight: 0.9 }],
+          flutter: { engine: 'SKIA', surfaceType: 'TEXTUREVIEW' },
+        },
+      });
+
+      const validPhases = [
+        {
+          id: 'p1',
+          name: '帧渲染分析',
+          goal: '调用 scrolling_analysis 获取卡顿帧分布',
+          expectedTools: ['invoke_skill', 'fetch_artifact'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+            { tool: 'fetch_artifact' },
+          ],
+        },
+        {
+          id: 'p2',
+          name: '根因诊断',
+          goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+            { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+            { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+          ],
+        },
+        {
+          id: 'p3',
+          name: '架构专项',
+          goal: '拆 Flutter TextureView producer 链路',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{ tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' }],
+        },
+      ];
+
+      const submit = await callTool(tools, 'submit_plan', {
+        phases: validPhases,
+        successCriteria: 'Complete scrolling analysis with Flutter producer evidence',
+      });
+      expect(submit.success).toBe(true);
+
+      const revised = await callTool(tools, 'revise_plan', {
+        updatedPhases: validPhases.map(phase => phase.id === 'p3'
+          ? {
+              ...phase,
+              goal: '用通用 SQL 手工查看架构，不声明 Flutter 专属 expectedCall',
+              expectedCalls: [],
+            }
+          : phase),
+        reason: 'Attempt to simplify the plan after overview collection',
+      });
+
+      expect(revised.success).toBe(false);
+      expect(revised.missingAspectIds).toContain('architecture_specific_jank');
+      expect(revised.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+      expect(analysisPlan.current?.revisionHistory).toBeUndefined();
+      expect(analysisPlan.current?.phases.find(p => p.id === 'p3')?.expectedCalls)
+        .toEqual([{ tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' }]);
+    });
+
+    it('blocks evidence tools after standalone architecture detection triggers a non-waivable missing aspect', async () => {
+      const { tools, analysisPlan } = createTestServer({ sceneType: 'scrolling' });
+      const basePhases = [
+        {
+          id: 'p1',
+          name: '帧渲染分析',
+          goal: '调用 scrolling_analysis 获取卡顿帧分布并读取 artifact',
+          expectedTools: ['invoke_skill', 'fetch_artifact'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+            { tool: 'fetch_artifact' },
+          ],
+        },
+        {
+          id: 'p2',
+          name: '根因诊断',
+          goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [
+            { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+            { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+            { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+          ],
+        },
+      ];
+      await callTool(tools, 'submit_plan', {
+        phases: basePhases,
+        successCriteria: 'Complete scrolling analysis',
+      });
+      jest.mocked(createArchitectureDetector).mockReturnValueOnce({
+        detect: jest.fn(async () => ({
+          type: 'FLUTTER',
+          confidence: 0.95,
+          evidence: [{ type: 'slice', value: 'Flutter TextureView', weight: 0.9 }],
+          flutter: { engine: 'SKIA', surfaceType: 'TEXTUREVIEW' },
+        })),
+      } as any);
+
+      const detected = await callTool(tools, 'detect_architecture');
+      expect(detected.planRevisionRequired).toBe(true);
+      expect(detected.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+      expect(analysisPlan.current?.unresolvedAspects).toContain('architecture_specific_jank');
+
+      const blockedSql = await callTool(tools, 'execute_sql', { sql: 'SELECT 1 AS ok' });
+      expect(blockedSql.success).toBe(false);
+      expect(blockedSql.action_required).toBe('revise_plan');
+
+      const revised = await callTool(tools, 'revise_plan', {
+        updatedPhases: [
+          ...basePhases,
+          {
+            id: 'p3',
+            name: 'Flutter TextureView 架构专项',
+            goal: '拆 Flutter producer 和 TextureView 上屏链路',
+            expectedTools: ['invoke_skill'],
+            expectedCalls: [{ tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' }],
+          },
+        ],
+        reason: 'Architecture detection found Flutter TextureView and requires producer-path evidence',
+      });
+      expect(revised.success).toBe(true);
+      expect(analysisPlan.current?.unresolvedAspects ?? []).not.toContain('architecture_specific_jank');
+
+      const unblockedSql = await callTool(tools, 'execute_sql', { sql: 'SELECT 1 AS ok' });
+      expect(unblockedSql.success).toBe(true);
+    });
+
+    it('uses architecture evidence values to trigger TextureView gates when the primary type is STANDARD', async () => {
+      const { tools } = createTestServer({ sceneType: 'scrolling' });
+      await callTool(tools, 'submit_plan', {
+        phases: [
+          {
+            id: 'p1',
+            name: '帧渲染分析',
+            goal: '调用 scrolling_analysis 获取卡顿帧分布并读取 artifact',
+            expectedTools: ['invoke_skill', 'fetch_artifact'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+              { tool: 'fetch_artifact' },
+            ],
+          },
+          {
+            id: 'p2',
+            name: '根因诊断',
+            goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+            expectedTools: ['invoke_skill'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+              { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+              { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+            ],
+          },
+        ],
+        successCriteria: 'Complete scrolling analysis',
+      });
+      jest.mocked(createArchitectureDetector).mockReturnValueOnce({
+        detect: jest.fn(async () => ({
+          type: 'STANDARD',
+          confidence: 0.84,
+          evidence: [{ type: 'slice', value: 'TEXTUREVIEW_STANDARD', weight: 0.84 }],
+          additionalInfo: { pipelineId: 'TEXTUREVIEW_STANDARD' },
+        })),
+      } as any);
+
+      const detected = await callTool(tools, 'detect_architecture');
+
+      expect(detected.evidence).toEqual([
+        expect.objectContaining({ value: 'TEXTUREVIEW_STANDARD' }),
+      ]);
+      expect(detected.additionalInfo).toEqual({ pipelineId: 'TEXTUREVIEW_STANDARD' });
+      expect(detected.planRevisionRequired).toBe(true);
+      expect(detected.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+    });
+
+    it('applies the same architecture gate through invoke_skill detect_architecture compatibility path', async () => {
+      const { tools } = createTestServer({ sceneType: 'scrolling' });
+      await callTool(tools, 'submit_plan', {
+        phases: [
+          {
+            id: 'p1',
+            name: '帧渲染分析',
+            goal: '调用 scrolling_analysis 获取卡顿帧分布并读取 artifact',
+            expectedTools: ['invoke_skill', 'fetch_artifact'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'scrolling_analysis' },
+              { tool: 'fetch_artifact' },
+            ],
+          },
+          {
+            id: 'p2',
+            name: '根因诊断',
+            goal: '使用 jank_frame_detail + frame_blocking_calls + blocking_chain_analysis 深入',
+            expectedTools: ['invoke_skill'],
+            expectedCalls: [
+              { tool: 'invoke_skill', skillId: 'jank_frame_detail' },
+              { tool: 'invoke_skill', skillId: 'frame_blocking_calls' },
+              { tool: 'invoke_skill', skillId: 'blocking_chain_analysis' },
+            ],
+          },
+        ],
+        successCriteria: 'Complete scrolling analysis',
+      });
+      jest.mocked(createArchitectureDetector).mockReturnValueOnce({
+        detect: jest.fn(async () => ({
+          type: 'FLUTTER',
+          confidence: 0.95,
+          evidence: [{ type: 'slice', value: 'Flutter TextureView', weight: 0.9 }],
+          flutter: { engine: 'SKIA', surfaceType: 'TEXTUREVIEW' },
+        })),
+      } as any);
+
+      const detected = await callTool(tools, 'invoke_skill', {
+        skillId: 'detect_architecture',
+        params: {},
+      });
+
+      expect(detected.planRevisionRequired).toBe(true);
+      expect(detected.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+      const blockedSql = await callTool(tools, 'execute_sql', { sql: 'SELECT 1 AS ok' });
+      expect(blockedSql.action_required).toBe('revise_plan');
     });
   });
 });

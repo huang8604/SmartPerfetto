@@ -100,6 +100,7 @@ describe('experimental OpenCode runtime contract', () => {
       displayName: 'Experimental OpenCode',
       production: false,
       publicRuntime: false,
+      promptCache: { systemPromptDynamicBoundary: false },
     });
   });
 
@@ -260,14 +261,16 @@ describe('experimental OpenCode runtime contract', () => {
 
   it('uses OpenCode promptAsync and polls completed assistant messages', async () => {
     const promptAsync = jest.fn(async (_input?: unknown) => ({ response: { status: 204 } }));
-    const messages = jest.fn(async (_input?: unknown) => ({
-      data: [
-        {
-          info: { role: 'assistant', finish: 'stop' },
-          parts: [{ type: 'text', text: '异步最终报告' }],
-        },
-      ],
-    }));
+    const messages = jest.fn<any>()
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({
+        data: [
+          {
+            info: { role: 'assistant', finish: 'stop' },
+            parts: [{ type: 'text', text: '异步最终报告' }],
+          },
+        ],
+      });
     const result = await runOpenCodePrompt({
       client: {
         session: {
@@ -293,6 +296,44 @@ describe('experimental OpenCode runtime contract', () => {
       query: { directory: '/tmp/project', limit: 50, order: 'asc' },
     });
     expect(extractOpenCodeAssistantText(result.messagesResponse)).toBe('异步最终报告');
+  });
+
+  it('does not return an assistant message that existed before the async prompt', async () => {
+    const promptAsync = jest.fn(async (_input?: unknown) => ({ response: { status: 204 } }));
+    const oldAssistant = {
+      info: { role: 'assistant', finish: 'stop', id: 'msg-old' },
+      parts: [{ type: 'text', text: '上一轮旧报告' }],
+    };
+    const newAssistant = {
+      info: { role: 'assistant', finish: 'stop', id: 'msg-new' },
+      parts: [{ type: 'text', text: '本轮新报告' }],
+    };
+    const messages = jest.fn<any>()
+      .mockResolvedValueOnce({ data: [oldAssistant] })
+      .mockResolvedValueOnce({ data: [oldAssistant] })
+      .mockResolvedValueOnce({ data: [oldAssistant, newAssistant] });
+
+    const result = await runOpenCodePrompt({
+      client: {
+        session: {
+          prompt: jest.fn(),
+          promptAsync,
+          messages,
+        },
+      },
+      server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+    } as any, {
+      path: { id: 'ses-opencode' },
+      query: { directory: '/tmp/project' },
+      body: { parts: [{ type: 'text', text: '继续分析启动性能' }] },
+    }, {
+      sessionId: 'ses-opencode',
+      projectDir: '/tmp/project',
+      timeoutMs: 4_000,
+    });
+
+    expect(messages).toHaveBeenCalledTimes(3);
+    expect(extractOpenCodeAssistantText(result.messagesResponse)).toBe('本轮新报告');
   });
 
   it('emits SmartPerfetto tool dispatch and response events from the OpenCode MCP bridge', async () => {

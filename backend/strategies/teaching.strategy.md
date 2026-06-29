@@ -39,11 +39,45 @@ plan_template:
     - id: architecture_detection
       match_keywords: ['detect_architecture', 'architecture', '架构', 'pipeline', '管线', '教学']
       suggestion: '教学场景建议包含架构检测阶段 (detect_architecture)'
+      required_expected_calls:
+        - tool: detect_architecture
     - id: pipeline_teaching
       match_keywords: ['teach', 'explain', '说明', '解释', 'thread', '线程', 'slice', 'mermaid', 'invoke_skill']
       suggestion: '教学场景建议包含管线教学内容获取阶段 (invoke_skill with pipeline skill)'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: rendering_pipeline_detection
+        - tool: invoke_skill
+          skill_id: scene_reconstruction
 ---
 
+#### teaching Core Strategy
+
+**Route card**: 教学 / 是什么 / 什么意思 / 怎么工作 / 怎么运作 / explain / how does / what is / thread role / mechanism
+
+**Capabilities**: required=[none], optional=[none]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- architecture_detection: 教学场景建议包含架构检测阶段 (detect_architecture) (required: detect_architecture)
+- pipeline_teaching: 教学场景建议包含管线教学内容获取阶段 (invoke_skill with pipeline skill) (requires one of: invoke_skill(rendering_pipeline_detection), invoke_skill(scene_reconstruction))
+
+**Phase reminders**
+- 无额外 phase hint。
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `teaching:full`: 教学/概念解释分析（用户提到 是什么、什么意思、怎么工作、explain、what is、pipeline、thread role） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="teaching full strategy detail" keywords="teaching,教学,是什么,什么意思,怎么工作,怎么运作,explain,how does,what is,thread role,mechanism,原理,线程角色,教学/概念解释分析（用户提到 是什么、什么意思、怎么工作、explain、what is、pipeline、thread role）,detail,full" default="true" -->
 #### 教学/概念解释分析（用户提到 是什么、什么意思、怎么工作、explain、what is、pipeline、thread role）
 
 **核心目标：** 帮助用户理解 trace 中的组件、线程、Slice 和渲染管线的工作原理，先教后诊、分层递进。
@@ -174,3 +208,4 @@ invoke_skill('pipeline_key_slices_overlay', {
 - **关联实践**：始终结合当前 trace 中的实际数据
 - **不假设知识**：首次使用技术术语时用中文解释含义
 - **鼓励探索**：在结尾建议用户可以进一步询问的方向
+<!-- /strategy-detail -->

@@ -281,7 +281,7 @@ describe('HypothesisExecutor', () => {
 
       expect(result.rounds).toBe(1);
       expect(result.findings).toHaveLength(1);
-      expect(result.stopReason).toBeNull();
+      expect(result.stopReason).toBe('Strategy concluded');
       expect(services.circuitBreaker.canExecute).toHaveBeenCalled();
       expect(services.circuitBreaker.recordIteration).toHaveBeenCalledWith('hypothesis_loop');
       expect(services.messageBus.dispatchTasksParallel).toHaveBeenCalled();
@@ -457,6 +457,47 @@ describe('HypothesisExecutor', () => {
       expect(services.messageBus.updateHypothesis).toHaveBeenCalled();
     });
 
+    it('records a stop reason when the strategy planner concludes', async () => {
+      const ctx = createMockExecutionContext();
+      strategyPlanner.planNextIteration.mockResolvedValue({
+        strategy: 'conclude',
+        confidence: 0.8,
+        reasoning: 'Sufficient findings collected',
+      });
+
+      const result = await executor.execute(ctx, emitter);
+
+      expect(result.stopReason).toBe('Strategy concluded');
+      expect(emittedUpdates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'progress',
+          content: expect.objectContaining({
+            phase: 'early_stop',
+            reason: 'Strategy concluded',
+          }),
+        }),
+      ]));
+    });
+
+    it('does not replace an existing focused time range with the global trace range during deep_dive', async () => {
+      const ctx = createMockExecutionContext({
+        options: {
+          traceProcessorService: {},
+          packageName: 'com.example.app',
+          timeRange: { start: '0', end: '9999' },
+        },
+      });
+      ctx.sharedContext.focusedTimeRange = { start: '1000', end: '2000' };
+
+      strategyPlanner.planNextIteration
+        .mockResolvedValueOnce({ strategy: 'deep_dive', confidence: 0.6, reasoning: 'Need deeper', focusArea: 'cpu' })
+        .mockResolvedValueOnce({ strategy: 'conclude', confidence: 0.8, reasoning: 'Done' });
+
+      await executor.execute(ctx, emitter);
+
+      expect(ctx.sharedContext.focusedTimeRange).toEqual({ start: '1000', end: '2000' });
+    });
+
     it('handles pivot strategy', async () => {
       const ctx = createMockExecutionContext();
 
@@ -599,8 +640,8 @@ describe('HypothesisExecutor', () => {
 
       const result = await executor.execute(ctx, emitter);
 
-      // Should complete without early stop due to noProgress (we reset the counter)
-      expect(result.stopReason).toBeNull();
+      // Should complete by strategy conclusion, not no-progress early stop.
+      expect(result.stopReason).toBe('Strategy concluded');
       expect(result.rounds).toBe(4);
       // Verify we accumulated findings from both rounds where we had findings
       expect(result.findings.length).toBeGreaterThanOrEqual(2);
@@ -626,7 +667,7 @@ describe('HypothesisExecutor', () => {
 
       const result = await executor.execute(ctx, emitter);
 
-      expect(result.stopReason).toBeNull();
+      expect(result.stopReason).toBe('Strategy concluded');
       expect(result.rounds).toBe(1);
       expect(emittedUpdates.some(
         update => update.type === 'progress' && String(update.content.phase || '').includes('intervention')

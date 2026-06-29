@@ -98,11 +98,50 @@ plan_template:
     - id: network_data
       match_keywords: ['network_analysis', 'network', '网络', '流量', 'packet']
       suggestion: '网络场景必须先调用 network_analysis 或明确说明 network_packets 数据缺失'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: network_analysis
     - id: network_power_context
       match_keywords: ['battery_drain_attribution', 'power_consumption_overview', '耗电', '唤醒', 'power']
       suggestion: '网络耗电/唤醒问题需要补充功耗或唤醒上下文'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: battery_drain_attribution
+        - tool: invoke_skill
+          skill_id: power_consumption_overview
 ---
 
+#### network Core Strategy
+
+**Route card**: 网络 / 流量 / 数据包 / network / traffic / packet / wifi / cellular / 4g / 5g
+
+**Capabilities**: required=[none], optional=[network_packets, power_rails, battery_counters]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- network_data: 网络场景必须先调用 network_analysis 或明确说明 network_packets 数据缺失 (required: invoke_skill(network_analysis))
+- network_power_context: 网络耗电/唤醒问题需要补充功耗或唤醒上下文 (requires one of: invoke_skill(battery_drain_attribution), invoke_skill(power_consumption_overview))
+
+**Phase reminders**
+- network_packets: 优先调用 network_analysis。若 android_network_packets 不存在或为空，必须标注 trace 未启用 network_packets，不能解释为没有网络活动。 工具: network_analysis
+- network_power: 网络耗电问题需要把 network_analysis 与 battery_drain_attribution / power_consumption_overview 组合，区分网络事件链和 rail 级功耗归因。 工具: network_analysis, battery_drain_attribution, power_consumption_overview
+- request_stage_boundary: request-stage 归因必须先说明 packet-level trace 只能证明包/接口/协议/活跃窗口；只有存在 OkHttp/Cronet/HttpEngine 事件、request_id、app trace slice、接入层日志或 APM 且与当前时间窗对齐时，才能拆 DNS/connect/TLS/TTFB/body/decode/cache/retry。缺失时输出采集建议。 工具: network_analysis, lookup_knowledge
+- network_state_policy_boundary: 网络栈/政策问题必须把当前 trace packet 证据、client stack/config、Android/API/targetSdk/Extension、NetworkCallback/NetworkCapabilities、dumpsys/connectivity、服务端支持和外部错误日志分开；版本或配置未知时不得提升为确定根因。 工具: network_analysis, lookup_knowledge
+
+**Final report contract summary**
+- 请求阶段证据边界
+- 网络栈/版本策略边界
+
+
+**Detail ref**
+- `network:full`: 网络活动分析 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="network full strategy detail" keywords="network,网络,流量,数据包,network,traffic,packet,wifi,cellular,4g,5g,tcp,udp,网络活动分析,detail,full" default="true" -->
 #### 网络活动分析
 
 网络场景先判断 trace 是否真的采集了 `android.network_packets`。如果没有该数据源，只能给采集建议，不能把空结果解释为"没有网络问题"。
@@ -164,3 +203,4 @@ invoke_skill("power_consumption_overview", { package: "<包名>", start_ts: "<st
 1. 网络包/活跃周期证据
 2. wakelock / suspend-wakeup / job 事件链
 3. rail 级能耗归因是否可用
+<!-- /strategy-detail -->

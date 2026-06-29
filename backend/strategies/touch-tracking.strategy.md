@@ -44,8 +44,37 @@ plan_template:
     - id: per_frame_latency_measurement
       match_keywords: ['input', 'touch', '跟手', '延迟', 'latency', 'per_frame', 'tracking']
       suggestion: '跟手度场景建议包含逐帧 Input-to-Display 延迟测量阶段'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: touch_to_display_latency
 ---
 
+#### touch_tracking Core Strategy
+
+**Route card**: 跟手度 / 跟手 / 跟随 / follow finger / touch tracking / 触控延迟 / 持续延迟 / 滑动跟随 / input to display / 管线延迟
+
+**Capabilities**: required=[input_latency, frame_rendering, surfaceflinger], optional=[cpu_scheduling, gpu]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- per_frame_latency_measurement: 跟手度场景建议包含逐帧 Input-to-Display 延迟测量阶段 (required: invoke_skill(touch_to_display_latency))
+
+**Phase reminders**
+- 无额外 phase hint。
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `touch_tracking:full`: 跟手度分析（用户提到 跟手度、跟手延迟、follow finger、touch tracking） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="touch_tracking full strategy detail" keywords="touch_tracking,跟手度,跟手,跟随,follow finger,touch tracking,触控延迟,持续延迟,滑动跟随,input to display,管线延迟,pipeline latency,触摸跟踪,跟手度分析（用户提到 跟手度、跟手延迟、follow finger、touch tracking）,detail,full" default="true" -->
 #### 跟手度分析（用户提到 跟手度、跟手延迟、follow finger、touch tracking）
 
 **⚠️ 核心区分：跟手度 ≠ 首帧响应速度 ≠ 滑动流畅性**
@@ -211,3 +240,4 @@ LIMIT 5
 5. **优化建议**：
    - 按根因类别给出可操作建议
    - 标注预期收益（例如"优化后预计 P90 从 38ms 降至 24ms"）
+<!-- /strategy-detail -->

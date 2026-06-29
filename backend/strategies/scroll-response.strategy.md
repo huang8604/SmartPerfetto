@@ -74,14 +74,60 @@ plan_template:
     - id: input_event_detection
       match_keywords: ['input', 'gesture', 'motion', 'action_move', '输入', '手势', '触摸', 'input_events']
       suggestion: '滑动响应场景建议包含输入事件定位阶段 (input event detection)'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: click_response_analysis
+        - tool: invoke_skill
+          skill_id: input_events_in_range
     - id: latency_breakdown
       match_keywords: ['latency', 'response', 'delay', '延迟', '响应', '分解', 'breakdown', '首帧', 'FrameTimeline', 'present']
       suggestion: '滑动响应场景建议包含响应延迟口径和帧/上屏证据边界 (latency scope + frame linkage)'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: scroll_response_latency
+        - tool: invoke_skill
+          skill_id: touch_to_display_latency
     - id: input_target_boundary
       match_keywords: ['stale', 'focused window', 'target window', 'InputChannel', 'FINISHED', 'ACK', 'wait queue', 'wq', 'dumpsys', 'logcat']
       suggestion: '滑动响应场景需要说明输入目标、stale、FINISHED ACK 和窗口/队列证据是否可用或缺失'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: click_response_detail
+        - tool: invoke_skill
+          skill_id: input_events_in_range
 ---
 
+#### scroll_response Core Strategy
+
+**Route card**: 滑动响应 / 滑动延迟 / 响应速度 / 首帧延迟 / 首帧响应 / scroll response / scroll latency / first frame / response latency / 滑动开始
+
+**Capabilities**: required=[frame_rendering, input_latency], optional=[cpu_scheduling, surfaceflinger]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- input_event_detection: 滑动响应场景建议包含输入事件定位阶段 (input event detection) (requires one of: invoke_skill(click_response_analysis), invoke_skill(input_events_in_range))
+- latency_breakdown: 滑动响应场景建议包含响应延迟口径和帧/上屏证据边界 (latency scope + frame linkage) (requires one of: invoke_skill(scroll_response_latency), invoke_skill(touch_to_display_latency))
+- input_target_boundary: 滑动响应场景需要说明输入目标、stale、FINISHED ACK 和窗口/队列证据是否可用或缺失 (requires one of: invoke_skill(click_response_detail), invoke_skill(input_events_in_range))
+
+**Phase reminders**
+- scroll_latency_scope_boundary: 先声明响应口径：dispatch-to-ACK、ACTION_MOVE 到首帧候选、还是 input-to-present。scroll_response_latency 的默认输出不能在缺少 FrameTimeline/present 链接时被写成硬端到端上屏。 工具: input_events_in_range, scroll_response_latency
+- scroll_input_target_boundary: 滑动响应异常可能来自输入队列、窗口目标、stale drop 或未完成 ACK。若没有 dumpsys/logcat/WindowManager/InputDispatcher 证据，只能作为缺口，不要把它归因成 App 滑动代码。 工具: input_events_in_range
+
+**Final report contract summary**
+- 响应延迟口径
+- 输入目标与队列边界
+- FrameTimeline/上屏置信度
+
+
+**Detail ref**
+- `scroll_response:full`: 滑动响应速度分析（用户提到 滑动响应、滑动延迟、首帧延迟、scroll response、scroll latency） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="scroll_response full strategy detail" keywords="scroll_response,滑动响应,滑动延迟,响应速度,首帧延迟,首帧响应,scroll response,scroll latency,first frame,response latency,滑动开始,scroll start,initial response,滑动响应速度分析（用户提到 滑动响应、滑动延迟、首帧延迟、scroll response、scroll latency）,detail,full" default="true" -->
 #### 滑动响应速度分析（用户提到 滑动响应、滑动延迟、首帧延迟、scroll response、scroll latency）
 
 **核心区分：滑动响应速度 ≠ 滑动流畅性**
@@ -281,3 +327,4 @@ LIMIT 20
 5. **优化建议**：按瓶颈段给出可操作的建议
 
 6. **证据边界**：列出 FrameTimeline/present、InputDispatcher/dumpsys/logcat、WindowManager/focus、stale/FINISHED ACK 哪些可用，哪些缺失或不适用。
+<!-- /strategy-detail -->

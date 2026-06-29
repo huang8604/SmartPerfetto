@@ -785,6 +785,70 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }));
   });
 
+  it('passes stable and volatile full-mode prompt blocks through the Claude cache boundary', async () => {
+    const runtime = new ClaudeRuntime({
+      query: async () => ({ columns: ['cnt'], rows: [[0]] }),
+      getTrace: () => ({ traceOs: 'android', traceFormat: 'perfetto' }),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-cache-boundary', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-cache-boundary',
+        num_turns: 1,
+        result: [
+          '## 综合结论',
+          'Full-mode prompt cache boundary was applied.',
+          '',
+          '## 关键证据链',
+          '- Selection context stayed in the volatile suffix.',
+          '',
+          '## 优化建议',
+          '- Keep stable prompt sections cacheable.',
+        ].join('\n'),
+      };
+    });
+
+    const result = await runtime.analyze('分析选区内的掉帧', 'session-cache-boundary', 'trace-cache-boundary', {
+      analysisMode: 'full',
+      packageName: 'com.example.app',
+      selectionContext: { kind: 'area', startNs: 100, endNs: 200 } as any,
+    });
+
+    expect(result.success).toBe(true);
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(Array.isArray(call.options.systemPrompt)).toBe(true);
+    const blocks = call.options.systemPrompt as string[];
+    const boundaryIndex = blocks.indexOf('__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__');
+    expect(boundaryIndex).toBeGreaterThan(0);
+    expect(blocks.slice(0, boundaryIndex).join('\n\n')).toContain('SmartPerfetto');
+    expect(blocks.slice(boundaryIndex + 1).join('\n\n')).toContain('用户选区上下文');
+  });
+
+  it('keeps unsupported runtime prompt cache capabilities on the full system prompt string', () => {
+    const sdkPrompt = __testing.buildClaudeSdkSystemPrompt({
+      fullPrompt: 'stable\n\nvolatile',
+      stablePrefix: 'stable',
+      volatileSuffix: 'volatile',
+    }, {
+      kind: 'unsupported-runtime',
+      displayName: 'Unsupported Runtime',
+      production: false,
+      publicRuntime: false,
+      promptCache: { systemPromptDynamicBoundary: false },
+    });
+
+    expect(sdkPrompt).toBe('stable\n\nvolatile');
+  });
+
   it('keeps monitor-only context pressure warnings out of user-facing progress updates', async () => {
     process.env.CLAUDE_PRECOMPACT_THRESHOLD = '0.6';
     const runtime = new ClaudeRuntime({

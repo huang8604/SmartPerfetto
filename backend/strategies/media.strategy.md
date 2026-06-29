@@ -47,11 +47,49 @@ plan_template:
     - id: codec_activity
       match_keywords: ['media_codec_activity', 'MediaCodec', 'Codec2', 'OMX', '解码', '编码']
       suggestion: '媒体场景必须检查 codec/buffer 活动或明确说明 trace 缺少媒体信号'
+      required_expected_calls:
+        - tool: invoke_skill
+          skill_id: media_codec_activity
     - id: render_or_power_context
       match_keywords: ['gl_standalone_swap_jank', 'android_gpu_work_period_track', 'power_consumption_overview', 'frame', 'gpu', '功耗']
       suggestion: '媒体卡顿/耗电问题需要补充渲染、GPU 或功耗上下文'
+      required_expected_call_alternatives:
+        - tool: invoke_skill
+          skill_id: gl_standalone_swap_jank
+        - tool: invoke_skill
+          skill_id: android_gpu_work_period_track
+        - tool: invoke_skill
+          skill_id: power_consumption_overview
 ---
 
+#### media Core Strategy
+
+**Route card**: 视频 / 音频 / 解码 / 编码 / media / codec / video / audio / decoder / encoder
+
+**Capabilities**: required=[cpu_scheduling], optional=[frame_rendering, gpu, gpu_work_period, power_rails]
+
+**Execution contract**
+- 先 submit_plan；计划必须覆盖下列 frontmatter mandatory aspects，并在 expectedCalls 中声明关键 Skill/工具。
+- 条件触发项只在 plan/证据命中对应 trigger 时强制；数据缺失时用 skipped+reason 或 waiver，不把缺失证据改写成通过。
+- detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
+
+**Mandatory aspects**
+- codec_activity: 媒体场景必须检查 codec/buffer 活动或明确说明 trace 缺少媒体信号 (required: invoke_skill(media_codec_activity))
+- render_or_power_context: 媒体卡顿/耗电问题需要补充渲染、GPU 或功耗上下文 (requires one of: invoke_skill(gl_standalone_swap_jank), invoke_skill(android_gpu_work_period_track), invoke_skill(power_consumption_overview))
+
+**Phase reminders**
+- codec_activity: 优先调用 media_codec_activity 检查 codec/buffer 事件。该 skill 基于 slice 信号；缺 codec trace 时必须标注数据不足。 工具: media_codec_activity
+- media_rendering_power: 视频/媒体卡顿需要结合 frame/GL/GPU/power 证据：必要时调用 scrolling_analysis、gl_standalone_swap_jank、android_gpu_work_period_track、power_consumption_overview。 工具: media_codec_activity, gl_standalone_swap_jank, android_gpu_work_period_track, power_consumption_overview
+
+**Final report contract summary**
+- 遵循通用输出契约。
+
+
+**Detail ref**
+- `media:full`: 媒体 / Codec 分析 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+
+
+<!-- strategy-detail id="full" title="media full strategy detail" keywords="media,视频,音频,解码,编码,media,codec,video,audio,decoder,encoder,mediacodec,codec2,媒体 / Codec 分析,detail,full" default="true" -->
 #### 媒体 / Codec 分析
 
 当前公开 stdlib index 没有稳定的 Android codec 专用表，因此媒体基础分析先基于 `slice` / `thread` 信号识别 MediaCodec、Codec2、OMX、CCodec 和 buffer API。
@@ -73,3 +111,4 @@ invoke_skill("media_codec_activity", { package: "<包名>", start_ts: "<start>",
 | 媒体播放耗电 | `invoke_skill("power_consumption_overview")` |
 
 输出时必须标注媒体 trace 信号来源。如果 codec slices 不存在，只能说明当前 trace 不支持媒体归因，并给出采集建议。
+<!-- /strategy-detail -->

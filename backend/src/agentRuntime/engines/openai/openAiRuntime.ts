@@ -594,9 +594,10 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       : undefined;
   }
 
-  restoreSessionMapping(sessionId: string, sdkSessionId: string): void {
-    const existing = this.sessionMap.get(sessionId);
-    this.sessionMap.set(sessionId, {
+  restoreSessionMapping(sessionId: string, sdkSessionId: string, referenceTraceId?: string): void {
+    const sessionMapKey = this.buildSessionMapKey(sessionId, referenceTraceId);
+    const existing = this.sessionMap.get(sessionMapKey);
+    this.sessionMap.set(sessionMapKey, {
       ...existing,
       lastResponseId: sdkSessionId,
       updatedAt: Date.now(),
@@ -1491,6 +1492,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const { allowedTools, toolDefinitions } = createClaudeMcpServer({
       sessionId,
       traceId,
+      userQuery: query,
       traceProcessorService: this.traceProcessorService,
       skillExecutor,
       packageName: effectivePackageName,

@@ -1798,4 +1798,37 @@ describe('final result quality gate', () => {
       query: '分析这个 trace',
     })).toBeUndefined();
   });
+
+  it('still enforces kernel blocking claim boundaries for partial runtime results', () => {
+    const issue = assessFinalResultQuality({
+      result: result({
+        partial: true,
+        conclusion: [
+          '# I/O 分析报告',
+          '',
+          '## 综合结论',
+          'blocked_function 是完整内核调用栈，filemap_read -> io_schedule 证明这是完整 off-CPU 调用路径。',
+          '',
+          '## I/O 证据类型',
+          '- blocked_function=filemap_read+0x508。',
+          '',
+          '## 文件/数据库/Provider 边界',
+          '- 文件读候选，业务路径未确认。',
+          '',
+          '## 置信度与补证',
+          '- 需要补采样。',
+        ].join('\n'),
+        findings: [{
+          severity: 'warning',
+          title: 'filemap_read wait',
+          description: 'main thread blocked_function=filemap_read',
+          evidence: ['blocked_function=filemap_read+0x508 dur=120ms'],
+        } as any],
+      }),
+      query: '分析 blocked_function filemap_read 为什么导致卡顿',
+      sceneType: 'io',
+    });
+
+    expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+  });
 });

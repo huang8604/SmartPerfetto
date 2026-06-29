@@ -34,6 +34,7 @@
 import {createSdkMcpServer} from '@anthropic-ai/claude-agent-sdk';
 
 import {
+  compactSharedToolSpec,
   createClaudeSdkToolFromSharedSpec,
   sharedToolSpecFromClaudeSdkTool,
   type SharedToolSpec,
@@ -133,13 +134,14 @@ export class McpToolRegistry {
       def.exposure,
       {summary: def.summary, requires: def.requires},
     );
+    const runtimeShared = compactSharedToolSpec(shared);
     this.entries.push({
-      name: shared.name,
-      shared,
-      tool: createClaudeSdkToolFromSharedSpec(shared),
-      exposure: shared.exposure,
-      summary: shared.summary,
-      requires: shared.requires,
+      name: runtimeShared.name,
+      shared: runtimeShared,
+      tool: createClaudeSdkToolFromSharedSpec(runtimeShared),
+      exposure: runtimeShared.exposure,
+      summary: runtimeShared.summary,
+      requires: runtimeShared.requires,
     });
   }
 

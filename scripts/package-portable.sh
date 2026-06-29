@@ -638,6 +638,7 @@ package_target() {
   local node_sha node_file node_dir node_runtime_version node_archive node_dir_suffix
   local perfetto_version tp_sha_key tp_sha trace_name trace_prebuilt_key tp_prebuilt tp_actual_sha
   local signed=false notarized=false
+  local macos_resources_dir
 
   os_name="$(target_field "$target" os_name)"
   arch_name="$(target_field "$target" arch_name)"
@@ -653,8 +654,7 @@ package_target() {
 
   resources_dir="$package_dir"
   if [ "$target" = "macos-arm64" ]; then
-    create_macos_app_bundle "$package_dir"
-    resources_dir="$package_dir/SmartPerfetto.app/Contents/Resources"
+    resources_dir="$package_dir/.staging-resources"
     signed=true
     if [ -n "${SMARTPERFETTO_MACOS_NOTARY_PROFILE:-}" ]; then
       notarized=true
@@ -707,6 +707,14 @@ package_target() {
   cp "$tp_prebuilt" "$resources_dir/bin/$trace_name"
   if [ "$target" != "windows-x64" ]; then
     chmod +x "$resources_dir/bin/$trace_name"
+  fi
+
+  if [ "$target" = "macos-arm64" ]; then
+    macos_resources_dir="$package_dir/SmartPerfetto.app/Contents/Resources"
+    create_macos_app_bundle "$package_dir"
+    rm -rf "$macos_resources_dir"
+    mv "$resources_dir" "$macos_resources_dir"
+    resources_dir="$macos_resources_dir"
   fi
 
   echo "Building launcher for $target..."

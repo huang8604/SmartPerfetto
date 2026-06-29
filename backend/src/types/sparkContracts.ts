@@ -26,6 +26,8 @@
  * @module sparkContracts
  */
 
+import type {CaseKnowledgeExtension} from './caseKnowledge';
+
 // =============================================================================
 // Shared base types (used across all Spark plans)
 // =============================================================================
@@ -1820,6 +1822,8 @@ export interface CaseNode extends SparkProvenance {
   curatedAt?: number;
   /** Educational level (Spark #162). */
   educationalLevel?: CaseEducationalLevel;
+  /** Rich curated-case payload derived from Markdown knowledge sources. */
+  knowledge?: CaseKnowledgeExtension;
 }
 
 /**

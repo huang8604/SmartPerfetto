@@ -36,6 +36,7 @@ import {
   summarizeTraceAgentState,
 } from '../state/traceAgentState';
 import { agentSessionConfig } from '../../config';
+import { loadPromptTemplate, renderTemplate } from '../../agentv3/strategyLoader';
 
 // =============================================================================
 // Semantic Working Memory (v2.0)
@@ -48,6 +49,20 @@ interface WorkingMemoryEntry {
   confidence?: number;
   conclusions: string[];
   nextSteps: string[];
+}
+
+interface RecentSqlResultContextEntry {
+  messageId: string;
+  timestamp: number;
+  title?: string;
+  evidenceRefId?: string;
+  sourceToolCallId?: string;
+  queryHash?: string;
+  traceId?: string;
+  traceSide?: string;
+  sql?: string;
+  data: unknown;
+  truncated?: boolean;
 }
 
 /**
@@ -65,6 +80,7 @@ export class EnhancedSessionContext {
   private openQuestions: string[] = [];
   private entityStore: EntityStore;
   private workingMemory: WorkingMemoryEntry[] = [];
+  private recentSqlResults: RecentSqlResultContextEntry[] = [];
   private traceAgentState: TraceAgentState | null = null;
 
   constructor(sessionId: string, traceId: string) {
@@ -863,6 +879,12 @@ export class EnhancedSessionContext {
       parts.push('');
     }
 
+    const recentSqlContext = this.generateRecentSqlResultContext(5);
+    if (recentSqlContext) {
+      parts.push(recentSqlContext);
+      parts.push('');
+    }
+
     // Add turn count
     parts.push(`## 对话历史 (${summary.turnCount} 轮)`);
 
@@ -956,6 +978,59 @@ export class EnhancedSessionContext {
     }
 
     return result;
+  }
+
+  // ==========================================================================
+  // Recent SQL results restored from messages.sql_result
+  // ==========================================================================
+
+  /**
+   * Hydrate compact raw SQL result previews from persisted chat messages.
+   * The full durable payload remains in SQLite; prompt context receives a
+   * bounded preview so resumed agents can inspect recent evidence without
+   * re-running every query.
+   */
+  hydrateRecentSqlResultsFromMessages(
+    messages: Array<{ id: string; timestamp: number; sqlResult?: unknown }>,
+    maxMessages: number = 5,
+  ): void {
+    const entries = messages
+      .filter(message => message.sqlResult)
+      .slice(-maxMessages)
+      .flatMap(message => extractRecentSqlResultEntries(message));
+    this.recentSqlResults = entries.slice(-maxMessages * 5);
+  }
+
+  private generateRecentSqlResultContext(maxEntries: number): string {
+    if (this.recentSqlResults.length === 0) return '';
+
+    const entries = this.recentSqlResults.slice(-maxEntries);
+    const renderedResults = entries.map((entry, index) => {
+      const lines = [`### SQL Result ${index + 1}: ${entry.title || 'SQL result'}`];
+      const meta: string[] = [];
+      if (entry.evidenceRefId) meta.push(`evidence=${entry.evidenceRefId}`);
+      if (entry.sourceToolCallId) meta.push(`toolCall=${entry.sourceToolCallId}`);
+      if (entry.queryHash) meta.push(`queryHash=${entry.queryHash}`);
+      if (entry.traceSide) meta.push(`traceSide=${entry.traceSide}`);
+      if (entry.truncated) meta.push('truncated=true');
+      if (meta.length > 0) lines.push(`- ${meta.join('; ')}`);
+      if (entry.sql) {
+        lines.push('```sql');
+        lines.push(truncateForPrompt(entry.sql, 1200));
+        lines.push('```');
+      }
+      lines.push('```json');
+      lines.push(truncateForPrompt(JSON.stringify(compactSqlPromptData(entry.data), null, 2), 2400));
+      lines.push('```');
+      return lines.join('\n');
+    }).join('\n\n');
+
+    const template = loadPromptTemplate('prompt-recent-sql-results');
+    if (!template) return renderedResults;
+    return renderTemplate(template, {
+      resultCount: entries.length,
+      results: renderedResults,
+    });
   }
 
   // ==========================================================================
@@ -1207,6 +1282,7 @@ export class EnhancedSessionContext {
       openQuestions: this.openQuestions,
       entityStore: this.entityStore.serialize(),
       workingMemory: this.workingMemory,
+      recentSqlResults: this.recentSqlResults,
       traceAgentState: this.traceAgentState,
     });
   }
@@ -1224,6 +1300,7 @@ export class EnhancedSessionContext {
     ctx.topicsDiscussed = new Set(data.topicsDiscussed);
     ctx.openQuestions = data.openQuestions;
     ctx.workingMemory = Array.isArray(data.workingMemory) ? data.workingMemory : [];
+    ctx.recentSqlResults = Array.isArray(data.recentSqlResults) ? data.recentSqlResults : [];
 
     // Restore EntityStore if present
     if (data.entityStore) {
@@ -1237,6 +1314,70 @@ export class EnhancedSessionContext {
 
     return ctx;
   }
+}
+
+function extractRecentSqlResultEntries(message: {
+  id: string;
+  timestamp: number;
+  sqlResult?: unknown;
+}): RecentSqlResultContextEntry[] {
+  const sqlResult = message.sqlResult;
+  if (!sqlResult || typeof sqlResult !== 'object') return [];
+  const record = sqlResult as Record<string, any>;
+
+  if (record.schemaVersion === 'sql_result_message_v1' && Array.isArray(record.results)) {
+    return record.results
+      .filter(result => result && typeof result === 'object')
+      .map((result: Record<string, any>) => ({
+        messageId: message.id,
+        timestamp: message.timestamp,
+        title: typeof result.title === 'string' ? result.title : undefined,
+        evidenceRefId: typeof result.evidenceRefId === 'string' ? result.evidenceRefId : undefined,
+        sourceToolCallId: typeof result.sourceToolCallId === 'string' ? result.sourceToolCallId : undefined,
+        queryHash: typeof result.queryHash === 'string' ? result.queryHash : undefined,
+        traceId: typeof result.traceId === 'string' ? result.traceId : undefined,
+        traceSide: typeof result.traceSide === 'string' ? result.traceSide : undefined,
+        sql: typeof result.sql === 'string' ? result.sql : undefined,
+        data: result.data,
+        truncated: result.truncated === true,
+      }));
+  }
+
+  if (Array.isArray(record.columns) && Array.isArray(record.rows)) {
+    return [{
+      messageId: message.id,
+      timestamp: message.timestamp,
+      title: 'SQL result',
+      sql: typeof record.query === 'string' ? record.query : undefined,
+      data: {
+        columns: record.columns,
+        rows: record.rows,
+        rowCount: typeof record.rowCount === 'number' ? record.rowCount : record.rows.length,
+      },
+    }];
+  }
+
+  return [];
+}
+
+function compactSqlPromptData(data: unknown): unknown {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const record = data as Record<string, unknown>;
+    if (Array.isArray(record.rows)) {
+      return {
+        columns: Array.isArray(record.columns) ? record.columns : undefined,
+        rowCount: typeof record.rowCount === 'number' ? record.rowCount : record.rows.length,
+        rows: record.rows.slice(0, 5),
+        truncatedRows: record.rows.length > 5,
+      };
+    }
+  }
+  return data;
+}
+
+function truncateForPrompt(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 // =============================================================================

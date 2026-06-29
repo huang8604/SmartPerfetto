@@ -523,11 +523,14 @@ export class MergeStrategyRegistry {
 
     // 合并发现
     const findingsData = strategy.mergeFindings(parentFindings, childFindings, options);
+    const mergedResults = options.strategy === 'merge_findings'
+      ? this.injectMergedFindingsResult(resultData.mergedResults, parentFindings, findingsData, options)
+      : resultData.mergedResults;
 
     // 构建合并后的上下文
     const mergedContext: SubAgentContext = {
       ...parentContext,
-      previousResults: resultData.mergedResults,
+      previousResults: mergedResults,
     };
 
     return {
@@ -552,6 +555,65 @@ export class MergeStrategyRegistry {
       }
     }
     return findings;
+  }
+
+  private injectMergedFindingsResult(
+    parentResults: StageResult[],
+    parentFindings: Finding[],
+    findingsData: MergeFindingsData,
+    options: MergeOptions
+  ): StageResult[] {
+    const parentFindingCounts = this.countFindings(parentFindings);
+    const newFindings = findingsData.mergedFindings.filter(finding => {
+      const key = this.getFindingIdentity(finding);
+      const count = parentFindingCounts.get(key) ?? 0;
+      if (count > 0) {
+        parentFindingCounts.set(key, count - 1);
+        return false;
+      }
+      return true;
+    });
+    if (newFindings.length === 0) return parentResults;
+
+    const mergedAt = Date.now();
+    return [
+      ...parentResults,
+      {
+        stageId: `merge_findings:${options.childSessionId.slice(0, 8)}`,
+        success: true,
+        findings: newFindings,
+        data: {
+          _mergeInfo: {
+            findingsOnly: true,
+            sourceSession: options.childSessionId,
+            mergedAt,
+          },
+        },
+        startTime: mergedAt,
+        endTime: mergedAt,
+        retryCount: 0,
+      },
+    ];
+  }
+
+  private countFindings(findings: Finding[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const finding of findings) {
+      const key = this.getFindingIdentity(finding);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  private getFindingIdentity(finding: Finding): string {
+    return JSON.stringify({
+      id: finding.id,
+      category: finding.category,
+      type: finding.type,
+      severity: finding.severity,
+      title: finding.title,
+      description: finding.description,
+    });
   }
 }
 

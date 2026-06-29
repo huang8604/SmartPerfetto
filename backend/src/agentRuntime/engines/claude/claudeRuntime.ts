@@ -5,7 +5,10 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import {
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  query as sdkQuery,
+} from '@anthropic-ai/claude-agent-sdk';
 import type { TraceProcessorService } from '../../../services/traceProcessorService';
 import { createSkillExecutor } from '../../../services/skillEngine/skillExecutor';
 import { ensureSkillRegistryInitialized, skillRegistry } from '../../../services/skillEngine/skillLoader';
@@ -18,7 +21,11 @@ import type { AnalysisResult, AnalysisOptions, IOrchestrator } from '../../../ag
 import type { ArchitectureInfo } from '../../../agent/detectors/types';
 
 import { createClaudeMcpServer, loadLearnedSqlFixPairs, MCP_NAME_PREFIX } from '../../../agentv3/claudeMcpServer';
-import { buildSystemPrompt, buildQuickSystemPrompt, buildSelectionContextSection } from '../../../agentv3/claudeSystemPrompt';
+import {
+  buildSystemPromptParts,
+  buildQuickSystemPrompt,
+  buildSelectionContextSection,
+} from '../../../agentv3/claudeSystemPrompt';
 import {
   createSseBridge,
   extractSdkToolResultBlocks,
@@ -85,6 +92,9 @@ import {
   looksLikeProcessNarrationConclusion,
   looksLikePhaseSummaryFallback,
 } from '../../../services/finalResultQualityGate';
+import { buildCaseBackgroundContext } from '../../../services/caseEvolution/caseBackgroundContext';
+import { getProductionEngineCapabilities } from '../../runtimeDescriptors';
+import type { EngineCapabilities } from '../../runtimeDescriptorTypes';
 
 function looksLikeProcessNarration(text: string): boolean {
   return /(?:我来|我需要|我将|接下来|先重新|重新读取|继续调用|首先.*提交|计划已提交|工具|tool|let me|i need to|i will|next i)/i
@@ -537,10 +547,41 @@ function isFreshFullSdkSessionEntry(entry: SessionMapEntry | undefined, now = Da
     && isFreshRuntimeEntry(entry, SDK_SESSION_FRESHNESS_MS, now);
 }
 
+type ClaudeSdkSystemPrompt = string | string[];
+
+function supportsSystemPromptDynamicBoundary(capabilities: EngineCapabilities): boolean {
+  return capabilities.promptCache.systemPromptDynamicBoundary;
+}
+
+function buildClaudeSdkSystemPrompt(
+  parts: Pick<ReturnType<typeof buildSystemPromptParts>, 'fullPrompt' | 'stablePrefix' | 'volatileSuffix'>,
+  capabilities: EngineCapabilities,
+): ClaudeSdkSystemPrompt {
+  if (!supportsSystemPromptDynamicBoundary(capabilities)) {
+    return parts.fullPrompt;
+  }
+
+  const stablePrefix = parts.stablePrefix.trim();
+  if (!stablePrefix) {
+    return parts.fullPrompt;
+  }
+
+  const blocks = [
+    stablePrefix,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  ];
+  const volatileSuffix = parts.volatileSuffix.trim();
+  if (volatileSuffix) {
+    blocks.push(volatileSuffix);
+  }
+  return blocks;
+}
+
 export const __testing = {
   getSdkResultErrorMessage,
   isMissingSdkConversationError,
   isFreshFullSdkSessionEntry,
+  buildClaudeSdkSystemPrompt,
   getCorrectionRetryTimeoutMs,
   buildQuickConversationContext,
   correctionResultLooksUsable,
@@ -707,6 +748,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   /** In-flight SDK subprocess handles keyed by SmartPerfetto session. */
   private readonly activeAbortHandles: Map<string, Set<RuntimeAbortHandle>> = new Map();
   private readonly runtimeSelection: RuntimeSelection;
+  private readonly runtimeCapabilities: EngineCapabilities;
 
   constructor(
     traceProcessorService: TraceProcessorService,
@@ -717,12 +759,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     this.traceProcessorService = traceProcessorService;
     this.config = loadClaudeConfig(config);
     this.runtimeSelection = runtimeSelection;
+    this.runtimeCapabilities = getProductionEngineCapabilities(runtimeSelection.kind);
     this.sessionMap = loadSessionMapForCurrentMode();
   }
 
   /** Restore a previously persisted SDK session mapping (e.g., after server restart). */
-  restoreSessionMapping(smartPerfettoSessionId: string, sdkSessionId: string): void {
-    this.sessionMap.set(smartPerfettoSessionId, { sdkSessionId, updatedAt: Date.now(), mode: 'full' });
+  restoreSessionMapping(smartPerfettoSessionId: string, sdkSessionId: string, referenceTraceId?: string): void {
+    this.sessionMap.set(
+      this.buildSessionMapKey(smartPerfettoSessionId, referenceTraceId),
+      { sdkSessionId, updatedAt: Date.now(), mode: 'full' },
+    );
   }
 
   /** Restore a cached architecture detection result (e.g., from session persistence). */
@@ -1041,7 +1087,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         options: {
           model: runtimeConfig.model,
           maxTurns: runtimeConfig.maxTurns,
-          systemPrompt: ctx.systemPrompt,
+          systemPrompt: ctx.sdkSystemPrompt,
           mcpServers: { smartperfetto: ctx.mcpServer },
           includePartialMessages: true,
           settingSources: [],
@@ -2219,6 +2265,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const { server: mcpServer, allowedTools } = createClaudeMcpServer({
         sessionId,
         traceId,
+        userQuery: query,
         traceProcessorService: this.traceProcessorService,
         skillExecutor,
         packageName: effectivePackageName,
@@ -3010,6 +3057,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       traceFeatures,
       knowledgeScope,
     );
+    const caseBackgroundContext = buildCaseBackgroundContext(
+      sceneType,
+      architecture?.type,
+      knowledgeScope,
+    );
 
     // Phase 6: Session-scoped artifact store + analysis notes
     if (!this.artifactStores.has(sessionId)) {
@@ -3068,6 +3120,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     const { server: mcpServer, allowedTools } = createClaudeMcpServer({
       sessionId,
       traceId,
+      userQuery: query,
       traceProcessorService: this.traceProcessorService,
       skillExecutor,
       packageName: effectivePackageName,
@@ -3143,6 +3196,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sqlErrorFixPairs: sqlErrorFixPairs.length > 0 ? sqlErrorFixPairs : undefined,
       patternContext,
       negativePatternContext,
+      caseBackgroundContext,
       previousPlan,
       planHistory: analysisPlan.history.length > 0 ? analysisPlan.history : undefined,
       selectionContext: options.selectionContext,
@@ -3154,11 +3208,17 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       codeAwareMode: options.codeAwareMode,
       codebaseIds: options.codebaseIds,
     };
-    const systemPrompt = buildSystemPrompt(analysisContextForRebuild);
+    const systemPromptParts = buildSystemPromptParts(analysisContextForRebuild);
+    const systemPrompt = systemPromptParts.fullPrompt;
+    const sdkSystemPrompt = buildClaudeSdkSystemPrompt(
+      systemPromptParts,
+      this.runtimeCapabilities,
+    );
 
     return {
       mcpServer,
       systemPrompt,
+      sdkSystemPrompt,
       effectiveEffort,
       agents,
       sessionContext,

@@ -2,6 +2,8 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import type {CaseKnowledgeReportRecommendation} from '../../types/caseKnowledge';
+
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
 export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
 export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';
@@ -93,6 +95,12 @@ export interface ConclusionContract {
   clusters: ConclusionContractClusterItem[];
   evidenceChain: ConclusionContractEvidenceItem[];
   claims?: ConclusionContractClaimItem[];
+  /**
+   * Curated case-library recommendations selected by a retrieval/citation path.
+   * Report rendering consumes this structured projection; retrieval remains
+   * responsible for evidence-signature gating.
+   */
+  caseRecommendations?: CaseKnowledgeReportRecommendation[];
   uncertainties: string[];
   nextSteps: string[];
   metadata?: ConclusionContractMetadata;

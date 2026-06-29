@@ -1337,4 +1337,13 @@ describe('OpenAIRuntime previous response recovery', () => {
     }));
     expect(runtime.getSdkSessionId('s1', 'trace-b')).toBe('resp_compare_old');
   });
+
+  it('restores explicit OpenAI session mappings under the comparison key', () => {
+    const runtime = new OpenAIRuntime({} as any) as any;
+
+    runtime.restoreSessionMapping('s1', 'resp_compare_restored', 'trace-b');
+
+    expect(runtime.getSdkSessionId('s1')).toBeUndefined();
+    expect(runtime.getSdkSessionId('s1', 'trace-b')).toBe('resp_compare_restored');
+  });
 });
