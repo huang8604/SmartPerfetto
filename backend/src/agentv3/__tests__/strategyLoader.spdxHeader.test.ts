@@ -257,6 +257,10 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
       'lookup_knowledge',
     ]));
 
+    const startupDetailHint = startupHints.find(hint => hint.id === 'detail_breakdown');
+    expect(startupDetailHint?.constraints).toMatch(/start_ts.*end_ts.*dur_ms.*startup_type/);
+    expect(startupDetailHint?.constraints).not.toMatch(/ttid_ts|ttfd_ts/);
+
     const anrHints = getPhaseHints('anr');
     expect(anrHints.map(hint => hint.id)).toContain('anr_diagnostic_api_boundary');
     expect(anrHints.find(hint => hint.id === 'anr_diagnostic_api_boundary')?.criticalTools).toEqual(expect.arrayContaining([
@@ -388,5 +392,14 @@ describe('strategyLoader tolerates leading SPDX HTML comments', () => {
     expect(content).toContain('fetch_artifact(artifactId="art-N", detail="rows", offset=0, limit=50)');
     expect(content).toContain('__intrinsic_artifact_rows');
     expect(content).toContain('这些都不是 SQL 表');
+  });
+
+  it('keeps the quick prompt routed through scrolling_analysis for scroll/jank overviews', () => {
+    const content = loadPromptTemplate('prompt-quick');
+    expect(content).toContain('## 快速工具路由');
+    expect(content).toContain('invoke_skill("scrolling_analysis", ...)');
+    expect(content).toContain('enable_frame_details');
+    expect(content).toContain('不要把 FrameTimeline 原始 SQL 作为滑动概览的第一步');
+    expect(content).toContain('不是 `dur_ns`');
   });
 });

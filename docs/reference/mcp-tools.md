@@ -62,16 +62,22 @@ Full mode 中，`execute_sql` 和 `invoke_skill` 仍要求先提交分析计划�
 | Tool | 作用 |
 |---|---|
 | `lookup_knowledge` | 加载本地性能分析知识、模板或管线说明 |
-| `lookup_blog_knowledge` | 查询博客/外部知识索引 |
+| `lookup_blog_knowledge` | 查询博客或 Android Internals 背景知识；`source=android_internals_pack` 使用内置签名 Pack，`source=android_internals_wiki` 使用请求白名单中的私有 source id |
 | `lookup_aosp_source` | 查询 AOSP 相关源码知识 |
 | `lookup_oem_sdk` | 查询 OEM SDK / 厂商相关知识 |
 | `lookup_baseline` | 查询历史 baseline |
 | `compare_baselines` | 对比 baseline 指标 |
 | `recall_project_memory` | 检索项目级记忆 |
 | `recall_similar_case` | 检索相似分析案例 |
+| `recall_similar_result` | 检索相似 analysis-result snapshot，输出仅可作为 `navigation_hint_only` |
 | `recall_patterns` | 检索模式/反模式，通常作为内部分析辅助 |
 
 记忆和知识工具只能辅助当前 trace 分析，不能覆盖当前 trace 的证据。
+内置 `android_internals_pack` 固定签名版本和 fingerprint；私有
+`android_internals_wiki` 在每次调用时重新检查 scope、权利确认、provider 同意和
+active generation。模型可读取预算内脱敏片段；Claude、OpenAI、Pi、OpenCode、Qoder 的
+SSE/日志事件只保留版本化引用、哈希、长度、许可、出处和可信度侧车。完整流程见
+[Android Internals 知识包与私有知识库](../getting-started/android-internals-knowledge.md)。
 
 ## Planning / Hypothesis / Artifact 工具
 
@@ -85,6 +91,7 @@ Full mode 中，`execute_sql` 和 `invoke_skill` 仍要求先提交分析计划�
 | `flag_uncertainty` | 显式记录不确定性或缺失证据 |
 | `write_analysis_note` | 写入 session 分析笔记，按配置启用 |
 | `fetch_artifact` | 分页读取大型 SQL/Skill artifact，按 artifact store 启用 |
+| `lookup_strategy_detail` | 按 plan 工具返回的 detail ref 读取场景策略细节；仅作 informational fallback，不满足 expectedCalls |
 
 这些工具服务于分析纪律和上下文压缩。不要把 artifact 摘要当作完整证据删除；完整 DataEnvelope 仍可进入前端、报告、CLI 或 snapshot。
 
@@ -106,7 +113,7 @@ Code-aware 输出会进入 report/export/snapshot；处理隐私、路径和 pat
 |---|---|
 | `execute_sql_on` | 在 current 或 reference trace 上执行 SQL |
 | `compare_skill` | 对 current/reference 并行执行同一 Skill 并对比结果 |
-| `get_comparison_context` | 获取 trace pair 元数据和 comparison context |
+| `get_comparison_context` | 获取 trace pair 元数据、左右/上下窗格映射和 comparison context |
 
 Comparison 工具只在请求包含 `referenceTraceId` 且 comparison context 可用时注册。Raw trace comparison 和 analysis-result comparison 都应复用共享 evidence/report contract，避免 CLI-only 或 frontend-only 的私有输出。
 

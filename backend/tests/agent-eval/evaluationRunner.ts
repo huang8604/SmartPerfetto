@@ -27,9 +27,10 @@ import { loadScenarios, loadAllScenarios, LoadOptions } from './scenarioLoader';
 import { CodeGrader } from './codeGrader';
 import { ModelGrader, ModelGraderOptions } from './modelGrader';
 import { ProcessGrader } from './processGrader';
+import { resolveTraceCase } from '../../src/utils/traceCorpus';
 
-// Default trace directory
-const DEFAULT_TRACE_DIR = path.join(__dirname, '../../../test-traces');
+// Sentinel for catalog-backed default fixture resolution.
+const DEFAULT_TRACE_DIR = path.resolve(__dirname, '../../..');
 
 export interface RunnerOptions {
   /** Backend base URL */
@@ -258,7 +259,9 @@ export class EvaluationRunner {
     const input = scenario.input;
 
     // Get trace file path
-    const tracePath = path.join(this.options.traceDir, input.traceFile);
+    const tracePath = this.options.traceDir === DEFAULT_TRACE_DIR
+      ? resolveTraceCase(input.traceFile, DEFAULT_TRACE_DIR)
+      : path.join(this.options.traceDir, input.traceFile);
     if (!fs.existsSync(tracePath)) {
       throw new Error(`Trace file not found: ${tracePath}`);
     }

@@ -9,6 +9,8 @@ import * as path from 'path';
 import {afterEach, beforeEach, describe, expect, it} from '@jest/globals';
 
 import {RagStore} from '../ragStore';
+import {CodebaseRegistry} from '../codebase/codebaseRegistry';
+import {resolveCodebaseScope} from '../codebase/codebaseRegistry';
 import {parseBreakpadSym, resolveBreakpadAddress} from '../symbol/breakpadSymParser';
 import {parseKallsyms, resolveKallsymsAddress} from '../symbol/kallsymsParser';
 import {parseR8Mapping, retraceR8Symbol} from '../symbol/r8MappingParser';
@@ -17,10 +19,13 @@ import {normalizeTraceSymbolRows} from '../symbol/traceSymbolContext';
 
 let tmpDir: string;
 let store: RagStore;
+let registry: CodebaseRegistry;
+const scope = resolveCodebaseScope();
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'symbol-resolver-'));
   store = new RagStore(path.join(tmpDir, 'rag.json'));
+  registry = new CodebaseRegistry(path.join(tmpDir, 'codebases.json'));
 });
 
 afterEach(() => {
@@ -69,6 +74,12 @@ describe('native and kernel parsers', () => {
 
 describe('SymbolResolver', () => {
   it('uses R8 retrace before app source lookup', () => {
+    const appRef = registry.register({
+      kind: 'app_source',
+      displayName: 'App',
+      rootPath: tmpDir,
+      sendToProvider: false,
+    });
     store.addChunk({
       chunkId: 'app-1',
       kind: 'app_source',
@@ -79,13 +90,14 @@ describe('SymbolResolver', () => {
       lineRange: {start: 42, end: 44},
       symbol: 'provideRetrofit',
       buildId: 'app-build',
-      codebaseId: 'cb-app',
+      codebaseId: appRef.codebaseId,
       registryOrigin: 'codebase_registry',
-    });
+      sourceGeneration: `codebase_${appRef.indexGeneration}`,
+    }, scope);
 
-    const result = new SymbolResolver(store).resolveApp({
+    const result = new SymbolResolver(store, scope, registry).resolveApp({
       symbol: 'a.b.a',
-      codebaseId: 'cb-app',
+      codebaseId: appRef.codebaseId,
       r8MappingText: 'com.example.di.AppModule -> a.b:\n    1:3:retrofit2.Retrofit provideRetrofit():42:44 -> a\n',
       buildId: 'app-build',
     });
@@ -96,6 +108,20 @@ describe('SymbolResolver', () => {
   });
 
   it('resolves kernel and native symbols through source-backed chunks', () => {
+    const kernelRef = registry.register({
+      kind: 'kernel_source',
+      displayName: 'Kernel',
+      rootPath: tmpDir,
+      sendToProvider: false,
+      vendor: 'mtk',
+    });
+    const aospRef = registry.register({
+      kind: 'aosp',
+      displayName: 'AOSP',
+      rootPath: tmpDir,
+      sendToProvider: false,
+      buildId: 'aosp-build',
+    });
     store.addChunk({
       chunkId: 'kernel-1',
       kind: 'kernel_source',
@@ -107,9 +133,10 @@ describe('SymbolResolver', () => {
       lineRange: {start: 1, end: 3},
       symbol: 'binder_wait_for_work',
       vendor: 'mtk',
-      codebaseId: 'cb-k',
+      codebaseId: kernelRef.codebaseId,
       registryOrigin: 'codebase_registry',
-    });
+      sourceGeneration: `codebase_${kernelRef.indexGeneration}`,
+    }, scope);
     store.addChunk({
       chunkId: 'aosp-1',
       kind: 'aosp',
@@ -121,16 +148,18 @@ describe('SymbolResolver', () => {
       lineRange: {start: 1, end: 3},
       symbol: 'run',
       buildId: 'aosp-build',
-      codebaseId: 'cb-a',
+      codebaseId: aospRef.codebaseId,
       registryOrigin: 'codebase_registry',
-    });
+      sourceGeneration: `codebase_${aospRef.indexGeneration}`,
+    }, scope);
 
-    expect(new SymbolResolver(store).resolveKernel({
+    const resolver = new SymbolResolver(store, scope, registry);
+    expect(resolver.resolveKernel({
       address: 'ffff0110',
       vendor: 'mtk',
       kallsymsText: 'ffff0100 T binder_wait_for_work\n',
     }).candidates[0].chunkId).toBe('kernel-1');
-    expect(new SymbolResolver(store).resolveNative({
+    expect(resolver.resolveNative({
       address: '1010',
       buildId: 'aosp-build',
       breakpadSymText: 'MODULE Linux arm64 AOSP libhwui.so\nFUNC 1000 40 0 DrawFrameTask::run\n',

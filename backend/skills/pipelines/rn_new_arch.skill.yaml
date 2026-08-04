@@ -20,7 +20,7 @@ meta:
   description: "RN 新架构：JSI 直接 C++ 调用 + Fabric C++ Shadow tree + TurboModules + 宿主 HWUI"
   icon: "react"
   family: webview
-  doc_path: "rendering_pipelines/rn_new_arch.md"
+  doc_path: rendering_pipelines/S14_react_native_type.md
   # ----- Article-grounded signature (S14) -----
   s_article_ref: "S14"
   four_features:
@@ -71,29 +71,7 @@ detection:
     - thread_pattern: "mqt_shadow*"
 
 teaching:
-  title: "React Native New Arch (Fabric + JSI) 渲染管线"
-  summary: |
-    RN 新架构基于 Fabric 渲染器 + JSI：
-    - JS 线程（mqt_js）执行 React 业务逻辑
-    - JSI 直接 C++ 调用（无 JSON 序列化）
-    - Fabric C++ Shadow tree（不再有 mqt_shadow_queue）
-    - Fabric commit + mount 原子化 View 创建/更新
-    - 最终走宿主 HWUI RenderThread
-
-  key_slices:
-    - name: "FabricUIManager"
-      thread: any
-      description: "Fabric UI manager 入口"
-    - name: "FabricCommit / FabricMount"
-      thread: any
-      description: "Fabric 原子提交 View 更新"
-    - name: "JSI"
-      thread: any
-      description: "JSI 直接 C++ 调用（无 JSON）"
-    - name: "TurboModule"
-      thread: any
-      description: "TurboModule 同步调用 native 模块"
-
+  source: "rendering_pipelines/S14_react_native_type.md"
 analysis:
   common_issues:
     - id: js_thread_blocking

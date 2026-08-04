@@ -7,6 +7,11 @@ import {
   resolveProviderAgentRuntime,
   sharedKeyShouldUseClaudeAuthToken,
 } from './providerRuntimeMatrix';
+import {
+  requestProviderEndpoint,
+  type ProviderEndpointResponse,
+} from './providerEndpointRequest';
+import { buildOpenAIChatCompletionsTokenLimit } from './openAiChatCompletionsCompat';
 
 const TEST_REQUEST_TIMEOUT_MS = 10000;
 const TEST_TOTAL_TIMEOUT_MS = 15000;
@@ -48,6 +53,9 @@ async function runTest(provider: ProviderConfig): Promise<Omit<TestResult, 'late
   }
   if (runtime === 'opencode') {
     return testOpenCode(provider);
+  }
+  if (runtime === 'qoder-agent-sdk') {
+    return testQoder(provider);
   }
   if (runtime === 'openai-agents-sdk') {
     return testOpenAICompatible(provider);
@@ -120,6 +128,20 @@ function testOpenCode(provider: ProviderConfig): Omit<TestResult, 'latencyMs'> {
     success: true,
     modelVerified: false,
     error: 'OpenCode will use the OpenAI-compatible provider fields through its server runtime.',
+  };
+}
+
+function testQoder(provider: ProviderConfig): Omit<TestResult, 'latencyMs'> {
+  if (provider.type !== 'custom') {
+    return { success: false, error: 'Qoder Agent SDK runtime is only supported for custom providers' };
+  }
+  if (!provider.connection.qoderAccessToken?.trim() && !provider.connection.qoderCliPath?.trim()) {
+    return { success: false, error: 'Qoder Agent SDK requires a Personal Access Token or Qoder CLI path' };
+  }
+  return {
+    success: true,
+    modelVerified: false,
+    error: 'Qoder provider configuration is syntactically valid; SDK and authentication smoke checks run during analysis.',
   };
 }
 
@@ -342,8 +364,8 @@ async function testOpenAIChatCompletionsProtocol(
     headers,
     body: JSON.stringify({
       model: provider.models.primary,
-      max_tokens: 1,
       messages: [{ role: 'user', content: 'hi' }],
+      ...buildOpenAIChatCompletionsTokenLimit(provider.models.primary, 1),
     }),
   });
 
@@ -428,7 +450,7 @@ function resolveOllamaInstalledModel(
 }
 
 async function providerFailureFromResponse(
-  res: Response,
+  res: ProviderEndpointResponse,
   protocolLabel: string,
 ): Promise<Omit<TestResult, 'latencyMs'>> {
   if (res.status === 401) {
@@ -462,12 +484,16 @@ function responseErrorMessage(body: any): string | undefined {
 
 // --- Utilities ---
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<ProviderEndpointResponse> {
   const controller = new AbortController();
   const timeoutMs = getTimeoutMs('PROVIDER_TEST_REQUEST_TIMEOUT_MS', TEST_REQUEST_TIMEOUT_MS);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await requestProviderEndpoint(
+      url,
+      {...init, signal: controller.signal},
+      timeoutMs,
+    );
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error(`Connection timed out after ${timeoutMs / 1000}s`);
@@ -484,7 +510,7 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   }
 }
 
-async function safeJson(res: Response): Promise<any> {
+async function safeJson(res: ProviderEndpointResponse): Promise<any> {
   try {
     const body = await readResponseTextWithTimeout(res);
     if (!body) return null;
@@ -494,7 +520,7 @@ async function safeJson(res: Response): Promise<any> {
   }
 }
 
-async function readResponseTextWithTimeout(res: Response): Promise<string | null> {
+async function readResponseTextWithTimeout(res: ProviderEndpointResponse): Promise<string | null> {
   const timeoutMs = getTimeoutMs('PROVIDER_TEST_RESPONSE_BODY_TIMEOUT_MS', TEST_RESPONSE_BODY_TIMEOUT_MS);
   return withTimeout(
     res.text(),
@@ -506,9 +532,9 @@ async function readResponseTextWithTimeout(res: Response): Promise<string | null
   );
 }
 
-function cancelResponseBody(res: Response): void {
+function cancelResponseBody(res: ProviderEndpointResponse): void {
   try {
-    void res.body?.cancel();
+    res.cancelBody();
   } catch {
     // Best-effort cleanup only; the caller will return a normal test failure.
   }

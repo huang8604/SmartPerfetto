@@ -31,7 +31,6 @@ triggers:
 
 prerequisites:
   modules:
-    - sched
   required_tables:
     - slice
     - thread_track

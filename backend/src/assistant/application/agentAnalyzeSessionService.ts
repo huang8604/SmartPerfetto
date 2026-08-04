@@ -32,10 +32,18 @@ import type { ClaimVerificationResult } from '../../types/claimVerification';
 import type { IdentityResolutionV1 } from '../../types/identityContract';
 import { type SessionLogger } from '../../services/sessionLogger';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
+import {parseOutputLanguage, type OutputLanguage} from '../../agentv3/outputLanguage';
+import {
+  privateAnalysisQueryMessage,
+  sessionUsesPrivateKnowledge,
+} from '../../services/security/privateAnalysisProjection';
 import {
   AssistantApplicationService,
   type ManagedAssistantSession,
 } from './assistantApplicationService';
+import {
+  registerSessionBackgroundKnowledgeReferences,
+} from '../../services/androidInternalsPack/sessionBackgroundKnowledgeRegistry';
 
 export interface AnalyzeSessionConversationStep {
   eventId: string;
@@ -82,10 +90,20 @@ export interface AnalyzeManagedSession extends ManagedAssistantSession {
   userId?: string;
   /** Provider Manager profile used for this SDK session. null means env/default fallback is pinned. */
   providerId?: string | null;
+  /** SDK runtime pinned together with the provider snapshot for this session. */
+  runtimeKind?: AgentRuntimeKind;
+  /** Presentation language pinned for the lifetime of this runtime conversation. */
+  outputLanguage?: OutputLanguage;
   /** Non-secret ProviderSnapshot hash used to decide whether SDK session state can be reused. */
   providerSnapshotHash?: string | null;
   providerSnapshotChanged?: boolean;
   providerSnapshotChangeReason?: string;
+  /** Authorization partition for source/RAG-aware runtime continuity. */
+  analysisContextFingerprint?: string;
+  androidInternalsPackPin?: import('../../services/androidInternalsPack/types').AndroidInternalsPackIdentity;
+  codeAwareMode?: import('../../services/codebase/codeAwareFeature').CodeAwareMode;
+  codebaseIds?: string[];
+  knowledgeSourceIds?: string[];
   /** Original user query plus internal continuity preamble for the runtime only. */
   agentQuery?: string;
   /** Append-only provider/runtime continuity breaks that forced fresh SDK context. */
@@ -120,6 +138,7 @@ export interface AnalyzeManagedSession extends ManagedAssistantSession {
 
 interface SessionContextManagerLike {
   set(sessionId: string, traceId: string, context: EnhancedSessionContext): void;
+  remove(sessionId: string, traceId?: string): void;
 }
 
 interface AgentAnalyzeSessionServiceDeps<TSession extends AnalyzeManagedSession> {
@@ -133,6 +152,8 @@ interface AgentAnalyzeSessionServiceDeps<TSession extends AnalyzeManagedSession>
     sessionId: string,
     context: EnhancedSessionContext
   ) => AgentRuntimeAnalysisResult | null;
+  /** Clears request-scoped privacy guards when provider/source authorization changes. */
+  onSessionSecurityCleanup?: (sessionId: string) => void;
 }
 
 interface PrepareAnalyzeSessionInput {
@@ -143,6 +164,7 @@ interface PrepareAnalyzeSessionInput {
   providerId?: string | null;
   providerScope?: ProviderScope;
   options?: any;
+  analysisContextFingerprint?: string;
 }
 
 export interface PrepareAnalyzeSessionResult<TSession extends AnalyzeManagedSession> {
@@ -259,6 +281,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     sessionId: string,
     context: EnhancedSessionContext
   ) => AgentRuntimeAnalysisResult | null;
+  private readonly onSessionSecurityCleanup?: (sessionId: string) => void;
 
   constructor(deps: AgentAnalyzeSessionServiceDeps<TSession>) {
     this.assistantAppService = deps.assistantAppService;
@@ -266,10 +289,56 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     this.sessionPersistenceService = deps.sessionPersistenceService;
     this.sessionContextManager = deps.sessionContextManager ?? defaultSessionContextManager;
     this.buildRecoveredResultFromContext = deps.buildRecoveredResultFromContext;
+    this.onSessionSecurityCleanup = deps.onSessionSecurityCleanup;
+  }
+
+  private revokeLiveSession(session: TSession, reason: string): void {
+    this.onSessionSecurityCleanup?.(session.sessionId);
+    if (session.orchestratorUpdateHandler) {
+      session.orchestrator.off('update', session.orchestratorUpdateHandler);
+      session.orchestratorUpdateHandler = undefined;
+    }
+    if (typeof session.orchestrator.abortSession === 'function') {
+      void Promise.resolve(
+        session.orchestrator.abortSession(session.sessionId, session.referenceTraceId),
+      ).catch((error) => {
+        session.logger.warn('AgentRoutes', 'Failed to abort revoked SDK session', {
+          sessionId: session.sessionId,
+          reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    if (typeof session.orchestrator.cleanupSession === 'function') {
+      void Promise.resolve(session.orchestrator.cleanupSession(session.sessionId))
+        .catch((error) => {
+          session.logger.warn('AgentRoutes', 'Failed to clean up revoked SDK session', {
+            sessionId: session.sessionId,
+            reason,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
+    this.sessionContextManager.remove(session.sessionId);
+    this.assistantAppService.deleteSession(session.sessionId);
   }
 
   prepareSession(input: PrepareAnalyzeSessionInput): PrepareAnalyzeSessionResult<TSession> {
     const { traceId, query, requestedSessionId, options = {} } = input;
+    const defaultOutputLanguage = parseOutputLanguage(
+      process.env.SMARTPERFETTO_OUTPUT_LANGUAGE,
+    );
+    const explicitOutputLanguage = options.outputLanguage === 'en' ||
+      options.outputLanguage === 'zh-CN'
+      ? options.outputLanguage as OutputLanguage
+      : undefined;
+    let requestedOutputLanguage = explicitOutputLanguage ?? defaultOutputLanguage;
+    const requestedPrivateKnowledge = sessionUsesPrivateKnowledge({
+      codeAwareMode: options.codeAwareMode,
+      codebaseIds: options.codebaseIds,
+      knowledgeSourceIds: options.knowledgeSourceIds,
+    });
+    let privateQuery = privateAnalysisQueryMessage(requestedOutputLanguage);
     const providerScope = input.providerScope;
     const requestedReferenceTraceId = normalizeReferenceTraceId(input.referenceTraceId ?? options.referenceTraceId);
     let inheritedReferenceTraceId: string | undefined;
@@ -288,17 +357,47 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     const activeProviderId = explicitProviderId !== undefined
       ? undefined
       : providerSvc.getRawEffectiveProvider(providerScope)?.id;
-    const sessionProviderId = explicitProviderId !== undefined
+    let sessionProviderId = explicitProviderId !== undefined
       ? explicitProviderId
       : activeProviderId ?? null;
     const resolveProviderSnapshotHash = (
       providerId: string | null,
       runtimeOverride?: AgentRuntimeKind,
     ) => resolveProviderRuntimeSnapshot(providerSvc, providerId, runtimeOverride, providerScope).snapshotHash;
-    const sessionProviderSnapshotHash = resolveProviderSnapshotHash(sessionProviderId);
+    let sessionProviderSnapshotHash = resolveProviderSnapshotHash(sessionProviderId);
 
     if (requestedSessionId) {
-      const existingSession = this.assistantAppService.getSession(requestedSessionId);
+      const locatedSession = this.assistantAppService.getSession(requestedSessionId);
+      const persistedContinuitySnapshot = this.sessionPersistenceService
+        .loadSessionStateSnapshot(requestedSessionId);
+      if (!explicitOutputLanguage) {
+        requestedOutputLanguage = locatedSession?.outputLanguage
+          ?? persistedContinuitySnapshot?.outputLanguage
+          ?? defaultOutputLanguage;
+        privateQuery = privateAnalysisQueryMessage(requestedOutputLanguage);
+      }
+      const liveOutputLanguageMismatch = Boolean(
+        locatedSession &&
+        locatedSession.traceId === traceId &&
+        (locatedSession.outputLanguage ?? defaultOutputLanguage) !== requestedOutputLanguage,
+      );
+      const liveAnalysisContextMismatch = Boolean(
+        locatedSession &&
+        locatedSession.traceId === traceId &&
+        input.analysisContextFingerprint &&
+        locatedSession.analysisContextFingerprint !== input.analysisContextFingerprint,
+      );
+      if ((liveAnalysisContextMismatch || liveOutputLanguageMismatch) && locatedSession) {
+        this.revokeLiveSession(
+          locatedSession,
+          liveOutputLanguageMismatch
+            ? 'output_language_mismatch'
+            : 'analysis_context_fingerprint_mismatch',
+        );
+      }
+      const existingSession = liveAnalysisContextMismatch || liveOutputLanguageMismatch
+        ? undefined
+        : locatedSession;
       if (existingSession && existingSession.traceId === traceId) {
         assertReferenceTraceCompatible({
           requestedSessionId,
@@ -318,7 +417,13 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
         explicitProviderId !== undefined &&
         (existingSession.providerId ?? null) !== explicitProviderId,
       );
-      const liveSessionProviderSnapshotHash = existingSession?.providerSnapshotHash
+      const liveSessionProviderMissing = Boolean(
+        existingSession &&
+        existingSession.traceId === traceId &&
+        typeof liveSessionProviderId === 'string' &&
+        !providerSvc.getRawProvider(liveSessionProviderId, providerScope),
+      );
+      const liveSessionProviderSnapshotHash = existingSession?.providerSnapshotHash && !liveSessionProviderMissing
         ? resolveProviderSnapshotHash(liveSessionProviderId)
         : null;
       const liveSessionProviderSnapshotMismatch = Boolean(
@@ -335,75 +440,36 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
             previousProviderId: existingSession.providerId,
             nextProviderId: sessionProviderId,
           });
+          this.revokeLiveSession(existingSession, 'provider_override_mismatch');
           console.log(`[AgentRoutes] Provider changed for ${requestedSessionId}, creating a new agent session`);
+        } else if (liveSessionProviderMissing) {
+          existingSession.logger.warn('AgentRoutes', 'Pinned provider was removed; starting a fresh SDK session', {
+            previousProviderId: liveSessionProviderId,
+            nextProviderId: sessionProviderId,
+          });
+          this.revokeLiveSession(existingSession, 'pinned_provider_missing');
+          console.log(`[AgentRoutes] Pinned provider was removed for ${requestedSessionId}, creating a new agent session`);
         } else if (liveSessionProviderSnapshotMismatch) {
           const previousProviderSnapshotHash = existingSession.providerSnapshotHash as string;
-          if (existingSession.orchestratorUpdateHandler) {
-            existingSession.orchestrator.off('update', existingSession.orchestratorUpdateHandler);
-            existingSession.orchestratorUpdateHandler = undefined;
-          }
-          if (typeof existingSession.orchestrator.abortSession === 'function') {
-            void Promise.resolve(
-              existingSession.orchestrator.abortSession(
-                existingSession.sessionId,
-                existingSession.referenceTraceId,
-              ),
-            ).catch((error) => {
-              existingSession.logger.warn('AgentRoutes', 'Failed to abort stale provider SDK session', {
-                sessionId: existingSession.sessionId,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
-          }
-          if (typeof existingSession.orchestrator.cleanupSession === 'function') {
-            void Promise.resolve(
-              existingSession.orchestrator.cleanupSession(existingSession.sessionId),
-            ).catch((error) => {
-              existingSession.logger.warn('AgentRoutes', 'Failed to clean up stale provider SDK session', {
-                sessionId: existingSession.sessionId,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
-          }
-          existingSession.orchestrator = createAgentOrchestrator({
-            traceProcessorService: getTraceProcessorService(),
-            providerId: liveSessionProviderId,
-            providerScope,
-          });
-          existingSession.providerId = liveSessionProviderId;
-          existingSession.providerSnapshotHash = liveSessionProviderSnapshotHash;
-          existingSession.providerSnapshotChanged = true;
-          existingSession.providerSnapshotChangeReason = 'provider_snapshot_hash_mismatch';
-          existingSession.continuityBreaks = appendProviderContinuityBreak(
-            existingSession.continuityBreaks,
-            previousProviderSnapshotHash,
-          );
-          existingSession.referenceTraceId = requestedReferenceTraceId ?? inheritedReferenceTraceId;
-          existingSession.comparisonSource = comparisonSourceForReference(existingSession.referenceTraceId);
-          existingSession.runSequence = Number.isFinite(existingSession.runSequence)
-            ? Math.max(0, Math.floor(existingSession.runSequence as number))
-            : 0;
           existingSession.logger.warn('AgentRoutes', 'Provider snapshot changed; starting a fresh SDK session', {
             providerId: liveSessionProviderId,
             previousProviderSnapshotHash,
             nextProviderSnapshotHash: liveSessionProviderSnapshotHash,
           });
-          existingSession.query = query;
-          existingSession.agentQuery = buildAgentQueryWithContinuityNotice(
-            query,
-            existingSession.continuityBreaks,
-          );
-          existingSession.status = 'pending';
-          existingSession.lastActivityAt = Date.now();
-          console.log(`[AgentRoutes] Provider snapshot changed for ${requestedSessionId}, refreshed SDK session`);
-          return {
-            sessionId: requestedSessionId,
-            session: existingSession,
-            isNewSession: false,
-          };
+          sessionProviderId = liveSessionProviderId;
+          sessionProviderSnapshotHash = liveSessionProviderSnapshotHash as string;
+          this.revokeLiveSession(existingSession, 'provider_snapshot_hash_mismatch');
+          console.log(`[AgentRoutes] Provider snapshot changed for ${requestedSessionId}, creating a new agent session`);
         } else {
           const effectiveReferenceTraceId = requestedReferenceTraceId ?? inheritedReferenceTraceId;
           existingSession.providerId ??= null;
+          existingSession.outputLanguage ??= requestedOutputLanguage;
+          existingSession.runtimeKind ??= resolveProviderRuntimeSnapshot(
+            providerSvc,
+            liveSessionProviderId,
+            undefined,
+            providerScope,
+          ).snapshot.runtimeKind;
           existingSession.providerSnapshotHash ??= liveSessionProviderSnapshotHash;
           existingSession.providerSnapshotChanged = false;
           existingSession.providerSnapshotChangeReason = undefined;
@@ -412,9 +478,10 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
           existingSession.runSequence = Number.isFinite(existingSession.runSequence)
             ? Math.max(0, Math.floor(existingSession.runSequence as number))
             : 0;
+          const privateKnowledge = requestedPrivateKnowledge || sessionUsesPrivateKnowledge(existingSession);
           existingSession.logger.info('AgentRoutes', 'Continuing multi-turn dialogue', {
-            turnQuery: query,
-            previousQuery: existingSession.query,
+            turnQuery: privateKnowledge ? privateQuery : query,
+            previousQuery: privateKnowledge ? privateQuery : existingSession.query,
           });
           existingSession.query = query;
           existingSession.agentQuery = buildAgentQueryWithContinuityNotice(
@@ -432,7 +499,39 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
         }
       }
 
-      const persistedSession = liveSessionProviderMismatch
+      const persistedAnalysisContextFingerprint = persistedContinuitySnapshot
+        ?.analysisContextFingerprint;
+      const persistedAnalysisContextMismatch = Boolean(
+        input.analysisContextFingerprint &&
+        persistedAnalysisContextFingerprint !== input.analysisContextFingerprint,
+      );
+      const persistedOutputLanguageMismatch = Boolean(
+        persistedContinuitySnapshot?.outputLanguage &&
+        persistedContinuitySnapshot.outputLanguage !== requestedOutputLanguage,
+      );
+      const liveSessionSecurityCleaned = liveAnalysisContextMismatch ||
+        liveOutputLanguageMismatch ||
+        liveSessionProviderMismatch ||
+        liveSessionProviderMissing ||
+        liveSessionProviderSnapshotMismatch;
+      // Private source/RAG context is intentionally non-resumable. Persisted
+      // state created by an older version (or a corrupt snapshot) must never
+      // rehydrate provider conversation state, raw queries, or private tool
+      // results merely because its authorization fingerprint still matches.
+      if (requestedPrivateKnowledge && !liveSessionSecurityCleaned) {
+        this.onSessionSecurityCleanup?.(requestedSessionId);
+        this.sessionContextManager.remove(requestedSessionId);
+        this.sessionPersistenceService.clearPrivateSessionContextSnapshots(requestedSessionId);
+      } else if (
+        (persistedAnalysisContextMismatch || persistedOutputLanguageMismatch) &&
+        !liveSessionSecurityCleaned
+      ) {
+        this.onSessionSecurityCleanup?.(requestedSessionId);
+        this.sessionContextManager.remove(requestedSessionId);
+      }
+      const analysisContextMismatch = liveAnalysisContextMismatch || persistedAnalysisContextMismatch;
+      const outputLanguageMismatch = liveOutputLanguageMismatch || persistedOutputLanguageMismatch;
+      const persistedSession = requestedPrivateKnowledge || liveSessionProviderMismatch || liveSessionProviderMissing || liveSessionProviderSnapshotMismatch || analysisContextMismatch || outputLanguageMismatch
         ? null
         : this.sessionPersistenceService.getSession(requestedSessionId);
       if (persistedSession && persistedSession.traceId !== traceId) {
@@ -446,6 +545,10 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
       if (persistedSession && persistedSession.traceId === traceId) {
         const stateSnapshot =
           this.sessionPersistenceService.loadSessionStateSnapshot(requestedSessionId);
+        registerSessionBackgroundKnowledgeReferences(
+          requestedSessionId,
+          stateSnapshot?.backgroundKnowledgeReferences ?? [],
+        );
         const persistedReferenceTraceId = readPersistedReferenceTraceId(
           stateSnapshot,
           persistedSession.metadata,
@@ -458,8 +561,6 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
         inheritedReferenceTraceId = persistedReferenceTraceId;
         const restoredContext = this.sessionPersistenceService.loadSessionContext(requestedSessionId);
         if (restoredContext) {
-          this.sessionContextManager.set(requestedSessionId, traceId, restoredContext);
-
           const snapshotRuntimeKind = getSnapshotRuntimeKind(stateSnapshot);
           const snapshotProviderId = getSnapshotRuntimeProviderId(stateSnapshot);
           const snapshotProviderHash = getSnapshotRuntimeProviderSnapshotHash(stateSnapshot);
@@ -494,10 +595,13 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
           );
 
           if (snapshotProviderMismatch) {
+            this.onSessionSecurityCleanup?.(requestedSessionId);
+            this.sessionContextManager.remove(requestedSessionId);
             console.log(
               `[AgentRoutes] Provider override changed for ${requestedSessionId}, creating a new agent session`
             );
           } else {
+            this.sessionContextManager.set(requestedSessionId, traceId, restoredContext);
             const restoredOrchestrator: IOrchestrator = createAgentOrchestrator({
               traceProcessorService: getTraceProcessorService(),
               providerId: restoredProviderId,
@@ -621,11 +725,27 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
               workspaceId: persistedSession.metadata?.workspaceId,
               userId: persistedSession.metadata?.userId,
               providerId: restoredProviderId,
+              runtimeKind: restoredProviderId
+                ? resolveProviderRuntimeSnapshot(
+                    providerSvc,
+                    restoredProviderId,
+                    undefined,
+                    providerScope,
+                  ).snapshot.runtimeKind
+                : snapshotRuntimeKind ?? resolveProviderRuntimeSnapshot(
+                    providerSvc,
+                    null,
+                    undefined,
+                    providerScope,
+                  ).snapshot.runtimeKind,
+              outputLanguage: requestedOutputLanguage,
               providerSnapshotHash: restoredProviderSnapshotHash ?? sessionProviderSnapshotHash,
               providerSnapshotChanged: snapshotProviderHashMismatch || undefined,
               providerSnapshotChangeReason: snapshotProviderHashMismatch
                 ? 'provider_snapshot_hash_mismatch'
                 : undefined,
+              analysisContextFingerprint: input.analysisContextFingerprint,
+              androidInternalsPackPin: stateSnapshot?.androidInternalsPackPin,
               agentQuery: restoredAgentQuery,
               continuityBreaks: restoredContinuityBreaks.length > 0 ? restoredContinuityBreaks : undefined,
               lineage: restoredLineage,
@@ -661,9 +781,10 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
             } as unknown as TSession;
 
             this.assistantAppService.setSession(requestedSessionId, restoredSession);
+            const privateKnowledge = requestedPrivateKnowledge || sessionUsesPrivateKnowledge(restoredSession);
             restoredLogger.info('AgentRoutes', 'Continuing multi-turn dialogue from persisted context', {
-              turnQuery: query,
-              previousQuery: latestTurn?.query || persistedSession.question,
+              turnQuery: privateKnowledge ? privateQuery : query,
+              previousQuery: privateKnowledge ? privateQuery : latestTurn?.query || persistedSession.question,
               turnCount: restoredTurns.length,
               runtimeArraysRestored: !!runtimeArrays,
               restoredSteps: runtimeArrays?.conversationSteps?.length || 0,
@@ -700,7 +821,7 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
     const logger = this.createSessionLogger(sessionId);
     logger.setMetadata({
       traceId,
-      query,
+      query: requestedPrivateKnowledge ? privateQuery : query,
       architecture: 'agent-driven',
       referenceTraceId: effectiveReferenceTraceId,
     });
@@ -715,8 +836,17 @@ export class AgentAnalyzeSessionService<TSession extends AnalyzeManagedSession> 
       query,
       agentQuery: query,
       providerId: sessionProviderId,
+      runtimeKind: resolveProviderRuntimeSnapshot(
+        providerSvc,
+        sessionProviderId,
+        undefined,
+        providerScope,
+      ).snapshot.runtimeKind,
+      outputLanguage: requestedOutputLanguage,
       providerSnapshotHash: sessionProviderSnapshotHash,
       providerSnapshotChanged: false,
+      analysisContextFingerprint: input.analysisContextFingerprint,
+      androidInternalsPackPin: input.options?.androidInternalsPackPin,
       referenceTraceId: effectiveReferenceTraceId,
       comparisonSource: comparisonSourceForReference(effectiveReferenceTraceId),
       createdAt: Date.now(),

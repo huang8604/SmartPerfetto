@@ -24,7 +24,9 @@ export type EnterpriseWorkspaceScopedTable =
   | 'runtime_snapshots'
   | 'report_artifacts'
   | 'memory_entries'
-  | 'skill_registry_entries';
+  | 'skill_registry_entries'
+  | 'batch_trace_runs'
+  | 'batch_trace_metrics';
 
 export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceScopedTable[] = [
   'trace_assets',
@@ -38,6 +40,8 @@ export const ENTERPRISE_WORKSPACE_SCOPED_TABLES: readonly EnterpriseWorkspaceSco
   'report_artifacts',
   'memory_entries',
   'skill_registry_entries',
+  'batch_trace_runs',
+  'batch_trace_metrics',
 ];
 
 export type EnterpriseQueryCriteria = Record<string, SqliteBindValue | undefined>;

@@ -22,7 +22,7 @@ meta:
   description: "Chrome 浏览器 Viz 合成器管线，多进程架构 (Browser/Renderer/GPU)"
   icon: "web"
   family: webview
-  doc_path: "rendering_pipelines/chrome_browser_viz.md"
+  doc_path: rendering_pipelines/S09_webview_type.md
   # ----- Article-grounded signature (S09) -----
   s_article_ref: "S09"
   four_features:
@@ -84,95 +84,7 @@ detection:
 # Teaching Content
 # ==========================================================================
 teaching:
-  title: "Chrome Browser Viz 合成器渲染管线"
-  summary: |
-    Chrome 浏览器使用多进程架构进行渲染：
-    - Browser Process (CrBrowserMain): 管理 UI、导航、网络请求
-    - Renderer Process (CrRendererMain): Blink 引擎解析/布局/绘制网页内容
-    - GPU/Viz Process (VizCompositorThread): OOP-R 光栅化 + Viz 合成
-
-    Viz (Visual Compositor) 是 Chrome 的集中式合成器，负责将来自多个 Renderer
-    的合成帧整合并通过 SurfaceFlinger 或直接提交到显示。
-    OOP-R (Out-of-Process Rasterization) 将光栅化移到 GPU 进程，
-    减少 Renderer 进程的 GPU 资源竞争。
-
-  mermaid: |
-    sequenceDiagram
-      participant BM as CrBrowserMain
-      participant CC as Compositor (Renderer)
-      participant CR as CrRendererMain
-      participant Viz as VizCompositorThread
-      participant GPU as CrGpuMain
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over BM,SF: Chrome Browser Viz Pipeline (OOP-R)
-      BM->>CR: 导航/加载请求
-      activate CR
-      CR->>CR: Blink: Parse → Style → Layout → Paint
-      CR->>CC: 生成 CompositorFrame
-      deactivate CR
-
-      activate CC
-      CC->>Viz: SubmitCompositorFrame
-      deactivate CC
-
-      activate Viz
-      Viz->>Viz: cc::DisplayScheduler
-      Viz->>Viz: 聚合多 Renderer CompositorFrame
-      Viz->>GPU: GPU 光栅化 + 合成
-      deactivate Viz
-
-      activate GPU
-      GPU->>GPU: Rasterize Tiles (OOP-R)
-      GPU->>GPU: Draw Quad / Output Surface
-      GPU->>SF: 提交 Buffer
-      deactivate GPU
-
-      VS->>SF: VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      SF->>SF: Present to Display
-      deactivate SF
-
-      Note over BM,SF: 多进程隔离：Renderer 崩溃不影响 Browser
-
-  thread_roles:
-    - thread: CrBrowserMain
-      role: "Browser 主线程"
-      description: "管理 Chrome UI、标签页导航、网络请求调度"
-      trace_tags: "Navigation, Loading, NetworkService"
-    - thread: CrRendererMain
-      role: "Renderer 主线程"
-      description: "Blink 引擎执行 HTML/CSS/JS，生成绘制命令"
-      trace_tags: "Blink, v8, Layout, Paint"
-    - thread: VizCompositorThread
-      role: "Viz 合成器"
-      description: "集中式合成器，聚合多个 Renderer 的 CompositorFrame"
-      trace_tags: "DisplayScheduler, SurfaceAggregator"
-    - thread: CrGpuMain
-      role: "GPU 主线程"
-      description: "OOP-R 光栅化、GPU 命令执行、Buffer 提交"
-      trace_tags: "RasterTask, GpuChannel"
-
-  key_slices:
-    - name: "viz.BeginFrame"
-      thread: VizCompositorThread
-      description: "Viz 发起帧调度信号"
-    - name: "Chromium.Compositor"
-      thread: CrRendererMain
-      description: "Renderer 侧合成操作"
-    - name: "cc::DisplayScheduler"
-      thread: VizCompositorThread
-      description: "Viz 显示调度器决定何时合成/提交"
-    - name: "SubmitCompositorFrame"
-      thread: CrRendererMain
-      description: "Renderer 提交 CompositorFrame 到 Viz"
-    - name: "RasterTask"
-      thread: CrGpuMain
-      description: "OOP-R GPU 光栅化任务"
-
+  source: "rendering_pipelines/S09_webview_type.md"
 # ==========================================================================
 # Auto Pin Configuration
 # ==========================================================================

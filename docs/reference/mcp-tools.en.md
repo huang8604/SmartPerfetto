@@ -60,16 +60,23 @@ Agent wants a tool call
 | Tool | Purpose |
 |---|---|
 | `lookup_knowledge` | Load local performance knowledge, templates, or pipeline docs |
-| `lookup_blog_knowledge` | Query blog or external knowledge indexes |
+| `lookup_blog_knowledge` | Query blog or Android Internals background knowledge; `source=android_internals_pack` uses the signed built-in Pack, while `source=android_internals_wiki` uses a request-whitelisted private source id |
 | `lookup_aosp_source` | Query AOSP-related source knowledge |
 | `lookup_oem_sdk` | Query OEM SDK or vendor knowledge |
 | `lookup_baseline` | Fetch historical baselines |
 | `compare_baselines` | Compare baseline metrics |
 | `recall_project_memory` | Retrieve project memory |
 | `recall_similar_case` | Retrieve similar analysis cases |
+| `recall_similar_result` | Retrieve similar analysis-result snapshots as `navigation_hint_only` output |
 | `recall_patterns` | Retrieve patterns or anti-patterns, usually as internal analysis support |
 
-Knowledge and memory support the investigation; they must not override current trace evidence.
+Knowledge and memory support the investigation; they must not override current
+trace evidence. The built-in `android_internals_pack` pins a signed version and
+fingerprint. Private `android_internals_wiki` calls recheck scope, rights,
+provider consent, and the active generation. The model can read budgeted,
+redacted hits, while Claude, OpenAI, Pi, OpenCode, and Qoder SSE/log events retain only
+versioned citations, hashes, lengths, licenses, attribution, and trust
+sidecars. See [Android Internals Knowledge Pack And Private Knowledge](../getting-started/android-internals-knowledge.en.md).
 
 ## Planning, Hypothesis, And Artifact Tools
 
@@ -83,6 +90,7 @@ Knowledge and memory support the investigation; they must not override current t
 | `flag_uncertainty` | Mark uncertainty or missing evidence explicitly |
 | `write_analysis_note` | Persist session analysis notes when configured |
 | `fetch_artifact` | Page through large SQL/Skill artifacts when an artifact store exists |
+| `lookup_strategy_detail` | Read scene strategy details by detail ref returned from plan tools; informational fallback only and does not satisfy expectedCalls |
 
 These tools enforce investigation discipline and reduce context size. Artifact summaries are not a reason to discard full DataEnvelope evidence from frontend, reports, CLI artifacts, or snapshots.
 
@@ -104,7 +112,7 @@ Code-aware output can appear in reports, exports, and snapshots; do not validate
 |---|---|
 | `execute_sql_on` | Run SQL on the current or reference trace |
 | `compare_skill` | Run a Skill on both traces and compare results |
-| `get_comparison_context` | Fetch trace-pair metadata and comparison context |
+| `get_comparison_context` | Fetch trace-pair metadata, left/right or top/bottom pane mapping, and comparison context |
 
 Comparison tools are registered only when `referenceTraceId` and comparison context are available. Raw trace comparison and analysis-result comparison should reuse the shared evidence/report contract.
 

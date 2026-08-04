@@ -4,8 +4,10 @@
 
 import express from 'express';
 import {z} from 'zod';
+import {localize, parseOutputLanguage} from '../agentv3/outputLanguage';
 import {summarizeCriticalPathWithAi} from '../services/criticalPathAiSummary';
 import {analyzeCriticalPath, type CriticalPathAnalyzeOptions} from '../services/criticalPathAnalyzer';
+import {projectCriticalPathAnalysis} from '../services/criticalPathLocalization';
 import {getTraceProcessorService} from '../services/traceProcessorService';
 
 const router = express.Router();
@@ -31,6 +33,7 @@ const AnalyzeBodySchema = z.object({
   segmentBudget: z.number().int().min(4).max(32).optional(),
   includeAi: z.boolean().optional(),
   question: z.string().max(500).optional(),
+  outputLanguage: z.enum(['zh-CN', 'en']).optional(),
 });
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -43,20 +46,35 @@ async function ensureTrace(traceId: string): Promise<boolean> {
 }
 
 router.post('/:traceId/analyze', async (req, res) => {
+  const outputLanguage = parseOutputLanguage(
+    req.body?.outputLanguage ||
+    req.header('accept-language') ||
+    process.env.SMARTPERFETTO_OUTPUT_LANGUAGE,
+  );
   try {
     const {traceId} = req.params;
     if (!traceId) {
-      return res.status(400).json({success: false, error: 'traceId is required'});
+      return res.status(400).json({
+        success: false,
+        error: localize(outputLanguage, '必须提供 traceId', 'traceId is required'),
+      });
     }
     if (!(await ensureTrace(traceId))) {
-      return res.status(404).json({success: false, error: `Trace ${traceId} not found`});
+      return res.status(404).json({
+        success: false,
+        error: localize(
+          outputLanguage,
+          `未找到 Trace ${traceId}`,
+          `Trace ${traceId} not found`,
+        ),
+      });
     }
 
     const parsed = AnalyzeBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid request body',
+        error: localize(outputLanguage, '请求体无效', 'Invalid request body'),
         issues: parsed.error.issues.map((issue) => ({
           path: issue.path.join('.'),
           message: issue.message,
@@ -76,15 +94,36 @@ router.post('/:traceId/analyze', async (req, res) => {
       recursionEnabled: body.recursionEnabled,
       segmentBudget: body.segmentBudget,
     };
-    const analysis = await analyzeCriticalPath(traceProcessorService, traceId, analyzeOptions);
+    const rawAnalysis = await analyzeCriticalPath(traceProcessorService, traceId, analyzeOptions);
     const aiSummary =
-      body.includeAi === false ? undefined : await summarizeCriticalPathWithAi(analysis, body.question);
-    return res.json({success: true, analysis, aiSummary});
+      body.includeAi === false
+        ? undefined
+        : await summarizeCriticalPathWithAi(
+            rawAnalysis,
+            body.question,
+            outputLanguage,
+          );
+    return res.json({
+      success: true,
+      analysis: rawAnalysis,
+      presentationAnalysis: projectCriticalPathAnalysis(
+        rawAnalysis,
+        outputLanguage,
+      ),
+      aiSummary,
+    });
   } catch (error: unknown) {
     console.error('[CriticalPath] Analyze error:', error);
     return res.status(500).json({
       success: false,
-      error: errorMessage(error, 'Critical path analysis failed'),
+      error: errorMessage(
+        error,
+        localize(
+          outputLanguage,
+          '关键路径分析失败',
+          'Critical path analysis failed',
+        ),
+      ),
     });
   }
 });

@@ -4,6 +4,9 @@
 
 export type CodeAwareMode = 'off' | 'metadata_only' | 'provider_send';
 
+export const MAX_CODEBASE_IDS_PER_ANALYSIS = 32;
+export const MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS = 32;
+
 export function codeAwareFeatureEnabled(): boolean {
   return process.env.SMARTPERFETTO_CODE_AWARE !== 'off';
 }

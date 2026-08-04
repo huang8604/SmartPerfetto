@@ -3,7 +3,13 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import type {RagChunk} from '../../types/sparkContracts';
+import {
+  activeCodebaseGeneration,
+  type CodebaseKind,
+  type CodebaseRegistry,
+} from '../codebase/codebaseRegistry';
 import type {RagStore} from '../ragStore';
+import type {KnowledgeScope} from '../scopedKnowledgeStore';
 import {parseBreakpadSym, resolveBreakpadAddress} from './breakpadSymParser';
 import {parseKallsyms, resolveKallsymsAddress} from './kallsymsParser';
 import {parseR8Mapping, retraceR8Symbol} from './r8MappingParser';
@@ -72,7 +78,11 @@ function toCandidate(chunk: RagChunk, confidence: ResolvedSymbolCandidate['confi
 }
 
 export class SymbolResolver {
-  constructor(private readonly store: RagStore) {}
+  constructor(
+    private readonly store: RagStore,
+    private readonly scope?: KnowledgeScope,
+    private readonly codebaseRegistry?: CodebaseRegistry,
+  ) {}
 
   resolveApp(opts: ResolveAppSymbolOptions): ResolveAppSymbolResult {
     const retraced = opts.r8MappingText
@@ -89,8 +99,10 @@ export class SymbolResolver {
     const base = {
       kinds: ['app_source' as const],
       topK,
+      scope: this.scope,
       ...(opts.codebaseId ? {codebaseIds: [opts.codebaseId]} : {}),
       ...(opts.buildId ? {buildId: opts.buildId} : {}),
+      activeCodebaseGenerations: this.activeCodebaseGenerations(opts.codebaseId),
     };
 
     const exact = this.store.search(querySymbol, {
@@ -148,7 +160,7 @@ export class SymbolResolver {
     if (!query) {
       return {success: false, query: opts.address ?? '', candidates: [], degradedReason: 'no_match'};
     }
-    return this.resolveSourceKind(query, 'kernel_source', {
+    return this.resolveSourceKinds(query, ['kernel_source'], {
       codebaseId: opts.codebaseId,
       vendor: opts.vendor,
       buildId: opts.buildId,
@@ -166,26 +178,36 @@ export class SymbolResolver {
     if (!query) {
       return {success: false, query: opts.address ?? '', candidates: [], degradedReason: 'no_match'};
     }
-    return this.resolveSourceKind(query, 'aosp', {
+    const registeredKind = opts.codebaseId
+      ? this.codebaseRegistry?.get(opts.codebaseId, this.scope)?.kind
+      : undefined;
+    const kinds: Array<Extract<CodebaseKind, 'aosp' | 'oem_sdk'>> = registeredKind === 'oem_sdk'
+      ? ['oem_sdk']
+      : registeredKind === 'aosp'
+        ? ['aosp']
+        : ['aosp', 'oem_sdk'];
+    return this.resolveSourceKinds(query, kinds, {
       codebaseId: opts.codebaseId,
       buildId: opts.buildId,
       topK: opts.topK,
     });
   }
 
-  private resolveSourceKind(
+  private resolveSourceKinds(
     symbol: string,
-    kind: 'kernel_source' | 'aosp',
+    kinds: Array<Extract<CodebaseKind, 'kernel_source' | 'aosp' | 'oem_sdk'>>,
     opts: {codebaseId?: string; vendor?: string; buildId?: string; topK?: number},
   ): ResolveSymbolResult {
     const topK = opts.topK ?? 5;
     const symbolName = symbol.split('::').pop()?.split('.').pop() ?? symbol;
     const base = {
-      kinds: [kind],
+      kinds,
       topK,
+      scope: this.scope,
       ...(opts.codebaseId ? {codebaseIds: [opts.codebaseId]} : {}),
       ...(opts.vendor ? {vendor: opts.vendor} : {}),
       ...(opts.buildId ? {buildId: opts.buildId} : {}),
+      activeCodebaseGenerations: this.activeCodebaseGenerations(opts.codebaseId),
     };
     const exact = this.store.search(symbol, {...base, symbolExact: symbolName});
     const result = exact.results.length > 0 ? exact : this.store.search(symbol, base);
@@ -199,6 +221,17 @@ export class SymbolResolver {
         ? (opts.buildId ? undefined : 'symbol_only_low_confidence')
         : 'no_match',
     };
+  }
+
+  private activeCodebaseGenerations(codebaseId?: string): Record<string, string> {
+    if (!this.codebaseRegistry) return {};
+    const refs = codebaseId
+      ? [this.codebaseRegistry.get(codebaseId, this.scope)].filter(Boolean)
+      : this.codebaseRegistry.list(this.scope);
+    return Object.fromEntries(refs.map(ref => [
+      ref!.codebaseId,
+      activeCodebaseGeneration(ref!),
+    ]));
   }
 }
 

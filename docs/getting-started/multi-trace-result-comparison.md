@@ -72,6 +72,11 @@ AI 分析完成后，AI Assistant 顶部会显示 `Ready result` 或 `Partial re
 
 结果选择器会展示每条结果的场景、原始问题、Trace 信息、创建时间、创建者、指标数量、证据引用数量和可见性。当前窗口最近的结果会标记为 `Current`，仍打开的窗口结果会标记为 `Open`。
 
+如果你不确定该选哪份历史结果，可以先点结果行上的 `travel_explore`
+相似结果按钮。SmartPerfetto 会显示相似 snapshot 或 case-library hint，
+并标记为 `navigation_hint_only`。这些 hint 只用于帮助你决定下一步查看或对比
+哪份结果，不会作为当前 trace 的诊断证据。
+
 ## 输出会包含什么
 
 对比完成后，AI Assistant 会追加一条“分析结果对比已完成”消息，通常包含：

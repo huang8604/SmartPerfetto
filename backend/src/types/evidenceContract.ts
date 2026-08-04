@@ -15,6 +15,7 @@ export type EvidenceProducerKind =
   | 'manual';
 
 export type EvidenceTraceSide = 'current' | 'reference' | 'unknown';
+export type EvidencePaneSide = 'left' | 'right' | 'top' | 'bottom';
 
 export type EvidenceIdentityRole =
   | 'app_main'
@@ -40,12 +41,14 @@ export type ClaimKindV1 =
 export interface EvidenceContextV1 {
   traceId: string;
   traceSide?: EvidenceTraceSide;
+  paneSide?: EvidencePaneSide;
   toolCallId?: string;
   sourceToolCallId?: string;
   producerKind: EvidenceProducerKind;
   skillId?: string;
   stepId?: string;
   queryHash?: string;
+  queryReviewId?: string;
   sqlTextRef?: string;
   paramsHash?: string;
   /** Canonical artifact id used by Evidence Contract consumers. */

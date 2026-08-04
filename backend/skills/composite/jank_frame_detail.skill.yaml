@@ -445,6 +445,7 @@ steps:
         AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
         AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
         AND s.dur >= 1000000
+        AND s.name NOT GLOB '*resynced*'
       GROUP BY s.name
       HAVING dur_ms > 1
       ORDER BY dur_ms DESC
@@ -459,6 +460,64 @@ steps:
         count: { type: number, description: "执行次数" }
         max_ms: { type: number, description: "最大单次耗时(ms)" }
         ts: { type: string, description: "首次时间戳(ns字符串)" }
+
+  - id: choreographer_resync_markers
+    type: atomic
+    name: "Choreographer resync 标记"
+    display:
+      level: detail
+      layer: deep
+      title: "Choreographer resync 标记"
+      columns:
+        - name: name
+          label: "标记"
+          type: string
+        - name: target_vsync
+          label: "目标 VSync"
+          type: string
+        - name: resync_delay
+          label: "resync 延迟"
+          type: string
+        - name: dur_ms
+          label: "标记耗时"
+          type: duration
+          format: duration_ms
+        - name: ts
+          label: "时间戳"
+          type: timestamp
+          clickAction: navigate_timeline
+    sql: |
+      WITH main_thread AS (
+        SELECT t.utid
+        FROM thread t
+        JOIN process p ON t.upid = p.upid
+        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
+          AND (t.tid = p.pid OR t.name GLOB '[0-9]*.ui')
+      )
+      SELECT
+        s.name,
+        STR_SPLIT(s.name, ' ', 4) as target_vsync,
+        STR_SPLIT(s.name, ' ', 6) as resync_delay,
+        ROUND(s.dur / 1e6, 2) as dur_ms,
+        printf('%d', s.ts) as ts
+      FROM slice s
+      JOIN thread_track tt ON s.track_id = tt.id
+      WHERE tt.utid IN (SELECT utid FROM main_thread)
+        AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
+        AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
+        AND s.name GLOB 'Choreographer#doFrame - resynced*'
+      ORDER BY s.ts
+      LIMIT 10
+    save_as: resync_markers
+    optional: true
+    output_schema:
+      type: array
+      items:
+        name: { type: string, description: "resync marker slice name" }
+        target_vsync: { type: string, description: "重新绑定到的 VSync id" }
+        resync_delay: { type: string, description: "marker 中记录的 resync 延迟 token" }
+        dur_ms: { type: number, description: "marker slice duration in ms" }
+        ts: { type: string, description: "timestamp ns string" }
 
   # RenderThread 耗时操作：输出格式直接匹配前端展示需求
   # 前端期望: [{ name, dur_ms, ts }]
@@ -1014,6 +1073,7 @@ steps:
           AND s.ts >= COALESCE(${main_start_ts}, ${start_ts})
           AND s.ts < COALESCE(${main_end_ts}, ${end_ts})
           AND s.dur >= 1000000
+          AND s.name NOT GLOB '*resynced*'
         ORDER BY s.dur DESC
         LIMIT 1
       ),
@@ -1775,7 +1835,7 @@ steps:
       level: detail
       layer: deep
       title: "详细诊断"
-    inputs: [quadrant_data, binder_data, freq_data, main_slices, render_slices, freq_timeline, lock_data, gc_data, io_data, root_cause, sched_data, migration_data, gpu_data, binder_blocking_data, throttling_data, cluster_load_data, page_fault_data, sf_data, gpu_freq_data, vsync_data, pipeline_data]
+    inputs: [quadrant_data, binder_data, freq_data, main_slices, resync_markers, render_slices, freq_timeline, lock_data, gc_data, io_data, root_cause, sched_data, migration_data, gpu_data, binder_blocking_data, throttling_data, cluster_load_data, page_fault_data, sf_data, gpu_freq_data, vsync_data, pipeline_data]
     rules:
       # ===== 最高优先级：根因分析总结 =====
       - condition: "root_cause?.data?.[0]?.primary_cause"
@@ -1784,6 +1844,14 @@ steps:
         confidence: "${root_cause.data[0].confidence === '高' ? 'high' : root_cause.data[0].confidence === '中' ? 'medium' : 'low'}"
         suggestions:
           - "${root_cause.data[0].secondary_info || '查看下方详细数据分析具体原因'}"
+
+      - condition: "resync_markers?.data?.length > 0"
+        severity: warning
+        diagnosis: "检测到 Choreographer resync marker：doFrame 已重同步到后续 VSync，需结合 FrameTimeline/SF 消费证据判断是否存在 SF 未合成或帧堆积"
+        confidence: medium
+        suggestions:
+          - "不要把 resynced child slice 当作独立 doFrame 或普通业务耗时重复计数"
+          - "核对 jank_type、present_type、present_ts 间隔、同 layer token 和 SurfaceFlinger actual/display frame"
 
       # ===== 高优先级：锁竞争 =====
       - condition: "lock_data?.data?.length > 0 && lock_data.data[0]?.wait_ms > 1"

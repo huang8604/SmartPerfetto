@@ -4,6 +4,7 @@
 
 import { describe, expect, it, jest } from '@jest/globals';
 import { createSseBridge } from '../claudeSseBridge';
+import {__testing as claudeRuntimeTesting} from '../../agentRuntime/engines/claude/claudeRuntime';
 import type { StreamingUpdate } from '../../agent/types';
 
 describe('createSseBridge', () => {
@@ -97,6 +98,14 @@ describe('createSseBridge', () => {
         session_id: 'sdk-session-1',
       });
       bridge.handleMessage({
+        type: 'system',
+        subtype: 'thinking_tokens',
+        estimated_tokens: 12,
+        estimated_tokens_delta: 2,
+        uuid: 'thinking-1',
+        session_id: 'sdk-session-1',
+      });
+      bridge.handleMessage({
         type: 'rate_limit_event',
         retry_after_ms: 1000,
       });
@@ -111,6 +120,27 @@ describe('createSseBridge', () => {
           }),
         }),
       ]);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('logs only the shape of unhandled SDK messages', () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const bridge = createSseBridge(() => {});
+
+    try {
+      bridge.handleMessage({
+        type: 'future_sdk_message',
+        subtype: 'future_subtype',
+        payload: 'PRIVATE_UNHANDLED_MESSAGE_CANARY',
+      });
+
+      const serializedLogs = JSON.stringify(logSpy.mock.calls);
+      expect(serializedLogs).not.toContain('PRIVATE_UNHANDLED_MESSAGE_CANARY');
+      expect(serializedLogs).toContain('future_sdk_message');
+      expect(serializedLogs).toContain('future_subtype');
+      expect(serializedLogs).toContain('payload');
     } finally {
       logSpy.mockRestore();
     }
@@ -179,5 +209,100 @@ describe('createSseBridge', () => {
     expect(responses[1]).toEqual(expect.objectContaining({
       content: expect.objectContaining({ taskId: 'call_b', result: 'result b' }),
     }));
+  });
+
+  it('projects private wiki tool results before emitting agent_response', () => {
+    const updates: StreamingUpdate[] = [];
+    const bridge = createSseBridge((update) => updates.push(update));
+    bridge.handleMessage({
+      type: 'assistant',
+      message: {content: [{
+        type: 'tool_use',
+        id: 'wiki-call',
+        name: 'mcp__smartperfetto__lookup_blog_knowledge',
+        input: {source: 'android_internals_wiki'},
+      }]},
+    });
+    const privateResult = JSON.stringify({
+      success: true,
+      result: {
+        query: 'Handler',
+        probed: ['android_internals_wiki'],
+        retrievedAt: 1,
+        legacyPath: false,
+        hits: [{
+          chunkId: 'wiki-1',
+          score: 1,
+          metadata: {kind: 'android_internals_wiki', knowledgeSourceId: 'source-a'},
+          snippet: 'CLAUDE_PRIVATE_WIKI_CANARY',
+        }],
+      },
+    });
+
+    bridge.handleMessage({
+      type: 'user',
+      tool_use_result: privateResult,
+      message: {content: [{
+        type: 'tool_result',
+        tool_use_id: 'wiki-call',
+        content: privateResult,
+      }]},
+    });
+
+    const serialized = JSON.stringify(updates.filter(update => update.type === 'agent_response'));
+    expect(serialized).not.toContain('CLAUDE_PRIVATE_WIKI_CANARY');
+    expect(serialized).toContain('snippetHash');
+  });
+
+  it('projects replayed private wiki results even without a local tool-use mapping', () => {
+    const updates: StreamingUpdate[] = [];
+    const bridge = createSseBridge((update) => updates.push(update));
+    const privateResult = JSON.stringify({result: {
+      query: 'Handler',
+      probed: ['android_internals_wiki'],
+      retrievedAt: 1,
+      legacyPath: false,
+      hits: [{
+        chunkId: 'wiki-replay',
+        score: 1,
+        metadata: {kind: 'android_internals_wiki', knowledgeSourceId: 'source-a'},
+        snippet: 'CLAUDE_REPLAY_PRIVATE_WIKI_CANARY',
+      }],
+    }});
+
+    bridge.handleMessage({
+      type: 'user',
+      tool_use_result: privateResult,
+      message: {content: [{
+        type: 'tool_result',
+        tool_use_id: 'replayed-wiki-call',
+        content: privateResult,
+      }]},
+    });
+
+    const serialized = JSON.stringify(updates);
+    expect(serialized).not.toContain('CLAUDE_REPLAY_PRIVATE_WIKI_CANARY');
+    expect(serialized).toContain('snippetHash');
+  });
+
+  it('projects private wiki results before recording Claude plan evidence', () => {
+    const result = claudeRuntimeTesting.projectClaudeToolResultForPlan(
+      'lookup_blog_knowledge',
+      JSON.stringify({result: {
+        query: 'Handler',
+        probed: ['android_internals_wiki'],
+        retrievedAt: 1,
+        legacyPath: false,
+        hits: [{
+          chunkId: 'wiki-1',
+          score: 1,
+          metadata: {kind: 'android_internals_wiki', knowledgeSourceId: 'source-a'},
+          snippet: 'CLAUDE_PLAN_PRIVATE_WIKI_CANARY',
+        }],
+      }}),
+    );
+
+    expect(result).not.toContain('CLAUDE_PLAN_PRIVATE_WIKI_CANARY');
+    expect(result).toContain('snippetHash');
   });
 });

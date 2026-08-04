@@ -8,6 +8,7 @@ import { recordEnterpriseAuditEvent } from './enterpriseAuditService';
 
 const SAFE_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const MEMBER_ROLES = new Set(['viewer', 'analyst', 'workspace_admin', 'org_admin']);
+const WORKSPACE_ADMIN_DELEGATABLE_ROLES = new Set(['viewer', 'analyst']);
 
 export interface WorkspacePolicyInput {
   quotaPolicy?: Record<string, unknown> | null;
@@ -53,6 +54,71 @@ interface MemberRow {
   idp_subject: string | null;
   role: string;
   created_at: number;
+}
+
+function canManageOrgMembership(context: RequestContext): boolean {
+  return context.roles.includes('org_admin')
+    || context.scopes.includes('*')
+    || context.scopes.includes('tenant:manage');
+}
+
+function getMembershipRole(
+  db: Database.Database,
+  tenantId: string,
+  workspaceId: string,
+  userId: string,
+): string | undefined {
+  return db.prepare<unknown[], {role: string}>(`
+    SELECT role FROM memberships
+    WHERE tenant_id = ? AND workspace_id = ? AND user_id = ?
+  `).get(tenantId, workspaceId, userId)?.role;
+}
+
+function isPersonalWorkspace(
+  db: Database.Database,
+  tenantId: string,
+  workspaceId: string,
+): boolean {
+  return Boolean(db.prepare<unknown[], { workspace_id: string }>(`
+    SELECT workspace_id
+    FROM sso_personal_workspaces
+    WHERE tenant_id = ? AND workspace_id = ?
+    LIMIT 1
+  `).get(tenantId, workspaceId));
+}
+
+function assertMembershipMutationAllowed(
+  context: RequestContext,
+  targetUserId: string,
+  existingRole: string | undefined,
+  requestedRole?: string,
+): void {
+  if (canManageOrgMembership(context)) return;
+  if (targetUserId === context.userId) {
+    throw new EnterpriseAdminControlPlaneError(403, 'Workspace administrators cannot change their own role');
+  }
+  if (existingRole === 'workspace_admin' || existingRole === 'org_admin') {
+    throw new EnterpriseAdminControlPlaneError(403, 'Workspace administrators cannot manage peer or organization administrators');
+  }
+  if (requestedRole && !WORKSPACE_ADMIN_DELEGATABLE_ROLES.has(requestedRole)) {
+    throw new EnterpriseAdminControlPlaneError(403, `Workspace administrators cannot grant role: ${requestedRole}`);
+  }
+}
+
+function assertNotLastOrgAdmin(
+  db: Database.Database,
+  context: RequestContext,
+  existingRole: string | undefined,
+  nextRole?: string,
+): void {
+  if (existingRole !== 'org_admin' || nextRole === 'org_admin') return;
+  const count = db.prepare<unknown[], {count: number}>(`
+    SELECT COUNT(*) AS count FROM memberships
+    WHERE tenant_id = ? AND role = 'org_admin'
+  `).get(context.tenantId)?.count ?? 0;
+  if (count <= 1) {
+    throw new EnterpriseAdminControlPlaneError(409, 'Cannot remove or demote the last organization administrator');
+  }
 }
 
 function assertSafeId(value: string, label: string): string {
@@ -297,6 +363,10 @@ export function updateEnterpriseWorkspace(
 
   return db.transaction(() => {
     ensureTenantAndActor(db, context, now);
+    if (isPersonalWorkspace(db, context.tenantId, workspaceId)
+      && typeof input.name === 'string' && input.name.trim()) {
+      throw new EnterpriseAdminControlPlaneError(403, 'Personal workspace name is managed by OIDC');
+    }
     const result = db.prepare(`
       UPDATE workspaces
       SET ${updates.join(', ')}, updated_at = ?
@@ -379,6 +449,12 @@ export function upsertEnterpriseWorkspaceMember(
     if (!workspace) {
       throw new EnterpriseAdminControlPlaneError(404, 'Workspace not found');
     }
+    if (isPersonalWorkspace(db, context.tenantId, workspaceId)) {
+      throw new EnterpriseAdminControlPlaneError(403, 'Personal workspace membership is managed by OIDC');
+    }
+    const existingRole = getMembershipRole(db, context.tenantId, workspaceId, userId);
+    assertMembershipMutationAllowed(context, userId, existingRole, role);
+    assertNotLastOrgAdmin(db, context, existingRole, role);
     db.prepare(`
       INSERT INTO users (id, tenant_id, email, display_name, idp_subject, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -415,18 +491,26 @@ export function deleteEnterpriseWorkspaceMember(
 ) {
   const workspaceId = assertSafeId(workspaceIdInput, 'workspaceId');
   const userId = assertSafeId(userIdInput, 'userId');
-  const result = db.prepare(`
-    DELETE FROM memberships
-    WHERE tenant_id = ?
-      AND workspace_id = ?
-      AND user_id = ?
-  `).run(context.tenantId, workspaceId, userId);
-  if (result.changes === 0) {
-    throw new EnterpriseAdminControlPlaneError(404, 'Membership not found');
-  }
-  recordControlPlaneAudit(db, context, 'tenant.member.deleted', 'membership', `${workspaceId}:${userId}`, {
-    workspaceId,
-    userId,
-  });
-  return { success: true };
+  return db.transaction(() => {
+    if (isPersonalWorkspace(db, context.tenantId, workspaceId)) {
+      throw new EnterpriseAdminControlPlaneError(403, 'Personal workspace membership is managed by OIDC');
+    }
+    const existingRole = getMembershipRole(db, context.tenantId, workspaceId, userId);
+    if (!existingRole) {
+      throw new EnterpriseAdminControlPlaneError(404, 'Membership not found');
+    }
+    assertMembershipMutationAllowed(context, userId, existingRole);
+    assertNotLastOrgAdmin(db, context, existingRole);
+    db.prepare(`
+      DELETE FROM memberships
+      WHERE tenant_id = ?
+        AND workspace_id = ?
+        AND user_id = ?
+    `).run(context.tenantId, workspaceId, userId);
+    recordControlPlaneAudit(db, context, 'tenant.member.deleted', 'membership', `${workspaceId}:${userId}`, {
+      workspaceId,
+      userId,
+    });
+    return { success: true };
+  })();
 }

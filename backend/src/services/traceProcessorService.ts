@@ -8,7 +8,10 @@ import fs from 'fs';
 import path from 'path';
 import { uuidv4 } from '../utils/uuid';
 import { WorkingTraceProcessor, TraceProcessorFactory } from './workingTraceProcessor';
-import type { TraceProcessorQueryOptions } from './traceProcessorSqlWorker';
+import type {
+  TraceProcessorBoundedQueryOptions,
+  TraceProcessorQueryOptions,
+} from './traceProcessorSqlWorker';
 import {
   getTraceProcessorLeaseStore,
   type TraceProcessorLeaseMode,
@@ -21,6 +24,8 @@ import {
   rethrowIfTraceProcessorQueryCancelled,
   throwIfTraceProcessorQueryCancelled,
 } from './traceProcessorCancellation';
+import {currentRunManifestAttributionSink} from './selfEvolution/runManifestLifecycle';
+import {splitSqlStatements} from './sqlStdlibDependencyAnalyzer';
 
 export interface TraceInfo {
   id: string;
@@ -79,6 +84,13 @@ export type TraceProcessorServiceQueryOptions = TraceProcessorQueryOptions & {
   leaseScope?: EnterpriseRepositoryScope;
 };
 
+export type TraceProcessorServiceBoundedQueryOptions =
+  TraceProcessorBoundedQueryOptions & {
+    leaseId?: string;
+    leaseMode?: TraceProcessorLeaseMode | string;
+    leaseScope?: EnterpriseRepositoryScope;
+  };
+
 export interface TraceProcessorLeaseRestartPolicy {
   backoffMs?: number[];
   jitterMs?: number;
@@ -89,6 +101,15 @@ export interface TraceProcessorLeaseRestartPolicy {
 const DEFAULT_LEASE_RESTART_BACKOFF_MS = [1000, 5000, 15000];
 const DEFAULT_LEASE_RESTART_JITTER_MS = 250;
 const LEASE_RESTART_CONFLICT_STATES = new Set<TraceProcessorLeaseState>(['draining', 'released', 'failed']);
+
+function recordRunManifestSqlStatements(sql: string, success: boolean): void {
+  const sink = currentRunManifestAttributionSink();
+  if (!sink) return;
+  const statementCount = splitSqlStatements(sql).length;
+  for (let index = 0; index < statementCount; index++) {
+    sink.recordSqlStatement(success);
+  }
+}
 
 /**
  * Manages trace files and processors using the actual Perfetto Trace Processor WASM
@@ -208,6 +229,76 @@ export class TraceProcessorService extends EventEmitter {
 
     this.traces.set(traceId, traceInfo);
     this.emit('trace-initialized', traceInfo);
+  }
+
+  /**
+   * Register an already-authorized on-disk trace without starting a processor.
+   * Viewer leases use this after a backend restart to avoid creating an
+   * unrelated shared processor before their isolated processor is admitted.
+   */
+  public registerStoredTrace(input: {
+    id: string;
+    filename: string;
+    size: number;
+    filePath: string;
+    uploadedAt?: string | Date;
+  }): TraceInfo {
+    const filePath = path.resolve(input.filePath);
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      throw new Error(`Trace path is not a regular file: ${filePath}`);
+    }
+
+    const existing = this.traces.get(input.id);
+    if (existing) {
+      const existingPath = path.resolve(this.getTraceFilePath(input.id));
+      if (existingPath !== filePath) {
+        throw new Error(`Trace ${input.id} is already registered from a different path`);
+      }
+      return existing;
+    }
+
+    const traceInfo: TraceInfo = {
+      id: input.id,
+      filename: input.filename,
+      size: stats.size,
+      filePath,
+      uploadTime: new Date(input.uploadedAt ?? stats.mtime),
+      status: 'ready',
+    };
+    this.traces.set(input.id, traceInfo);
+    this.emit('trace-initialized', traceInfo);
+    return traceInfo;
+  }
+
+  /**
+   * Remove metadata for a trace registered from a managed external file.
+   * Unlike deleteTrace(), this never deletes the source file.
+   */
+  public unregisterStoredTrace(
+    traceId: string,
+    expectedFilePath: string,
+  ): boolean {
+    const trace = this.traces.get(traceId);
+    if (!trace) return false;
+    if (
+      path.resolve(this.getTraceFilePath(traceId))
+      !== path.resolve(expectedFilePath)
+    ) {
+      throw new Error(
+        `Trace ${traceId} is registered from an unexpected path`,
+      );
+    }
+    if ([...this.processors.values()].some(
+      processor => processor.traceId === traceId,
+    )) {
+      throw new Error(
+        `Trace ${traceId} still has an active processor`,
+      );
+    }
+    this.traces.delete(traceId);
+    this.emit('trace-unregistered', traceId);
+    return true;
   }
 
   /**
@@ -460,9 +551,47 @@ export class TraceProcessorService extends EventEmitter {
     sql: string,
     options: TraceProcessorServiceQueryOptions = {},
   ): Promise<QueryResult> {
-    const processor = await this.processorForQuery(traceId, options);
-    const { leaseId: _leaseId, leaseMode: _leaseMode, leaseScope: _leaseScope, ...queryOptions } = options;
-    return await processor.query(sql, queryOptions);
+    try {
+      const processor = await this.processorForQuery(traceId, options);
+      const { leaseId: _leaseId, leaseMode: _leaseMode, leaseScope: _leaseScope, ...queryOptions } = options;
+      const result = await processor.query(sql, queryOptions);
+      recordRunManifestSqlStatements(sql, !result.error);
+      return result;
+    } catch (error) {
+      recordRunManifestSqlStatements(sql, false);
+      throw error;
+    }
+  }
+
+  public async queryBounded(
+    traceId: string,
+    sql: string,
+    options: TraceProcessorServiceBoundedQueryOptions,
+  ): Promise<QueryResult> {
+    try {
+      const processor = await this.processorForQuery(traceId, options);
+      const boundedProcessor = processor as TraceProcessor & {
+        queryBounded?: (
+          boundedSql: string,
+          boundedOptions: TraceProcessorBoundedQueryOptions,
+        ) => Promise<QueryResult>;
+      };
+      if (!boundedProcessor.queryBounded) {
+        throw new Error('bounded_query_not_supported_by_trace_processor');
+      }
+      const {
+        leaseId: _leaseId,
+        leaseMode: _leaseMode,
+        leaseScope: _leaseScope,
+        ...queryOptions
+      } = options;
+      const result = await boundedProcessor.queryBounded(sql, queryOptions);
+      recordRunManifestSqlStatements(sql, !result.error);
+      return result;
+    } catch (error) {
+      recordRunManifestSqlStatements(sql, false);
+      throw error;
+    }
   }
 
   public async queryRaw(
@@ -891,6 +1020,22 @@ export class TraceProcessorService extends EventEmitter {
       cleaned++;
     }
     return cleaned;
+  }
+
+  public cleanupLeaseProcessor(
+    traceId: string,
+    leaseId: string,
+    mode: TraceProcessorLeaseMode | string,
+  ): boolean {
+    const processorKey = this.processorKeyForLease(traceId, leaseId, mode);
+    const processor = this.processors.get(processorKey);
+    if (!processor) return false;
+    if (!TraceProcessorFactory.remove(processorKey)) {
+      processor.destroy();
+    }
+    this.processors.delete(processorKey);
+    this.leaseRestartInProgress.delete(processorKey);
+    return true;
   }
 
   /**

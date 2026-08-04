@@ -50,7 +50,6 @@ import {
   parseCandidates,
   parseFeatures,
   transformPinInstruction,
-  transformTeachingContent,
   validateActiveProcesses,
   validateConfidence,
   type PinInstructionResponse,
@@ -60,6 +59,7 @@ import {
 } from '../../types/teaching.types';
 import {
   DataEnvelope,
+  DataEnvelopeMeta,
   DataEnvelopeTraceSide,
   ColumnDefinition,
   createDataEnvelope,
@@ -83,6 +83,18 @@ import {
   rethrowIfTraceProcessorQueryCancelled,
   throwIfTraceProcessorQueryCancelled,
 } from '../traceProcessorCancellation';
+import {
+  AiDisabledError,
+  assertAiFeatureEnabled,
+  getAiCapabilityPolicy,
+  isAiFeatureEnabled,
+} from '../aiCapabilityPolicy';
+import type {RunManifestAttributionSink} from '../../types/selfEvolution';
+import {
+  currentRunManifestAttributionSink,
+  resolveRunManifestAttributionSink,
+} from '../selfEvolution/runManifestLifecycle';
+import {fingerprintSkillDefinition} from '../selfEvolution/skillFingerprint';
 
 // =============================================================================
 // Layered Result Types
@@ -1076,16 +1088,25 @@ export class SkillExecutor {
   private fragmentRegistry: Map<string, string> = new Map();
   private identityGate = new IdentityGate();
   private processIdentityCache: Map<string, ProcessIdentityResolution> = new Map();
+  private runManifestAttributionSink?: RunManifestAttributionSink;
 
   constructor(
     traceProcessor: any,
     aiService?: any,
-    eventEmitter?: (event: SkillEvent) => void
+    eventEmitter?: (event: SkillEvent) => void,
+    runManifestAttributionSink?: RunManifestAttributionSink,
   ) {
     this.traceProcessor = traceProcessor;
     this.aiService = aiService;
     this.eventEmitter = eventEmitter;
     this.skillRegistry = new Map();
+    this.runManifestAttributionSink = runManifestAttributionSink;
+  }
+
+  setRunManifestAttributionSink(
+    sink: RunManifestAttributionSink | undefined,
+  ): void {
+    this.runManifestAttributionSink = sink;
   }
 
   private queryTraceProcessor(
@@ -1098,9 +1119,10 @@ export class SkillExecutor {
       ...options,
       ...(signal ? { signal } : {}),
     };
-    return Object.keys(queryOptions).length > 0
+    const query = Object.keys(queryOptions).length > 0
       ? this.traceProcessor.query(traceId, sql, queryOptions)
       : this.traceProcessor.query(traceId, sql);
+    return query;
   }
 
   /**
@@ -1175,6 +1197,11 @@ export class SkillExecutor {
     }
   }
 
+  replaceRegisteredSkills(skills: SkillDefinition[]): void {
+    this.skillRegistry.clear();
+    this.registerSkills(skills);
+  }
+
   /**
    * 发送事件到前端
    */
@@ -1204,6 +1231,30 @@ export class SkillExecutor {
       startTs: target.startTs ?? null,
       endTs: target.endTs ?? null,
     });
+  }
+
+  private buildAiDisabledStepResult(
+    stepId: string,
+    stepType: StepResult['stepType'],
+    startTime: number,
+  ): StepResult | null {
+    const policy = getAiCapabilityPolicy();
+    if (isAiFeatureEnabled('llm_skill_step', policy)) {
+      return null;
+    }
+    const error = new AiDisabledError('llm_skill_step', policy);
+    return {
+      stepId,
+      stepType,
+      success: false,
+      error: error.message,
+      code: error.code,
+      data: {
+        code: error.code,
+        feature: error.feature,
+      },
+      executionTimeMs: Date.now() - startTime,
+    };
   }
 
   private toNumber(value: any): number | undefined {
@@ -1559,6 +1610,73 @@ export class SkillExecutor {
     params: Record<string, any> = {},
     inherited: Record<string, any> = {}
   ): Promise<SkillExecutionResult> {
+    const inheritedSink = inherited.__runManifestAttributionSink as
+      | RunManifestAttributionSink
+      | undefined;
+    const sink = resolveRunManifestAttributionSink(
+      this.runManifestAttributionSink,
+      inheritedSink,
+      currentRunManifestAttributionSink(),
+    );
+    const skill = this.skillRegistry.get(skillId);
+    if (!skill) {
+      sink?.recordUnknownSkillInvocation(skillId);
+      return this.executeInternal(skillId, traceId, params, inherited);
+    }
+    const invocationId = sink?.startSkillInvocation({
+      skillId,
+      version: skill.version,
+      contentFingerprint: fingerprintSkillDefinition(
+        skill,
+        this.fragmentRegistry,
+      ),
+    });
+    try {
+      const result = await this.executeInternal(
+        skillId,
+        traceId,
+        params,
+        inherited,
+      );
+      if (sink && invocationId) {
+        sink.finishSkillInvocation(invocationId, {
+          success: result.success,
+          empty: result.success && this.isEmptySkillExecutionResult(result),
+        });
+      }
+      return result;
+    } catch (error) {
+      if (sink && invocationId) {
+        sink.finishSkillInvocation(invocationId, {
+          success: false,
+          empty: false,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private isEmptySkillExecutionResult(result: SkillExecutionResult): boolean {
+    if ((result.displayResults?.length ?? 0) > 0) return false;
+    if ((result.diagnostics?.length ?? 0) > 0) return false;
+    if ((result.synthesizeData?.length ?? 0) > 0) return false;
+    if (typeof result.aiSummary === 'string' && result.aiSummary.trim()) {
+      return false;
+    }
+    const rawResults = Object.values(result.rawResults ?? {});
+    return rawResults.every(entry => {
+      if (!entry || typeof entry !== 'object') return true;
+      const data = (entry as {data?: unknown}).data;
+      return !this.hasMeaningfulData(data);
+    });
+  }
+
+  private async executeInternal(
+    skillId: string,
+    traceId: string,
+    params: Record<string, any>,
+    inherited: Record<string, any>,
+  ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
     const signal = getSkillExecutionSignal(inherited);
     throwIfTraceProcessorQueryCancelled(signal);
@@ -1658,6 +1776,7 @@ export class SkillExecutor {
       const diagnostics: DiagnosticResult[] = [];
       const synthesizeData: SynthesizeData[] = [];
       let aiSummary: string | undefined;
+      let stepExecutionError: string | undefined;
 
 
       // 根据 skill 类型执行
@@ -1707,10 +1826,12 @@ export class SkillExecutor {
             }
             const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
             aiSummary = stepExec.aiSummary;
+            stepExecutionError = stepExec.error;
           }
           break;
 
         case 'composite':
+        case 'deep':
         case 'iterator':
         case 'diagnostic':
         case 'ai_decision':
@@ -1731,6 +1852,7 @@ export class SkillExecutor {
             }
             const stepExec = await this.executeStepBasedSkill(skill, skillId, context, displayResults, diagnostics, synthesizeData);
             aiSummary = stepExec.aiSummary;
+            stepExecutionError = stepExec.error;
           }
           break;
 
@@ -1746,6 +1868,25 @@ export class SkillExecutor {
             executionTimeMs: Date.now() - startTime,
             error: `Skill type '${skill.type}' is metadata-only and not executable by the single-trace SkillExecutor: ${skillId}`,
           };
+      }
+
+      if (stepExecutionError) {
+        this.emit({
+          type: 'skill_error',
+          skillId,
+          data: { error: stepExecutionError },
+        });
+        return {
+          skillId,
+          skillName: skill.meta.display_name,
+          success: false,
+          displayResults,
+          diagnostics,
+          rawResults: context.results,
+          ...(identityResolution ? { identityResolution } : {}),
+          executionTimeMs: Date.now() - startTime,
+          error: stepExecutionError,
+        };
       }
 
       // If skills provide data-driven synthesize configs, generate a deterministic
@@ -1802,7 +1943,7 @@ export class SkillExecutor {
   }
 
   /**
-   * Execute a step-based skill (composite/iterator/diagnostic, and legacy atomic skills without root-level `sql`).
+   * Execute a step-based skill (composite/deep/iterator/diagnostic, and legacy atomic skills without root-level `sql`).
    * Mutates `context.results` / `context.variables` and appends into `displayResults` / `diagnostics` / `synthesizeData`.
    */
   private hasMeaningfulData(value: any): boolean {
@@ -1889,7 +2030,7 @@ export class SkillExecutor {
     displayResults: DisplayResult[],
     diagnostics: DiagnosticResult[],
     synthesizeData: SynthesizeData[]
-  ): Promise<{ aiSummary?: string }> {
+  ): Promise<{ aiSummary?: string; error?: string }> {
     let aiSummary: string | undefined;
 
     if (!skill.steps) {
@@ -1971,6 +2112,18 @@ export class SkillExecutor {
         // 收集 AI 总结
         if ((step as any).type === 'ai_summary' && stepResult.data?.summary) {
           aiSummary = stepResult.data.summary;
+        }
+      } else {
+        const isQueryFailure = stepResult.stepType === 'atomic' && stepResult.code !== 'condition_not_met';
+        if (isQueryFailure) {
+          context.results[step.id] = stepResult;
+          const optional = 'optional' in step && Boolean(step.optional);
+          if (!optional) {
+            return {
+              aiSummary,
+              error: stepResult.error || `Required step failed: ${step.id}`,
+            };
+          }
         }
       }
     }
@@ -2714,6 +2867,7 @@ export class SkillExecutor {
           success: isOptional,
           data: isOptional ? [] : undefined,
           error: isOptional ? undefined : 'Condition not met',
+          code: 'condition_not_met',
           executionTimeMs: Date.now() - startTime,
         };
       }
@@ -2780,11 +2934,16 @@ export class SkillExecutor {
     } catch (error: any) {
       rethrowIfTraceProcessorQueryCancelled(error);
       const failedStep = step as SkillStep;
+      const aiDisabledError = error instanceof AiDisabledError ? error : null;
       result = {
         stepId: failedStep.id,
         stepType: failedStep.type || 'skill',
         success: false,
         error: error.message,
+        code: aiDisabledError?.code,
+        data: aiDisabledError
+          ? { code: aiDisabledError.code, feature: aiDisabledError.feature }
+          : undefined,
         executionTimeMs: Date.now() - startTime,
       };
     }
@@ -2793,7 +2952,7 @@ export class SkillExecutor {
       type: 'step_completed',
       skillId: parentSkillId,
       stepId: step.id,
-      data: { success: result.success, error: result.error },
+      data: { success: result.success, error: result.error, code: result.code },
     });
 
     return result;
@@ -2830,6 +2989,8 @@ export class SkillExecutor {
             stepType: 'atomic',
             success: true,
             data: [],
+            error: result.error,
+            code: 'optional_query_error',
             executionTimeMs: Date.now() - startTime,
           };
         }
@@ -2850,6 +3011,11 @@ export class SkillExecutor {
         stepType: 'atomic',
         success: true,
         data,
+        ...(
+          data.length === 0 && step.on_empty
+            ? { emptyMessage: step.on_empty }
+            : {}
+        ),
         executionTimeMs: Date.now() - startTime,
       };
 
@@ -2861,6 +3027,8 @@ export class SkillExecutor {
           stepType: 'atomic',
           success: true,
           data: [],
+          error: error.message,
+          code: 'optional_query_error',
           executionTimeMs: Date.now() - startTime,
         };
       }
@@ -3190,6 +3358,10 @@ export class SkillExecutor {
 
     // 如果没有匹配的规则且配置了 AI 辅助，调用 AI
     if (diagnostics.length === 0 && step.ai_assist && step.fallback && this.aiService) {
+      const disabledResult = this.buildAiDisabledStepResult(step.id, 'diagnostic', startTime);
+      if (disabledResult) {
+        return disabledResult;
+      }
       const aiResult = await this.callAI(step.fallback.prompt, context);
       if (aiResult) {
         diagnostics.push({
@@ -3355,6 +3527,11 @@ export class SkillExecutor {
   ): Promise<StepResult> {
     const startTime = Date.now();
 
+    const disabledResult = this.buildAiDisabledStepResult(step.id, 'ai_decision', startTime);
+    if (disabledResult) {
+      return disabledResult;
+    }
+
     if (!this.aiService) {
       return {
         stepId: step.id,
@@ -3405,6 +3582,11 @@ export class SkillExecutor {
     context: SkillExecutionContext
   ): Promise<StepResult> {
     const startTime = Date.now();
+
+    const disabledResult = this.buildAiDisabledStepResult(step.id, 'ai_summary', startTime);
+    if (disabledResult) {
+      return disabledResult;
+    }
 
     if (!this.aiService) {
       return {
@@ -3508,6 +3690,7 @@ export class SkillExecutor {
 
     try {
       await ensurePipelineSkillsInitialized();
+      const defaultSelection = pipelineSkillLoader.getDefaultSelection();
 
       const pipelineSource = step.pipeline_source || 'pipeline_result';
       const activeProcessesSource = step.active_processes_source || 'active_rendering_processes';
@@ -3524,19 +3707,36 @@ export class SkillExecutor {
       const primaryPipelineId = (
         explicitPipelineId ||
         String(pipelineRow?.primary_pipeline_id ?? '').trim() ||
-        TEACHING_DEFAULTS.pipelineId
+        defaultSelection.pipelineId
       );
       const primaryConfidence = validateConfidence(
         pipelineRow?.primary_confidence,
         TEACHING_DEFAULTS.confidence
       );
       const candidatesList = pipelineRow?.candidates_list || '';
+      const primaryRenderingTypeId = String(
+        pipelineRow?.primary_rendering_type_id ||
+        pipelineSkillLoader.getPipelineCatalogEntry(primaryPipelineId)?.rendering_type_id ||
+        defaultSelection.renderingTypeId
+      );
+      const renderingTypeCandidatesList = pipelineRow?.rendering_type_candidates_list || '';
+      const relatedRenderingTypeCandidatesList =
+        pipelineRow?.related_rendering_type_candidates_list || '';
       const featuresList = pipelineRow?.features_list || '';
-      const docPath = String(pipelineRow?.doc_path || TEACHING_DEFAULTS.docPath);
+      const docPath = String(pipelineRow?.doc_path || defaultSelection.docPath);
 
       const candidates = candidatesList
         ? parseCandidates(candidatesList, TEACHING_LIMITS.maxCandidates)
         : [{ id: primaryPipelineId, confidence: primaryConfidence }];
+      const renderingTypeCandidates = renderingTypeCandidatesList
+        ? parseCandidates(renderingTypeCandidatesList, TEACHING_LIMITS.maxCandidates)
+        : [{ id: primaryRenderingTypeId, confidence: primaryConfidence }];
+      const relatedRenderingTypes = pipelineSkillLoader.resolveRelatedRenderingTypes(
+        parseCandidates(
+          relatedRenderingTypeCandidatesList,
+          TEACHING_LIMITS.maxCandidates,
+        ),
+      );
       const features = parseFeatures(featuresList);
 
       const traceRequirementsMissing = this.extractTraceRequirementHints(
@@ -3547,23 +3747,17 @@ export class SkillExecutor {
         this.resolveStepResultFromSource(activeProcessesSource, context)
       );
 
-      const yamlTeaching = pipelineSkillLoader.getTeachingContent(primaryPipelineId);
       const mdTeaching = getPipelineDocService().getTeachingContent(primaryPipelineId);
-      const teachingContent: TeachingContentResponse | null = yamlTeaching
-        ? transformTeachingContent(
-            yamlTeaching,
-            pipelineSkillLoader.getPipelineMeta(primaryPipelineId)?.doc_path || docPath
-          )
-        : mdTeaching
-          ? {
-              title: mdTeaching.title,
-              summary: mdTeaching.summary,
-              mermaidBlocks: mdTeaching.mermaidBlocks,
-              threadRoles: mdTeaching.threadRoles,
-              keySlices: mdTeaching.keySlices,
-              docPath: mdTeaching.docPath,
-            }
-          : null;
+      const teachingContent: TeachingContentResponse | null = mdTeaching
+        ? {
+            title: mdTeaching.title,
+            summary: mdTeaching.summary,
+            mermaidBlocks: mdTeaching.mermaidBlocks,
+            threadRoles: mdTeaching.threadRoles,
+            keySlices: mdTeaching.keySlices,
+            docPath: mdTeaching.docPath,
+          }
+        : null;
 
       const basePinInstructions = pipelineSkillLoader
         .getAutoPinInstructions(primaryPipelineId)
@@ -3599,8 +3793,11 @@ export class SkillExecutor {
           detection: {
             detected: !!pipelineRow || !!explicitPipelineId,
             primaryPipelineId,
+            primaryRenderingTypeId,
             primaryConfidence,
             candidates,
+            renderingTypeCandidates,
+            relatedRenderingTypes,
             features,
             traceRequirementsMissing,
           },
@@ -3664,11 +3861,12 @@ export class SkillExecutor {
   /**
    * 调用 AI 服务
    */
-  private async callAI(prompt: string, _context: SkillExecutionContext, taskType: any = 'general'): Promise<string> {
+  private async callAI(prompt: string, _context: SkillExecutionContext, taskType: string = 'general'): Promise<string> {
     if (!this.aiService) {
       return '';
     }
 
+    assertAiFeatureEnabled('llm_skill_step');
     const safePrompt = redactTextForLLM(prompt).text;
     try {
       if (typeof this.aiService.chat === 'function') {
@@ -3680,6 +3878,9 @@ export class SkillExecutor {
       }
       throw new Error('AI service does not implement chat');
     } catch (error: any) {
+      if (error instanceof AiDisabledError) {
+        throw error;
+      }
       console.error('[SkillExecutor] AI call failed:', error.message);
       return '';
     }
@@ -3924,6 +4125,11 @@ export class SkillExecutor {
       layer: config.layer,         // 分层展示层级
       format: config.format || 'table',
       data: displayData,
+      executionStatus: stepResult.code === 'optional_query_error'
+        ? 'optional_error'
+        : (Array.isArray(data) && data.length === 0 ? 'empty' : 'observed'),
+      executionMessage: stepResult.emptyMessage,
+      executionError: stepResult.error,
       highlight: config.highlight,
       sql,  // 保存原始 SQL
       expandable: config.expandable,           // 是否支持展开查看详细分析
@@ -4417,7 +4623,7 @@ export class SkillExecutor {
   public static toDataEnvelopes(
     result: SkillExecutionResult,
     columnDefinitions?: Record<string, Partial<ColumnDefinition>[]>,
-    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide },
+    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide; paneSide?: DataEnvelopeMeta['paneSide'] },
   ): DataEnvelope[] {
     return result.displayResults.map(dr => {
       // Prefer external columnDefinitions, fallback to embedded columnDefinitions in DisplayResult
@@ -4441,15 +4647,16 @@ export class SkillExecutor {
 
   public static attachTraceProvenanceToEnvelope(
     envelope: DataEnvelope,
-    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide },
+    provenance?: { traceId?: string; traceSide?: DataEnvelopeTraceSide; paneSide?: DataEnvelopeMeta['paneSide'] },
   ): DataEnvelope {
-    if (!provenance?.traceId && !provenance?.traceSide) return envelope;
+    if (!provenance?.traceId && !provenance?.traceSide && !provenance?.paneSide) return envelope;
     return {
       ...envelope,
       meta: {
         ...envelope.meta,
         ...(provenance.traceId && !envelope.meta.traceId ? { traceId: provenance.traceId } : {}),
         ...(provenance.traceSide && !envelope.meta.traceSide ? { traceSide: provenance.traceSide } : {}),
+        ...(provenance.paneSide && !envelope.meta.paneSide ? { paneSide: provenance.paneSide } : {}),
       },
     };
   }

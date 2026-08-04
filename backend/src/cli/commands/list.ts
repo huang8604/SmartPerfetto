@@ -11,6 +11,11 @@
 import { Command } from 'commander';
 import path from 'path';
 import fs from 'fs';
+import {
+  localize,
+  parseOutputLanguage,
+} from '../../agentv3/outputLanguage';
+import {localizeSkillDefinition} from '../../services/skillLocalization';
 
 // ANSI color codes
 const colors = {
@@ -32,8 +37,16 @@ export const listCommand = new Command('list')
   .description('List all available skills')
   .option('-v, --verbose', 'Show detailed information')
   .option('--json', 'Output in JSON format')
-  .action(async (options: { verbose?: boolean; json?: boolean }) => {
+  .option('--language <language>', 'Output language: zh-CN or en')
+  .action(async (options: {
+    verbose?: boolean;
+    json?: boolean;
+    language?: string;
+  }) => {
     try {
+      const outputLanguage = parseOutputLanguage(
+        options.language ?? process.env.SMARTPERFETTO_OUTPUT_LANGUAGE,
+      );
       // Dynamic import to avoid loading heavy dependencies
       const { skillRegistry, ensureSkillRegistryInitialized } = await import('../../services/skillEngine/skillLoader');
 
@@ -43,7 +56,20 @@ export const listCommand = new Command('list')
       }
       await ensureSkillRegistryInitialized();
 
-      const skills = skillRegistry.getAllSkills();
+      const localizationStatusBySkillId = new Map<string, string>();
+      const skills = skillRegistry.getAllSkills().map(skill => {
+        const externalAuthored =
+          skillRegistry.getSkillOrigin(skill.name)?.origin === 'external_pack';
+        localizationStatusBySkillId.set(
+          skill.name,
+          externalAuthored ? 'external_authored' : 'catalog',
+        );
+        return localizeSkillDefinition(
+          skill,
+          outputLanguage,
+          {externalAuthored},
+        );
+      });
 
       if (options.json) {
         // JSON output
@@ -57,14 +83,23 @@ export const listCommand = new Command('list')
           type: skill.type,
           stepsCount: skill.steps?.length || 0,
           tags: skill.meta.tags,
+          localizationStatus: localizationStatusBySkillId.get(skill.name),
         }));
         console.log(JSON.stringify(output, null, 2));
         return;
       }
 
       // Human-readable output
-      console.log(colors.bold('\nSmartPerfetto Skills\n'));
-      console.log(`Found ${colors.cyan(String(skills.length))} skills\n`);
+      console.log(colors.bold(localize(
+        outputLanguage,
+        '\nSmartPerfetto Skills（技能）\n',
+        '\nSmartPerfetto Skills\n',
+      )));
+      console.log(localize(
+        outputLanguage,
+        `共找到 ${colors.cyan(String(skills.length))} 个 Skill\n`,
+        `Found ${colors.cyan(String(skills.length))} Skills\n`,
+      ));
 
       // Group by type
       const byType = new Map<string, typeof skills>();
@@ -89,7 +124,11 @@ export const listCommand = new Command('list')
           if (options.verbose) {
             // Steps
             const steps = skill.steps || [];
-            console.log(`    Steps: ${steps.length}`);
+            console.log(localize(
+              outputLanguage,
+              `    步骤：${steps.length}`,
+              `    Steps: ${steps.length}`,
+            ));
             for (const step of steps) {
               console.log(`      - ${(step as any).id}: ${(step as any).name || (step as any).type}`);
             }
@@ -99,12 +138,20 @@ export const listCommand = new Command('list')
               const keywords = Array.isArray(skill.triggers.keywords)
                 ? skill.triggers.keywords
                 : [...(skill.triggers.keywords.zh || []), ...(skill.triggers.keywords.en || [])];
-              console.log(`    Keywords: ${keywords.slice(0, 5).join(', ')}${keywords.length > 5 ? '...' : ''}`);
+              console.log(localize(
+                outputLanguage,
+                `    关键词：${keywords.slice(0, 5).join(', ')}${keywords.length > 5 ? '...' : ''}`,
+                `    Keywords: ${keywords.slice(0, 5).join(', ')}${keywords.length > 5 ? '...' : ''}`,
+              ));
             }
 
             // Tags
             if (skill.meta.tags) {
-              console.log(`    Tags: ${skill.meta.tags.join(', ')}`);
+              console.log(localize(
+                outputLanguage,
+                `    标签：${skill.meta.tags.join(', ')}`,
+                `    Tags: ${skill.meta.tags.join(', ')}`,
+              ));
             }
           }
         }

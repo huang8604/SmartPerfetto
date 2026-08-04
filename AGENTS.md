@@ -40,6 +40,11 @@ cd backend && npm run build
   and the reference docs as the source of truth.
 - Do not manually edit generated files; fix the generator/template and
   regenerate.
+- Keep tracked documentation limited to current user, architecture, runtime,
+  and maintainer contracts. Do not commit dated plans, review reports,
+  research dumps, presentation sources, or agent evidence; fold durable
+  conclusions into a core document and use issues, PRs, or git history for
+  implementation history.
 - Preserve the AI output contract: final conclusions, evidence/claim
   verification, identity resolution, reports, snapshots, CLI output, and
   frontend chat projection are separate surfaces. Keep chat readable without
@@ -50,8 +55,20 @@ cd backend && npm run build
 - Keep Provider Manager/runtime provider pinning semantics intact.
 - Do not push a root commit that points at a local-only `perfetto/` submodule
   commit.
+- Before committing or pushing changes to Skills, Strategies, portable SQL,
+  evidence/identity contracts, trace-processor pins, or the public exporter,
+  run `npm run check:perfetto-skills-impact` with the arguments defined in
+  `.claude/rules/skills.md` and record `required`, `not_required`, or `deferred` with the required
+  reason/handoff and change fingerprint.
 - Before feature or bug work, check the affected product surfaces in
   `.claude/rules/product-surface.md`.
+- Treat startup/readiness, loopback URLs, portable paths or package layout,
+  bundled runtimes/native modules, signing, and notarization changes as
+  portable-impacting work; follow the PR and release gates in
+  `.claude/rules/testing.md` and `.claude/rules/release.md`.
+- For non-trivial feature or bug work, use `gitnexus-impact-analysis` during
+  planning and run GitNexus change detection before commit. Follow
+  `.claude/rules/git.md` and cross-check graph results against source and tests.
 - Before syncing, rebasing, merging, or upgrading official Perfetto code,
   trace processor prebuilts, SQL docs, stdlib indexes, or committed Perfetto UI
   prebuilds, read `.claude/rules/perfetto-sync.md`.
@@ -95,3 +112,48 @@ Read the relevant detailed rule before touching that area:
 
 Run the smallest verification tier that proves the change. Before opening or
 landing a PR, run `npm run verify:pr` from the repository root.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **SmartPerfetto** (47377 symbols, 142809 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/SmartPerfetto/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/SmartPerfetto/clusters` | All functional areas |
+| `gitnexus://repo/SmartPerfetto/processes` | All execution flows |
+| `gitnexus://repo/SmartPerfetto/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

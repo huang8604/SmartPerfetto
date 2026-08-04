@@ -20,7 +20,7 @@ meta:
   description: "RN 老架构：JavaScriptCore/Hermes + Bridge JSON 序列化 + Shadow tree + Yoga + 宿主 HWUI"
   icon: "react"
   family: webview   # RN 与 WebView 在 family 上最近（都是嵌入式 UI 框架，回宿主 HWUI）
-  doc_path: "rendering_pipelines/rn_old_arch.md"
+  doc_path: rendering_pipelines/S14_react_native_type.md
   # ----- Article-grounded signature (S14) -----
   s_article_ref: "S14"
   four_features:
@@ -74,28 +74,7 @@ detection:
     - slice_pattern: "*FabricUIManager*"
 
 teaching:
-  title: "React Native Old Arch (Paper + Bridge) 渲染管线"
-  summary: |
-    RN 老架构基于 Paper 渲染器 + Bridge：
-    - JS 线程（mqt_js）执行 React 业务逻辑（Hermes 或 JSC）
-    - Bridge 通过 JSON 序列化跨 JS/Native 边界
-    - Shadow thread（mqt_shadow_queue）做 Yoga layout
-    - UIManager 在 main thread 创建/更新原生 View
-    - 最终走宿主 HWUI RenderThread
-
-    UI 更新延迟特征：JS 状态变化到 UI 反映通常 1-2 帧（Bridge 异步序列化开销）。
-
-  key_slices:
-    - name: "Yoga"
-      thread: mqt_shadow_queue
-      description: "Yoga layout 计算（flexbox 布局引擎）"
-    - name: "NativeToJsBridge / JsToNativeBridge"
-      thread: any
-      description: "Bridge 跨边界调用（高频率小粒度调用累积开销）"
-    - name: "UIManager.dispatchViewUpdates"
-      thread: main
-      description: "UIManager 提交 View 更新"
-
+  source: "rendering_pipelines/S14_react_native_type.md"
 analysis:
   common_issues:
     - id: js_thread_blocking

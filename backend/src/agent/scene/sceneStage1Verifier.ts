@@ -13,8 +13,9 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { sceneStoryConfig } from '../../config';
-import { createSdkEnv, getSdkBinaryOption, loadClaudeConfig } from '../../agentv3/claudeConfig';
+import {createSdkEnv, loadClaudeConfig} from '../../agentv3/claudeConfig';
 import { loadPromptTemplate, renderTemplate } from '../../agentv3/strategyLoader';
+import {isolatedSceneModelCallOptions} from './isolatedSceneModelCall';
 import type {
   DisplayedScene,
   SceneReconstructionVerification,
@@ -175,15 +176,13 @@ async function runLlmVerifier(
     stream = sdkQuery({
       prompt,
       options: {
-        model: loadClaudeConfig().lightModel,
-        maxTurns: 1,
-        permissionMode: 'bypassPermissions' as const,
-        allowDangerouslySkipPermissions: true,
-        env: sdkEnv,
-        stderr: (data: string) => {
-          console.warn(`[SceneStage1Verifier] SDK stderr: ${data.trimEnd()}`);
-        },
-        ...getSdkBinaryOption(sdkEnv),
+        ...isolatedSceneModelCallOptions({
+          model: loadClaudeConfig().lightModel,
+          env: sdkEnv,
+          stderr: (data: string) => {
+            console.warn(`[SceneStage1Verifier] SDK stderr: ${data.trimEnd()}`);
+          },
+        }),
       },
     });
 

@@ -76,7 +76,7 @@ echo "=== Jank Detection Regression Test ==="
 echo ""
 
 # 测试 Heavy Jank Trace
-HEAVY_TRACE="$PROJECT_ROOT/test-traces/app_aosp_scrolling_heavy_jank.pftrace"
+HEAVY_TRACE="$PROJECT_ROOT/Trace/real/android-scroll-customer/trace.pftrace"
 if [ -f "$HEAVY_TRACE" ]; then
     echo "Testing: Heavy Jank Trace"
     RESULT=$("$TRACE_PROCESSOR" "$HEAVY_TRACE" -Q "$VERIFY_SQL" 2>/dev/null | tail -1)
@@ -114,7 +114,7 @@ fi
 echo ""
 
 # 测试 Light Jank Trace
-LIGHT_TRACE="$PROJECT_ROOT/test-traces/app_aosp_scrolling_light.pftrace"
+LIGHT_TRACE="$PROJECT_ROOT/Trace/real/android-scroll-standard/trace.pftrace"
 if [ -f "$LIGHT_TRACE" ]; then
     echo "Testing: Light Jank Trace"
     RESULT=$("$TRACE_PROCESSOR" "$LIGHT_TRACE" -Q "$VERIFY_SQL" 2>/dev/null | tail -1)

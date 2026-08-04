@@ -20,7 +20,7 @@ meta:
   description: "同进程多窗口渲染 (Dialog/PopupWindow)，RenderThread 串行化"
   icon: "window"
   family: hwui
-  doc_path: "rendering_pipelines/android_view_multi_window.md"
+  doc_path: rendering_pipelines/S06_multi_window_type.md
   # ----- Article-grounded signature (S06) -----
   s_article_ref: "S06"
   four_features:
@@ -40,7 +40,7 @@ meta:
     - MULTI_WINDOW_SPLIT_SCREEN（分屏，通常跨进程）
     - MULTI_WINDOW_PIP（Picture in Picture）
     - MULTI_WINDOW_FREEFORM（自由窗口/桌面模式）
-    Phase E 拆分独立 ID。
+    当前条目在 catalog 中作为 S06 feature；多窗口形态不会覆盖各窗口自己的主渲染类型。
     决定性信号（同进程）：trace 同一 main thread 看到多次 performTraversals。
     YAML 当前不支持"同 doFrame 内多次出现"语义，留 Phase B 主决策树用 SQL 时间窗口分组实现。
 
@@ -67,68 +67,7 @@ detection:
       min_count: 2   # 至少 2 次以区分单窗口与多窗口（同 doFrame 多次的精确判断留 Phase B）
 
 teaching:
-  title: "Android View 多窗口渲染管线"
-  summary: |
-    同进程内存在多个窗口 (Dialog, PopupWindow, Toast)。由于共用一个 RenderThread，
-    多个窗口的渲染会串行化，可能导致帧率下降。需要关注窗口渲染顺序和时间分配。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant Main as App (main)
-      participant RT as RenderThread
-      participant BQ1 as BufferQueue (Main)
-      participant BQ2 as BufferQueue (Dialog)
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 Multi-Window (Dialog/PopupWindow)
-      VA->>Main: 🔔 VSync-app
-      activate Main
-      Main->>Main: 主窗口 Layout + Draw
-      Main->>RT: syncFrameState (主窗口)
-      Main->>Main: Dialog Layout + Draw
-      Main->>RT: syncFrameState (Dialog)
-      deactivate Main
-
-      activate RT
-      Note over RT: ⏱️ 串行处理多窗口
-      RT->>BQ1: queueBuffer (主窗口)
-      RT->>BQ2: queueBuffer (Dialog)
-      deactivate RT
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer (多 Surface)
-      SF->>SF: HWC 合成
-      deactivate SF
-
-      Note over VA,SF: ⚠️ RenderThread 串行化可能导致卡顿
-  thread_roles:
-    - thread: main
-      role: "多窗口 UI 管理"
-      description: "管理多个窗口的 View 树"
-    - thread: RenderThread
-      role: "渲染线程 (串行)"
-      description: "串行渲染多个窗口，可能成为瓶颈"
-
-  key_slices:
-    - name: "Dialog"
-      thread: any
-      description: "对话框相关操作"
-    - name: "PopupWindow"
-      thread: any
-      description: "弹出窗口操作"
-    - name: "Choreographer#doFrame"
-      thread: main
-      description: "同一帧内可能连续驱动多个窗口的 layout/draw"
-    - name: "syncFrameState"
-      thread: RenderThread
-      description: "多个窗口共享 RenderThread，同步与提交容易串行化"
-    - name: "DrawFrame"
-      thread: RenderThread
-      description: "GPU 渲染阶段（多窗口会放大工作量）"
-
+  source: "rendering_pipelines/S06_multi_window_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

@@ -20,7 +20,7 @@ meta:
   description: "现代 WebView + Viz/OOP-R，独立合成"
   icon: "web"
   family: webview
-  doc_path: "rendering_pipelines/webview_surface_control.md"
+  doc_path: rendering_pipelines/S09_webview_type.md
   # ----- Article-grounded signature (S09) -----
   s_article_ref: "S09"
   four_features:
@@ -52,57 +52,7 @@ detection:
     - thread: "1.ui"           # Flutter engine present → use Flutter pipeline
 
 teaching:
-  title: "WebView Surface Control 渲染管线"
-  summary: |
-    现代 WebView 使用 Viz (Visual Compositor) 和 OOP-R (Out-of-Process Rasterization)
-    进行渲染时，可能通过 SurfaceControl 独立提交到 SurfaceFlinger。
-    browser code 与 GPU / network services 通常仍在宿主 app 进程内；
-    是否启用该模式、是否完全不阻塞宿主 RenderThread，要以具体设备和 trace 为准。
-
-  mermaid: |
-    sequenceDiagram
-      participant CR as CrRendererMain
-      participant Viz as VizCompositorThread
-      participant SC as SurfaceControl
-      participant TX as Transaction
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over CR,SF: 📍 WebView Surface Control (条件成立时的独立合成)
-      CR->>CR: Blink 渲染网页
-      CR->>Viz: 提交合成任务
-
-      activate Viz
-      Viz->>Viz: GPU 光栅化 Tiles
-      Viz->>Viz: 合成网页 Layers
-      Viz->>SC: 创建/更新 SurfaceControl
-      Viz->>TX: ASurfaceTransaction
-      TX->>SF: 独立提交 Transaction
-      deactivate Viz
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over CR,SF: ✨ 独立于 App RenderThread，不阻塞 UI
-  thread_roles:
-    - thread: VizCompositorThread
-      role: "Viz 合成器"
-      description: "Chromium 可视化合成器，线程名可能表现为 VizCompositorThread 或相近名称"
-    - thread: CrRendererMain
-      role: "Chromium 渲染"
-      description: "WebView 内容渲染"
-
-  key_slices:
-    - name: "VizCompositorThread (hint)"
-      thread: VizCompositorThread
-      description: "Viz 合成提示信号，未必稳定可见"
-    - name: "SurfaceControl"
-      thread: any
-      description: "SurfaceControl 事务"
-
+  source: "rendering_pipelines/S09_webview_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

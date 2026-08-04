@@ -24,7 +24,16 @@ prerequisites:
   modules:
     - android.gpu.work_period
 
-inputs: []
+inputs:
+  - name: package
+    type: string
+    required: false
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
 
 steps:
   - id: gpu_work
@@ -47,9 +56,23 @@ steps:
           type: number
     sql: |
       SELECT
-        ts,
-        ROUND(dur / 1e6, 2) AS dur_ms,
-        uid
-      FROM android_gpu_work_period_track
-      ORDER BY ts ASC
+        s.ts,
+        ROUND(s.dur / 1e6, 2) AS dur_ms,
+        t.uid,
+        t.gpu_id
+      FROM android_gpu_work_period_track t
+      JOIN slice s ON s.track_id = t.id
+      WHERE s.dur > 0
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+        AND (
+          '${package}' = ''
+          OR EXISTS (
+            SELECT 1
+            FROM package_list p
+            WHERE p.uid = t.uid
+              AND p.package_name GLOB '${package}*'
+          )
+        )
+      ORDER BY s.ts ASC
       LIMIT 100

@@ -156,6 +156,7 @@ describe('createQuickConfig', () => {
     const config = createQuickConfig(loadClaudeConfig({ maxTurns: 60 }));
 
     expect(config.maxTurns).toBe(50);
+    expect(config.quickTargetTurns).toBe(5);
     expect(config.enableVerification).toBe(false);
     expect(config.enableSubAgents).toBe(false);
   });
@@ -166,6 +167,16 @@ describe('createQuickConfig', () => {
     const config = createQuickConfig(loadClaudeConfig({ maxTurns: 60 }));
 
     expect(config.maxTurns).toBe(8);
+    expect(config.quickTargetTurns).toBe(5);
+  });
+
+  it('allows quick target override and clamps it to quick max turns', () => {
+    process.env.CLAUDE_QUICK_MAX_TURNS = '8';
+    process.env.CLAUDE_QUICK_TARGET_TURNS = '12';
+    const config = createQuickConfig(loadClaudeConfig({ maxTurns: 60 }));
+
+    expect(config.maxTurns).toBe(8);
+    expect(config.quickTargetTurns).toBe(8);
   });
 
   it('uses shared quick max-turn config as fallback', () => {
@@ -198,7 +209,28 @@ describe('createQuickConfig', () => {
     expect(createQuickConfig(loadClaudeConfig({ maxTurns: 60 }), {}).maxTurns).toBe(50);
     expect(createQuickConfig(loadClaudeConfig({ maxTurns: 60 }), {
       CLAUDE_QUICK_MAX_TURNS: '6',
+      CLAUDE_QUICK_TARGET_TURNS: '4',
     }).maxTurns).toBe(6);
+    expect(createQuickConfig(loadClaudeConfig({ maxTurns: 60 }), {
+      CLAUDE_QUICK_MAX_TURNS: '6',
+      CLAUDE_QUICK_TARGET_TURNS: '4',
+    }).quickTargetTurns).toBe(4);
+  });
+
+  it('uses the light model for quick calls from an isolated SDK env', () => {
+    const config = createQuickConfig(
+      {
+        ...loadClaudeConfig({
+          maxTurns: 60,
+          model: 'deepseek-v4-pro',
+        }),
+        lightModel: 'base-light-model',
+      },
+      { CLAUDE_LIGHT_MODEL: 'deepseek-v4-flash' },
+    );
+
+    expect(config.model).toBe('deepseek-v4-flash');
+    expect(config.lightModel).toBe('deepseek-v4-flash');
   });
 });
 
@@ -210,7 +242,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     process.env.CLAUDE_MODEL = 'mimo-main';
     process.env.CLAUDE_LIGHT_MODEL = 'mimo-light';
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.runtime).toBe('claude-agent-sdk');
     expect(diagnostics.providerMode).toBe('anthropic_compatible_proxy');
@@ -226,7 +258,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     delete process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_AUTH_TOKEN = 'sk-deepseek-test';
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.providerMode).toBe('anthropic_compatible_proxy');
     expect(diagnostics.configured).toBe(true);
@@ -240,7 +272,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
     delete process.env.CLAUDE_CODE_USE_VERTEX;
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.providerMode).toBe('unconfigured');
     expect(diagnostics.configured).toBe(false);
@@ -253,7 +285,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
     delete process.env.CLAUDE_CODE_USE_VERTEX;
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.providerMode).toBe('unconfigured');
     expect(diagnostics.configured).toBe(false);
@@ -269,7 +301,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     process.env.ANTHROPIC_VERTEX_PROJECT_ID = 'smartperfetto-project';
     process.env.CLOUD_ML_REGION = 'us-central1';
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.providerMode).toBe('google_vertex');
     expect(diagnostics.configured).toBe(true);
@@ -290,7 +322,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     process.env.CLAUDE_CODE_USE_VERTEX = '1';
     delete process.env.ANTHROPIC_VERTEX_PROJECT_ID;
 
-    const diagnostics = getClaudeRuntimeDiagnostics();
+    const diagnostics = getClaudeRuntimeDiagnostics(null);
 
     expect(diagnostics.providerMode).toBe('google_vertex');
     expect(diagnostics.configured).toBe(false);

@@ -180,10 +180,13 @@ describe('enterprise report routes', () => {
     const getRes = await ssoHeaders(request(app).get(`/api/reports/${reportId}`));
     expect(getRes.status).toBe(200);
     expect(getRes.text).toContain('enterprise report');
+    expect(getRes.headers['content-security-policy']).toContain('sandbox allow-scripts');
+    expect(getRes.headers['content-security-policy']).toContain("connect-src 'none'");
 
     const exportRes = await ssoHeaders(request(app).get(`/api/reports/${reportId}/export`));
     expect(exportRes.status).toBe(200);
     expect(exportRes.text).toContain('enterprise report');
+    expect(exportRes.headers['content-security-policy']).toContain('sandbox allow-scripts');
     expect(readAuditActions()).toEqual(expect.arrayContaining([
       'report.read',
       'report.exported',

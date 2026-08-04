@@ -20,7 +20,7 @@ meta:
   description: "原生 Vulkan 渲染，现代高性能图形 API"
   icon: "vulkan"
   family: graphics
-  doc_path: "rendering_pipelines/vulkan_native.md"
+  doc_path: rendering_pipelines/S08_native_graphics_type.md
   # ----- Article-grounded signature (S08) -----
   s_article_ref: "S08"
   four_features:
@@ -67,63 +67,7 @@ detection:
       weight: 5
 
 teaching:
-  title: "Vulkan Native 渲染管线"
-  summary: |
-    使用 Vulkan API 进行高性能渲染。Vulkan 提供更低的 CPU 开销、
-    更好的多线程支持和更精细的 GPU 控制。适用于高端游戏和专业图形应用。
-    Swappy 库可提供更稳的帧节拍控制。不要把 `vkAcquireNextImageKHR` /
-    `vkQueuePresentKHR` 是否阻塞当作固定行为，它们在不同设备上可能表现不同。
-
-  mermaid: |
-    sequenceDiagram
-      participant App as App Thread
-      participant VK as Vulkan Thread
-      participant Swappy as Frame Pacing
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over App,SF: 📍 Vulkan Native 渲染链路
-      VK->>VK: vkAcquireNextImage
-      activate VK
-      VK->>VK: vkBeginCommandBuffer
-      VK->>VK: Record Draw Commands
-      VK->>VK: vkEndCommandBuffer
-      VK->>VK: vkQueueSubmit
-      VK->>VK: vkQueuePresentKHR
-      deactivate VK
-
-      Swappy-->>VK: Frame Pacing 控制
-      BQ-->>SF: Buffer Ready
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC 合成
-      deactivate SF
-
-      Note over App,SF: 🚀 现代高性能图形 API，支持 Frame Pacing
-  thread_roles:
-    - thread: main
-      role: "应用逻辑"
-      description: "游戏/应用主循环"
-    - thread: Vulkan
-      role: "Vulkan 渲染线程"
-      description: "记录/提交 Vulkan 命令（线程名通常包含 Vulkan/Vk/Render 等关键词）"
-    - thread: SurfaceFlinger
-      role: "合成显示"
-      description: "latch Buffer 并提交到 HWC"
-
-  key_slices:
-    - name: "vkQueuePresentKHR"
-      thread: any
-      description: "提交帧到显示；可见但不代表其阻塞行为稳定"
-    - name: "vkCmdDraw*"
-      thread: any
-      description: "Vulkan 绘制命令"
-    - name: "Swappy"
-      thread: any
-      description: "帧节拍控制"
-
+  source: "rendering_pipelines/S08_native_graphics_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

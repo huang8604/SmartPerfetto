@@ -8,12 +8,15 @@ This file is part of SmartPerfetto. See LICENSE for details.
 
 [English](windows-exe.en.md) | [中文](windows-exe.md)
 
+<!-- i18n-headings: paired -->
+
 > 当前 Windows 命令是跨平台免安装打包流程的兼容入口。完整三平台流程见
 > [免安装包打包](portable-packaging.md)。
 
 SmartPerfetto 的 Windows 包不是单文件二进制。`SmartPerfetto.exe` 是启动器，
 同目录还包含 Windows Node.js 24 runtime、Windows 原生 `node_modules`、
-预构建 Perfetto UI、后端运行时代码和固定版本的 `trace_processor_shell.exe`。
+预构建 Perfetto UI、后端运行时代码、固定版本的 `trace_processor_shell.exe` 和
+签名 Android Internals Knowledge Pack。
 用户只需要解压并双击 `SmartPerfetto.exe`，不需要安装 Docker 或 Node.js。
 
 ## 维护者打包流程
@@ -38,23 +41,26 @@ npm run package:windows-exe
 输出位置：
 
 ```text
-dist/windows-exe/smartperfetto-v1.0.1-windows-x64/SmartPerfetto.exe
-dist/windows-exe/smartperfetto-v1.0.1-windows-x64.zip
+dist/windows-exe/smartperfetto-v<version>-windows-x64/SmartPerfetto.exe
+dist/windows-exe/smartperfetto-v<version>-windows-x64.zip
 ```
 
 脚本会执行这些步骤：
 
 1. 切到 Node.js 24，并安装/校验当前平台的 backend 依赖。
 2. 运行 `cd backend && npm run build`。
-3. 复制 `backend/dist`、`backend/skills`、`backend/strategies`、`backend/sql`、`backend/data`、`backend/public` 和根目录 `frontend/` 预构建包。
+3. 复制 `backend/dist`、`backend/skills`、`backend/strategies`、`backend/sql`、
+   `backend/data`、`backend/knowledge`、`backend/public` 和根目录 `frontend/`
+   预构建包。
 4. 在发布目录里用 `npm ci --omit=dev --include=optional --os=win32 --cpu=x64` 安装 Windows x64 production 依赖。
 5. 校验 Windows 版 `better-sqlite3` native module 和 `@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe` 已存在。
 6. 下载并校验 Node.js 24 Windows x64 zip。
-7. 下载并校验 `v56.0/windows-amd64/trace_processor_shell.exe`。
+7. 按 `scripts/trace-processor-pin.env` 下载并校验 Windows
+   `trace_processor_shell.exe`，不在文档中复制版本号。
 8. 用 Go 交叉编译 `SmartPerfetto.exe` 启动器。
 9. 写入 `PACKAGE-MANIFEST.json`，记录版本、zip 顶层目录、git commit、
-   dirty 状态、Node runtime 和 trace processor pin。
-10. 生成 zip 包并校验文件名、顶层目录、包内版本和 manifest。
+   dirty 状态、Node runtime、trace processor pin 和 Knowledge Pack。
+10. 生成 zip 包并校验文件名、顶层目录、包内版本、Knowledge Pack 哈希和 manifest。
 
 ## 发布流程
 
@@ -65,15 +71,16 @@ x64 asset。
 正式发布前先同步并提交版本号：
 
 ```bash
-npm run version:set -- 1.0.1
+npm run version:set -- <version>
+npm run version:sync -- --check
 git add package.json package-lock.json backend/package.json backend/package-lock.json
-git commit -m "chore: release v1.0.1"
+git commit -m "chore: release v<version>"
 ```
 
 然后发布：
 
 ```bash
-npm run release:windows-exe -- 1.0.1
+npm run release:windows-exe -- <version>
 ```
 
 脚本会：
@@ -84,15 +91,15 @@ npm run release:windows-exe -- 1.0.1
 3. 重新打包 Windows x64 zip。
 4. 校验 zip 文件名、顶层目录、包内版本、manifest commit 和 dirty 状态。
 5. 生成 release notes，包含 zip 的 SHA256、大小和目标 commit。
-6. 创建或更新 GitHub Release `v1.0.1`，并把 release tag target 指向目标 commit。
-7. 上传带版本号的文件名，例如 `smartperfetto-v1.0.1-windows-x64.zip`，
+6. 创建或更新 GitHub Release `v<version>`，并把 release tag target 指向目标 commit。
+7. 上传带版本号的文件名，例如 `smartperfetto-v<version>-windows-x64.zip`，
    方便用户区分不同版本的离线包。
 
 默认创建 draft release。确认 Windows 真机 smoke 后，可以在 GitHub UI 里发布；
 如果要直接发布，运行：
 
 ```bash
-npm run release:windows-exe -- 1.0.1 --no-draft
+npm run release:windows-exe -- <version> --no-draft
 ```
 
 上传 release 包默认要求 git worktree 干净，避免 release tag 指向的源码版本和
@@ -102,16 +109,16 @@ zip 内版本不一致。只做 draft/test 上传且已经确认可以接受本�
 只同步版本号但不发布：
 
 ```bash
-npm run version:set -- 1.0.1
+npm run version:set -- <version>
 npm run version:sync -- --check
 ```
 
 ## 用户运行流程
 
-1. 解压 `smartperfetto-v1.0.1-windows-x64.zip` 到普通本地目录，例如 `C:\SmartPerfetto`。
+1. 解压 `smartperfetto-v<version>-windows-x64.zip` 到普通本地目录，例如 `C:\SmartPerfetto`。
 2. 双击 `SmartPerfetto.exe`。
-3. 浏览器通常会自动打开；如果没有，手动打开 [http://localhost:10000](http://localhost:10000)。
-4. AI 分析需要在 UI 里配置 Provider profile；如需 env 凭证，在解压目录下创建 `data\env` 并填写 provider 配置，然后重启 `SmartPerfetto.exe`。
+3. 浏览器通常会自动打开；如果没有，按启动器输出打开 [http://127.0.0.1:10000](http://127.0.0.1:10000)（默认端口被占用时，启动器会选择其他端口）。
+4. AI 分析需要在 UI 里配置 Provider profile；如需 env 凭证，在 `%LOCALAPPDATA%\SmartPerfetto\env` 写入 provider 配置，然后重启 `SmartPerfetto.exe`。不要把持久凭证写入解压目录。
 5. 使用时保持启动器窗口打开；按 `Ctrl+C` 会停止后端、前端和 trace processor 子进程。
 
 ## 验证
@@ -120,18 +127,20 @@ npm run version:sync -- --check
 Windows 原生 smoke。发布前应在真实 Windows x64 机器上做一次最小验证：
 
 ```powershell
-Expand-Archive .\smartperfetto-v1.0.1-windows-x64.zip -DestinationPath C:\SmartPerfettoSmoke
-C:\SmartPerfettoSmoke\smartperfetto-v1.0.1-windows-x64\SmartPerfetto.exe
+Expand-Archive .\smartperfetto-v<version>-windows-x64.zip -DestinationPath C:\SmartPerfettoSmoke
+C:\SmartPerfettoSmoke\smartperfetto-v<version>-windows-x64\SmartPerfetto.exe
 ```
 
 然后检查：
 
-- [http://localhost:10000](http://localhost:10000) 能打开 Perfetto UI。
-- [http://localhost:3000/health](http://localhost:3000/health) 返回 `status: "OK"`。
+- 启动器输出的 `http://127.0.0.1:<port>` 能打开 Perfetto UI。
+- 启动器输出的后端 `http://127.0.0.1:<port>/health` 返回 `status: "OK"`。
 - 上传一条小 trace 后，后端日志里能看到 `trace_processor_shell.exe` 启动。
+- 包内 CLI 的 `smp knowledge-pack status --format json` 能解析 bundled/active Pack。
 
-如果默认端口被本机其他服务占用，启动可执行文件前设置
-`SMARTPERFETTO_BACKEND_PORT` 或 `SMARTPERFETTO_FRONTEND_PORT`。
+launcher 优先使用后端端口 `3000`、前端端口 `10000`，默认端口被占用时会自动选择其他可用端口。
+以 launcher 打印的 URL 为准。只有需要固定端口时才设置 `SMARTPERFETTO_BACKEND_PORT`
+或 `SMARTPERFETTO_FRONTEND_PORT`；显式配置的端口不可用时会快速失败。
 
 ## 限制
 

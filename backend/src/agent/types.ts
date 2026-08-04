@@ -632,6 +632,7 @@ export interface ModelCallResult {
   latencyMs: number;
   success: boolean;
   error?: string;
+  errorCode?: 'context_overflow' | 'provider_error';
 }
 
 export interface EnsembleResult {

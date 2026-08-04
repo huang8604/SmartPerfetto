@@ -5,11 +5,13 @@
 import type { TraceProcessorLeaseMode } from './traceProcessorLeaseStore';
 
 export type TraceProcessorTraceSide = 'current' | 'reference';
+export type TraceProcessorPaneSide = 'left' | 'right' | 'top' | 'bottom';
 export type TraceProcessorDatabaseIsolation = 'shared' | 'isolated';
 
 export interface TraceProcessorDatabaseScope {
   traceId: string;
   traceSide?: TraceProcessorTraceSide;
+  paneSide?: TraceProcessorPaneSide;
   processorKey: string;
   isolation: TraceProcessorDatabaseIsolation;
   leaseId?: string;
@@ -23,6 +25,7 @@ export interface TraceProcessorConnectionScope {
 
 export interface TraceProcessorQueryProvenance {
   traceSide?: TraceProcessorTraceSide;
+  paneSide?: TraceProcessorPaneSide;
   traceId: string;
   processorKey: string;
   databaseScope: TraceProcessorDatabaseScope;
@@ -32,6 +35,7 @@ export interface TraceProcessorQueryProvenance {
 export interface TraceProcessorConnectionInput {
   traceId: string;
   traceSide?: TraceProcessorTraceSide;
+  paneSide?: TraceProcessorPaneSide;
   leaseId?: string;
   leaseMode?: TraceProcessorLeaseMode | string;
 }
@@ -53,6 +57,7 @@ export function buildTraceProcessorDatabaseScope(
   return {
     traceId: input.traceId,
     ...(input.traceSide ? { traceSide: input.traceSide } : {}),
+    ...(input.paneSide ? { paneSide: input.paneSide } : {}),
     processorKey,
     isolation,
     ...(input.leaseId ? { leaseId: input.leaseId } : {}),
@@ -70,6 +75,7 @@ export function buildTraceProcessorQueryProvenance(
   };
   return {
     ...(input.traceSide ? { traceSide: input.traceSide } : {}),
+    ...(input.paneSide ? { paneSide: input.paneSide } : {}),
     traceId: input.traceId,
     processorKey: databaseScope.processorKey,
     databaseScope,

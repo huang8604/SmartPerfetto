@@ -3,7 +3,8 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { HTMLReportGenerator } from '../htmlReportGenerator';
-import type { DataEnvelope } from '../../types/dataContract';
+import {createDataEnvelope, type DataEnvelope} from '../../types/dataContract';
+import {QUERY_REVIEW_SCHEMA_VERSION, type QueryReviewV1} from '../../types/queryReviewContract';
 
 const originalOutputLanguage = process.env.SMARTPERFETTO_OUTPUT_LANGUAGE;
 
@@ -31,6 +32,35 @@ function makeEnvelopeWithFrameId(frameId: number): DataEnvelope {
       rows: [[frameId, 16.9]],
     } as any,
   };
+}
+
+function makeEnvelopeWithQueryReview(): DataEnvelope {
+  const queryReview: QueryReviewV1 = {
+    schemaVersion: QUERY_REVIEW_SCHEMA_VERSION,
+    id: 'qr:execute_sql:report',
+    producer: {kind: 'execute_sql', sourceToolCallId: 'execute_sql:report'},
+    title: 'SQL review',
+    purpose: 'Review SQL output',
+    source: {evidenceRefId: 'data:sql:report', queryHash: 'hash-report'},
+    reads: [{table: 'thread_state', confidence: 'observed'}],
+    filters: [{expression: 'dur > 0', confidence: 'observed'}],
+    outputShape: [{name: 'dur_ms', type: 'duration', required: true}],
+    guardrails: [{ruleId: 'safe-duration-boundary', message: 'review duration handling', severity: 'warning'}],
+    limitations: ['review-only metadata'],
+    observedExecution: {executed: true, executableSql: 'SELECT dur FROM thread_state WHERE dur > 0', rowCount: 1},
+    allowedUse: 'review_metadata_only',
+  };
+  return createDataEnvelope(
+    {columns: ['dur_ms'], rows: [[10]]},
+    {
+      type: 'sql_result',
+      source: 'execute_sql',
+      title: 'SQL Query',
+      evidenceRefId: 'data:sql:report',
+      queryHash: 'hash-report',
+      queryReview,
+    },
+  );
 }
 
 describe('HTMLReportGenerator', () => {
@@ -72,6 +102,25 @@ describe('HTMLReportGenerator', () => {
     expect(html).not.toContain('1,435,508');
   });
 
+  test('escapes nested report keys and object values', () => {
+    const generator = new HTMLReportGenerator();
+    const renderDeepAnalysisCard = (
+      generator as unknown as {
+        renderDeepAnalysisCard(item: unknown, index: number): string;
+      }
+    ).renderDeepAnalysisCard.bind(generator);
+    const payload = '</span><img src=x onerror="fetch(\'/api/v1/providers\')">';
+
+    const html = renderDeepAnalysisCard({
+      title: 'safe',
+      [`metric_${payload}`]: {nested: {payload}},
+    }, 0);
+
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('</span><img');
+    expect(html).toContain('&lt;/span&gt;&lt;img');
+  });
+
   test('renders partial warning for degraded agent results', () => {
     const generator = new HTMLReportGenerator();
     const message = '最终结果质量闸门发现 provider 没有产出可独立交付的完整结论';
@@ -99,6 +148,122 @@ describe('HTMLReportGenerator', () => {
 
     expect(html).toContain('结果完整性提示');
     expect(html).toContain(message);
+  });
+
+  test('renders query review sidecar in data envelope section', () => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-query-review',
+      query: '分析线程状态',
+      timestamp: Date.now(),
+      hypotheses: [],
+      dialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [makeEnvelopeWithQueryReview()],
+      result: {
+        sessionId: 'session-query-review',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'ok',
+        confidence: 0.8,
+        rounds: 1,
+        totalDurationMs: 1000,
+      },
+    });
+
+    expect(html).toContain('Query Review');
+    expect(html).toContain('qr:execute_sql:report');
+    expect(html).toContain('thread_state');
+    expect(html).toContain('safe-duration-boundary');
+  });
+
+  test('renders analysis receipt aggregate audit section', () => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-receipt',
+      query: '分析启动慢',
+      timestamp: Date.now(),
+      hypotheses: [],
+      dialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      result: {
+        sessionId: 'session-receipt',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'ok',
+        confidence: 0.8,
+        rounds: 1,
+        totalDurationMs: 1000,
+        analysisReceipt: {
+          schemaVersion: 1,
+          runId: 'run-receipt',
+          sessionId: 'session-receipt',
+          traceId: 'trace-receipt',
+          mode: 'fast',
+          resolvedMode: 'quick',
+          providerId: null,
+          generatedAt: 1,
+          traceEvidence: {
+            sqlCount: 2,
+            skillCount: 1,
+            dataEnvelopeCount: 3,
+            artifactCount: 1,
+            evidenceRefCount: 4,
+          },
+          nonEvidenceContext: {
+            frontendPrequeryCount: 1,
+            memoryHintCount: 2,
+            conversationContextCount: 3,
+            strategyHintCount: 4,
+          },
+          claimAudit: {
+            totalClaims: 5,
+            verifiedClaims: 4,
+            unsupportedClaims: 1,
+            uncertainClaims: 0,
+          },
+          qualityGates: {
+            finalReportContract: 'passed',
+            claimVerification: 'partial',
+            identityResolution: 'not_applicable',
+          },
+          outputs: {
+            reportId: 'report-receipt',
+            resultSnapshotId: 'snapshot-receipt',
+          },
+        },
+        uiActionProposals: [{
+          schemaVersion: 1,
+          id: 'ui-open_evidence_table-1',
+          kind: 'open_evidence_table',
+          title: '打开启动证据表',
+          reason: '查看支撑结论的原始证据行',
+          source: {
+            evidenceRefId: 'data:startup:summary:123',
+            artifactId: 'artifact-startup',
+            skillId: 'startup_analysis',
+          },
+          payload: {
+            artifactId: 'artifact-startup',
+            evidenceRefId: 'data:startup:summary:123',
+          },
+          requiresConfirmation: true,
+        }],
+      },
+    });
+
+    expect(html).toContain('分析回执');
+    expect(html).toContain('Trace 证据');
+    expect(html).toContain('Evidence refs');
+    expect(html).toContain('report-receipt');
+    expect(html).toContain('snapshot-receipt');
+    expect(html).toContain('UI 动作提案');
+    expect(html).toContain('打开启动证据表');
+    expect(html).toContain('artifact-startup');
+    expect(html).not.toContain('SELECT ');
   });
 
   test('formats layered duration-like keys in ms only', () => {
@@ -178,6 +343,7 @@ describe('HTMLReportGenerator', () => {
         timestamp: Date.now(),
         evidenceRefId: 'data:sql_summary:reference:trace-hash:query-hash:tool-hash',
         traceSide: 'reference',
+        paneSide: 'right',
         traceId: 'trace-ref',
         queryHash: 'query-hash',
         sourceToolCallId: 'execute_sql_on:1:params_hash:reference',
@@ -224,6 +390,7 @@ describe('HTMLReportGenerator', () => {
     });
 
     expect(html).toContain('Reference SQL Summary');
+    expect(html).toContain('右侧/参考 Trace');
     expect(html).toContain('来源: execute_sql');
     expect(html).toContain('DataEnvelope.overview');
     expect(html).toContain('阶段: p1 Compare baseline');

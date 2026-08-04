@@ -3,11 +3,16 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
+import type { TracePaneSide, TracePairContext, TraceSource } from './types';
 
 const MCP_PREFIX = 'mcp__smartperfetto__';
 const MAX_MESSAGE_CHARS = 220;
 const MAX_PLAN_MESSAGE_CHARS = 560;
 const MAX_SQL_MESSAGE_CHARS = 300;
+
+export interface ToolNarrationOptions {
+  tracePairContext?: TracePairContext;
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value === 'string') {
@@ -43,6 +48,39 @@ function shortToolName(toolName: string): string {
     ? toolName.slice(MCP_PREFIX.length)
     : toolName;
   return cleaned.replace(/^smartperfetto__/, '');
+}
+
+function normalizeTraceSource(value: string): TraceSource {
+  return value === 'reference' ? 'reference' : 'current';
+}
+
+function tracePaneLabel(side: TracePaneSide, language: OutputLanguage): string {
+  switch (side) {
+    case 'left':
+      return localize(language, '左侧', 'left pane');
+    case 'right':
+      return localize(language, '右侧', 'right pane');
+    case 'top':
+      return localize(language, '上方', 'top pane');
+    case 'bottom':
+      return localize(language, '下方', 'bottom pane');
+  }
+}
+
+function traceRoleLabel(traceSide: TraceSource, language: OutputLanguage): string {
+  return traceSide === 'reference'
+    ? localize(language, '参考 Trace', 'reference trace')
+    : localize(language, '当前 Trace', 'current trace');
+}
+
+function comparisonTraceLabel(
+  traceSide: TraceSource,
+  language: OutputLanguage,
+  options: ToolNarrationOptions,
+): string {
+  const pane = options.tracePairContext?.panes.find(item => item.traceSide === traceSide);
+  const role = traceRoleLabel(traceSide, language);
+  return pane ? `${tracePaneLabel(pane.side, language)}/${role}` : role;
 }
 
 function parseArray(value: unknown): Record<string, unknown>[] {
@@ -259,6 +297,7 @@ export function formatToolCallNarration(
   rawToolName: string,
   rawArgs: unknown,
   language: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
+  options: ToolNarrationOptions = {},
 ): string {
   const toolName = shortToolName(readString(rawToolName) || 'unknown');
   const args = asRecord(rawArgs);
@@ -309,12 +348,10 @@ export function formatToolCallNarration(
       return shorten(localize(language, `执行 SQL：${intent}`, `Run SQL: ${intent}`), MAX_SQL_MESSAGE_CHARS);
     }
     case 'execute_sql_on': {
-      const trace = readString(args.trace) || 'current';
+      const trace = normalizeTraceSource(readString(args.trace) || readString(args.traceSide));
       const sql = readString(args.sql);
       const intent = sqlIntent(sql, language);
-      const traceLabel = trace === 'reference'
-        ? localize(language, '参考 Trace', 'reference trace')
-        : localize(language, '当前 Trace', 'current trace');
+      const traceLabel = comparisonTraceLabel(trace, language, options);
       return shorten(
         localize(language, `执行对比 SQL：在${traceLabel}${intent}，验证两条 Trace 的差异`, `Run comparison SQL on the ${traceLabel}: ${intent}; verify trace differences`),
         MAX_SQL_MESSAGE_CHARS,
@@ -327,10 +364,12 @@ export function formatToolCallNarration(
       const paramsText = params
         ? localize(language, `；参数：${params}`, `; params: ${params}`)
         : '';
+      const currentTraceLabel = comparisonTraceLabel('current', language, options);
+      const referenceTraceLabel = comparisonTraceLabel('reference', language, options);
       return shorten(localize(
         language,
-        `对比 Skill ${skillId}：在当前 Trace 和参考 Trace 上同时${purpose}${paramsText}`,
-        `Compare Skill ${skillId}: ${purpose} on both current and reference traces${paramsText}`,
+        `对比 Skill ${skillId}：在 ${currentTraceLabel} 和 ${referenceTraceLabel} 上同时${purpose}${paramsText}`,
+        `Compare Skill ${skillId}: ${purpose} on both ${currentTraceLabel} and ${referenceTraceLabel}${paramsText}`,
       ));
     }
     case 'get_comparison_context':

@@ -15,9 +15,16 @@ tier: B
 
 meta:
   display_name: "主线程文件 IO (区间)"
-  description: "统计区间内主线程文件 IO 相关切片耗时"
+  description: "统计区间内主线程文件/SQLite 命名切片耗时；命名切片是线索，不单独证明底层存储阻塞"
   icon: "folder"
-  tags: [main_thread, io, startup, atomic]
+  tags: [main_thread, io, file_io, sqlite, database, startup, atomic]
+
+triggers:
+  keywords:
+    zh: [主线程 IO, 文件 IO, SQLite, 数据库切片, 磁盘访问]
+    en: [main thread IO, file IO, SQLite, database slice, disk access]
+  patterns:
+    - "(?i)(main thread|主线程).*(file|sqlite|database|io|文件|数据库)"
 
 inputs:
   - name: start_ts

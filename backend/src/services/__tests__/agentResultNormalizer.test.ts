@@ -10,6 +10,7 @@ import {
   normalizeResultForReport,
 } from '../agentResultNormalizer';
 import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
+import type { ConclusionContract } from '../../agent/core/conclusionContract';
 import { runClaimVerification } from '../verifier/claimVerificationRunner';
 import type { DataEnvelope } from '../../types/dataContract';
 
@@ -190,6 +191,58 @@ describe('deriveEvidenceBackedConclusionContractForNarrative', () => {
     )).not.toBe(true);
   });
 
+  test('keeps fallback claims, evidence chain, and metadata from the same source', () => {
+    const envelopes: DataEnvelope[] = [{
+      meta: {
+        type: 'skill_result',
+        version: '2.0.0',
+        source: 'startup_analysis',
+        skillId: 'startup_analysis',
+        stepId: 'startup_overview',
+        evidenceRefId: 'data:skill:startup_analysis:startup_overview:current:abc',
+        traceId: 'trace-1',
+        traceSide: 'current',
+        timestamp: 1,
+      },
+      display: {
+        layer: 'overview',
+        format: 'table',
+        title: '启动概览',
+      },
+      data: {
+        columns: ['package', 'startup_type', 'ttid_ms'],
+        rows: [['com.example.launch.aosp.heavy', 'cold', 1912]],
+      },
+    }];
+    const parsed: ConclusionContract = {
+      schemaVersion: 'conclusion_contract_v1',
+      mode: 'initial_report',
+      conclusions: [{ rank: 1, statement: '旧结论' }],
+      clusters: [],
+      evidenceChain: [{ conclusionId: 'C1', text: 'legacy provider evidence chain' }],
+      uncertainties: [],
+      nextSteps: [],
+      metadata: {
+        claimDerivation: 'explicit_model_contract',
+        claimVerificationScope: 'explicit_claims',
+      },
+    };
+
+    const contract = deriveEvidenceBackedConclusionContractForNarrative(
+      '# 启动性能分析报告\n\n## 综合结论\n\ncom.example.launch.aosp.heavy 是 cold 启动，TTID=1912ms。',
+      envelopes,
+      { existingContract: parsed },
+    );
+
+    expect(contract?.claims?.length).toBeGreaterThan(0);
+    expect(contract?.evidenceChain.some(item => item.text === 'legacy provider evidence chain')).toBe(false);
+    expect(contract?.evidenceChain.some(item =>
+      item.text.includes('data:skill:startup_analysis:startup_overview:current:abc'),
+    )).toBe(true);
+    expect(contract?.metadata?.claimDerivation).toBe('narrative_evidence_match');
+    expect(contract?.metadata?.claimVerificationScope).toBe('sampled_narrative_evidence');
+  });
+
   test('replaces provider claims when every structured reference is unresolvable but narrative evidence matches data', () => {
     const envelopes: DataEnvelope[] = [{
       meta: {
@@ -352,6 +405,73 @@ describe('deriveEvidenceBackedConclusionContractForNarrative', () => {
     }).claimVerificationResult;
     expect(verification.status).toBe('passed');
   });
+
+  test('replaces row-only identity claims with verifier-ready process identity cells', () => {
+    const envelopes: DataEnvelope[] = [{
+      meta: {
+        type: 'skill_result',
+        version: '2.0.0',
+        source: 'process_identity_resolver',
+        skillId: 'process_identity_resolver',
+        stepId: 'current',
+        evidenceRefId: 'data:skill:process_identity_resolver:current:identity',
+        traceId: 'trace-1',
+        traceSide: 'current',
+        timestamp: 1,
+        identityStatus: 'verified',
+        identityRefId: 'identity:trace-1:current:process:885',
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: '进程身份候选',
+      },
+      data: {
+        columns: ['process_name', 'package_name', 'pid', 'upid', 'confidence_score'],
+        rows: [['com.example.wechatfriendforcustomscroller', 'com.example.wechatfriendforcustomscroller', 13534, 885, 100]],
+      },
+    }];
+    const parsed: ConclusionContract = {
+      schemaVersion: 'conclusion_contract_v1',
+      mode: 'focused_answer',
+      conclusions: [],
+      clusters: [],
+      evidenceChain: [],
+      claims: [{
+        id: 'C2',
+        text: '主要进程名为 com.example.wechatfriendforcustomscroller，PID 为 13534，UPID 为 885',
+        kind: 'identity',
+        references: [{
+          evidenceRefId: 'data:skill:process_identity_resolver:current:identity',
+          sourceRef: '进程身份候选',
+          rowIndex: 0,
+        }],
+      }],
+      uncertainties: [],
+      nextSteps: [],
+    };
+
+    const contract = deriveEvidenceBackedConclusionContractForNarrative(
+      '这个 trace 的主要进程名为 com.example.wechatfriendforcustomscroller，PID 为 13534，UPID 为 885。',
+      envelopes,
+      { existingContract: parsed, mode: 'focused_answer' },
+    );
+
+    expect(contract?.metadata?.replacedUnresolvableProviderClaims).toBe(true);
+    const columns = new Set(contract?.claims?.flatMap(claim =>
+      claim.references.map(ref => ref.column).filter(Boolean),
+    ));
+    expect(columns.has('process_name')).toBe(true);
+    expect(columns.has('pid')).toBe(true);
+    expect(columns.has('upid')).toBe(true);
+
+    const verification = runClaimVerification({
+      conclusionContract: contract,
+      dataEnvelopes: envelopes,
+      policy: 'record_only',
+    }).claimVerificationResult;
+    expect(verification.status).toBe('passed');
+  });
 });
 
 describe('normalizeResultForReport', () => {
@@ -434,5 +554,65 @@ describe('normalizeResultForReport', () => {
     expect(out.conclusionContract?.claims?.some(claim =>
       claim.references.some(ref => ref.column === 'ttid_ms' && ref.value === 1912),
     )).toBe(true);
+  });
+
+  test('preserves sidecar metadata while normalizing report text', () => {
+    const receipt = {
+      schemaVersion: 1,
+      runId: 'run-1',
+      sessionId: 'agent-test',
+      traceId: 'trace-1',
+      mode: 'auto',
+      resolvedMode: 'full',
+      providerId: null,
+      generatedAt: 1,
+      traceEvidence: {
+        sqlCount: 0,
+        skillCount: 0,
+        dataEnvelopeCount: 0,
+        artifactCount: 0,
+        evidenceRefCount: 0,
+      },
+      nonEvidenceContext: {
+        frontendPrequeryCount: 0,
+        memoryHintCount: 0,
+        conversationContextCount: 0,
+        strategyHintCount: 0,
+      },
+      claimAudit: {
+        totalClaims: 0,
+        verifiedClaims: 0,
+        unsupportedClaims: 0,
+        uncertainClaims: 0,
+      },
+      qualityGates: {
+        finalReportContract: 'not_applicable',
+        claimVerification: 'not_applicable',
+        identityResolution: 'not_applicable',
+      },
+      outputs: {},
+    } as const;
+    const r = makeResult({
+      conclusion: '快速回答：帧耗时 45.6ms（ev_deadbeef1234）。',
+      analysisReceipt: receipt,
+      uiActionProposals: [
+        {
+          schemaVersion: 1,
+          id: 'ui-navigate_timeline-1',
+          kind: 'navigate_timeline',
+          title: '跳到帧',
+          reason: '来自证据表',
+          source: { evidenceRefId: 'ev_deadbeef1234' },
+          payload: { ts: '123456789' },
+          requiresConfirmation: true,
+        },
+      ],
+    });
+
+    const out = normalizeResultForReport(r);
+
+    expect(out.conclusion).not.toContain('ev_deadbeef1234');
+    expect(out.analysisReceipt).toBe(receipt);
+    expect(out.uiActionProposals).toBe(r.uiActionProposals);
   });
 });

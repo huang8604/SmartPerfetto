@@ -165,7 +165,7 @@ steps:
         SELECT
           g.gap_start,
           g.gap_end,
-          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' THEN s.id END) as doframe_count,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' AND s.name NOT GLOB '*resynced*' THEN s.id END) as doframe_count,
           COUNT(DISTINCT CASE WHEN s.name LIKE 'DrawFrame%' OR s.name LIKE 'draw:%' THEN s.id END) as drawframe_count
         FROM gaps g
         JOIN relevant_threads rt ON 1=1
@@ -306,7 +306,7 @@ steps:
         SELECT
           g.gap_start,
           g.gap_end,
-          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' THEN s.id END) as doframe_count,
+          COUNT(DISTINCT CASE WHEN s.name LIKE 'Choreographer#doFrame%' AND s.name NOT GLOB '*resynced*' THEN s.id END) as doframe_count,
           COUNT(DISTINCT CASE WHEN s.name LIKE 'DrawFrame%' OR s.name LIKE 'draw:%' THEN s.id END) as drawframe_count
         FROM gaps g
         JOIN relevant_threads rt ON 1=1

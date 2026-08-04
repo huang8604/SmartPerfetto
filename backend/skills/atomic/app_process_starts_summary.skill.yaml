@@ -65,11 +65,11 @@ steps:
     sql: |
       SELECT
         process_name,
-        process_start_ts,
+        proc_start_ts AS process_start_ts,
         ROUND(total_dur / 1e6, 1) AS total_dur_ms,
         reason
       FROM android_app_process_starts
       WHERE (process_name GLOB '${package}*' OR '${package}' = '')
-        AND (${start_ts} IS NULL OR process_start_ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR process_start_ts < ${end_ts})
-      ORDER BY process_start_ts ASC
+        AND (${start_ts} IS NULL OR proc_start_ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR proc_start_ts < ${end_ts})
+      ORDER BY proc_start_ts ASC

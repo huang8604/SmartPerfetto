@@ -6,6 +6,15 @@ import express from 'express';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import { requireRequestContext } from '../middleware/auth';
 import { isOwnedByContext, sendResourceNotFound } from '../services/resourceOwnership';
+import {parseOutputLanguage} from '../agentv3/outputLanguage';
+import {
+  privateAnalysisQueryMessage,
+  projectPrivateConclusion,
+  projectPrivateStructuredValue,
+  projectPrivateTerminationMessage,
+  projectPrivateTerminationReason,
+  sessionUsesPrivateKnowledge,
+} from '../services/security/privateAnalysisProjection';
 
 interface AgentReportRoutesDeps {
   getSession: (sessionId: string) => any;
@@ -46,33 +55,63 @@ export function registerAgentReportRoutes(
     }
 
     const completedPayload = deps.getCompletedPayload?.(session);
-    const conclusion = completedPayload?.normalizedConclusion
+    const rawConclusion = completedPayload?.normalizedConclusion
       || deps.normalizeNarrativeForClient(result.conclusion);
+    const privateKnowledge = sessionUsesPrivateKnowledge(session);
+    const outputLanguage = session.outputLanguage
+      ?? parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+    const conclusion = privateKnowledge
+      ? projectPrivateConclusion({
+          sessionId,
+          conclusion: rawConclusion,
+          success: result.success === true,
+          language: outputLanguage,
+        })
+      : rawConclusion;
     const findings = Array.isArray(result.findings) ? result.findings : [];
-    const clientFindings = deps.buildClientFindings(findings, session.scenes || []);
-    const resultContract = deps.buildSessionResultContract(session, clientFindings);
-    const hypotheses = Array.isArray(result.hypotheses) ? result.hypotheses : [];
+    const rawClientFindings = deps.buildClientFindings(findings, session.scenes || []);
+    const clientFindings = privateKnowledge
+      ? projectPrivateStructuredValue(sessionId, rawClientFindings)
+      : rawClientFindings;
+    const rawResultContract = deps.buildSessionResultContract(session, rawClientFindings);
+    const resultContract = privateKnowledge
+      ? projectPrivateStructuredValue(sessionId, rawResultContract)
+      : rawResultContract;
+    const rawHypotheses = Array.isArray(result.hypotheses) ? result.hypotheses : [];
+    const hypotheses = privateKnowledge
+      ? projectPrivateStructuredValue(sessionId, rawHypotheses)
+      : rawHypotheses;
     const conversationTimeline = Array.isArray(session.conversationSteps)
       ? session.conversationSteps
       : [];
 
     // Use snapshot as single source of truth for agentv3-specific state.
     // Falls back to live getters for active sessions where snapshot hasn't been taken yet.
-    const snapshot = SessionPersistenceService.getInstance().loadSessionStateSnapshot(sessionId);
-    const analysisNotes = snapshot?.analysisNotes
+    const snapshot = privateKnowledge
+      ? undefined
+      : SessionPersistenceService.getInstance().loadSessionStateSnapshot(sessionId);
+    const analysisNotes = privateKnowledge ? [] : snapshot?.analysisNotes
       ?? (typeof session.orchestrator?.getSessionNotes === 'function'
         ? session.orchestrator.getSessionNotes(sessionId) : []);
-    const analysisPlan = snapshot?.analysisPlan
+    const analysisPlan = privateKnowledge ? null : snapshot?.analysisPlan
       ?? (typeof session.orchestrator?.getSessionPlan === 'function'
         ? session.orchestrator.getSessionPlan(sessionId) : null);
-    const uncertaintyFlags = snapshot?.uncertaintyFlags
+    const uncertaintyFlags = privateKnowledge ? [] : snapshot?.uncertaintyFlags
       ?? (typeof session.orchestrator?.getSessionUncertaintyFlags === 'function'
         ? session.orchestrator.getSessionUncertaintyFlags(sessionId) : []);
+    const rawClaimSupport = completedPayload?.qualityArtifacts?.claimSupport || result.claimSupport;
+    const rawClaimVerification = completedPayload?.qualityArtifacts?.claimVerificationResult
+      || result.claimVerificationResult;
+    const rawIdentityResolutions = completedPayload?.qualityArtifacts?.identityResolutions
+      || result.identityResolutions;
+    const rawConclusionContract = completedPayload?.normalizedConclusionContract
+      || result.conclusionContract;
+    const rawUiActionProposals = completedPayload?.uiActionProposals || result.uiActionProposals || [];
 
     const report = {
       sessionId,
       traceId: session.traceId,
-      query: session.query,
+      query: privateKnowledge ? privateAnalysisQueryMessage(outputLanguage) : session.query,
       createdAt: session.createdAt,
       completedAt: Date.now(),
       summary: {
@@ -81,16 +120,32 @@ export function registerAgentReportRoutes(
         totalDurationMs: result.totalDurationMs,
         rounds: result.rounds,
         partial: result.partial,
-        terminationReason: result.terminationReason,
-        terminationMessage: result.terminationMessage,
+        terminationReason: privateKnowledge
+          ? projectPrivateTerminationReason(result.terminationReason)
+          : result.terminationReason,
+        terminationMessage: privateKnowledge
+          ? projectPrivateTerminationMessage(result.terminationMessage, outputLanguage)
+          : result.terminationMessage,
       },
       reportUrl: completedPayload?.finalArtifacts?.reportUrl,
-      reportError: completedPayload?.finalArtifacts?.reportError,
+      reportError: privateKnowledge ? undefined : completedPayload?.finalArtifacts?.reportError,
       resultSnapshotId: completedPayload?.finalArtifacts?.resultSnapshotId,
-      claimSupport: completedPayload?.qualityArtifacts?.claimSupport || result.claimSupport,
-      claimVerificationResult: completedPayload?.qualityArtifacts?.claimVerificationResult || result.claimVerificationResult,
-      identityResolutions: completedPayload?.qualityArtifacts?.identityResolutions || result.identityResolutions,
-      findings: findings.map((f: any) => ({
+      conclusionContract: privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, rawConclusionContract)
+        : rawConclusionContract,
+      claimSupport: privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, rawClaimSupport)
+        : rawClaimSupport,
+      claimVerificationResult: privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, rawClaimVerification)
+        : rawClaimVerification,
+      identityResolutions: privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, rawIdentityResolutions)
+        : rawIdentityResolutions,
+      uiActionProposals: privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, rawUiActionProposals)
+        : rawUiActionProposals,
+      findings: clientFindings.map((f: any) => ({
         id: f.id,
         category: f.category,
         severity: f.severity,
@@ -103,7 +158,7 @@ export function registerAgentReportRoutes(
         status: h.status,
         confidence: h.confidence,
       })),
-      conversationTimeline: conversationTimeline.map((step: any) => ({
+      conversationTimeline: (privateKnowledge ? [] : conversationTimeline).map((step: any) => ({
         eventId: step.eventId,
         ordinal: step.ordinal,
         phase: step.phase,
@@ -112,13 +167,13 @@ export function registerAgentReportRoutes(
         timestamp: step.timestamp,
         sourceEventType: step.sourceEventType,
       })),
-      queryHistory: session.queryHistory || [],
-      conclusionHistory: session.conclusionHistory || [],
+      queryHistory: privateKnowledge ? [] : session.queryHistory || [],
+      conclusionHistory: privateKnowledge ? [] : session.conclusionHistory || [],
       analysisNotes,
       analysisPlan,
       uncertaintyFlags,
       resultContract,
-      logFile: session.logger.getLogFilePath(),
+      logFile: privateKnowledge ? undefined : session.logger.getLogFilePath(),
     };
 
     return res.json({

@@ -4,8 +4,35 @@
 
 import {type SDKMessage, type SDKResultSuccess, query as sdkQuery} from '@anthropic-ai/claude-agent-sdk';
 import {createSdkEnv, getSdkBinaryOption, hasClaudeCredentials, loadClaudeConfig} from '../agentv3/claudeConfig';
+import {
+  localize,
+  type OutputLanguage,
+} from '../agentv3/outputLanguage';
 import {redactObjectForLLM} from '../utils/llmPrivacy';
 import type {CriticalPathAnalysis} from './criticalPathAnalyzer';
+
+const ENGLISH_CRITICAL_PATH_MODULES = new Map<string, string>([
+  ['IO / 文件系统', 'I/O / File system'],
+  ['锁 / Monitor', 'Locks / Monitor'],
+  ['锁 / Futex', 'Locks / Futex'],
+  ['图形渲染 / Surface', 'Graphics / Surface'],
+  ['调度 / CPU 竞争', 'Scheduling / CPU contention'],
+]);
+
+const ENGLISH_CRITICAL_PATH_ANOMALIES = new Map<string, string>([
+  ['选中 task 本身耗时过长', 'The selected task is too long'],
+  ['选中 task 超过单帧预算', 'The selected task exceeds the frame budget'],
+  ['外部 critical path 占比过高', 'External critical-path share is high'],
+  ['存在长 critical path 段', 'A long critical-path segment exists'],
+  ['等待链涉及 IO/page-cache 候选', 'The wait chain contains an I/O or page-cache candidate'],
+  ['等待链涉及 Binder / IPC', 'The wait chain contains Binder / IPC'],
+  ['等待链涉及 Java 锁竞争', 'The wait chain contains Java lock contention'],
+  ['GC 与等待链重叠', 'GC overlaps the wait chain'],
+  ['存在调度或 CPU 竞争迹象', 'Scheduling or CPU contention is indicated'],
+  ['未发现明显异常', 'No clear anomaly was found'],
+  ['Running 状态：无等待链可分析', 'Running state: no wait chain to analyze'],
+  ['没有取到 critical path 等待链', 'No critical-path wait chain was found'],
+]);
 
 export interface CriticalPathAiSummary {
   generated: boolean;
@@ -90,7 +117,59 @@ function redactCriticalPathFields(value: unknown): unknown {
   return value;
 }
 
-export function buildDeterministicCriticalPathSummary(analysis: CriticalPathAnalysis): string {
+export function buildDeterministicCriticalPathSummary(
+  analysis: CriticalPathAnalysis,
+  outputLanguage: OutputLanguage = 'zh-CN',
+): string {
+  if (outputLanguage === 'en') {
+    const lines = [
+      'Critical-path analysis for the selected task.',
+      '',
+      'Evidence source: Perfetto sched.thread_executing_span_with_slice / _critical_path_stack.',
+      `Selected task: ${analysis.task.processName ?? '-'} / ${analysis.task.threadName ?? '-'}, ${analysis.totalMs.toFixed(2)} ms.`,
+      `External critical path: ${analysis.blockingMs.toFixed(2)} ms (${analysis.externalBlockingPercentage.toFixed(2)}%).`,
+    ];
+
+    if (analysis.moduleBreakdown.length > 0) {
+      lines.push(
+        `Primary modules: ${analysis.moduleBreakdown
+          .slice(0, 4)
+          .map((item) =>
+            `${ENGLISH_CRITICAL_PATH_MODULES.get(item.module) || item.module} ` +
+            `${item.durationMs.toFixed(2)} ms`)
+          .join(', ')}.`,
+      );
+    }
+    if (analysis.directWaker?.kind && analysis.directWaker.kind !== 'unknown') {
+      lines.push(
+        `Direct waker: ${analysis.directWaker.kind}${
+          analysis.directWaker.threadName
+            ? ` (${analysis.directWaker.threadName})`
+            : ''
+        }${analysis.directWaker.irqContext ? ', IRQ context' : ''}.`,
+      );
+    }
+    if (analysis.quantification?.counterfactual) {
+      lines.push(
+        `Counterfactual upper bound: removing the longest external segment ` +
+        `(${analysis.quantification.counterfactual.longestSegmentDurMs.toFixed(2)} ms) ` +
+        `gives a task-duration upper bound of ` +
+        `${analysis.quantification.counterfactual.upperBoundMs.toFixed(2)} ms. ` +
+        'This is an upper bound, not a guaranteed prediction.',
+      );
+    }
+    if (analysis.anomalies.length > 0) {
+      lines.push(
+        `Rule findings: ${analysis.anomalies
+          .slice(0, 3)
+          .map((item) =>
+            ENGLISH_CRITICAL_PATH_ANOMALIES.get(item.title) || item.title)
+          .join('; ')}.`,
+      );
+    }
+    return lines.filter(line => line !== undefined).join('\n');
+  }
+
   const lines = [
     analysis.summary,
     '',
@@ -254,16 +333,53 @@ const STRUCTURED_PROMPT_TEMPLATE = `你是 Android Perfetto 调度与渲染性�
 {{JSON}}
 {{QUESTION_BLOCK}}`;
 
+const STRUCTURED_PROMPT_TEMPLATE_EN = `You are an Android Perfetto scheduling and rendering-performance expert. The following JSON contains redacted, structured facts for a selected task. Return exactly five short sections with no preamble.
+
+# 1. What is it waiting for? [evidence_strength]
+Use the L1 task state and L3 semantic signals (binder, monitor, I/O, GC, CPU contention). Mark conflicting or thin signals as [Weak evidence] or [Insufficient evidence].
+
+# 2. Who woke it and why? [evidence_strength]
+Use directWaker and recursive wakeupChain children. Explain the direct source and what the waker was doing before the wakeup. State when IRQ or swapper ends the upstream chain.
+
+# 3. Path semantics [evidence_strength]
+Use semantics.binderTxns, monitorContention, ioSignals, gcEvents, and cpuCompetition. Reference redacted method IDs unchanged and explain how events combine into total wait time.
+
+# 4. Quantified impact [evidence_strength]
+Use quantification.counterfactual and frameImpacts. Explicitly state that the counterfactual is an upper bound, not a guaranteed prediction.
+
+# 5. Falsifiable hypotheses and SQL [evidence_strength]
+List at most three hypotheses with strength and reuse verificationSql verbatim.
+
+Rules:
+- Begin every section with [Strong evidence], [Weak evidence], or [Insufficient evidence].
+- Do not invent facts absent from the JSON.
+- Keep redacted markers such as <method_name_xxxx> unchanged.
+- Write entirely in English with a professional tone and no more than four sentences per section.
+
+Fact JSON:
+{{JSON}}
+{{QUESTION_BLOCK}}`;
+
 export async function summarizeCriticalPathWithAi(
   analysis: CriticalPathAnalysis,
-  question?: string
+  question?: string,
+  outputLanguage: OutputLanguage = 'zh-CN',
 ): Promise<CriticalPathAiSummary> {
-  const fallback = buildDeterministicCriticalPathSummary(analysis);
+  const fallback = buildDeterministicCriticalPathSummary(
+    analysis,
+    outputLanguage,
+  );
   if (!hasClaudeCredentials()) {
     return {
       generated: false,
       summary: fallback,
-      warnings: ['AI 模型未配置，已返回规则兜底总结。'],
+      warnings: [
+        localize(
+          outputLanguage,
+          'AI 模型未配置，已返回规则兜底总结。',
+          'No AI model is configured; a deterministic rule summary was returned.',
+        ),
+      ],
     };
   }
 
@@ -272,10 +388,23 @@ export async function summarizeCriticalPathWithAi(
   const customRedacted = redactCriticalPathFields(compact);
   const redacted = redactObjectForLLM(customRedacted);
 
-  const prompt = STRUCTURED_PROMPT_TEMPLATE.replace(
+  const promptTemplate =
+    outputLanguage === 'en'
+      ? STRUCTURED_PROMPT_TEMPLATE_EN
+      : STRUCTURED_PROMPT_TEMPLATE;
+  const prompt = promptTemplate.replace(
     '{{JSON}}',
     JSON.stringify(redacted.value).slice(0, 32_000)
-  ).replace('{{QUESTION_BLOCK}}', question ? `\n\n用户额外问题：${clampString(question, 500)}` : '');
+  ).replace(
+    '{{QUESTION_BLOCK}}',
+    question
+      ? localize(
+          outputLanguage,
+          `\n\n用户额外问题：${clampString(question, 500)}`,
+          `\n\nAdditional user question: ${clampString(question, 500)}`,
+        )
+      : '',
+  );
 
   const timeoutMs = Number.parseInt(process.env.CRITICAL_PATH_AI_TIMEOUT_MS || '60000', 10);
   const sdkEnv = createSdkEnv();
@@ -320,7 +449,13 @@ export async function summarizeCriticalPathWithAi(
       generated: false,
       model: config.model,
       summary: fallback,
-      warnings: [`AI 诊断失败，已返回规则兜底总结：${errorMessage(error)}`],
+      warnings: [
+        localize(
+          outputLanguage,
+          `AI 诊断失败，已返回规则兜底总结：${errorMessage(error)}`,
+          `AI diagnosis failed; a deterministic rule summary was returned: ${errorMessage(error)}`,
+        ),
+      ],
       redactionApplied: redacted.stats.applied,
     };
   } finally {
@@ -337,7 +472,19 @@ export async function summarizeCriticalPathWithAi(
       generated: false,
       model: config.model,
       summary: fallback,
-      warnings: [timedOut ? 'AI 诊断超时，已返回规则兜底总结。' : 'AI 没有返回有效内容，已返回规则兜底总结。'],
+      warnings: [
+        timedOut
+          ? localize(
+              outputLanguage,
+              'AI 诊断超时，已返回规则兜底总结。',
+              'AI diagnosis timed out; a deterministic rule summary was returned.',
+            )
+          : localize(
+              outputLanguage,
+              'AI 没有返回有效内容，已返回规则兜底总结。',
+              'The AI returned no valid content; a deterministic rule summary was returned.',
+            ),
+      ],
       redactionApplied: redacted.stats.applied,
     };
   }

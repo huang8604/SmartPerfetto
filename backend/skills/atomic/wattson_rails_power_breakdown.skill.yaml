@@ -77,12 +77,6 @@ steps:
           label: "数据来源"
           type: string
     sql: |
-      WITH window AS (
-        SELECT
-          COALESCE(${start_ts}, trace_start()) AS ts,
-          MAX(COALESCE(${end_ts}, trace_end()) - COALESCE(${start_ts}, trace_start()), 0) AS dur,
-          0 AS period_id
-      )
       SELECT
         subsystem,
         breakdown_type,
@@ -91,7 +85,12 @@ steps:
         ROUND(SUM(estimated_mws) / 3600.0, 6) AS energy_mwh,
         ROUND(SUM(estimated_mws) * 1e9 / NULLIF(SUM(period_dur), 0), 2) AS avg_power_mw,
         'wattson_estimate' AS source_level
-      FROM wattson_rails_aggregation!(window)
+      FROM wattson_rails_aggregation!((
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS ts,
+          MAX(COALESCE(${end_ts}, trace_end()) - COALESCE(${start_ts}, trace_start()), 0) AS dur,
+          0 AS period_id
+      ))
       GROUP BY subsystem, breakdown_type, component_id
       ORDER BY total_energy_mws DESC
       LIMIT ${top_n|20}

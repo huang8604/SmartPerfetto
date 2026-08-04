@@ -18,7 +18,9 @@
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { createSdkEnv, getSdkBinaryOption, loadClaudeConfig } from '../../agentv3/claudeConfig';
+import {createSdkEnv, loadClaudeConfig} from '../../agentv3/claudeConfig';
+import {loadPromptTemplate, renderTemplate} from '../../agentv3/strategyLoader';
+import {isolatedSceneModelCallOptions} from './isolatedSceneModelCall';
 import {
   DisplayedScene,
   SceneAnalysisJob,
@@ -29,18 +31,29 @@ export interface Stage3SummaryInput {
   jobs: SceneAnalysisJob[];
 }
 
+export interface Stage3LocalizedSummaries {
+  'zh-CN': string;
+  en: string;
+}
+
 const HAIKU_TIMEOUT_MS = 60_000;
+const MAX_STAGE3_JSON_BYTES = 8 * 1024;
+const MAX_STAGE3_FIELD_BYTES = 4 * 1024;
+const MAX_STAGE3_ZH_CODE_POINTS = 200;
+const MAX_STAGE3_EN_WORDS = 140;
 
 /**
- * Generate a Chinese narrative summary of a scene story run.
+ * Generate both locale projections in one call so a language-neutral cache
+ * never reuses the first caller's narrative for another locale.
  * Returns null on any failure (Haiku error / timeout / empty response).
  */
 export async function runStage3Summary(
   input: Stage3SummaryInput,
-): Promise<string | null> {
+): Promise<Stage3LocalizedSummaries | null> {
   if (input.scenes.length === 0) return null;
 
-  const prompt = buildPrompt(input);
+  const prompt = buildStage3Prompt(input);
+  if (!prompt) return null;
 
   let stream: ReturnType<typeof sdkQuery> | undefined;
   let timedOut = false;
@@ -55,15 +68,13 @@ export async function runStage3Summary(
     stream = sdkQuery({
       prompt,
       options: {
-        model: loadClaudeConfig().lightModel,
-        maxTurns: 1,
-        permissionMode: 'bypassPermissions' as const,
-        allowDangerouslySkipPermissions: true,
-        env: sdkEnv,
-        stderr: (data: string) => {
-          console.warn(`[SceneStage3Summarizer] SDK stderr: ${data.trimEnd()}`);
-        },
-        ...getSdkBinaryOption(sdkEnv),
+        ...isolatedSceneModelCallOptions({
+          model: loadClaudeConfig().lightModel,
+          env: sdkEnv,
+          stderr: (data: string) => {
+            console.warn(`[SceneStage3Summarizer] SDK stderr: ${data.trimEnd()}`);
+          },
+        }),
       },
     });
 
@@ -75,8 +86,7 @@ export async function runStage3Summary(
       }
     }
 
-    const trimmed = result.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    return parseStage3Summaries(result);
   } catch (err) {
     console.warn(
       '[SceneStage3Summarizer] Haiku summary failed (graceful degradation):',
@@ -93,7 +103,12 @@ export async function runStage3Summary(
 // Prompt construction
 // ---------------------------------------------------------------------------
 
-function buildPrompt(input: Stage3SummaryInput): string {
+export function buildStage3Prompt(input: Stage3SummaryInput): string | null {
+  const template = loadPromptTemplate('prompt-scene-stage3-summary');
+  if (!template) {
+    console.warn('[SceneStage3Summarizer] Missing prompt-scene-stage3-summary template');
+    return null;
+  }
   const sceneLines = input.scenes
     .slice(0, 30)
     .map((s, i) => formatSceneLine(s, i));
@@ -105,26 +120,48 @@ function buildPrompt(input: Stage3SummaryInput): string {
 
   const failedCount = input.jobs.filter((j) => j.state === 'failed').length;
 
-  return [
-    '你是一个还原用户手机操作过程的助手。请根据下面按时间排列的场景列表,',
-    '用第三人称视角写一段 200 字以内的中文叙述,像讲故事一样还原用户从头到尾在手机上做了什么。',
-    '',
-    '要求:',
-    '- 从用户视角描述,比如"用户在桌面停留了片刻,然后点击图标启动了某应用"',
-    '- 按时间顺序串联场景,交代因果关系(点击→启动→进入应用→操作→返回)',
-    '- 自然地融入性能观感,例如"启动较慢,用户等待了约1.3秒"、"滑动流畅无卡顿"',
-    '- 用应用名的可读部分(如 launch.aosp.heavy 而非完整包名)让叙述简洁',
-    '- 不要罗列数据表格,不要加 markdown 标题/列表/代码块,只输出连贯叙述',
-    '',
-    `## 操作时间线 (共 ${input.scenes.length} 个场景):`,
-    ...sceneLines,
-    '',
-    analysisLines.length > 0 ? '## 深度分析发现的性能问题:' : '',
-    ...analysisLines,
-    failedCount > 0 ? `(${failedCount} 个场景分析失败)` : '',
-  ]
-    .filter((l) => l !== undefined && l !== '')
-    .join('\n');
+  return renderTemplate(template, {
+    sceneCount: input.scenes.length,
+    sceneLines: sceneLines.join('\n'),
+    analysisLines: analysisLines.length > 0 ? analysisLines.join('\n') : 'none',
+    failedCount,
+  });
+}
+
+export function parseStage3Summaries(value: string): Stage3LocalizedSummaries | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const jsonText = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+  if (Buffer.byteLength(jsonText, 'utf8') > MAX_STAGE3_JSON_BYTES) return null;
+  try {
+    const parsed = JSON.parse(jsonText) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const keys = Object.keys(parsed);
+    if (
+      keys.length !== 2 ||
+      !Object.prototype.hasOwnProperty.call(parsed, 'zh-CN') ||
+      !Object.prototype.hasOwnProperty.call(parsed, 'en')
+    ) {
+      return null;
+    }
+    const summaries = parsed as Partial<Stage3LocalizedSummaries>;
+    const zh = typeof summaries['zh-CN'] === 'string' ? summaries['zh-CN'].trim() : '';
+    const en = typeof summaries.en === 'string' ? summaries.en.trim() : '';
+    if (!zh || !en) return null;
+    if (
+      Buffer.byteLength(zh, 'utf8') > MAX_STAGE3_FIELD_BYTES ||
+      Buffer.byteLength(en, 'utf8') > MAX_STAGE3_FIELD_BYTES ||
+      Array.from(zh).length > MAX_STAGE3_ZH_CODE_POINTS ||
+      en.split(/\s+/u).length > MAX_STAGE3_EN_WORDS
+    ) {
+      return null;
+    }
+    return {'zh-CN': zh, en};
+  } catch {
+    return null;
+  }
 }
 
 function formatSceneLine(scene: DisplayedScene, index: number): string {
@@ -152,15 +189,15 @@ function formatAnalysisLine(job: SceneAnalysisJob): string {
 
 function summarizeDisplayResults(displayResults: unknown[]): string {
   if (!Array.isArray(displayResults) || displayResults.length === 0) {
-    return '无数据';
+    return 'no_data';
   }
   const titles = displayResults
     .map((dr: any) => dr?.title || dr?.stepId)
     .filter(Boolean)
     .slice(0, 5);
   return titles.length > 0
-    ? `${displayResults.length} 个步骤 (${titles.join(', ')})`
-    : `${displayResults.length} 个步骤`;
+    ? `${displayResults.length} steps (${titles.join(', ')})`
+    : `${displayResults.length} steps`;
 }
 
 function sevLabel(severity: DisplayedScene['severity']): string {

@@ -20,17 +20,18 @@ meta:
   description: "Camera2/HAL3 多流相机渲染"
   icon: "camera"
   family: specialized
-  doc_path: "rendering_pipelines/camera_pipeline.md"
+  doc_path: rendering_pipelines/S11_camera_type.md
   # ----- Article-grounded signature (S11) -----
   s_article_ref: "S11"
   four_features:
+    # 线程 / slice 名称只是 vendor-dependent candidate inventory，不是 request/result/buffer 生命周期证明。
     producer_threads: ["cameraserver", "camera HAL", "Camera*", "RequestThread", "CaptureSession"]
     optional_consumer_threads: ["RenderThread", "ImageReader", "media.codec"]
     expected_layer_count: 1   # 预览独立 layer（SurfaceView 模式）或 0（TextureView 模式回宿主）
     bufferqueue_path: "HAL_PRODUCED_TO_PREVIEW_SURFACE_OR_IMAGEREADER"
-    extra_rhythm_sources: ["sensor_exposure_capture_rhythm"]
-  deviation_anchors: "no_vsync_app_hardware_sensor_trigger"
-  # 锚点偏离：① 没有 vsync-app（sensor 采集节奏由 capture request 参数决定）；
+    extra_rhythm_sources: ["camera_request_activity"]
+  deviation_anchors: "no_vsync_app_camera_request_activity_candidate"
+  # 锚点偏离：① 候选 request activity 不跟随 vsync-app；slice 名不能证明 sensor trigger / exposure；
   # ② 宿主 UI Choreographer callback 仅管控制层，不生产预览像素；
   # ④⑤⑥ 由 Camera HAL 完成，App 只配置 Surface。
   subvariants_note: |
@@ -39,11 +40,11 @@ meta:
     - CAMERA_PREVIEW_TEXTUREVIEW（预览回宿主 TV，宿主采样路径）
     - CAMERA_IMAGEANALYSIS_READER（分析路径 ImageReader）
     - CAMERA_VIDEORECORD_SURFACE（录像 Surface）
-    Phase E 拆分独立 ID。当前 ID 一并覆盖。
+    当前 variant 对应 S11；预览、分析与录像作为同一类型下的检测子路径一并输出。
   multi_output_back_pressure: |
-    Camera 多路输出（preview/analysis/record）共享同一 capture pipeline——
-    任一路消费慢会 back-pressure 整段 pipeline，导致预览看似"卡"实际是被某路拖慢。
-    分析时必须分开看 3 路。
+    Camera 多路输出（preview/analysis/record）可能共享硬件与 buffer 资源。
+    只有存在 buffer ownership、acquire/release 或 fence 等证据时，才能把某一路消费慢报告为
+    整体 pipeline back-pressure；仅凭 PSS/RSS 增长不能判定 ImageReader 泄漏。
 
 detection:
   scoring_signals:
@@ -61,72 +62,14 @@ detection:
       weight: 30
 
 teaching:
-  title: "相机渲染管线"
-  summary: |
-    Camera2 API 和 HAL3 相机架构，支持多流同时处理（预览、拍照、录像）。
-    涉及相机硬件、ISP、编码器等多个组件的协同工作。
-    需要关注帧率稳定性和延迟。Camera trace 的可见性强依赖设备、
-    OEM 和启用的数据源，不应把缺失某个 `Camera*` slice 直接等价为“没有相机压力”。
-
-  mermaid: |
-    sequenceDiagram
-      participant App as App
-      participant Cam as CameraService
-      participant HAL as Camera HAL
-      participant ISP as ISP/GPU
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over App,SF: 📍 Camera2/HAL3 渲染链路
-      App->>Cam: createCaptureSession
-      App->>Cam: setRepeatingRequest
-
-      activate HAL
-      HAL->>ISP: 配置图像处理流水线
-      loop 每帧
-        HAL->>HAL: 捕获 Bayer 数据
-        HAL->>ISP: 3A + ISP 处理
-        ISP->>BQ: 输出到 Surface
-      end
-      deactivate HAL
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over App,SF: 📷 支持预览/录制/拍照多路输出
-  thread_roles:
-    - thread: Camera
-      role: "相机服务"
-      description: "Camera2 API 和相机服务（线程名 / slice 名依设备而异）"
-    - thread: CaptureSession
-      role: "采集会话"
-      description: "相机采集会话管理"
-
-  key_slices:
-    - name: "Camera"
-      thread: any
-      description: "相机相关操作（是否可见依设备 / tracing 配置）"
-    - name: "CaptureSession"
-      thread: any
-      description: "采集会话（名称与可见性依版本 / OEM 变化）"
-    - name: "createCaptureSession"
-      thread: any
-      description: "创建采集会话（常见于启动/切换摄像头/重配流）"
-    - name: "setRepeatingRequest"
-      thread: any
-      description: "预览/录制的重复请求（影响吞吐与延迟）"
-
+  source: "rendering_pipelines/S11_camera_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)
     - pattern: "^VSYNC-app$"
       match_by: name
       priority: 1
-      reason: "VSync (预览开始生产帧)"
+      reason: "VSync (宿主 UI/控制层节奏，不证明相机像素生产)"
 
     - pattern: "^main(\\s+\\d+)?$"
       match_by: name
@@ -183,30 +126,30 @@ analysis:
     - id: multi_output_back_pressure
       name: "多路输出 back-pressure 拖慢预览"
       description: |
-        Camera 多路输出（preview/analysis/record）共享同一 capture pipeline。
-        任一路消费慢（典型如 ImageReader 不及时 release / Codec 堆积）会 back-pressure HAL，
-        让预览看似卡顿。分析时必须分别看三路输出谁在回压，不能只盯 HAL 慢。
-      detection_skill: gpu_render_in_range
+        Camera 多路输出（preview/analysis/record）可能竞争共享硬件与 buffer 资源。
+        ImageReader 未及时 release / Codec 堆积导致 HAL back-pressure 只能作为候选解释；
+        需要 buffer ownership、acquire/release 或 fence 证据支持，不能仅凭 PSS/RSS 增长判定泄漏。
 
     - id: release_fence_late_blocks_hal
       name: "Release fence 晚回阻塞 HAL"
       description: |
         消费侧 release fence 晚回（HWC/SurfaceFlinger/宿主采样/Codec 编码） →
-        HAL 拿不到新 buffer → request pipeline 整体 back-pressure。
-      detection_skill: present_fence_timing
+        HAL 拿不到新 buffer → request pipeline 整体 back-pressure。必须有 Camera buffer ownership、
+        acquire/release 与 fence 的同一生命周期关联；display present fence 不能替代 Camera completion。
 
     - id: textureview_extra_resample_overhead
       name: "TextureView 模式宿主 RT 采样开销"
       description: |
-        预览承载若是 TextureView，宿主 RT updateTexImage acquire + GPU 重采样会引入额外延迟（通常 +1 帧）。
-        SurfaceView 模式可走 device composition 避免此开销。
+        预览承载若是 TextureView，宿主 RT updateTexImage acquire + GPU 重采样可能引入额外延迟。
+        SurfaceView 模式在设备与合成条件允许时可走 device composition 避免此开销。
       detection_skill: render_thread_slices
 
-    - id: sensor_trigger_not_vsync_aligned
-      name: "sensor 采集节奏不对齐 vsync"
+    - id: camera_request_activity_not_vsync_aligned
+      name: "Camera request activity candidate 不对齐 vsync"
       description: |
         Camera 帧率不等于显示刷新率（典型 30fps 视频拍摄在 60Hz 屏）。
-        分析卡顿要分别看 capture frame rate（HAL processCaptureResult 频率）vs preview display frame rate（SF latch 频率）。
+        `processCaptureRequest*` 等名称匹配只能标记 Camera request activity candidate，不能证明 sensor trigger。
+        分析卡顿要分别看有明确 identity 的 request/result/buffer 证据与 preview presentation 频率。
       detection_skill: vsync_alignment_in_range
 
   recommended_skills:

@@ -6,6 +6,8 @@ import { SkillDefinition } from './skillEngine/types';
 import {
   ensurePipelineSkillsInitialized,
   pipelineSkillLoader,
+  type PipelineCatalog,
+  type PipelineCatalogEntry,
   type PipelineDefinition,
 } from './pipelineSkillLoader';
 
@@ -20,40 +22,8 @@ interface SignalComponent {
   pattern: string;
 }
 
-const DEFAULT_PIPELINE_ID = 'ANDROID_VIEW_STANDARD_BLAST';
-const DEFAULT_DOC_PATH = 'rendering_pipelines/android_view_standard.md';
 const SCORE_THRESHOLD = 0.3;
 const MAX_CANDIDATES = 5;
-
-// Pipelines that represent orthogonal features (or implementation details) and should NOT win
-// the primary pipeline selection. They can still appear in the "features" list.
-//
-// Note: This is about *ranking*, not how we count their detection signals.
-const NON_PRIMARY_PIPELINE_IDS = new Set<string>([
-  'VARIABLE_REFRESH_RATE',
-  'VIDEO_OVERLAY_HWC',
-  'ANDROID_PIP_FREEFORM',
-  'ANDROID_VIEW_MULTI_WINDOW',
-  'ANGLE_GLES_VULKAN',
-]);
-
-// Pipelines whose detection signals often live outside the app processes (e.g. SurfaceFlinger/system_server),
-// so we should score them using global counts instead of app-filtered counts.
-const GLOBAL_SCOPE_PIPELINE_IDS = new Set<string>([
-  'VARIABLE_REFRESH_RATE',
-  'VIDEO_OVERLAY_HWC',
-  'ANDROID_PIP_FREEFORM',
-]);
-
-// Pipelines that should be surfaced in the "features" list.
-const FEATURE_PIPELINE_IDS = new Set<string>([
-  'VARIABLE_REFRESH_RATE',
-  'VIDEO_OVERLAY_HWC',
-  'SURFACE_CONTROL_API',
-  'ANDROID_PIP_FREEFORM',
-  'ANDROID_VIEW_MULTI_WINDOW',
-  'ANGLE_GLES_VULKAN',
-]);
 
 function sqlStringLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -77,12 +47,12 @@ function normalizeNonNegativeInt(value: unknown, fallback = 0): number {
   return Math.floor(parsed);
 }
 
-function getScopeColumn(pipelineId: string): ScopeColumn {
-  return GLOBAL_SCOPE_PIPELINE_IDS.has(pipelineId) ? 'global_cnt' : 'app_cnt';
+function getScopeColumn(entry: PipelineCatalogEntry): ScopeColumn {
+  return entry.signal_scope === 'global' ? 'global_cnt' : 'app_cnt';
 }
 
-function getSignalScope(pipelineId: string): SignalScope {
-  return getScopeColumn(pipelineId) === 'global_cnt' ? 'g' : 'a';
+function getSignalScope(entry: PipelineCatalogEntry): SignalScope {
+  return getScopeColumn(entry) === 'global_cnt' ? 'g' : 'a';
 }
 
 function buildSignalComponents(signal: {
@@ -122,28 +92,54 @@ function describeSignalKey(signal: {
   return 'unknown';
 }
 
-function buildPipelineListSql(pipelines: PipelineDefinition[]): string {
+function buildPipelineListSql(pipelines: PipelineDefinition[], defaultPipelineId: string): string {
   if (pipelines.length === 0) {
-    return `(${sqlStringLiteral(DEFAULT_PIPELINE_ID)})`;
+    return `(${sqlStringLiteral(defaultPipelineId)})`;
   }
   return pipelines
     .map((p) => `(${sqlStringLiteral(p.meta.pipeline_id)})`)
     .join(',\n        ');
 }
 
-function buildPipelineDocsSql(pipelines: PipelineDefinition[]): string {
-  if (pipelines.length === 0) {
-    return `(${sqlStringLiteral(DEFAULT_PIPELINE_ID)}, ${sqlStringLiteral(DEFAULT_DOC_PATH)})`;
-  }
-  return pipelines
-    .map((p) => {
-      const docPath = p.meta.doc_path ? sqlStringLiteral(p.meta.doc_path) : 'NULL';
-      return `(${sqlStringLiteral(p.meta.pipeline_id)}, ${docPath})`;
+function buildPipelineMetadataSql(catalog: PipelineCatalog): string {
+  return Object.entries(catalog.pipelines)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([pipelineId, entry]) => {
+      const renderingTypeId = entry.rendering_type_id
+        ? sqlStringLiteral(entry.rendering_type_id)
+        : 'NULL';
+      const document = catalog.rendering_types[entry.teaching_type_id].document;
+      return `(${[
+        pipelineId,
+        renderingTypeId,
+        entry.primary_eligible ? 1 : 0,
+        entry.feature_visible ? 1 : 0,
+        `rendering_pipelines/${document}`,
+      ].map((value) => typeof value === 'string' && (value === 'NULL' || /^'.*'$/.test(value)) ? value : sqlValueLiteral(value as string | number)).join(', ')})`;
     })
     .join(',\n        ');
 }
 
-function buildSignalDefsSql(pipelines: PipelineDefinition[]): string {
+function buildPipelineRelatedRenderingTypesSql(catalog: PipelineCatalog): string {
+  return Object.entries(catalog.pipelines)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([pipelineId, entry]) =>
+      (entry.related_rendering_type_ids || [])
+        .slice()
+        .sort()
+        .map(
+          (renderingTypeId) =>
+            `(${sqlStringLiteral(pipelineId)}, ${sqlStringLiteral(renderingTypeId)})`,
+        ),
+    )
+    .join(',\n        ');
+}
+
+function buildSignalDefsSql(
+  pipelines: PipelineDefinition[],
+  entries: Record<string, PipelineCatalogEntry>,
+  defaultPipelineId: string
+): string {
   const rows: string[] = [];
   let signalId = 0;
 
@@ -164,7 +160,9 @@ function buildSignalDefsSql(pipelines: PipelineDefinition[]): string {
     if (components.length === 0) return;
 
     const currentSignalId = signalId++;
-    const scope = getSignalScope(pipelineId);
+    const entry = entries[pipelineId];
+    if (!entry) throw new Error(`Missing catalog entry for ${pipelineId}`);
+    const scope = getSignalScope(entry);
 
     for (const component of components) {
       rows.push(`(${[
@@ -216,15 +214,19 @@ function buildSignalDefsSql(pipelines: PipelineDefinition[]): string {
   }
 
   if (rows.length === 0) {
-    return `(0, ${sqlStringLiteral(DEFAULT_PIPELINE_ID)}, 's', 'noop', 0, 1, 's', 'eq', '__smartperfetto_noop__', 'a')`;
+    return `(0, ${sqlStringLiteral(defaultPipelineId)}, 's', 'noop', 0, 1, 's', 'eq', '__smartperfetto_noop__', 'a')`;
   }
 
   return rows.join(',\n        ');
 }
 
-function buildPipelineScoresSql(pipelines: PipelineDefinition[]): string {
-  const pipelineListSql = buildPipelineListSql(pipelines);
-  const signalDefsSql = buildSignalDefsSql(pipelines);
+function buildPipelineScoresSql(pipelines: PipelineDefinition[], catalog: PipelineCatalog): string {
+  const pipelineListSql = buildPipelineListSql(pipelines, catalog.default.pipeline_id);
+  const signalDefsSql = buildSignalDefsSql(
+    pipelines,
+    catalog.pipelines,
+    catalog.default.pipeline_id
+  );
 
   return `
       WITH
@@ -390,49 +392,92 @@ function buildPipelineScoresSql(pipelines: PipelineDefinition[]): string {
     `;
 }
 
-function buildDeterminePipelineSql(pipelines: PipelineDefinition[]): string {
-  const pipelineDocsSql = buildPipelineDocsSql(pipelines);
-
-  const primaryExcludeSql = Array.from(NON_PRIMARY_PIPELINE_IDS)
-    .map((id) => sqlStringLiteral(id))
-    .join(', ');
-
-  const featureIdsSql = Array.from(FEATURE_PIPELINE_IDS)
-    .map((id) => sqlStringLiteral(id))
-    .join(', ');
-
+function buildDeterminePipelineSql(catalog: PipelineCatalog): string {
+  const pipelineMetadataSql = buildPipelineMetadataSql(catalog);
+  const pipelineRelatedRenderingTypesSql = buildPipelineRelatedRenderingTypesSql(catalog);
+  const defaultPipelineId = catalog.default.pipeline_id;
+  const defaultRenderingTypeId = catalog.default.rendering_type_id;
+  const defaultDocument = catalog.rendering_types[defaultRenderingTypeId].document;
   return `
       WITH
       pipeline_scores AS (
         SELECT * FROM \${pipeline_scores}
       ),
-      pipeline_docs(pipeline_id, doc_path) AS (
+      pipeline_metadata(
+        pipeline_id,
+        rendering_type_id,
+        primary_eligible,
+        feature_visible,
+        doc_path
+      ) AS (
         VALUES
-        ${pipelineDocsSql}
+        ${pipelineMetadataSql}
+      ),
+      pipeline_related_rendering_types(
+        pipeline_id,
+        rendering_type_id
+      ) AS (
+        VALUES
+        ${pipelineRelatedRenderingTypesSql}
       ),
       ranked AS (
         SELECT
-          pipeline_id,
-          score,
-          ROW_NUMBER() OVER (ORDER BY score DESC, pipeline_id ASC) as rank
-        FROM pipeline_scores
-        WHERE score >= ${SCORE_THRESHOLD}
-          ${primaryExcludeSql ? `AND pipeline_id NOT IN (${primaryExcludeSql})` : ''}
+          ps.pipeline_id,
+          ps.score,
+          pm.rendering_type_id,
+          ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.pipeline_id ASC) as rank
+        FROM pipeline_scores ps
+        JOIN pipeline_metadata pm USING (pipeline_id)
+        WHERE ps.score >= ${SCORE_THRESHOLD}
+          AND pm.primary_eligible = 1
       ),
       primary_pipeline AS (
-        SELECT pipeline_id, score FROM ranked WHERE rank = 1
+        SELECT pipeline_id, rendering_type_id, score FROM ranked WHERE rank = 1
       ),
       candidates AS (
-        SELECT pipeline_id, score, rank FROM ranked WHERE rank <= ${MAX_CANDIDATES}
+        SELECT pipeline_id, rendering_type_id, score, rank
+        FROM ranked
+        WHERE rank <= ${MAX_CANDIDATES}
       ),
       features AS (
         SELECT
-          pipeline_id,
+          ps.pipeline_id,
+          ps.score,
+          ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.pipeline_id ASC) as rank
+        FROM pipeline_scores ps
+        JOIN pipeline_metadata pm USING (pipeline_id)
+        WHERE pm.feature_visible = 1
+          AND ps.score >= ${SCORE_THRESHOLD}
+      ),
+      rendering_type_scores AS (
+        SELECT
+          rendering_type_id,
+          MAX(score) as score
+        FROM ranked
+        WHERE rendering_type_id IS NOT NULL
+        GROUP BY rendering_type_id
+      ),
+      ranked_rendering_types AS (
+        SELECT
+          rendering_type_id,
           score,
-          ROW_NUMBER() OVER (ORDER BY score DESC, pipeline_id ASC) as rank
-        FROM pipeline_scores
-        WHERE pipeline_id IN (${featureIdsSql})
-          AND score >= ${SCORE_THRESHOLD}
+          ROW_NUMBER() OVER (ORDER BY score DESC, rendering_type_id ASC) as rank
+        FROM rendering_type_scores
+      ),
+      related_rendering_type_scores AS (
+        SELECT
+          prt.rendering_type_id,
+          MAX(f.score) as score
+        FROM features f
+        JOIN pipeline_related_rendering_types prt USING (pipeline_id)
+        GROUP BY prt.rendering_type_id
+      ),
+      ranked_related_rendering_types AS (
+        SELECT
+          rendering_type_id,
+          score,
+          ROW_NUMBER() OVER (ORDER BY score DESC, rendering_type_id ASC) as rank
+        FROM related_rendering_type_scores
       ),
       candidate_list AS (
         SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as candidates_list
@@ -442,6 +487,26 @@ function buildDeterminePipelineSql(pipelines: PipelineDefinition[]): string {
           ORDER BY rank ASC
         )
         GROUP BY 'all_candidates'
+      ),
+      rendering_type_candidate_list AS (
+        SELECT GROUP_CONCAT(rendering_type_id || ':' || ROUND(score, 2), ',') as rendering_type_candidates_list
+        FROM (
+          SELECT rendering_type_id, score
+          FROM ranked_rendering_types
+          WHERE rank <= ${MAX_CANDIDATES}
+          ORDER BY rank ASC
+        )
+        GROUP BY 'all_rendering_type_candidates'
+      ),
+      related_rendering_type_candidate_list AS (
+        SELECT GROUP_CONCAT(rendering_type_id || ':' || ROUND(score, 2), ',') as related_rendering_type_candidates_list
+        FROM (
+          SELECT rendering_type_id, score
+          FROM ranked_related_rendering_types
+          WHERE rank <= ${MAX_CANDIDATES}
+          ORDER BY rank ASC
+        )
+        GROUP BY 'all_related_rendering_type_candidates'
       ),
       feature_list AS (
         SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as features_list
@@ -454,17 +519,23 @@ function buildDeterminePipelineSql(pipelines: PipelineDefinition[]): string {
       ),
       result AS (
         SELECT
-          COALESCE((SELECT pipeline_id FROM primary_pipeline), ${sqlStringLiteral(DEFAULT_PIPELINE_ID)}) as primary_pipeline_id,
+          COALESCE((SELECT pipeline_id FROM primary_pipeline), ${sqlStringLiteral(defaultPipelineId)}) as primary_pipeline_id,
+          COALESCE((SELECT rendering_type_id FROM primary_pipeline), ${sqlStringLiteral(defaultRenderingTypeId)}) as primary_rendering_type_id,
           COALESCE((SELECT score FROM primary_pipeline), 0.50) as primary_confidence,
           COALESCE((SELECT candidates_list FROM candidate_list), '') as candidates_list,
+          COALESCE((SELECT rendering_type_candidates_list FROM rendering_type_candidate_list), '') as rendering_type_candidates_list,
+          COALESCE((SELECT related_rendering_type_candidates_list FROM related_rendering_type_candidate_list), '') as related_rendering_type_candidates_list,
           COALESCE((SELECT features_list FROM feature_list), '') as features_list
       )
       SELECT
         r.primary_pipeline_id,
+        r.primary_rendering_type_id,
         r.primary_confidence,
         r.candidates_list,
+        r.rendering_type_candidates_list,
+        r.related_rendering_type_candidates_list,
         r.features_list,
-        COALESCE((SELECT doc_path FROM pipeline_docs WHERE pipeline_id = r.primary_pipeline_id), ${sqlStringLiteral(DEFAULT_DOC_PATH)}) as doc_path
+        COALESCE((SELECT doc_path FROM pipeline_metadata WHERE pipeline_id = r.primary_pipeline_id), ${sqlStringLiteral(`rendering_pipelines/${defaultDocument}`)}) as doc_path
       FROM result r
     `;
 }
@@ -809,16 +880,15 @@ function buildActiveRenderingProcessesSql(): string {
 }
 
 // =============================================================================
-// Phase B: Article-grounded 4-feature signal extractors
+// Supporting evidence-axis extractors
 // =============================================================================
-// Adds three orthogonal output channels that the LLM Agent and downstream skills
-// can consume for article-grounded diagnosis (S01 §4 特征分型 + 12 锚点).
-// These SQL builders are PURELY ADDITIVE — they don't modify the primary scoring
-// in buildDeterminePipelineSql, so existing canonical regression remains stable.
+// These outputs help explain Producer, layer, submission-path, and cadence
+// evidence. They are not a standalone rendering-type proof and do not modify
+// primary ranking.
 // =============================================================================
 
 /**
- * S01 §4 特征分型 [feature 2: layer count]
+ * Supporting layer-count evidence.
  * Queries SurfaceFlinger-side layer information for the dominant App.
  *
  * Layer count is the article's decisive signal:
@@ -897,12 +967,12 @@ function buildLayerSignalsSql(): string {
 }
 
 /**
- * S01 §4 特征分型 [feature 4: extra rhythm sources]
+ * Supporting cadence-source evidence.
  * Detects non-vsync-app rhythm sources in the App scope:
  * - Swappy/SwappyVk frame pacing
  * - AChoreographer (NDK Choreographer)
  * - setFrameRate / setFrameRateCategory APIs
- * - Camera HAL sensor trigger
+ * - Camera request activity candidate (slice-name match; not sensor-trigger proof)
  * - MediaCodec codec pacing
  * - Game engine main loop
  *
@@ -982,7 +1052,7 @@ function buildExtraRhythmSignalsSql(): string {
           WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*Swappy*' OR slice_name GLOB '*SwappyVk_*'), 0) > 0 THEN 'swappy_pacing'
           WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*AChoreographer*'), 0) > 0 THEN 'achoreographer'
           WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*PlayerLoop*' OR slice_name GLOB '*FEngineLoop*' OR slice_name GLOB '*MainLoop*'), 0) > 0 THEN 'engine_main_loop'
-          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*'), 0) > 0 THEN 'camera_sensor_trigger'
+          WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*'), 0) > 0 THEN 'camera_request_activity'
           WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*releaseOutputBuffer*'), 0) > 0 THEN 'video_codec_pacing'
           ELSE 'vsync_app_only'
         END as primary_rhythm_source
@@ -990,7 +1060,7 @@ function buildExtraRhythmSignalsSql(): string {
 }
 
 /**
- * S01 §4 特征分型 [feature 3: queueBuffer path]
+ * Supporting BufferQueue-path evidence.
  * Distinguishes the BufferQueue path:
  * - BBQ_TRANSACTION_INPROC (BLAST: applyTransaction + BLASTBufferQueue both present)
  * - BUFFERQUEUE_INPROC (Legacy: queueBuffer present BUT no BLAST signals)
@@ -1098,27 +1168,38 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
     .getAllPipelines()
     .filter((p) => p?.meta?.pipeline_id)
     .sort((a, b) => a.meta.pipeline_id.localeCompare(b.meta.pipeline_id));
+  const catalog = pipelineSkillLoader.getCatalog();
 
-  const pipelineScoresSql = buildPipelineScoresSql(pipelines);
-  const determinePipelineSql = buildDeterminePipelineSql(pipelines);
+  const pipelineScoresSql = buildPipelineScoresSql(pipelines, catalog);
+  const determinePipelineSql = buildDeterminePipelineSql(catalog);
   const subvariantsSql = buildSubvariantsSql();
   const traceRequirementsSql = buildTraceRequirementsSql();
   const activeProcessesSql = buildActiveRenderingProcessesSql();
-  // Phase B: 4-feature 分型新增 SQL（layer 数 / 额外节奏 / bufferqueue 路径）
+  // Supporting evidence axes: layer count, cadence, and BufferQueue path.
   const layerSignalsSql = buildLayerSignalsSql();
   const extraRhythmSignalsSql = buildExtraRhythmSignalsSql();
   const bufferqueuePathSignalsSql = buildBufferqueuePathSignalsSql();
 
   return {
     name: 'rendering_pipeline_detection',
-    version: '3.3',
+    version: '4.0',
     type: 'composite',
     category: 'rendering',
     meta: {
       display_name: '渲染管线检测 (YAML 驱动)',
-      description: '从 pipeline YAML detection 配置生成打分规则，输出主管线/候选/特性',
+      description: '从 catalog 与 pipeline YAML 生成子路径评分、主出图类型、候选与正交特性',
       icon: 'layers',
       tags: ['rendering', 'pipeline', 'detection', 'teaching', 'yaml'],
+    },
+    triggers: {
+      keywords: {
+        zh: ['渲染管线', '管线检测', '出图类型', 'SurfaceView', 'TextureView', 'Flutter', 'WebView'],
+        en: ['rendering pipeline', 'rendering type', 'pipeline detection', 'surfaceview', 'textureview', 'flutter', 'webview'],
+      },
+      patterns: [
+        '.*(渲染管线|出图类型|SurfaceView|TextureView|WebView|Flutter).*',
+        '.*(rendering pipeline|rendering type|surfaceview|textureview|webview|flutter).*',
+      ],
     },
     prerequisites: {
       required_tables: ['slice', 'thread_track', 'thread', 'process'],
@@ -1189,11 +1270,11 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         sql: activeProcessesSql,
         save_as: 'active_rendering_processes',
       },
-      // ----- Phase B: Article-grounded 4 特征分型扩展 -----
+      // Supporting evidence axes; none is sufficient for type proof by itself.
       {
         id: 'layer_signals',
         type: 'atomic',
-        name: 'SF Layer 数与名字模式 (S01 §4 特征分型 - feature 2)',
+        name: 'SF Layer 数与名字模式 (辅助证据)',
         display: {
           level: 'detail',
           title: 'Layer 信号',
@@ -1204,7 +1285,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
       {
         id: 'extra_rhythm_signals',
         type: 'atomic',
-        name: '额外节奏源 (S01 §4 特征分型 - feature 4)',
+        name: '额外节奏源 (辅助证据)',
         display: {
           level: 'detail',
           title: '额外节奏源',
@@ -1215,7 +1296,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
       {
         id: 'bufferqueue_path_signals',
         type: 'atomic',
-        name: 'BufferQueue 路径分型 (S01 §4 特征分型 - feature 3)',
+        name: 'BufferQueue 路径证据',
         display: {
           level: 'detail',
           title: 'BufferQueue 路径',
@@ -1245,7 +1326,7 @@ export async function generateRenderingPipelineDetectionSkill(): Promise<SkillDe
         { name: 'subvariants', label: '子变体信息' },
         { name: 'trace_requirements', label: '采集完整性检查' },
         { name: 'active_rendering_processes', label: '活跃渲染进程列表 (用于智能 Pin)' },
-        // Phase B: 4 特征分型扩展（用于 LLM Agent 与下游 skill 引用）
+        // Supporting evidence axes used by the LLM Agent and downstream skills.
         { name: 'layer_signals', label: 'Layer 信号 (SF 侧 layer 数与命名模式)' },
         { name: 'extra_rhythm_signals', label: '额外节奏源 (Swappy/AChoreographer/Camera/Codec)' },
         { name: 'bufferqueue_path_signals', label: 'BufferQueue 路径分型' },

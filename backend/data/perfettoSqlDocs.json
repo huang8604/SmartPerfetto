@@ -1,19 +1,19 @@
 {
   "version": 1,
-  "generatedAt": "2026-06-05T15:24:20.967Z",
-  "generatedFrom": "10d908b9f9277de86eb1438be4213d99e842c2d5",
-  "sourceDocs": "frontend/v56.0-9986a6a7c/stdlib_docs.json",
+  "generatedAt": "2026-07-03T06:02:02.424Z",
+  "generatedFrom": "bc652c5c9d562b16af45111809e6f6837290999f",
+  "sourceDocs": "frontend/v57.1-bc652c5c9/stdlib_docs.json",
   "pfsqlLineage": {
     "status": "unavailable"
   },
   "stats": {
-    "moduleCount": 248,
-    "entryCount": 434,
+    "moduleCount": 250,
+    "entryCount": 441,
     "byType": {
       "function": 69,
       "table": 182,
       "table_function": 30,
-      "view": 132,
+      "view": 139,
       "macro": 21
     }
   },
@@ -1217,6 +1217,20 @@
         "graphs.scan",
         "graphs.search"
       ]
+    },
+    {
+      "package": "android",
+      "module": "android.memory.heap_graph.oome",
+      "moduleDoc": "",
+      "tags": [],
+      "includes": [],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/android/memory/heap_graph/oome.sql",
+      "missingIncludes": [],
+      "errors": [],
+      "symbols": [
+        "android_heap_graph_java_oome_details"
+      ],
+      "transitiveIncludes": []
     },
     {
       "package": "android",
@@ -3562,6 +3576,20 @@
     },
     {
       "package": "linux",
+      "module": "linux.systemd_journald",
+      "moduleDoc": "",
+      "tags": [],
+      "includes": [],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/linux/systemd_journald.sql",
+      "missingIncludes": [],
+      "errors": [],
+      "symbols": [
+        "linux_systemd_journald_logs"
+      ],
+      "transitiveIncludes": []
+    },
+    {
+      "package": "linux",
       "module": "linux.threads",
       "moduleDoc": "",
       "tags": [
@@ -3764,11 +3792,13 @@
       "missingIncludes": [],
       "errors": [],
       "symbols": [
+        "heap_graph",
         "heap_graph_class",
         "heap_graph_object",
         "heap_graph_object_data",
         "heap_graph_primitive",
         "heap_graph_reference",
+        "heap_graph_thread_callsite",
         "memory_snapshot",
         "memory_snapshot_edge",
         "memory_snapshot_node",
@@ -3854,10 +3884,12 @@
         "heap_profile_allocation",
         "instant",
         "instruments_sample",
+        "logs",
         "machine",
         "package_list",
         "perf_session",
         "process",
+        "process_memory_mappings",
         "profiler_smaps",
         "protolog",
         "slice",
@@ -3867,6 +3899,7 @@
         "stack_profile_frame",
         "stack_profile_mapping",
         "stack_profile_symbol",
+        "state",
         "surfaceflinger_layer",
         "surfaceflinger_layers_snapshot",
         "surfaceflinger_transactions",
@@ -9998,6 +10031,57 @@
       ]
     },
     {
+      "id": "stdlib.android.memory.heap_graph.oome.android_heap_graph_java_oome_details",
+      "name": "android_heap_graph_java_oome_details",
+      "type": "view",
+      "category": "android",
+      "subcategory": "memory.heap_graph.oome",
+      "module": "android.memory.heap_graph.oome",
+      "package": "android",
+      "description": "Details of Java OutOfMemoryError exceptions that triggered heap dumps",
+      "fullDescription": "Details of Java OutOfMemoryError exceptions that triggered heap dumps.",
+      "visibility": "public",
+      "tags": [],
+      "include": "INCLUDE PERFETTO MODULE android.memory.heap_graph.oome;",
+      "moduleIncludes": [],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/android/memory/heap_graph/oome.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Unique identifier for this details row."
+        },
+        {
+          "name": "heap_graph_id",
+          "type": "JOINID(heap_graph.id)",
+          "description": "The heap graph instance this OOM trigger details belongs to.",
+          "table": "heap_graph",
+          "column": "id"
+        },
+        {
+          "name": "allocation_size_bytes",
+          "type": "LONG",
+          "description": "Number of bytes that triggered the OOME."
+        },
+        {
+          "name": "total_bytes_free",
+          "type": "LONG",
+          "description": "Total free bytes in the Java heap at OOME time."
+        },
+        {
+          "name": "free_bytes_until_oom",
+          "type": "LONG",
+          "description": "Free bytes remaining until OOME."
+        },
+        {
+          "name": "error_msg",
+          "type": "STRING",
+          "description": "Error message associated with the OOME."
+        }
+      ],
+      "transitiveIncludes": []
+    },
+    {
       "id": "stdlib.android.memory.heap_graph.heap_graph_stats.android_heap_graph_stats",
       "name": "android_heap_graph_stats",
       "type": "table",
@@ -11722,8 +11806,8 @@
       "subcategory": "after_eof.views",
       "module": "prelude.after_eof.views",
       "package": "prelude",
-      "description": "Log entries from Android logcat",
-      "fullDescription": "Log entries from Android logcat. NOTE: this table is not sorted by timestamp.",
+      "description": "Android log entries from logcat or bugreport",
+      "fullDescription": "Android log entries from logcat or bugreport. NOTE: this table is not sorted by timestamp.",
       "visibility": "public",
       "tags": [
         "trace"
@@ -11742,29 +11826,29 @@
         {
           "name": "ts",
           "type": "TIMESTAMP",
-          "description": "Timestamp of log entry."
+          "description": "Timestamp in nanoseconds."
         },
         {
           "name": "utid",
           "type": "JOINID(thread.id)",
-          "description": "Thread writing the log entry.",
+          "description": "Thread id in the trace (nullable).",
           "table": "thread",
           "column": "id"
         },
         {
           "name": "prio",
           "type": "LONG",
-          "description": "Priority of the log. 3=DEBUG, 4=INFO, 5=WARN, 6=ERROR."
+          "description": "Android log priority (3=DEBUG, 4=INFO, 5=WARN, 6=ERROR, 7=FATAL)."
         },
         {
           "name": "tag",
           "type": "STRING",
-          "description": "Tag of the log entry."
+          "description": "Log tag."
         },
         {
           "name": "msg",
           "type": "STRING",
-          "description": "Content of the log entry"
+          "description": "Log message text."
         }
       ],
       "transitiveIncludes": [
@@ -13064,7 +13148,7 @@
       "module": "android.memory.memory_breakdown",
       "package": "android",
       "description": "A table of process memory counter intervals, clipped to the process lifetime",
-      "fullDescription": "A table of process memory counter intervals, clipped to the process lifetime. Provides a comprehensive view of memory usage, including raw values and zygote-adjusted values. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details.",
+      "fullDescription": "A table of process memory counter intervals, clipped to the process lifetime. Provides a comprehensive view of memory usage, including raw values and zygote-adjusted values. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the average memory usage of the zygote that forked the process (its parent). This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from its zygote. This is a no-op for a process whose forking zygote has no memory samples in the trace (e.g. traces with only ftrace rss_stat, where idle zygotes are not sampled; process_stats polling captures them). NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details.",
       "visibility": "public",
       "tags": [],
       "include": "INCLUDE PERFETTO MODULE android.memory.memory_breakdown;",
@@ -13154,7 +13238,7 @@
       "module": "android.memory.memory_breakdown",
       "package": "android",
       "description": "Correlates memory counters with OOM adjustment scores",
-      "fullDescription": "Correlates memory counters with OOM adjustment scores. This table joins memory counters with OOM adjustment scores, providing insights into memory usage under system memory pressure. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details.",
+      "fullDescription": "Correlates memory counters with OOM adjustment scores. This table joins memory counters with OOM adjustment scores, providing insights into memory usage under system memory pressure. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the average memory usage of the zygote that forked the process (its parent). This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from its zygote. This is a no-op for a process whose forking zygote has no memory samples in the trace (e.g. traces with only ftrace rss_stat, where idle zygotes are not sampled; process_stats polling captures them). NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details.",
       "visibility": "public",
       "tags": [],
       "include": "INCLUDE PERFETTO MODULE android.memory.memory_breakdown;",
@@ -25729,6 +25813,59 @@
       "transitiveIncludes": []
     },
     {
+      "id": "stdlib.prelude.after_eof.memory.heap_graph",
+      "name": "heap_graph",
+      "type": "view",
+      "category": "prelude",
+      "subcategory": "after_eof.memory",
+      "module": "prelude.after_eof.memory",
+      "package": "prelude",
+      "description": "A list of heap graphs (heap dumps) captured during the trace",
+      "fullDescription": "A list of heap graphs (heap dumps) captured during the trace.",
+      "visibility": "public",
+      "tags": [
+        "memory"
+      ],
+      "include": "INCLUDE PERFETTO MODULE prelude.after_eof.memory;",
+      "moduleIncludes": [
+        "prelude.after_eof.views"
+      ],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/prelude/after_eof/memory.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Unique identifier for this heap graph instance."
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP",
+          "description": "Timestamp of the heap dump in nanoseconds."
+        },
+        {
+          "name": "upid",
+          "type": "JOINID(process.upid)",
+          "description": "Unique PID of the target.",
+          "table": "process",
+          "column": "upid"
+        },
+        {
+          "name": "dump_reason",
+          "type": "STRING",
+          "description": "Reason why the heap graph was dumped (e.g. OOME, periodic, manual)."
+        },
+        {
+          "name": "heap_size",
+          "type": "LONG",
+          "description": "Total bytes allocated in the heap as reported by the VM."
+        }
+      ],
+      "transitiveIncludes": [
+        "prelude.after_eof.casts",
+        "prelude.after_eof.views"
+      ]
+    },
+    {
       "id": "stdlib.android.memory.heap_graph.bitmap.heap_graph_bitmaps",
       "name": "heap_graph_bitmaps",
       "type": "table",
@@ -26264,6 +26401,58 @@
           "name": "deobfuscated_field_name",
           "type": "STRING",
           "description": "The deobfuscated name, if field_name was obfuscated and a deobfuscation mapping was provided for it."
+        }
+      ],
+      "transitiveIncludes": [
+        "prelude.after_eof.casts",
+        "prelude.after_eof.views"
+      ]
+    },
+    {
+      "id": "stdlib.prelude.after_eof.memory.heap_graph_thread_callsite",
+      "name": "heap_graph_thread_callsite",
+      "type": "view",
+      "category": "prelude",
+      "subcategory": "after_eof.memory",
+      "module": "prelude.after_eof.memory",
+      "package": "prelude",
+      "description": "Callstack profiles of threads at the time the heap graph was collected",
+      "fullDescription": "Callstack profiles of threads at the time the heap graph was collected.",
+      "visibility": "public",
+      "tags": [
+        "memory"
+      ],
+      "include": "INCLUDE PERFETTO MODULE prelude.after_eof.memory;",
+      "moduleIncludes": [
+        "prelude.after_eof.views"
+      ],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/prelude/after_eof/memory.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Unique identifier for this mapping row."
+        },
+        {
+          "name": "heap_graph_id",
+          "type": "JOINID(heap_graph.id)",
+          "description": "The heap graph instance.",
+          "table": "heap_graph",
+          "column": "id"
+        },
+        {
+          "name": "utid",
+          "type": "JOINID(thread.id)",
+          "description": "The thread ID.",
+          "table": "thread",
+          "column": "id"
+        },
+        {
+          "name": "callsite_id",
+          "type": "JOINID(stack_profile_callsite.id)",
+          "description": "The callsite of the leaf frame of the stacktrace.",
+          "table": "stack_profile_callsite",
+          "column": "id"
         }
       ],
       "transitiveIncludes": [
@@ -27558,6 +27747,82 @@
       "transitiveIncludes": []
     },
     {
+      "id": "stdlib.linux.systemd_journald.linux_systemd_journald_logs",
+      "name": "linux_systemd_journald_logs",
+      "type": "view",
+      "category": "linux",
+      "subcategory": "systemd_journald",
+      "module": "linux.systemd_journald",
+      "package": "linux",
+      "description": "Journald log entries from the linux.systemd_journald data source",
+      "fullDescription": "Journald log entries from the linux.systemd_journald data source. NOTE: this table is not sorted by timestamp.",
+      "visibility": "public",
+      "tags": [],
+      "include": "INCLUDE PERFETTO MODULE linux.systemd_journald;",
+      "moduleIncludes": [],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/linux/systemd_journald.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Which row in the table the log corresponds to."
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP",
+          "description": "Timestamp in nanoseconds."
+        },
+        {
+          "name": "utid",
+          "type": "JOINID(thread.id)",
+          "description": "Thread id in the trace (nullable).",
+          "table": "thread",
+          "column": "id"
+        },
+        {
+          "name": "prio",
+          "type": "LONG",
+          "description": "Syslog priority (0=EMERG, 7=DEBUG)."
+        },
+        {
+          "name": "tag",
+          "type": "STRING",
+          "description": "SYSLOG_IDENTIFIER (program name / tag, nullable)."
+        },
+        {
+          "name": "msg",
+          "type": "STRING",
+          "description": "Log message text."
+        },
+        {
+          "name": "uid",
+          "type": "LONG",
+          "description": "User ID (nullable)."
+        },
+        {
+          "name": "comm",
+          "type": "STRING",
+          "description": "Process comm name (nullable)."
+        },
+        {
+          "name": "systemd_unit",
+          "type": "STRING",
+          "description": "Systemd unit name (nullable)."
+        },
+        {
+          "name": "hostname",
+          "type": "STRING",
+          "description": "Hostname (nullable)."
+        },
+        {
+          "name": "transport",
+          "type": "STRING",
+          "description": "Transport method (nullable)."
+        }
+      ],
+      "transitiveIncludes": []
+    },
+    {
       "id": "stdlib.prelude.before_eof.functions.ln",
       "name": "ln",
       "type": "function",
@@ -27582,6 +27847,73 @@
         }
       ],
       "transitiveIncludes": []
+    },
+    {
+      "id": "stdlib.prelude.after_eof.views.logs",
+      "name": "logs",
+      "type": "view",
+      "category": "prelude",
+      "subcategory": "after_eof.views",
+      "module": "prelude.after_eof.views",
+      "package": "prelude",
+      "description": "Log entries from all sources (Android logcat, systemd_journald, etc.)",
+      "fullDescription": "Log entries from all sources (Android logcat, systemd_journald, etc.). NOTE: this table is not sorted by timestamp.",
+      "visibility": "public",
+      "tags": [
+        "trace"
+      ],
+      "include": "INCLUDE PERFETTO MODULE prelude.after_eof.views;",
+      "moduleIncludes": [
+        "prelude.after_eof.casts"
+      ],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/prelude/after_eof/views.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Which row in the table the log corresponds to."
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP",
+          "description": "Timestamp of the log entry."
+        },
+        {
+          "name": "utid",
+          "type": "JOINID(thread.id)",
+          "description": "Thread writing the log entry (nullable).",
+          "table": "thread",
+          "column": "id"
+        },
+        {
+          "name": "prio",
+          "type": "LONG",
+          "description": "Priority. Android: 3=DEBUG..6=ERROR. Journald/syslog: 0=EMERG..7=DEBUG."
+        },
+        {
+          "name": "log_source",
+          "type": "STRING",
+          "description": "Source of the log entry: 'android_logcat' or 'systemd_journald'."
+        },
+        {
+          "name": "tag",
+          "type": "STRING",
+          "description": "Tag / SYSLOG_IDENTIFIER of the log entry."
+        },
+        {
+          "name": "msg",
+          "type": "STRING",
+          "description": "Content of the log entry."
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID",
+          "description": "Args for source-specific metadata."
+        }
+      ],
+      "transitiveIncludes": [
+        "prelude.after_eof.casts"
+      ]
     },
     {
       "id": "stdlib.prelude.after_eof.views.machine",
@@ -27612,6 +27944,11 @@
           "name": "raw_id",
           "type": "LONG",
           "description": "Raw machine identifier in the trace packet."
+        },
+        {
+          "name": "name",
+          "type": "STRING",
+          "description": "Human-readable name of the machine, used as its label in the UI."
         },
         {
           "name": "sysname",
@@ -28832,6 +29169,121 @@
       ]
     },
     {
+      "id": "stdlib.prelude.after_eof.views.process_memory_mappings",
+      "name": "process_memory_mappings",
+      "type": "view",
+      "category": "prelude",
+      "subcategory": "after_eof.views",
+      "module": "prelude.after_eof.views",
+      "package": "prelude",
+      "description": "Per-VMA memory mapping stats",
+      "fullDescription": "Per-VMA memory mapping stats.",
+      "visibility": "public",
+      "tags": [
+        "trace"
+      ],
+      "include": "INCLUDE PERFETTO MODULE prelude.after_eof.views;",
+      "moduleIncludes": [
+        "prelude.after_eof.casts"
+      ],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/prelude/after_eof/views.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "The id of the row."
+        },
+        {
+          "name": "upid",
+          "type": "LONG",
+          "description": "Unique pid of the process."
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP",
+          "description": "Timestamp of the snapshot."
+        },
+        {
+          "name": "path",
+          "type": "STRING",
+          "description": "The mapping name. Any (deleted) suffix is removed for file-backed mappings."
+        },
+        {
+          "name": "aggregate_count",
+          "type": "LONG",
+          "description": "Number of original mappings aggregated into this row."
+        },
+        {
+          "name": "is_deleted",
+          "type": "LONG",
+          "description": "True if this is a file-backed mapping, and the file was deleted. In other words, the kernel reported the mapping with a \"(deleted)\" suffix."
+        },
+        {
+          "name": "size_kb",
+          "type": "LONG",
+          "description": "Total size of the mapping."
+        },
+        {
+          "name": "rss_kb",
+          "type": "LONG",
+          "description": "Resident set size (RSS) of the mapping."
+        },
+        {
+          "name": "anonymous_kb",
+          "type": "LONG",
+          "description": "Anonymous (non-file-backed) portion of the mapping."
+        },
+        {
+          "name": "swap_kb",
+          "type": "LONG",
+          "description": "Portion of the mapping in swap."
+        },
+        {
+          "name": "shared_clean_kb",
+          "type": "LONG",
+          "description": "Shared clean RSS of the mapping."
+        },
+        {
+          "name": "shared_dirty_kb",
+          "type": "LONG",
+          "description": "Shared dirty RSS of the mapping."
+        },
+        {
+          "name": "private_clean_kb",
+          "type": "LONG",
+          "description": "Private clean RSS of the mapping."
+        },
+        {
+          "name": "private_dirty_kb",
+          "type": "LONG",
+          "description": "Private dirty RSS of the mapping."
+        },
+        {
+          "name": "locked_kb",
+          "type": "LONG",
+          "description": "Locked KB."
+        },
+        {
+          "name": "pss_kb",
+          "type": "LONG",
+          "description": "Proportional set size (PSS)."
+        },
+        {
+          "name": "pss_dirty_kb",
+          "type": "LONG",
+          "description": "Dirty portion of the proportional set size (PSS)."
+        },
+        {
+          "name": "swap_pss_kb",
+          "type": "LONG",
+          "description": "Proportional share of swap."
+        }
+      ],
+      "transitiveIncludes": [
+        "prelude.after_eof.casts"
+      ]
+    },
+    {
       "id": "stdlib.prelude.after_eof.memory.process_memory_snapshot",
       "name": "process_memory_snapshot",
       "type": "view",
@@ -29058,8 +29510,8 @@
       "subcategory": "after_eof.views",
       "module": "prelude.after_eof.views",
       "package": "prelude",
-      "description": "The profiler smaps contains the memory stats for virtual memory ranges",
-      "fullDescription": "The profiler smaps contains the memory stats for virtual memory ranges.",
+      "description": "Per-VMA memory mapping stats",
+      "fullDescription": "Per-VMA memory mapping stats. For linux traces, prefer the process_memory_mappings view.",
       "visibility": "public",
       "tags": [
         "trace"
@@ -29089,6 +29541,21 @@
           "name": "path",
           "type": "STRING",
           "description": "The mmaped file, as per /proc/pid/smaps."
+        },
+        {
+          "name": "path_trimmed",
+          "type": "STRING",
+          "description": "Same as path but with any trailing \" (deleted)\" suffix removed."
+        },
+        {
+          "name": "aggregate_count",
+          "type": "LONG",
+          "description": "Number of original mappings aggregated into this row."
+        },
+        {
+          "name": "is_deleted",
+          "type": "LONG",
+          "description": "True if this is a file-backed mapping, and the file was deleted."
         },
         {
           "name": "size_kb",
@@ -29158,7 +29625,27 @@
         {
           "name": "proportional_resident_kb",
           "type": "LONG",
-          "description": "Proportional resident KB."
+          "description": "Proportional set size (PSS) KB."
+        },
+        {
+          "name": "rss_kb",
+          "type": "LONG",
+          "description": "Resident set size (RSS) KB."
+        },
+        {
+          "name": "anonymous_kb",
+          "type": "LONG",
+          "description": "Anonymous (non-file-backed) KB."
+        },
+        {
+          "name": "pss_dirty_kb",
+          "type": "LONG",
+          "description": "Dirty portion of the proportional set size (PSS) KB."
+        },
+        {
+          "name": "swap_pss_kb",
+          "type": "LONG",
+          "description": "Proportional share of swap KB."
         }
       ],
       "transitiveIncludes": [
@@ -30897,6 +31384,68 @@
           "name": "inlined",
           "type": "LONG",
           "description": "Whether this function was inlined."
+        }
+      ],
+      "transitiveIncludes": [
+        "prelude.after_eof.casts"
+      ]
+    },
+    {
+      "id": "stdlib.prelude.after_eof.views.state",
+      "name": "state",
+      "type": "view",
+      "category": "prelude",
+      "subcategory": "after_eof.views",
+      "module": "prelude.after_eof.views",
+      "package": "prelude",
+      "description": "Contains state from userspace which reads like a symbolic counter with literals rather than numbers",
+      "fullDescription": "Contains state from userspace which reads like a symbolic counter with literals rather than numbers.",
+      "visibility": "public",
+      "tags": [
+        "trace"
+      ],
+      "include": "INCLUDE PERFETTO MODULE prelude.after_eof.views;",
+      "moduleIncludes": [
+        "prelude.after_eof.casts"
+      ],
+      "sourcePath": "perfetto/src/trace_processor/perfetto_sql/stdlib/prelude/after_eof/views.sql",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID",
+          "description": "Unique id of a state slice"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP",
+          "description": "The start timestamp of the state slice in nanoseconds."
+        },
+        {
+          "name": "dur",
+          "type": "DURATION",
+          "description": "The duration of the state slice in nanoseconds."
+        },
+        {
+          "name": "track_id",
+          "type": "JOINID(track.id)",
+          "description": "The track this state slice belongs to.",
+          "table": "track",
+          "column": "id"
+        },
+        {
+          "name": "category",
+          "type": "STRING",
+          "description": "The category of the state."
+        },
+        {
+          "name": "value",
+          "type": "STRING",
+          "description": "The string value/name of the state."
+        },
+        {
+          "name": "arg_set_id",
+          "type": "ARGSETID",
+          "description": "Additional information about the state."
         }
       ],
       "transitiveIncludes": [
@@ -33812,6 +34361,7 @@
     "android_heap_graph_class_aggregation": "android.memory.heap_graph.heap_graph_class_aggregation",
     "android_heap_graph_class_find_descendants": "android.memory.heap_graph.class_relationship",
     "android_heap_graph_class_summary_tree": "android.memory.heap_graph.class_summary_tree",
+    "android_heap_graph_java_oome_details": "android.memory.heap_graph.oome",
     "android_heap_graph_stats": "android.memory.heap_graph.heap_graph_stats",
     "android_heap_profile_summary_tree": "android.memory.heap_profile.summary_tree",
     "android_input_event_dispatch": "android.input",
@@ -34040,6 +34590,7 @@
     "graph_reachable_bfs": "graphs.search",
     "graph_reachable_dfs": "graphs.search",
     "graph_reachable_weight_bounded_dfs": "graphs.search",
+    "heap_graph": "prelude.after_eof.memory",
     "heap_graph_bitmaps": "android.memory.heap_graph.bitmap",
     "heap_graph_class": "prelude.after_eof.memory",
     "heap_graph_dominator_tree": "android.memory.heap_graph.dominator_tree",
@@ -34047,6 +34598,7 @@
     "heap_graph_object_data": "prelude.after_eof.memory",
     "heap_graph_primitive": "prelude.after_eof.memory",
     "heap_graph_reference": "prelude.after_eof.memory",
+    "heap_graph_thread_callsite": "prelude.after_eof.memory",
     "heap_profile_allocation": "prelude.after_eof.views",
     "instant": "prelude.after_eof.views",
     "instruments_sample": "prelude.after_eof.views",
@@ -34070,7 +34622,9 @@
     "linux_perf_samples_summary_tree": "linux.perf.samples",
     "linux_perf_spe_record": "linux.perf.spe",
     "linux_soft_irqs": "linux.irqs",
+    "linux_systemd_journald_logs": "linux.systemd_journald",
     "ln": "prelude.before_eof.functions",
+    "logs": "prelude.after_eof.views",
     "machine": "prelude.after_eof.views",
     "memory_oom_score_with_rss_and_swap_per_process": "android.memory.process",
     "memory_rss_and_swap_per_process": "linux.memory.process",
@@ -34089,6 +34643,7 @@
     "pkvm_hypervisor_events": "pkvm.hypervisor",
     "process": "prelude.after_eof.views",
     "process_counter_track": "prelude.after_eof.counters",
+    "process_memory_mappings": "prelude.after_eof.views",
     "process_memory_snapshot": "prelude.after_eof.memory",
     "process_slice": "slices.with_context",
     "process_track": "prelude.after_eof.tracks",
@@ -34124,6 +34679,7 @@
     "stack_profile_frame": "prelude.after_eof.views",
     "stack_profile_mapping": "prelude.after_eof.views",
     "stack_profile_symbol": "prelude.after_eof.views",
+    "state": "prelude.after_eof.views",
     "stats": "prelude.before_eof.stats",
     "surfaceflinger_layer": "prelude.after_eof.views",
     "surfaceflinger_layers_snapshot": "prelude.after_eof.views",

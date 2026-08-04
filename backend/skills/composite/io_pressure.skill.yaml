@@ -49,7 +49,6 @@ prerequisites:
   required_tables:
     - thread_state
   modules:
-    - sched
     - linux.threads
 
 inputs:

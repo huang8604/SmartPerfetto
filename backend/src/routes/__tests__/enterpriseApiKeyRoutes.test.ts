@@ -37,6 +37,14 @@ function viewerHeaders(): Record<string, string> {
   };
 }
 
+function orgAdminHeaders(): Record<string, string> {
+  return {
+    ...adminHeaders(),
+    'X-SmartPerfetto-SSO-Roles': 'org_admin',
+    'X-SmartPerfetto-SSO-Scopes': '*',
+  };
+}
+
 function makeApp(service: EnterpriseApiKeyService): express.Express {
   const app = express();
   app.use(express.json());
@@ -184,6 +192,52 @@ describe('enterprise API key routes', () => {
       .expect(400);
 
     expect(res.body.error).toContain('workspaceId must match');
+  });
+
+  test('prevents a workspace admin from minting a tenant-wide wildcard key', async () => {
+    const response = await request(app)
+      .post('/api/auth/api-keys')
+      .set(adminHeaders())
+      .send({workspaceId: null, ownerUserId: null, scopes: ['*']})
+      .expect(400);
+
+    expect(response.body.error).toContain('org admin');
+  });
+
+  test('prevents a workspace admin from delegating scopes they do not hold', async () => {
+    const response = await request(app)
+      .post('/api/auth/api-keys')
+      .set(adminHeaders())
+      .send({scopes: ['provider:manage_org']})
+      .expect(400);
+
+    expect(response.body.error).toContain('Cannot delegate scope');
+  });
+
+  test('keeps tenant-wide keys invisible and irrevocable to workspace admins', async () => {
+    const created = await request(app)
+      .post('/api/auth/api-keys')
+      .set(orgAdminHeaders())
+      .send({workspaceId: null, scopes: ['*']})
+      .expect(201);
+
+    const listed = await request(app)
+      .get('/api/auth/api-keys')
+      .set(adminHeaders())
+      .expect(200);
+    expect(listed.body.apiKeys).toEqual([]);
+
+    await request(app)
+      .post(`/api/auth/api-keys/${created.body.apiKey.id}/revoke`)
+      .set(adminHeaders())
+      .expect(404);
+
+    const protectedResponse = await request(app)
+      .get('/protected')
+      .set('Authorization', `Bearer ${created.body.token}`)
+      .set('X-Workspace-Id', 'workspace-b')
+      .expect(200);
+    expect(protectedResponse.body.requestContext.workspaceId).toBe('default-workspace');
   });
 
   test('rejects expired managed API keys during authenticate', async () => {

@@ -2,27 +2,20 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import crypto from 'crypto';
+import type {
+  Configuration,
+  DiscoveryRequestOptions,
+} from 'openid-client';
+
 export interface OidcRuntimeConfig {
   issuerUrl: string;
   clientId: string;
-  clientSecret?: string;
+  clientSecret: string;
   redirectUri: string;
   scopes: string[];
-}
-
-interface OidcDiscoveryDocument {
-  authorization_endpoint: string;
-  token_endpoint: string;
-  userinfo_endpoint?: string;
-  issuer?: string;
-}
-
-interface OidcTokenResponse {
-  access_token?: string;
-  token_type?: string;
-  expires_in?: number;
-  id_token?: string;
-  [key: string]: unknown;
+  allowInsecureHttp: boolean;
+  requestTimeoutMs: number;
 }
 
 export interface EnterpriseOidcUserInfo {
@@ -33,47 +26,119 @@ export interface EnterpriseOidcUserInfo {
   claims: Record<string, unknown>;
 }
 
+export interface OidcExchangeOptions {
+  codeVerifier: string;
+  expectedState: string;
+  expectedNonce: string;
+}
+
+type OpenidClientModule = typeof import('openid-client');
+type OpenidClientLoader = () => Promise<OpenidClientModule>;
+
 export const OIDC_ENV = {
   issuerUrl: 'SMARTPERFETTO_OIDC_ISSUER_URL',
   clientId: 'SMARTPERFETTO_OIDC_CLIENT_ID',
   clientSecret: 'SMARTPERFETTO_OIDC_CLIENT_SECRET',
   redirectUri: 'SMARTPERFETTO_OIDC_REDIRECT_URI',
-  scopes: 'SMARTPERFETTO_OIDC_SCOPES',
+  allowInsecureHttp: 'SMARTPERFETTO_OIDC_ALLOW_INSECURE_HTTP',
 } as const;
 
-function normalizeIssuerUrl(value: string): string {
-  return value.replace(/\/+$/, '');
+const OIDC_SCOPES = ['openid', 'email', 'profile'];
+const OIDC_REQUEST_TIMEOUT_MS = 10_000;
+
+function truthy(value: string | undefined): boolean {
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(
+    value?.trim().toLowerCase() || '',
+  );
 }
 
-function discoveryUrlForIssuer(issuerUrl: string): string {
-  const normalized = normalizeIssuerUrl(issuerUrl);
-  if (normalized.endsWith('/.well-known/openid-configuration')) return normalized;
-  return `${normalized}/.well-known/openid-configuration`;
+function normalizeIssuerUrl(value: string, allowInsecureHttp: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('OIDC issuer URL must be a valid URL');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('OIDC issuer URL must not contain credentials, a query, or a fragment');
+  }
+  if (/\/\.well-known\/openid-configuration\/?$/.test(parsed.pathname)) {
+    throw new Error('OIDC issuer URL must be an issuer identifier, not a discovery document URL');
+  }
+  if (parsed.protocol !== 'https:' && !(allowInsecureHttp && parsed.protocol === 'http:')) {
+    throw new Error('OIDC issuer URL must use HTTPS');
+  }
+  return parsed.toString();
 }
 
-export function resolveOidcRuntimeConfig(env: NodeJS.ProcessEnv = process.env): OidcRuntimeConfig | null {
+function normalizeRedirectUri(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('OIDC redirect URI must be a valid URL');
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol)
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+  ) {
+    throw new Error(
+      'OIDC redirect URI must be an HTTP(S) URL without credentials, a query, or a fragment',
+    );
+  }
+  return parsed.toString();
+}
+
+function stringClaim(
+  claims: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  const value = claims[name];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function verifiedEmail(claims: Record<string, unknown>): string | undefined {
+  if (claims.email_verified !== true) return undefined;
+  return stringClaim(claims, 'email');
+}
+
+export function createPkceChallenge(verifier: string): string {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
+}
+
+export function resolveOidcRuntimeConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): OidcRuntimeConfig | null {
   const issuerUrl = env[OIDC_ENV.issuerUrl]?.trim();
   const clientId = env[OIDC_ENV.clientId]?.trim();
+  const clientSecret = env[OIDC_ENV.clientSecret]?.trim();
   const redirectUri = env[OIDC_ENV.redirectUri]?.trim();
-  if (!issuerUrl || !clientId || !redirectUri) return null;
+  if (!issuerUrl || !clientId || !clientSecret || !redirectUri) return null;
+  const allowInsecureHttp = truthy(env[OIDC_ENV.allowInsecureHttp]);
   return {
-    issuerUrl: normalizeIssuerUrl(issuerUrl),
+    issuerUrl: normalizeIssuerUrl(issuerUrl, allowInsecureHttp),
     clientId,
-    clientSecret: env[OIDC_ENV.clientSecret]?.trim() || undefined,
-    redirectUri,
-    scopes: (env[OIDC_ENV.scopes] || 'openid email profile')
-      .split(/[,\s]+/)
-      .map(scope => scope.trim())
-      .filter(Boolean),
+    clientSecret,
+    redirectUri: normalizeRedirectUri(redirectUri),
+    scopes: OIDC_SCOPES,
+    allowInsecureHttp,
+    requestTimeoutMs: OIDC_REQUEST_TIMEOUT_MS,
   };
 }
 
 export class EnterpriseOidcClient {
-  private discovery: OidcDiscoveryDocument | null = null;
+  private configuration: Configuration | null = null;
+  private clientModule: OpenidClientModule | null = null;
 
   constructor(
     private readonly config: OidcRuntimeConfig,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly loadClient: OpenidClientLoader = () => import('openid-client'),
   ) {}
 
   static fromEnv(env: NodeJS.ProcessEnv = process.env): EnterpriseOidcClient | null {
@@ -84,80 +149,100 @@ export class EnterpriseOidcClient {
   async buildAuthorizationUrl(params: {
     state: string;
     nonce: string;
+    codeChallenge: string;
   }): Promise<string> {
-    const discovery = await this.getDiscovery();
-    const url = new URL(discovery.authorization_endpoint);
-    url.searchParams.set('response_type', 'code');
-    url.searchParams.set('client_id', this.config.clientId);
-    url.searchParams.set('redirect_uri', this.config.redirectUri);
-    url.searchParams.set('scope', this.config.scopes.join(' '));
-    url.searchParams.set('state', params.state);
-    url.searchParams.set('nonce', params.nonce);
-    return url.toString();
+    const [client, configuration] = await this.getClient();
+    return client.buildAuthorizationUrl(configuration, {
+      response_type: 'code',
+      response_mode: 'query',
+      redirect_uri: this.config.redirectUri,
+      scope: this.config.scopes.join(' '),
+      state: params.state,
+      nonce: params.nonce,
+      code_challenge: params.codeChallenge,
+      code_challenge_method: 'S256',
+    }).toString();
   }
 
-  async exchangeCodeForUserInfo(code: string): Promise<EnterpriseOidcUserInfo> {
-    const discovery = await this.getDiscovery();
-    if (!discovery.userinfo_endpoint) {
-      throw new Error('OIDC discovery document is missing userinfo_endpoint');
-    }
-
-    const body = new URLSearchParams();
-    body.set('grant_type', 'authorization_code');
-    body.set('code', code);
-    body.set('redirect_uri', this.config.redirectUri);
-    body.set('client_id', this.config.clientId);
-    if (this.config.clientSecret) {
-      body.set('client_secret', this.config.clientSecret);
-    }
-
-    const tokenResponse = await this.fetchImpl(discovery.token_endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-    if (!tokenResponse.ok) {
-      throw new Error(`OIDC token exchange failed with status ${tokenResponse.status}`);
-    }
-    const token = await tokenResponse.json() as OidcTokenResponse;
-    if (!token.access_token || typeof token.access_token !== 'string') {
-      throw new Error('OIDC token response did not include access_token');
-    }
-
-    const userInfoResponse = await this.fetchImpl(discovery.userinfo_endpoint, {
-      headers: {
-        authorization: `Bearer ${token.access_token}`,
+  async exchangeCodeForUserInfo(
+    code: string,
+    options: OidcExchangeOptions,
+  ): Promise<EnterpriseOidcUserInfo> {
+    const [client, configuration] = await this.getClient();
+    const callbackUrl = new URL(this.config.redirectUri);
+    callbackUrl.searchParams.set('code', code);
+    callbackUrl.searchParams.set('state', options.expectedState);
+    const tokens = await client.authorizationCodeGrant(
+      configuration,
+      callbackUrl,
+      {
+        pkceCodeVerifier: options.codeVerifier,
+        expectedState: options.expectedState,
+        expectedNonce: options.expectedNonce,
+        idTokenExpected: true,
       },
-    });
-    if (!userInfoResponse.ok) {
-      throw new Error(`OIDC userinfo request failed with status ${userInfoResponse.status}`);
+    );
+    const idTokenClaims = tokens.claims();
+    const subject = idTokenClaims?.sub?.trim();
+    if (!idTokenClaims || !subject) {
+      throw new Error('OIDC token response did not include a valid ID Token subject');
     }
-    const claims = await userInfoResponse.json() as Record<string, unknown>;
-    const subject = typeof claims.sub === 'string' ? claims.sub.trim() : '';
-    if (!subject) {
-      throw new Error('OIDC userinfo response did not include sub');
+
+    let claims: Record<string, unknown> = {
+      ...(idTokenClaims as Record<string, unknown>),
+    };
+    if (
+      configuration.serverMetadata().userinfo_endpoint
+      && typeof tokens.access_token === 'string'
+      && tokens.access_token
+    ) {
+      const userInfo = await client.fetchUserInfo(
+        configuration,
+        tokens.access_token,
+        subject,
+      );
+      claims = {
+        ...claims,
+        ...(userInfo as Record<string, unknown>),
+      };
     }
 
     return {
-      issuer: discovery.issuer || this.config.issuerUrl,
+      issuer: configuration.serverMetadata().issuer,
       subject,
-      email: typeof claims.email === 'string' ? claims.email : undefined,
-      displayName: typeof claims.name === 'string' ? claims.name : undefined,
+      email: verifiedEmail(claims),
+      displayName:
+        stringClaim(claims, 'name')
+        || stringClaim(claims, 'preferred_username'),
       claims,
     };
   }
 
-  private async getDiscovery(): Promise<OidcDiscoveryDocument> {
-    if (this.discovery) return this.discovery;
-    const response = await this.fetchImpl(discoveryUrlForIssuer(this.config.issuerUrl));
-    if (!response.ok) {
-      throw new Error(`OIDC discovery failed with status ${response.status}`);
+  private async getClient(): Promise<[OpenidClientModule, Configuration]> {
+    if (this.clientModule && this.configuration) {
+      return [this.clientModule, this.configuration];
     }
-    const parsed = await response.json() as OidcDiscoveryDocument;
-    if (!parsed.authorization_endpoint || !parsed.token_endpoint) {
-      throw new Error('OIDC discovery document is missing required endpoints');
-    }
-    this.discovery = parsed;
-    return parsed;
+    const client = await this.loadClient();
+    const options: DiscoveryRequestOptions = {
+      timeout: Math.max(1, Math.ceil(this.config.requestTimeoutMs / 1000)),
+      [client.customFetch]: this.fetchImpl,
+      ...(this.config.allowInsecureHttp
+        ? {execute: [client.allowInsecureRequests]}
+        : {}),
+    };
+    const configuration = await client.discovery(
+      new URL(this.config.issuerUrl),
+      this.config.clientId,
+      {
+        client_secret: this.config.clientSecret,
+        token_endpoint_auth_method: 'client_secret_basic',
+      },
+      client.ClientSecretBasic(this.config.clientSecret),
+      options,
+    );
+    configuration[client.customFetch] = this.fetchImpl;
+    this.clientModule = client;
+    this.configuration = configuration;
+    return [client, configuration];
   }
 }

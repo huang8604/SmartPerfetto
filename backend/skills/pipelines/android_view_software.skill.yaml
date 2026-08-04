@@ -20,7 +20,7 @@ meta:
   description: "CPU Skia 软件渲染，无 RenderThread，用于低端设备或特殊场景"
   icon: "cpu"
   family: hwui
-  doc_path: "rendering_pipelines/android_view_software.md"
+  doc_path: rendering_pipelines/S07_software_offscreen_type.md
   # ----- Article-grounded signature (S07) -----
   s_article_ref: "S07"
   four_features:
@@ -37,7 +37,8 @@ meta:
     2. SOFTWARE_RENDERING_LAYER（View.setLayerType(LAYER_TYPE_SOFTWARE)，混合路径，仍有 RenderThread + Bitmap upload）— 当前 exclude_if RenderThread 排除掉
     3. OFFSCREEN_HARDWAREBUFFER（HardwareBufferRenderer 离屏 GPU，Android 14+/API 35）
     4. OFFSCREEN_BITMAP（离屏 Bitmap + 纹理上传）
-    Phase E 会拆分独立 ID。
+    这些子路径统一映射到 S07；只有 catalog 标记为 variant 的条目参与主类型判定，
+    HardwareBufferRenderer、ImageReader 等条目作为 feature 保留附加证据。
     article-precise slice 名（用于 LLM 诊断参考）：
     - nSurface_lockCanvas / nSurface_unlockCanvasAndPost（native 层 Surface 操作）
     - drawSoftware（ViewRootImpl.drawSoftware()）
@@ -61,51 +62,7 @@ detection:
     - slice_pattern: "DrawFrame*"
 
 teaching:
-  title: "Android View 软件渲染管线"
-  summary: |
-    使用 CPU Skia 进行软件渲染，所有绘制都在主线程完成。
-    通常用于低端设备、特殊 View (如 SurfaceHolder.lockCanvas)，或硬件加速被禁用时。
-    性能较低，但兼容性最好。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant Main as App (main)
-      participant Canvas as Canvas (CPU)
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 Software Rendering (无 RenderThread)
-      VA->>Main: 🔔 VSync-app 信号触发
-      activate Main
-      Main->>Main: Choreographer#doFrame
-      Main->>Canvas: lockCanvas
-      Main->>Canvas: Skia CPU 绘制 (drawXXX)
-      Main->>Canvas: unlockCanvasAndPost
-      Main->>BQ: queueBuffer
-      deactivate Main
-
-      VS->>SF: 🔔 VSync-sf 触发
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over VA,SF: ⚠️ 无硬件加速，适用于简单 UI 或兼容模式
-  thread_roles:
-    - thread: main
-      role: "UI 构建 + 渲染"
-      description: "Measure/Layout/Draw 全在主线程，使用 CPU Skia 渲染"
-
-  key_slices:
-    - name: "lockCanvas"
-      thread: main
-      description: "获取 CPU 画布"
-    - name: "unlockCanvasAndPost"
-      thread: main
-      description: "提交绘制结果"
-
+  source: "rendering_pipelines/S07_software_offscreen_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> consume -> display)
@@ -164,7 +121,8 @@ analysis:
       description: |
         若某 View 设了 LAYER_TYPE_SOFTWARE，子树会被绘制到离屏 Bitmap 再由 HWUI 作为纹理上传参与 GPU 合成。
         Trace 中表现为 RenderThread 仍存在（与纯软件不同），但额外伴随 Bitmap 分配 + uploadToTexture slice。
-        当前 ID 因 exclude_if RenderThread 排除此场景；Phase E 拆 SOFTWARE_RENDERING_LAYER 独立 ID。
+        当前 ID 因 exclude_if RenderThread 排除此场景；该现象作为 S07 内的软件 layer 子路径说明，
+        不单独提升为主渲染类型。
       detection_skill: render_thread_slices
 
   recommended_skills:

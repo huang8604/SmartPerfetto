@@ -14,6 +14,12 @@ import {
   type ToolCallRecord,
 } from './types';
 import { summarizeToolCallInput } from './toolCallSummary';
+import {
+  getSourceLookupCodeReferences,
+  rememberSourceLookupCodeReferences,
+  sourceLookupResultHasCodeReferences,
+  type SourceLookupCodeReference,
+} from '../services/codebase/sourceLookupTools';
 
 const MCP_NAME_PREFIX = 'mcp__smartperfetto__';
 const MAX_PLAN_TOOL_CALL_LOG = 100;
@@ -22,7 +28,16 @@ export interface PlanToolCallRecorderInput {
   toolName: string;
   input?: unknown;
   resultText?: string;
+  /** Privacy-safe fact extracted from the raw result before any external-surface projection. */
+  returnedCodeReferences?: boolean;
+  /** Ephemeral only: retained in memory and never copied into ToolCallRecord or snapshots. */
+  returnedCodeReferenceHints?: readonly SourceLookupCodeReference[];
   timestamp?: number;
+}
+
+export interface AnalysisPlanTracker {
+  current: AnalysisPlanV3 | null;
+  prePlanToolCallLog?: ToolCallRecord[];
 }
 
 export interface PlanEvidenceGap {
@@ -33,6 +48,22 @@ export interface PlanEvidenceGap {
 
 function shortToolName(toolName: string): string {
   return toolName.startsWith(MCP_NAME_PREFIX) ? toolName.slice(MCP_NAME_PREFIX.length) : toolName;
+}
+
+function buildToolCallRecord(input: PlanToolCallRecorderInput): ToolCallRecord {
+  const callSummary = summarizeToolCallInput(shortToolName(input.toolName), input.input);
+  const success = extractToolCallSuccessFromResult(input.resultText);
+  const returnedCodeReferences = input.returnedCodeReferences ?? (
+    Boolean(input.returnedCodeReferenceHints?.length) ||
+    sourceLookupResultHasCodeReferences(input.toolName, input.resultText)
+  );
+  return {
+    toolName: input.toolName,
+    timestamp: input.timestamp ?? Date.now(),
+    ...(success === undefined ? {} : { success }),
+    ...(returnedCodeReferences ? { returnedCodeReferences: true } : {}),
+    ...callSummary,
+  };
 }
 
 function parseLeadingJsonObject(text: string): Record<string, unknown> | null {
@@ -72,22 +103,59 @@ function parseLeadingJsonObject(text: string): Record<string, unknown> | null {
   return null;
 }
 
+function collectToolResultCandidates(resultText: string): string[] {
+  const candidates = [resultText];
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > 3 || value == null) return;
+    if (typeof value === 'string') {
+      candidates.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(entry => collect(entry, depth + 1));
+      return;
+    }
+    if (typeof value !== 'object') return;
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === 'string') candidates.push(record.text);
+    if (typeof record.output === 'string') candidates.push(record.output);
+    collect(record.content, depth + 1);
+    collect(record.result, depth + 1);
+  };
+
+  try {
+    collect(JSON.parse(resultText), 0);
+  } catch {
+    // A tool result may append a reasoning nudge after its leading JSON object.
+  }
+  return [...new Set(candidates)];
+}
+
+export function extractToolCallSuccessFromResult(resultText?: string): boolean | undefined {
+  if (!resultText) return undefined;
+  for (const candidate of collectToolResultCandidates(resultText)) {
+    const parsed = parseLeadingJsonObject(candidate.trim());
+    if (!parsed) continue;
+    if (typeof parsed.success === 'boolean') return parsed.success;
+    if (parsed.isError === true) return false;
+    if (parsed.outcome === 'success') return true;
+    if (
+      parsed.outcome === 'rejected' ||
+      parsed.outcome === 'budget_exceeded' ||
+      parsed.outcome === 'consent_blocked' ||
+      parsed.outcome === 'license_blocked' ||
+      parsed.outcome === 'unresolved' ||
+      parsed.outcome === 'sidecar_missing'
+    ) {
+      return false;
+    }
+  }
+  return undefined;
+}
+
 export function extractPlanPhaseIdFromToolResult(resultText?: string): string | undefined {
   if (!resultText) return undefined;
-  const candidates: string[] = [resultText];
-  try {
-    const parsed = JSON.parse(resultText);
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    for (const entry of entries) {
-      if (entry && typeof entry === 'object' && typeof (entry as any).text === 'string') {
-        candidates.push((entry as any).text);
-      }
-    }
-  } catch {
-    // Fall through to leading-object parsing below.
-  }
-
-  for (const candidate of candidates) {
+  for (const candidate of collectToolResultCandidates(resultText)) {
     const trimmed = candidate.trim();
     const parsed = parseLeadingJsonObject(trimmed);
     const planPhaseId = parsed?.planPhaseId;
@@ -106,12 +174,7 @@ export function recordPlanToolCall(
   }
   const shortName = shortToolName(input.toolName);
   const canSatisfyEvidence = isEvidenceCapableToolName(shortName);
-  const callSummary = summarizeToolCallInput(shortName, input.input);
-  const candidate: ToolCallRecord = {
-    toolName: input.toolName,
-    timestamp: input.timestamp ?? Date.now(),
-    ...callSummary,
-  };
+  const candidate = buildToolCallRecord(input);
 
   const expectedGapPhase = canSatisfyEvidence ? findBestPhaseForExpectedCallGap(plan, candidate) : undefined;
   const toolReturnedPhaseId = extractPlanPhaseIdFromToolResult(input.resultText);
@@ -139,10 +202,62 @@ export function recordPlanToolCall(
 
   const record = { ...candidate, matchedPhaseId };
   plan.toolCallLog.push(record);
+  rememberSourceLookupCodeReferences(plan, input.returnedCodeReferenceHints ?? []);
   if (plan.toolCallLog.length > MAX_PLAN_TOOL_CALL_LOG) {
     plan.toolCallLog.splice(0, plan.toolCallLog.length - MAX_PLAN_TOOL_CALL_LOG);
   }
   return record;
+}
+
+export function recordPlanOrPrePlanToolCall(
+  tracker: AnalysisPlanTracker | null | undefined,
+  input: PlanToolCallRecorderInput,
+): ToolCallRecord | undefined {
+  if (!tracker) return undefined;
+  if (tracker.current) {
+    return recordPlanToolCall(tracker.current, input);
+  }
+
+  const shortName = shortToolName(input.toolName);
+  if (!isEvidenceCapableToolName(shortName)) return undefined;
+
+  if (!Array.isArray(tracker.prePlanToolCallLog)) {
+    tracker.prePlanToolCallLog = [];
+  }
+  const record = buildToolCallRecord(input);
+  tracker.prePlanToolCallLog.push(record);
+  rememberSourceLookupCodeReferences(record, input.returnedCodeReferenceHints ?? []);
+  if (tracker.prePlanToolCallLog.length > MAX_PLAN_TOOL_CALL_LOG) {
+    tracker.prePlanToolCallLog.splice(0, tracker.prePlanToolCallLog.length - MAX_PLAN_TOOL_CALL_LOG);
+  }
+  return record;
+}
+
+export function replayPrePlanToolCalls(tracker: AnalysisPlanTracker | null | undefined): number {
+  const plan = tracker?.current;
+  const prePlanToolCallLog = tracker?.prePlanToolCallLog;
+  if (!plan || !Array.isArray(prePlanToolCallLog) || prePlanToolCallLog.length === 0) return 0;
+  if (!Array.isArray(plan.toolCallLog)) {
+    plan.toolCallLog = [];
+  }
+
+  let replayed = 0;
+  for (const candidate of prePlanToolCallLog) {
+    const matchedPhase = findBestPhaseForExpectedCallGap(plan, candidate);
+    if (!matchedPhase) continue;
+    plan.toolCallLog.push({
+      ...candidate,
+      matchedPhaseId: matchedPhase.id,
+    });
+    rememberSourceLookupCodeReferences(plan, getSourceLookupCodeReferences(candidate));
+    replayed++;
+    if (plan.toolCallLog.length > MAX_PLAN_TOOL_CALL_LOG) {
+      plan.toolCallLog.splice(0, plan.toolCallLog.length - MAX_PLAN_TOOL_CALL_LOG);
+    }
+  }
+
+  tracker.prePlanToolCallLog = [];
+  return replayed;
 }
 
 export function findMissingExpectedCallsForPhase(

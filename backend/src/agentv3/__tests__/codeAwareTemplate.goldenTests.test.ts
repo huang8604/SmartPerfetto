@@ -28,6 +28,14 @@ describe('code-aware.template golden rules', () => {
     expect(rendered).toContain('不能生成 patch');
   });
 
+  it('requires successful source lookups to remain locatable in the final report', () => {
+    const contract = loadPromptTemplate('prompt-code-reference-contract-zh') ?? '';
+    expect(contract).toContain('成功返回源码 CodeRef');
+    expect(contract).toContain('relative/path/File.kt:L10-L20');
+    expect(contract).toContain('不能只写文件名');
+    expect(contract).toContain('不得编造行号');
+  });
+
   it('locks patchStatus output discipline', () => {
     expect(rendered).toContain('patchStatus="verified"');
     expect(rendered).toContain('patchStatus="sketch"');
@@ -43,4 +51,3 @@ describe('code-aware.template golden rules', () => {
     expect(rendered).toContain('不等同于用户代码证据');
   });
 });
-

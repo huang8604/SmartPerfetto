@@ -20,7 +20,7 @@ meta:
   description: "NDK SurfaceControl 直接事务提交，低级别表面控制"
   icon: "code"
   family: surface
-  doc_path: "rendering_pipelines/surface_control_api.md"
+  doc_path: rendering_pipelines/S07_software_offscreen_type.md
   # ----- Article-grounded signature (related: S03 SurfaceView, S05 mixed) -----
   s_article_ref: "S03"   # NDK SurfaceControl 是 SurfaceView/SurfaceControl 体系的低级别接口
   four_features:
@@ -62,63 +62,7 @@ detection:
       weight: 15
 
 teaching:
-  title: "SurfaceControl API 渲染管线"
-  summary: |
-    使用 NDK SurfaceControl API 直接控制 Surface 和 Transaction。
-    提供最低级别的合成控制，可以创建子 Surface、控制 Z-order、
-    原子性更新多个属性。它与 BLAST 共享同一事务式更新体系，
-    但不应被简单理解为“SurfaceControl API 就等于 BLAST”。
-
-  mermaid: |
-    sequenceDiagram
-      participant App as App (NDK)
-      participant SC as SurfaceControl
-      participant TX as Transaction
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over App,SF: 📍 NDK SurfaceControl API
-      App->>SC: ASurfaceControl_create
-      App->>BQ: ANativeWindow_dequeueBuffer
-      App->>App: GPU 渲染
-      App->>BQ: ANativeWindow_queueBuffer
-
-      App->>TX: ASurfaceTransaction_create
-      App->>TX: 设置 Buffer/几何/混合模式
-      App->>TX: ASurfaceTransaction_apply
-
-      TX-->>SF: Transaction 提交
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: 接收并处理 Transaction
-      SF->>SF: latchBuffer
-      SF->>SF: HWC 合成
-      deactivate SF
-
-      Note over App,SF: 🔧 低级别 API，完全控制 Buffer 和 Surface
-  thread_roles:
-    - thread: main
-      role: "SurfaceControl 控制"
-      description: "创建 Surface、构建和提交 Transaction"
-    - thread: any
-      role: "生产者线程"
-      description: "在任意线程渲染/写入 Buffer，并与 Transaction 提交节拍对齐"
-    - thread: SurfaceFlinger
-      role: "事务处理/合成"
-      description: "接收 Transaction、latch Buffer、合成并提交到 HWC"
-
-  key_slices:
-    - name: "ASurfaceControl"
-      thread: any
-      description: "NDK SurfaceControl 操作（create/destroy/reparent 等）"
-    - name: "ASurfaceTransaction_apply"
-      thread: any
-      description: "提交 Transaction（原子性更新多个属性）"
-    - name: "setTransactionState"
-      thread: SurfaceFlinger
-      description: "SurfaceFlinger 处理 Transaction 的常见提示信号；名称依版本和 tracing 变化"
-
+  source: "rendering_pipelines/S07_software_offscreen_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

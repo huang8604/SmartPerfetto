@@ -12,10 +12,9 @@
  *   DELETE /api/baselines/:id      remove
  *   GET    /api/baselines          list (optional ?status=, ?keyPrefix=)
  *
- * Out of scope here: diff and regression-gate routes land alongside
- * `baselineDiffer.ts` in M1. The MCP tools (`lookup_baseline`,
- * `compare_to_baseline`) wire into the agent runtime in M2 and will run
- * trace regression then.
+ * Out of scope here: diff/gate computation lives in `baselineDiffer.ts`; MCP
+ * read tools are `lookup_baseline` and `compare_baselines`. A future
+ * trace-vs-baseline tool remains separate from this CRUD route.
  *
  * Construction is factory-style so tests can inject a fresh store
  * pointing at a tmp path — the production app entry calls

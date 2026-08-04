@@ -30,6 +30,29 @@ keywords: []
 
 **Final report contract summary**
 - 遵循通用输出契约。
+- 以下结构化区块是开放式分析收口行为的事实源：
+
+```json analysis-closure-contract
+{
+  "applies_to": "open_ended_investigation",
+  "max_secondary_domains": 3,
+  "report_fields": [
+    "checked_domains",
+    "missing_data",
+    "unresolved_alternatives"
+  ],
+  "skip_for": "bounded_question",
+  "stop_conditions": [
+    "no_independent_high_impact_anomaly",
+    "repeated_evidence",
+    "missing_data",
+    "budget_exhausted"
+  ]
+}
+```
+
+- 对“全面分析”“为什么慢”等开放式请求，在主证据链成立后执行一次**有界次要瓶颈收口**：仅从已观测且仍有可用证据的方向中，最多检查 3 个尚未覆盖的独立域；遇到没有高影响独立异常、下一查询会重复已有证据、所需数据不可用或预算耗尽时立即停止。
+- 对具体且范围明确的问题不附加该收口。最终报告列出已检查域、未解决的替代解释与缺失数据；次要检查为空不能削弱已经验证的主结论。
 
 
 **Detail ref**

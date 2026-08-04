@@ -20,7 +20,7 @@ meta:
   description: "HWC 视频层硬件加速叠加"
   icon: "video"
   family: specialized
-  doc_path: "rendering_pipelines/video_overlay_hwc.md"
+  doc_path: rendering_pipelines/S12_video_overlay_hwc_type.md
   # ----- Article-grounded signature (S12) -----
   s_article_ref: "S12"
   four_features:
@@ -41,7 +41,7 @@ meta:
     - VIDEO_DECODER_SURFACE（非 Tunneled，MediaCodec → Surface → SurfaceView 或 TextureView）
     - VIDEO_DECODER_TEXTUREVIEW（MediaCodec → TextureView，宿主采样）
     - VIDEO_TUNNELED_PLAYBACK（硬件 A/V 同步，sideband stream，App 进程看不到中间过程）
-    Phase E 拆分独立 ID。
+    当前 variant 对应 S12；decoder、TextureView 与 tunneled playback 作为同一类型下的检测子路径输出。
   hwc_overlay_decision_factors: |
     HWC 5 步谈判（S01）针对视频时关注：
     - buffer 格式（YUV NV12/P010 vs RGBA）
@@ -66,56 +66,7 @@ detection:
       weight: 20
 
 teaching:
-  title: "视频 Overlay (HWC) 渲染管线"
-  summary: |
-    使用 HWC (Hardware Composer) 的视频 Overlay 层进行视频渲染。
-    视频帧直接从解码器输出到独立的 HWC 层，通常可绕过或显著减少 GPU 合成负担，
-    在设备/内容满足 overlay 条件时实现更低延迟与更好功耗。若回退到 CLIENT，
-    代表合成路径和功耗变差，但不应直接推断“受保护内容一定无法播放”。
-
-  mermaid: |
-    sequenceDiagram
-      participant App as App
-      participant MC as MediaCodec
-      participant Dec as Video Decoder
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant HWC as HWC (Overlay)
-      participant SF as SurfaceFlinger
-
-      Note over App,SF: 📍 Video HWC Overlay 链路
-      App->>MC: configure (Surface)
-      App->>MC: queueInputBuffer
-
-      activate Dec
-      Dec->>Dec: 硬件视频解码
-      Dec->>BQ: releaseOutputBuffer
-      deactivate Dec
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>HWC: 请求 Overlay 合成
-      HWC->>HWC: 硬件 Overlay 混合
-      Note over HWC: 视频层直接送显示
-      deactivate SF
-
-      Note over App,SF: 🎥 满足条件时可走硬件 Overlay；实际策略受内容、DRM 与 HWC 能力影响
-  thread_roles:
-    - thread: MediaCodec
-      role: "视频解码"
-      description: "硬件视频解码器"
-    - thread: SurfaceFlinger
-      role: "HWC 控制"
-      description: "配置 HWC 视频层"
-
-  key_slices:
-    - name: "MediaCodec"
-      thread: any
-      description: "视频解码"
-    - name: "HWC"
-      thread: SurfaceFlinger
-      description: "硬件合成器配置（overlay/client 决策依设备策略变化）"
-
+  source: "rendering_pipelines/S12_video_overlay_hwc_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

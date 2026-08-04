@@ -548,7 +548,7 @@ steps:
         FROM (
           SELECT
             le.process_name,
-            AVG((MIN(p.start_ts) - le.ts) / 1e6) AS avg_delay_ms
+            (MIN(p.start_ts) - le.ts) / 1e6 AS avg_delay_ms
           FROM android_lmk_events le
           JOIN process p ON p.name GLOB le.process_name || '*' AND p.start_ts > le.ts
           WHERE CASE WHEN '${package}' != ''

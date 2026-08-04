@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "generatedAt": "2026-06-06T00:11:20.808163",
+  "generatedAt": "2026-07-03T14:02:35.520451",
   "source": "perfetto/src/trace_processor/perfetto_sql/stdlib",
   "templates": [
     {
@@ -1524,7 +1524,7 @@
       "id": "stdlib.android._android_distinct_frames_in_cuj",
       "name": "_android_distinct_frames_in_cuj",
       "category": "android",
-      "type": "view",
+      "type": "table",
       "description": "Track all distinct frames that overlap with the CUJ slice. In this table two frames are considered distinct if they have different frame_id/vsync.",
       "columns": [
         {
@@ -2014,7 +2014,7 @@
       "id": "stdlib.android._extended_frame_boundary",
       "name": "_extended_frame_boundary",
       "category": "android",
-      "type": "view",
+      "type": "table",
       "description": "For cases when a blocking call starts within a frame, but does not end before the actual frame ends, a part of the blocking call can be missed while calculating the metric. To avoid this issue, the frame boundary is extended, spanning from the start of the current actual frame, till the start of either next actual frame or the next doFrame slice - whichever is earliest; we are relying on both types of slices to get more stable metrics for cases where, for instance, doFrame blocks are running without any visible changes on the screen - leading to no actual frames being drawn. When this happens there might be gaps in actual frame timeline, so then the next doFrame would be resolved as an earlier boundary for an extended frame.",
       "columns": [
         {
@@ -2055,7 +2055,7 @@
       "id": "stdlib.android._blocking_calls_frame_cuj",
       "name": "_blocking_calls_frame_cuj",
       "category": "android",
-      "type": "view",
+      "type": "table",
       "description": "Capture blocking call duration within frames within a CUJ.",
       "columns": [
         {
@@ -3089,6 +3089,10 @@
       "columns": [
         {
           "name": "utid",
+          "type": "UNKNOWN"
+        },
+        {
+          "name": "upid",
           "type": "UNKNOWN"
         },
         {
@@ -4502,6 +4506,23 @@
       "description": "Returns outgoing references with cumulative size information."
     },
     {
+      "id": "stdlib.android.android_heap_graph_java_oome_details",
+      "name": "android_heap_graph_java_oome_details",
+      "category": "android",
+      "type": "view",
+      "description": "Details of Java OutOfMemoryError exceptions that triggered heap dumps.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "heap_graph_id",
+          "type": "JOINID(heap_graph.id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.android._heap_graph_super_root_fn",
       "name": "_heap_graph_super_root_fn",
       "category": "android",
@@ -4679,7 +4700,7 @@
       "name": "android_process_memory_intervals",
       "category": "android",
       "type": "table",
-      "description": "A table of process memory counter intervals, clipped to the process lifetime. Provides a comprehensive view of memory usage, including raw values and zygote-adjusted values. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
+      "description": "A table of process memory counter intervals, clipped to the process lifetime. Provides a comprehensive view of memory usage, including raw values and zygote-adjusted values. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the average memory usage of the zygote that forked the process (its parent). This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from its zygote. This is a no-op for a process whose forking zygote has no memory samples in the trace (e.g. traces with only ftrace rss_stat, where idle zygotes are not sampled; process_stats polling captures them). NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
     },
     {
       "id": "stdlib.android._memory_breakdown_oom_intervals_prepared",
@@ -4694,7 +4715,7 @@
       "name": "android_process_memory_intervals_by_oom_bucket",
       "category": "android",
       "type": "table",
-      "description": "Correlates memory counters with OOM adjustment scores. This table joins memory counters with OOM adjustment scores, providing insights into memory usage under system memory pressure. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the Zygote's average memory usage. This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from the Zygote. NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
+      "description": "Correlates memory counters with OOM adjustment scores. This table joins memory counters with OOM adjustment scores, providing insights into memory usage under system memory pressure. NOTE: For 'mem.rss.anon', 'mem.swap', 'mem.rss.file', and 'mem.heap' tracks, we subtract the average memory usage of the zygote that forked the process (its parent). This provides a better estimate of the child process's unique memory usage by accounting for the baseline memory inherited from its zygote. This is a no-op for a process whose forking zygote has no memory samples in the trace (e.g. traces with only ftrace rss_stat, where idle zygotes are not sampled; process_stats polling captures them). NOTE: Some tracks may have a spike greater than 100MiB. This can be legitimate or an accounting issue: see b/418231246 for more details."
     },
     {
       "id": "stdlib.android.memory_oom_score_with_rss_and_swap_per_process",
@@ -12778,6 +12799,27 @@
       ]
     },
     {
+      "id": "stdlib.linux.linux_systemd_journald_logs",
+      "name": "linux_systemd_journald_logs",
+      "category": "linux",
+      "type": "view",
+      "description": "Journald log entries from the linux.systemd_journald data source. NOTE: this table is not sorted by timestamp.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "utid",
+          "type": "JOINID(thread.id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.linux.linux_kernel_threads",
       "name": "linux_kernel_threads",
       "category": "linux",
@@ -13457,6 +13499,44 @@
       ]
     },
     {
+      "id": "stdlib.prelude.heap_graph",
+      "name": "heap_graph",
+      "category": "prelude",
+      "type": "view",
+      "description": "A list of heap graphs (heap dumps) captured during the trace.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "upid",
+          "type": "JOINID(process.upid)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.heap_graph_thread_callsite",
+      "name": "heap_graph_thread_callsite",
+      "category": "prelude",
+      "type": "view",
+      "description": "Callstack profiles of threads at the time the heap graph was collected.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "heap_graph_id",
+          "type": "JOINID(heap_graph.id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.prelude.slice_is_ancestor",
       "name": "slice_is_ancestor",
       "category": "prelude",
@@ -13544,6 +13624,31 @@
         {
           "name": "ts",
           "type": "TIMESTAMP"
+        },
+        {
+          "name": "track_id",
+          "type": "JOINID(track.id)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.state",
+      "name": "state",
+      "category": "prelude",
+      "type": "view",
+      "description": "Contains state from userspace which reads like a symbolic counter with literals rather than numbers.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "dur",
+          "type": "DURATION"
         },
         {
           "name": "track_id",
@@ -13727,11 +13832,32 @@
       ]
     },
     {
+      "id": "stdlib.prelude.logs",
+      "name": "logs",
+      "category": "prelude",
+      "type": "view",
+      "description": "Log entries from all sources (Android logcat, systemd_journald, etc.). NOTE: this table is not sorted by timestamp.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "utid",
+          "type": "JOINID(thread.id)"
+        }
+      ]
+    },
+    {
       "id": "stdlib.prelude.android_logs",
       "name": "android_logs",
       "category": "prelude",
       "type": "view",
-      "description": "Log entries from Android logcat. NOTE: this table is not sorted by timestamp.",
+      "description": "Android log entries from logcat or bugreport. NOTE: this table is not sorted by timestamp.",
       "columns": [
         {
           "name": "id",
@@ -13867,7 +13993,7 @@
       "name": "profiler_smaps",
       "category": "prelude",
       "type": "view",
-      "description": "The profiler smaps contains the memory stats for virtual memory ranges.",
+      "description": "Per-VMA memory mapping stats. For linux traces, prefer the process_memory_mappings view.",
       "columns": [
         {
           "name": "id",
@@ -13884,6 +14010,18 @@
         {
           "name": "path",
           "type": "STRING"
+        },
+        {
+          "name": "path_trimmed",
+          "type": "STRING"
+        },
+        {
+          "name": "aggregate_count",
+          "type": "LONG"
+        },
+        {
+          "name": "is_deleted",
+          "type": "LONG"
         },
         {
           "name": "size_kb",
@@ -13939,6 +14077,103 @@
         },
         {
           "name": "proportional_resident_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "rss_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "anonymous_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "pss_dirty_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "swap_pss_kb",
+          "type": "LONG"
+        }
+      ]
+    },
+    {
+      "id": "stdlib.prelude.process_memory_mappings",
+      "name": "process_memory_mappings",
+      "category": "prelude",
+      "type": "view",
+      "description": "Per-VMA memory mapping stats.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "ID"
+        },
+        {
+          "name": "upid",
+          "type": "LONG"
+        },
+        {
+          "name": "ts",
+          "type": "TIMESTAMP"
+        },
+        {
+          "name": "path",
+          "type": "STRING"
+        },
+        {
+          "name": "aggregate_count",
+          "type": "LONG"
+        },
+        {
+          "name": "is_deleted",
+          "type": "LONG"
+        },
+        {
+          "name": "size_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "rss_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "anonymous_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "swap_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "shared_clean_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "shared_dirty_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "private_clean_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "private_dirty_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "locked_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "pss_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "pss_dirty_kb",
+          "type": "LONG"
+        },
+        {
+          "name": "swap_pss_kb",
           "type": "LONG"
         }
       ]
@@ -14304,6 +14539,10 @@
         {
           "name": "raw_id",
           "type": "LONG"
+        },
+        {
+          "name": "name",
+          "type": "STRING"
         },
         {
           "name": "sysname",
@@ -17413,12 +17652,7 @@
       "category": "viz",
       "type": "table",
       "description": "Table: _process_available_info_summary",
-      "columns": [
-        {
-          "name": "upid",
-          "type": "UNKNOWN"
-        }
-      ]
+      "columns": []
     },
     {
       "id": "stdlib.viz._slice_track_summary",
@@ -17603,6 +17837,10 @@
         },
         {
           "name": "is_counter",
+          "type": "UNKNOWN"
+        },
+        {
+          "name": "is_state",
           "type": "UNKNOWN"
         },
         {

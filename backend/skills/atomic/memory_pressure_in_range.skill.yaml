@@ -52,6 +52,7 @@ inputs:
 
 steps:
   - id: memory_pressure_analysis
+    type: atomic
     description: Analyze memory pressure indicators in the given time range
     optional: true
     sql: |

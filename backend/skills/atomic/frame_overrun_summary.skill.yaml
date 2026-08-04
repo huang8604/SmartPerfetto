@@ -59,10 +59,13 @@ steps:
           format: duration_ms
     sql: |
       SELECT
-        frame_id,
-        ts,
-        ROUND(dur / 1e6, 2) AS dur_ms,
-        ROUND(overrun / 1e6, 2) AS overrun_ms
-      FROM android_frames_overrun
-      ORDER BY overrun DESC
+        o.frame_id,
+        MIN(a.ts) AS ts,
+        ROUND(MAX(a.dur) / 1e6, 2) AS dur_ms,
+        ROUND(o.overrun / 1e6, 2) AS overrun_ms
+      FROM android_frames_overrun o
+      LEFT JOIN actual_frame_timeline_slice a
+        ON CAST(a.name AS INTEGER) = o.frame_id
+      GROUP BY o.frame_id, o.overrun
+      ORDER BY o.overrun DESC
       LIMIT 100

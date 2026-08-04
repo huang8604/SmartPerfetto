@@ -18,6 +18,9 @@
  * @version 2.0.0 - DataEnvelope refactoring
  */
 
+import { sanitizeQueryReview, type QueryReviewV1 } from './queryReviewContract';
+import type {AgentRuntimeKind} from '../agentRuntime/runtimeKinds';
+
 // =============================================================================
 // Column Definition System (Phase 0 - DataEnvelope Refactoring)
 // =============================================================================
@@ -304,17 +307,26 @@ export interface DataEnvelopeMeta {
   /** Optional step ID within a skill */
   stepId?: string;
 
+  /** Query execution state retained across Agent, report, snapshot, and UI projections. */
+  executionStatus?: 'observed' | 'empty' | 'optional_error';
+  executionMessage?: string;
+  executionError?: string;
+
   /** Stable evidence reference shared by UI, reports, and snapshots */
   evidenceRefId?: string;
 
   /** Trace side for comparison-mode outputs */
   traceSide?: DataEnvelopeTraceSide;
 
+  paneSide?: 'left' | 'right' | 'top' | 'bottom';
+
   /** Backend trace identifier used to produce this data */
   traceId?: string;
 
   /** Stable hash of the SQL or data-producing query */
   queryHash?: string;
+
+  queryReview?: QueryReviewV1;
 
   /** Tool-call identifier that produced this data, when available */
   sourceToolCallId?: string;
@@ -437,6 +449,59 @@ export interface DataEnvelope<T = DataPayload> {
   display: DataEnvelopeDisplay;
 }
 
+export const VALID_UI_ACTION_KINDS = [
+  'navigate_timeline',
+  'navigate_range',
+  'open_evidence_table',
+  'pin_evidence',
+] as const;
+export type UiActionKind = typeof VALID_UI_ACTION_KINDS[number];
+
+export interface UiActionProposalSource {
+  evidenceRefId?: string;
+  artifactId?: string;
+  skillId?: string;
+  sourceToolCallId?: string;
+  reportSection?: string;
+}
+
+export interface UiNavigateTimelinePayload {
+  ts: string;
+  traceId?: string;
+}
+
+export interface UiNavigateRangePayload {
+  startNs: string;
+  endNs: string;
+  traceId?: string;
+}
+
+export interface UiOpenEvidenceTablePayload {
+  artifactId: string;
+  evidenceRefId?: string;
+}
+
+export interface UiPinEvidencePayload {
+  evidenceRefId: string;
+}
+
+interface UiActionProposalBase<K extends UiActionKind, P> {
+  schemaVersion: 1;
+  id: string;
+  kind: K;
+  title: string;
+  reason: string;
+  source: UiActionProposalSource;
+  payload: P;
+  requiresConfirmation: true;
+}
+
+export type UiActionProposalV1 =
+  | UiActionProposalBase<'navigate_timeline', UiNavigateTimelinePayload>
+  | UiActionProposalBase<'navigate_range', UiNavigateRangePayload>
+  | UiActionProposalBase<'open_evidence_table', UiOpenEvidenceTablePayload>
+  | UiActionProposalBase<'pin_evidence', UiPinEvidencePayload>;
+
 /**
  * Create a DataEnvelope from raw data
  */
@@ -447,6 +512,9 @@ export function createDataEnvelope<T = DataPayload>(
     source: string;
     skillId?: string;
     stepId?: string;
+    executionStatus?: DataEnvelopeMeta['executionStatus'];
+    executionMessage?: string;
+    executionError?: string;
     title: string;
     layer?: DisplayLayer;
     format?: DisplayFormat;
@@ -458,8 +526,10 @@ export function createDataEnvelope<T = DataPayload>(
     defaultCollapsed?: boolean;
     evidenceRefId?: string;
     traceSide?: DataEnvelopeTraceSide;
+    paneSide?: 'left' | 'right' | 'top' | 'bottom';
     traceId?: string;
     queryHash?: string;
+    queryReview?: QueryReviewV1;
     sourceToolCallId?: string;
     paramsHash?: string;
     artifactId?: string;
@@ -481,6 +551,7 @@ export function createDataEnvelope<T = DataPayload>(
 ): DataEnvelope<T> {
   const columns = sanitizeColumnDefinitions(options.columns);
   const metadataFields = sanitizeMetadataFields(options.metadataFields);
+  const queryReview = sanitizeQueryReview(options.queryReview);
 
   return {
     meta: {
@@ -490,10 +561,15 @@ export function createDataEnvelope<T = DataPayload>(
       timestamp: Date.now(),
       skillId: options.skillId,
       stepId: options.stepId,
+      executionStatus: options.executionStatus,
+      executionMessage: options.executionMessage,
+      executionError: options.executionError,
       evidenceRefId: options.evidenceRefId,
       traceSide: options.traceSide,
+      paneSide: options.paneSide,
       traceId: options.traceId,
       queryHash: options.queryHash,
+      queryReview,
       sourceToolCallId: options.sourceToolCallId,
       paramsHash: options.paramsHash,
       artifactId: options.artifactId,
@@ -811,6 +887,10 @@ export interface DisplayResult {
   format: DisplayFormat;
   /** The actual data */
   data: DataPayload;
+  /** Public execution state; keeps successful-empty distinct from optional query failure. */
+  executionStatus?: DataEnvelopeMeta['executionStatus'];
+  executionMessage?: string;
+  executionError?: string;
   /** Highlight rules for conditional styling */
   highlight?: HighlightRule[];
   /** Original SQL query (for reproducibility) */
@@ -934,13 +1014,115 @@ export interface ConversationStepEvent {
   timestamp: number;
 }
 
+export type AnalysisReceiptRuntime = AgentRuntimeKind;
+
+export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
+
+export interface AnalysisReceiptBase {
+  runId: string;
+  sessionId: string;
+  traceId: string;
+  mode: 'fast' | 'full' | 'auto';
+  resolvedMode: 'quick' | 'full';
+  runtime?: AnalysisReceiptRuntime;
+  providerId: string | null;
+  generatedAt: number;
+  traceEvidence: {
+    sqlCount: number;
+    skillCount: number;
+    dataEnvelopeCount: number;
+    artifactCount: number;
+    evidenceRefCount: number;
+  };
+  nonEvidenceContext: {
+    frontendPrequeryCount: number;
+    memoryHintCount: number;
+    conversationContextCount: number;
+    strategyHintCount: number;
+  };
+  claimAudit: {
+    totalClaims: number;
+    verifiedClaims: number;
+    unsupportedClaims: number;
+    uncertainClaims: number;
+  };
+  qualityGates: {
+    finalReportContract: AnalysisReceiptGateStatus;
+    claimVerification: AnalysisReceiptGateStatus;
+    identityResolution: AnalysisReceiptGateStatus;
+  };
+  outputs: {
+    reportId?: string;
+    reportUrl?: string;
+    resultSnapshotId?: string;
+    cliTurnPath?: string;
+    reportError?: string;
+  };
+}
+
+export interface AnalysisReceiptV1 extends AnalysisReceiptBase {
+  schemaVersion: 1;
+}
+
+export interface AnalysisReceiptV2 extends AnalysisReceiptBase {
+  schemaVersion: 2;
+  runManifestId: string;
+}
+
+export type AnalysisReceipt = AnalysisReceiptV1 | AnalysisReceiptV2;
+
 /**
  * Analysis Completed Event - SSE payload for final result
  */
+export interface AnalysisCompletedFinding {
+  id: string;
+  category?: string;
+  severity?: string;
+  title?: string;
+  description?: string;
+  timestampsNs?: unknown;
+  evidence?: unknown;
+  details?: unknown;
+  recommendations?: unknown;
+  confidence?: number;
+}
+
+export interface AnalysisCompletedHypothesis {
+  id?: string;
+  description?: string;
+  status?: string;
+  confidence?: number;
+  supportingEvidence?: unknown;
+  contradictingEvidence?: unknown;
+}
+
+export interface AnalysisCompletedConversationStep {
+  eventId: string;
+  ordinal: number;
+  phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+  role: 'agent' | 'system';
+  text: string;
+  timestamp: number;
+  sourceEventType?: string;
+}
+
+export interface AnalysisCompletedObservability {
+  runId?: string;
+  requestId?: string;
+  runSequence?: number;
+}
+
 export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
+  architecture?: 'agent-driven';
+  runId?: string;
+  requestId?: string;
+  runSequence?: number;
   data: {
-    summary: string;
+    /** Legacy compatibility aliases. New emitters use conclusion. */
+    summary?: string;
+    answer?: string;
+    privateProjectionVersion?: number;
     conclusion?: string;
     conclusionContract?: import('../agent/core/conclusionContract').ConclusionContract;
     claimSupport?: import('./evidenceContract').ClaimSupportV1[];
@@ -954,9 +1136,25 @@ export interface AnalysisCompletedEvent {
     partial?: boolean;
     terminationReason?: string;
     terminationMessage?: string;
+    quickRun?: import('../agent/core/orchestratorTypes').QuickRunReceipt;
+    analysisReceipt?: AnalysisReceipt;
+    uiActionProposals?: UiActionProposalV1[];
+    smartScenePreview?: import('../agent/scene/types').SmartScenePreviewPayload;
     terminalRunStatus?: 'completed' | 'quota_exceeded';
-    findings: DiagnosticFinding[];
-    suggestions: string[];
+    findings: AnalysisCompletedFinding[];
+    resultContract?: import('../assistant/contracts/assistantResultContract').AssistantResultContract;
+    hypotheses?: AnalysisCompletedHypothesis[];
+    agentDialogueCount?: number;
+    conversationTimelineCount?: number;
+    conversationTimeline?: AnalysisCompletedConversationStep[];
+    reportError?: string;
+    comparisonReportSection?: Omit<
+      import('../agentv3/sessionStateSnapshot').ComparisonReportSection,
+      'html'
+    > & {html?: string};
+    observability?: AnalysisCompletedObservability;
+    /** Legacy compatibility field; recommendations now live in findings/resultContract. */
+    suggestions?: string[];
   };
   timestamp: number;
 }
@@ -1219,6 +1417,9 @@ export function displayResultToEnvelope(
     source: `${skillId}:${result.stepId}`,
     skillId,
     stepId: result.stepId,
+    executionStatus: result.executionStatus,
+    executionMessage: result.executionMessage,
+    executionError: result.executionError,
     title: result.title,
     layer: result.layer,
     format: result.format,

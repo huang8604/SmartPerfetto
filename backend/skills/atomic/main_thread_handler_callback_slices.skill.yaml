@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+# Reports only callback execution slices emitted around Looper dispatch. Slice
+# duration is observed callback execution time. It cannot establish enqueue
+# time, message priority, causality, or the reason a callback was delayed.
+
+name: main_thread_handler_callback_slices
+version: "1.0"
+type: atomic
+category: app_lifecycle
+tier: B
+
+meta:
+  display_name: "主线程 Handler 回调切片"
+  description: "统计 trace 中实际观测到的主线程 Handler 回调执行切片；不代表消息排队等待或根因"
+  icon: "timer"
+  tags: [main_thread, handler, looper, message_queue, callback, atomic]
+
+triggers:
+  keywords:
+    zh: [Handler, Looper, 消息队列, 主线程回调]
+    en: [Handler callback, Looper, message queue, main thread callback]
+  patterns:
+    - "(?i)(handler|looper).*(callback|message|slice)"
+
+prerequisites:
+  required_tables: [slice, thread_track, thread, process]
+  modules: [android.slices]
+
+inputs:
+  - name: package
+    type: string
+    required: false
+    default: ""
+    description: "目标进程/包名前缀；为空时覆盖所有进程"
+  - name: start_ts
+    type: timestamp
+    required: false
+    default: 0
+    description: "分析起始时间戳(ns)"
+  - name: end_ts
+    type: timestamp
+    required: false
+    default: 0
+    description: "分析结束时间戳(ns)；0 表示 trace 结束"
+  - name: min_dur_ns
+    type: integer
+    required: false
+    default: 100000
+    description: "最小回调执行时长(ns)，默认 0.1ms"
+  - name: top_k
+    type: integer
+    required: false
+    default: 20
+    description: "返回的回调类型数量"
+
+steps:
+  - id: callback_slices
+    type: atomic
+    name: "主线程 Handler 回调执行"
+    display:
+      level: detail
+      layer: list
+      title: "主线程 Handler 回调执行"
+      columns:
+        - {name: raw_slice_name, label: "原始切片名", type: string}
+        - {name: standardized_slice_name, label: "标准化切片名", type: string}
+        - {name: process_name, label: "进程", type: string}
+        - {name: thread_name, label: "主线程", type: string}
+        - {name: callback_count, label: "次数", type: number, format: compact}
+        - {name: total_ms, label: "总执行时长", type: duration, format: duration_ms}
+        - {name: avg_ms, label: "平均执行时长", type: duration, format: duration_ms}
+        - {name: max_ms, label: "最长执行时长", type: duration, format: duration_ms}
+        - {name: first_ts, label: "首次时间", type: timestamp}
+        - {name: last_ts, label: "末次时间", type: timestamp}
+        - {name: evidence_scope, label: "证据边界", type: string}
+    sql: |
+      INCLUDE PERFETTO MODULE android.slices;
+
+      WITH bounds AS (
+        SELECT
+          MAX(${start_ts}, trace_start()) AS start_ts,
+          CASE WHEN ${end_ts} > 0 THEN MIN(${end_ts}, trace_end()) ELSE trace_end() END AS end_ts
+      ),
+      observed_callbacks AS (
+        SELECT
+          MAX(s.ts, b.start_ts) AS clipped_ts,
+          MIN(s.ts + s.dur, b.end_ts) - MAX(s.ts, b.start_ts) AS clipped_dur,
+          s.name AS raw_slice_name,
+          android_standardize_slice_name(s.name) AS standardized_slice_name,
+          p.name AS process_name,
+          t.name AS thread_name
+        FROM slice s
+        JOIN thread_track tt ON s.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        CROSS JOIN bounds b
+        WHERE t.tid = p.pid
+          AND (p.name GLOB '${package}*' OR '${package}' = '')
+          AND s.ts < b.end_ts
+          AND s.ts + s.dur > b.start_ts
+          AND s.dur > 0
+          -- Looper dispatch tracing names callbacks as "<Handler class>: <target>".
+          -- The required space prevents SurfaceFlinger TransactionHandler:flush...
+          -- from being mistaken for an Android message callback.
+          AND s.name GLOB '*Handler: *'
+          AND s.name NOT GLOB 'TransactionHandler:*'
+      )
+      SELECT
+        raw_slice_name,
+        standardized_slice_name,
+        process_name,
+        thread_name,
+        COUNT(*) AS callback_count,
+        ROUND(SUM(clipped_dur) / 1e6, 3) AS total_ms,
+        ROUND(AVG(clipped_dur) / 1e6, 3) AS avg_ms,
+        ROUND(MAX(clipped_dur) / 1e6, 3) AS max_ms,
+        MIN(clipped_ts) AS first_ts,
+        MAX(clipped_ts) AS last_ts,
+        'observed_callback_execution_only' AS evidence_scope
+      FROM observed_callbacks
+      WHERE clipped_dur >= ${min_dur_ns}
+      GROUP BY raw_slice_name, standardized_slice_name, process_name, thread_name
+      ORDER BY total_ms DESC
+      LIMIT ${top_k}

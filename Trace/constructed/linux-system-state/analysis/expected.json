@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "case_id": "linux-system-state",
+  "marker": "SmartPerfetto::CASE::linux-system-state",
+  "expectations": [
+    {
+      "id": "execute-device_state_snapshot",
+      "type": "skill",
+      "target": "device_state_snapshot",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/device_state_snapshot.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "environment_snapshot",
+        "idle_window_summary"
+      ],
+      "required_sql_steps": [
+        "environment_snapshot",
+        "idle_window_summary"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "environment_snapshot",
+      "required_marker": "SmartPerfetto::CASE::linux-system-state"
+    },
+    {
+      "id": "execute-linux_perf_counter_hotspots",
+      "type": "skill",
+      "target": "linux_perf_counter_hotspots",
+      "mode": "graceful_empty",
+      "source_file": "backend/skills/atomic/linux_perf_counter_hotspots.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "perf_counter_hotspots"
+      ],
+      "required_sql_steps": [
+        "perf_counter_hotspots"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "perf_counter_hotspots",
+      "limitation_reason": "The fixture does not contain PMU perf sample/counter packets.",
+      "required_marker": "SmartPerfetto::CASE::linux-system-state"
+    },
+    {
+      "id": "execute-linux_systemd_journald_analysis",
+      "type": "skill",
+      "target": "linux_systemd_journald_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/linux_systemd_journald_analysis.skill.yaml",
+      "parameters": {
+        "max_prio": 4,
+        "max_rows": 80
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::linux-system-state"
+    },
+    {
+      "id": "execute-trace_state_track_summary",
+      "type": "skill",
+      "target": "trace_state_track_summary",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/trace_state_track_summary.skill.yaml",
+      "parameters": {
+        "max_rows": 80
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::linux-system-state"
+    },
+    {
+      "id": "strategy-linux",
+      "type": "strategy",
+      "target": "linux",
+      "query": "linux",
+      "expected_strategy": "linux",
+      "source_file": "backend/strategies/linux.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::linux-system-state"
+    }
+  ]
+}

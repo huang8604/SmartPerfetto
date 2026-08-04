@@ -17,6 +17,20 @@ import {
 } from '../captureConfig';
 
 describe('capture config rendering', () => {
+  it('exposes and renders the shared Camera preset', () => {
+    expect(listCapturePresets().map(preset => preset.id)).toContain('camera');
+
+    const config = renderAndroidTraceConfig({
+      target: 'android',
+      preset: 'camera',
+      app: 'com.example.camera',
+      durationSeconds: 20,
+    });
+
+    expect(config).toContain('SmartPerfetto capture preset: camera');
+    expect(config).toContain('ftrace_events: "dmabuf_heap/dma_heap_stat"');
+  });
+
   it('renders every built-in Android preset as a textproto config', () => {
     for (const preset of listCapturePresets()) {
       const config = renderAndroidTraceConfig({

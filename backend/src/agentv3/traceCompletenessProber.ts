@@ -200,7 +200,7 @@ const CAPABILITY_REGISTRY: CapabilityDef[] = [
     priority: 'optional',
   },
 
-  // ── Wattson power-modeling prerequisites (added 2026-05 per docs/skills-audit-2026-05.md M2.0) ──
+  // ── Wattson power-modeling prerequisites; see docs/reference/skill-system.md for Skill validation policy. ──
   // Power skills require specific capture sources. Most production traces don't enable them,
   // so the prompt must surface gaps before Claude trusts empty tables.
   // These entries explicitly INCLUDE their stdlib modules before probing; otherwise sqlite_master

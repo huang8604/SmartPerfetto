@@ -369,6 +369,7 @@ export async function purgeTenantNow(
   };
 
   const tx = db.transaction(() => {
+    db.prepare('DELETE FROM rag_knowledge_fts WHERE tenant_id = ?').run(context.tenantId);
     db.prepare('DELETE FROM provider_snapshots WHERE tenant_id = ?').run(context.tenantId);
     db.prepare('DELETE FROM provider_credentials WHERE tenant_id = ?').run(context.tenantId);
     db.prepare('DELETE FROM api_keys WHERE tenant_id = ?').run(context.tenantId);

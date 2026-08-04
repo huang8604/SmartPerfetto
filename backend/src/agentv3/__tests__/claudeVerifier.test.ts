@@ -177,6 +177,93 @@ describe('verifyHeuristic', () => {
       expect(findings[0].evidence?.[0]?.text).toContain('47-59ms');
       expect(issues.filter(issue => issue.type === 'missing_evidence')).toHaveLength(0);
     });
+
+    it('should bind a suffix severity heading to its following metric list', () => {
+      const conclusion = `
+### Frame 2 — workload_heavy **[CRITICAL]**
+
+- 耗时: 62.73ms (7.5x VSync 预算)，丢失 7 个 VSync
+- 主线程: \`Choreographer#doFrame\` 60.85ms，其中 animation 回调 59.02ms
+- 根因: 主线程同步重计算导致 RenderThread 等待
+
+这段结论说明量化条目属于 Frame 2 的严重发现，而不是脱离父标题的独立结论。
+`;
+      const findings = extractFindingsFromText(conclusion);
+      const issues = verifyHeuristic(findings, conclusion);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].title).toBe('Frame 2 — workload_heavy');
+      expect(findings[0].evidence?.[0]?.text).toContain('62.73ms');
+      expect(issues.filter(issue => issue.type === 'missing_evidence')).toHaveLength(0);
+    });
+
+    it('should not treat an unquantified metric list as critical evidence', () => {
+      const conclusion = `
+### Main thread issue **[CRITICAL]**
+
+- CPU: 主线程看起来很忙
+- 建议: 继续采集数据确认
+
+这段结论没有任何时间、比例、计数或证据引用，不能通过严重发现的证据门禁。
+`;
+      const findings = extractFindingsFromText(conclusion);
+      const issues = verifyHeuristic(findings, conclusion);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].evidence).toBeUndefined();
+      expect(issues.some(issue => issue.type === 'missing_evidence' && issue.severity === 'error')).toBe(true);
+    });
+
+    it('should not let a critical finding borrow evidence from the next suffix heading', () => {
+      const conclusion = `
+### First finding **[CRITICAL]**
+
+这里没有量化数据或证据引用。
+
+### Evidence: 62.73ms **[HIGH]**
+
+后一个发现有独立的量化标题证据，不能回流到前一个发现。
+`;
+      const findings = extractFindingsFromText(conclusion);
+      const issues = verifyHeuristic(findings, conclusion);
+
+      expect(findings).toHaveLength(2);
+      expect(findings[0].title).toBe('First finding');
+      expect(findings[0].evidence).toBeUndefined();
+      expect(issues.some(issue => issue.type === 'missing_evidence' && issue.severity === 'error')).toBe(true);
+    });
+
+    it('should ignore a severity marker at the end of an ordinary sentence', () => {
+      const conclusion = `
+The severity assigned by the model is **[CRITICAL]**
+
+This is explanatory prose rather than a structured finding heading, and it must not create a synthetic finding.
+`;
+      const findings = extractFindingsFromText(conclusion);
+
+      expect(findings).toHaveLength(0);
+    });
+
+    it.each([
+      ['预计优化值', '耗时: 预计优化后 10ms'],
+      ['中文预期值', '耗时: 预期 10ms'],
+      ['English expected value', 'duration: expected 10ms'],
+    ])('should not accept %s as observed evidence', (_caseName, metric) => {
+      const conclusion = `
+### Animation issue **[CRITICAL]**
+
+- ${metric}
+- 建议: 重写动画逻辑
+
+这段结论只包含目标值，没有当前 trace 的观测值或证据引用。
+`;
+      const findings = extractFindingsFromText(conclusion);
+      const issues = verifyHeuristic(findings, conclusion);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0].evidence).toBeUndefined();
+      expect(issues.some(issue => issue.type === 'missing_evidence' && issue.severity === 'error')).toBe(true);
+    });
   });
 
   describe('Check 2: Too many CRITICALs', () => {
@@ -261,6 +348,16 @@ describe('verifyHeuristic', () => {
       expect(issues.map(issue => issue.message)).toEqual([
         expect.stringContaining('VRR'),
         expect.stringContaining('(学习) Learned VSync warning'),
+      ]);
+
+      const privateIssues = verifyHeuristic(
+        [],
+        'VSync alignment misalign and VSync 对齐异常严重',
+        'pipeline',
+        false,
+      ).filter(issue => issue.type === 'known_misdiagnosis');
+      expect(privateIssues.map(issue => issue.message)).toEqual([
+        expect.stringContaining('VRR'),
       ]);
     });
   });
@@ -451,6 +548,120 @@ describe('verifyPlanAdherence', () => {
       i.severity === 'error' &&
       i.message.includes('综合结论与优化建议'),
     )).toBe(false);
+  });
+
+  it('allows a comparison synthesis phase to reuse prior matching evidence calls', () => {
+    const plan = makePlan({
+      phases: [
+        {
+          id: 'p2',
+          name: '启动详情对比',
+          goal: '通过 SQL 深钻两侧 bindApplication 和主线程热点',
+          expectedTools: ['execute_sql_on'],
+          status: 'completed',
+          summary: '已用 execute_sql_on 对比两侧 bindApplication 子阶段和热点函数。',
+        },
+        {
+          id: 'p5',
+          name: '差异深钻与根因定位',
+          goal: '对前序阶段中差异显著的指标做综合归因',
+          expectedTools: ['execute_sql_on', 'fetch_artifact', 'lookup_knowledge'],
+          status: 'completed',
+          summary: '差异深钻完成：bindApplication 子分解、主线程热点 self_ms、四象限均已通过 execute_sql_on 对比。',
+        },
+      ],
+      toolCallLog: [
+        {
+          toolName: 'execute_sql_on',
+          timestamp: Date.now(),
+          matchedPhaseId: 'p2',
+        },
+      ],
+    });
+
+    const issues = verifyPlanAdherence(plan);
+    expect(issues.some(i =>
+      i.type === 'plan_deviation' &&
+      i.severity === 'error' &&
+      i.message.includes('差异深钻与根因定位'),
+    )).toBe(false);
+  });
+
+  it('does not let unrelated prior evidence satisfy a comparison synthesis phase', () => {
+    const plan = makePlan({
+      phases: [
+        {
+          id: 'p1',
+          name: '启动概览对比',
+          goal: '运行 compare_skill 获取概览',
+          expectedTools: ['compare_skill'],
+          status: 'completed',
+          summary: '已完成概览对比。',
+        },
+        {
+          id: 'p5',
+          name: '差异深钻与根因定位',
+          goal: '对前序阶段中差异显著的指标做综合归因',
+          expectedTools: ['execute_sql_on'],
+          status: 'completed',
+          summary: '声称完成差异深钻，但没有执行 SQL 深钻。',
+        },
+      ],
+      toolCallLog: [
+        {
+          toolName: 'compare_skill',
+          skillId: 'startup_analysis',
+          timestamp: Date.now(),
+          matchedPhaseId: 'p1',
+        },
+      ],
+    });
+
+    const issues = verifyPlanAdherence(plan);
+    expect(issues.some(i =>
+      i.type === 'plan_deviation' &&
+      i.severity === 'error' &&
+      i.message.includes('无匹配的工具调用'),
+    )).toBe(true);
+  });
+
+  it('still requires structured expectedCalls on comparison synthesis phases', () => {
+    const plan = makePlan({
+      phases: [
+        {
+          id: 'p1',
+          name: '启动概览对比',
+          goal: '运行 startup_analysis 获取概览',
+          expectedTools: ['compare_skill'],
+          status: 'completed',
+          summary: '已完成概览对比。',
+        },
+        {
+          id: 'p5',
+          name: '差异深钻与根因定位',
+          goal: '对前序阶段中差异显著的指标做综合归因',
+          expectedTools: ['compare_skill'],
+          expectedCalls: [{ tool: 'compare_skill', skillId: 'startup_detail' }],
+          status: 'completed',
+          summary: '声称包含 startup_detail 深钻，但只运行过 startup_analysis。',
+        },
+      ],
+      toolCallLog: [
+        {
+          toolName: 'compare_skill',
+          skillId: 'startup_analysis',
+          timestamp: Date.now(),
+          matchedPhaseId: 'p1',
+        },
+      ],
+    });
+
+    const issues = verifyPlanAdherence(plan);
+    expect(issues.some(i =>
+      i.type === 'plan_deviation' &&
+      i.severity === 'error' &&
+      i.message.includes('缺失: compare_skill(startup_detail)'),
+    )).toBe(true);
   });
 
   it('allows a final conclusion expectedCall when the required call ran in an evidence phase', () => {
@@ -1119,6 +1330,73 @@ describe('verifySceneCompleteness — startup cold-start checks', () => {
 });
 
 describe('verifyConclusion progress output', () => {
+  it('requires a locatable CodeRef after a successful source lookup', async () => {
+    const sourcePlan = makePlan({
+      toolCallLog: [
+        {
+          toolName: 'mcp__smartperfetto__lookup_app_source',
+          timestamp: Date.now(),
+          matchedPhaseId: 'phase-1',
+          success: true,
+          returnedCodeReferences: true,
+        },
+      ],
+    });
+    const reportWithoutLocation = [
+      '## 综合结论',
+      '',
+      'StartupHooks.kt 显示首帧前存在同步初始化，但当前 trace 证据才是本次发生的证明。',
+      '',
+      '## 关键证据链',
+      '',
+      'TTID=1912ms，证据来自 art-10。',
+    ].join('\n');
+
+    const missing = await verifyConclusion([], reportWithoutLocation, {
+      enableLLM: false,
+      plan: sourcePlan,
+      outputLanguage: 'zh-CN',
+    });
+    expect(missing.heuristicIssues).toContainEqual(expect.objectContaining({
+      type: 'missing_evidence',
+      severity: 'error',
+      message: expect.stringContaining('relative/path/File.kt:L10-L20'),
+    }));
+
+    const locatable = await verifyConclusion(
+      [],
+      `${reportWithoutLocation}\n\n源码定位：app/src/main/java/demo/StartupHooks.kt:L10-L20。`,
+      {
+        enableLLM: false,
+        plan: sourcePlan,
+        outputLanguage: 'zh-CN',
+      },
+    );
+    expect(locatable.heuristicIssues.filter(issue =>
+      issue.message.includes('relative/path/File.kt:L10-L20'),
+    )).toHaveLength(0);
+  });
+
+  it('does not require a CodeRef when the source lookup returned no references', async () => {
+    const sourcePlan = makePlan({
+      toolCallLog: [{
+        toolName: 'lookup_app_source',
+        timestamp: Date.now(),
+        matchedPhaseId: 'phase-1',
+        success: true,
+      }],
+    });
+
+    const result = await verifyConclusion([], '## 综合结论\n\n源码查询无命中，结论仅使用 trace 证据。', {
+      enableLLM: false,
+      plan: sourcePlan,
+      outputLanguage: 'zh-CN',
+    });
+    expect(result.heuristicIssues.filter(issue =>
+      issue.message.includes('relative/path/File.kt:L10-L20'),
+    )).toHaveLength(0);
+  });
+
   it('treats missing startup final-report contract sections as correction errors', async () => {
     const conclusion = [
       '# 启动性能分析报告',

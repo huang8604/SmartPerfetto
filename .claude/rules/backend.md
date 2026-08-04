@@ -2,7 +2,7 @@
 
 ## Runtime Selection
 
-SmartPerfetto has four production agent runtimes behind the shared
+SmartPerfetto has five production agent runtimes behind the shared
 `IOrchestrator` contract:
 
 - `claude-agent-sdk`: default runtime for Claude Code, Anthropic direct,
@@ -13,6 +13,9 @@ SmartPerfetto has four production agent runtimes behind the shared
   Manager profiles or explicit env/runtime pins.
 - `opencode`: OpenCode SDK runtime, selected through custom Provider Manager
   profiles or explicit env/runtime pins.
+- `qoder-agent-sdk`: opt-in Qoder Agent SDK runtime, selected through custom
+  Provider Manager profiles or explicit env/runtime pins; local CLI auth is
+  allowed only after the optional SDK is installed.
 
 Runtime selection lives in `backend/src/agentRuntime/runtimeSelection.ts`.
 Selection order is:
@@ -24,7 +27,7 @@ Selection order is:
 
 Do not treat provider names such as DeepSeek or Qwen as runtime values. Valid
 runtime values are `claude-agent-sdk`, `openai-agents-sdk`, `pi-agent-core`,
-and `opencode`.
+`opencode`, and `qoder-agent-sdk`.
 
 ## Primary Flow
 
@@ -53,6 +56,7 @@ Key files:
 | `backend/src/agentRuntime/engines/openai/openAiRuntime.ts` | OpenAI Agents SDK orchestrator |
 | `backend/src/agentRuntime/engines/pi/piAgentCoreRuntime.ts` | Pi Agent Core orchestrator |
 | `backend/src/agentRuntime/engines/opencode/openCodeRuntime.ts` | OpenCode SDK orchestrator and bridge |
+| `backend/src/agentRuntime/engines/qoder/qoderRuntime.ts` | Qoder Agent SDK orchestrator, private streaming projection, and session isolation |
 | `backend/src/agentv3/claudeMcpServer.ts` | shared MCP tool implementations |
 | `backend/src/agentv3/mcpToolRegistry.ts` | single registry for MCP tool exposure and allowed tool names |
 | `backend/src/agentv3/planToolCallRecorder.ts` | provider-neutral tool-call evidence log for plan adherence |
@@ -115,6 +119,31 @@ Tool visibility is request-shaped:
 - Comparison tools are registered only when a `referenceTraceId` exists.
 - External/public contracts should be derived from the registry view, not from
   an old static tool list.
+
+## Self-Evolution Control Plane
+
+- `backend/src/services/selfEvolution/` owns manifests, feedback isolation,
+  evaluation corpus, proposal lifecycle, paired replay, overlay artifacts,
+  generation publishing, reconciliation, contribution bundles, and rollback.
+- `backend/src/routes/selfEvolutionAdminRoutes.ts` is the only HTTP control
+  plane. Keep handlers thin and preserve separate
+  `self_evolution:read|curate|export|apply|revert` permissions.
+- Curation is explicit and public-feedback-only. Private feedback must never
+  enter proposal evidence, contribution bundles, metrics detail, or an
+  external judge.
+- Online feedback statistics are hypothesis generation only. Apply eligibility
+  requires the fixed validation + holdout baseline/candidate replay and human
+  acceptance.
+- `SELF_EVOLUTION_ENABLED` and `SELF_EVOLUTION_APPLY` default off. Apply/revert
+  must fail closed unless effective apply is enabled and persistent user data
+  outside the package is available.
+- Keep operation streams scope-bound and bounded. Browser consumers require
+  fetch-based SSE so Authorization and workspace headers remain attached.
+- Contribution export creates a local deidentified artifact and never uploads,
+  commits, opens a PR, or changes the TypeScript runtime.
+- External L2 judge use requires a versioned rubric, sampled/disputed routing,
+  and explicit per-use consent. Do not infer consent from Provider Manager or
+  add an undocumented environment switch.
 
 ## Analysis Options Propagation
 

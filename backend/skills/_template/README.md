@@ -1,7 +1,7 @@
 # Skills Templates
 
-S/A/B 三档 skill 模板 + vendor override 模板。配套 `docs/skills-audit-2026-05.md` Section 6
-"S/A/B 三档规范" 使用。
+S/A/B 三档 skill 模板 + vendor override 模板。配套
+`docs/reference/skill-system.md` 的 "Skill tier 与校验规则" 使用。
 
 > **重要**: `_template/` 目录被 `SkillRegistry` 自动跳过（不在
 > `skillLoader.loadSkillsFromDir` 扫描的 `atomic/`/`composite/`/`deep/`/`system/`
@@ -24,7 +24,7 @@ S/A/B 三档 skill 模板 + vendor override 模板。配套 `docs/skills-audit-2
 2. 重命名（`<your_skill_id>.skill.yaml`，snake_case，全 registry 内唯一）
 3. 替换全部 `{{...}}` 占位符
 4. 删除模板内的注释块和示例占位
-5. 跑 `npm run validate:skills` —— 任何 lint rule 失败必须 fix（参见 `docs/skills-audit-2026-05.md` §7）
+5. 跑 `npm run validate:skills` —— 任何 lint rule 失败必须 fix（参见 `docs/reference/skill-system.md`）
 6. 加 trace fixture 测试到 `tests/skill-eval/`
 7. 跑 `npm run test:scene-trace-regression` 6/6 PASS
 
@@ -40,4 +40,4 @@ S/A/B 三档 skill 模板 + vendor override 模板。配套 `docs/skills-audit-2
 
 ## 修改模板
 
-修改时请同步更新 `docs/skills-audit-2026-05.md` Section 6 spec，保持单一事实源。
+修改时请同步更新 `docs/reference/skill-system.md` 的 tier/validation 规则，保持单一事实源。

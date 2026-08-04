@@ -158,6 +158,7 @@ steps:
         AND (s.name GLOB '*Choreographer#doFrame*'
              OR s.name GLOB '*doFrame*'
              OR s.name GLOB '*Choreographer*')
+        AND s.name NOT GLOB '*resynced*'
     display:
       level: key
       layer: overview
@@ -201,6 +202,7 @@ steps:
         AND t.tid = p.pid
         AND (s.name GLOB '*Choreographer#doFrame*'
              OR s.name GLOB '*doFrame*')
+        AND s.name NOT GLOB '*resynced*'
       ORDER BY s.ts
       LIMIT 200
     display:
@@ -283,6 +285,7 @@ steps:
       WHERE p.name LIKE '%${package}%'
         AND t.tid = p.pid
         AND (s.name GLOB '*Choreographer#doFrame*' OR s.name GLOB '*doFrame*')
+        AND s.name NOT GLOB '*resynced*'
         AND s.dur > ${vsync_period_ns|16666667}  -- exceeds frame deadline
       ORDER BY s.dur DESC
       LIMIT 30

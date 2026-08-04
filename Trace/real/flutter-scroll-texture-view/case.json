@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "flutter-scroll-texture-view",
+  "kind": "real",
+  "title": "Android 15 Flutter TextureView scroll",
+  "description": "Existing Flutter scrolling fixture rendered through TextureView.",
+  "scene": "scrolling",
+  "tags": ["android", "flutter", "scrolling", "textureview"],
+  "aliases": ["Scroll-Flutter-327-TextureView.pftrace"],
+  "known_issues": [
+    "The original capture reports seven trace_sorter_negative_timestamp_dropped health events."
+  ],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "645deaa9fc564e0ea33072c83f5ecf1d0a6f53a97055cc98c640e8294deb315e",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "15",
+    "api_level": 35,
+    "device": "nubia pacific",
+    "build_fingerprint": "nubia/pacific/pacific:15/1.4.1.0/101:user/release-keys",
+    "compatibility": {"min_api": 35, "max_api": 35}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/Scroll-Flutter-327-TextureView.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

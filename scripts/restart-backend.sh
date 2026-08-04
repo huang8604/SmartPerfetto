@@ -11,39 +11,38 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
 SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
+SERVICE_LIFECYCLE_HELPERS="$PROJECT_ROOT/scripts/service-lifecycle.sh"
+DETACHED_PROCESS_LAUNCHER="$PROJECT_ROOT/scripts/launch-detached.mjs"
 # shellcheck source=scripts/node-env.sh
 . "$NODE_ENV_HELPERS"
 # shellcheck source=scripts/service-ports.sh
 . "$SERVICE_PORT_HELPERS"
+# shellcheck source=scripts/service-lifecycle.sh
+. "$SERVICE_LIFECYCLE_HELPERS"
 
 smartperfetto_ensure_node "$PROJECT_ROOT"
+for required_command in curl lsof pgrep; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "ERROR: required command '$required_command' is not installed." >&2
+    exit 1
+  fi
+done
 BACKEND_PORT="$(smartperfetto_resolve_backend_port)"
 FRONTEND_PORT="$(smartperfetto_resolve_frontend_port)"
 FRONTEND_URL="$(smartperfetto_env_value FRONTEND_URL)"
-FRONTEND_URL="${FRONTEND_URL:-http://localhost:$FRONTEND_PORT}"
+FRONTEND_URL="${FRONTEND_URL:-$(smartperfetto_loopback_url "$FRONTEND_PORT")}"
+BACKEND_HEALTH_URL="$(smartperfetto_loopback_url "$BACKEND_PORT" "/health")"
+BACKEND_PID_FILE="$PROJECT_ROOT/.backend.pid"
+BACKEND_CWD="$PROJECT_ROOT/backend"
 
-# Kill only the backend process
+# Stop only a backend previously recorded by this repository launcher.
 echo "Stopping backend..."
-if [ -f "$PROJECT_ROOT/.backend.pid" ]; then
-  BACKEND_PID=$(cat "$PROJECT_ROOT/.backend.pid")
-  if kill -0 "$BACKEND_PID" 2>/dev/null; then
-    kill "$BACKEND_PID" 2>/dev/null || true
-    sleep 1
-    if kill -0 "$BACKEND_PID" 2>/dev/null; then
-      kill -9 "$BACKEND_PID" 2>/dev/null || true
-    fi
-  fi
-fi
-
-# Also kill any tsx/node processes on the backend port.
-PORT_PIDS=$(lsof -ti "tcp:$BACKEND_PORT" -sTCP:LISTEN 2>/dev/null || true)
-if [ -n "$PORT_PIDS" ]; then
-  echo "$PORT_PIDS" | xargs kill 2>/dev/null || true
-fi
-sleep 1
+smartperfetto_stop_owned_pid_file \
+  "$BACKEND_PID_FILE" "backend" "$PROJECT_ROOT" "$BACKEND_CWD"
+smartperfetto_assert_port_available "$BACKEND_PORT" "backend"
 
 smartperfetto_ensure_backend_deps "$PROJECT_ROOT"
 
@@ -55,33 +54,41 @@ LOGS_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOGS_DIR"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKEND_LOG="$LOGS_DIR/backend_${TIMESTAMP}.log"
+SOURCE_BUILD_COMMIT="$(smartperfetto_source_build_commit "$PROJECT_ROOT")"
 
-# Redirect directly to log file instead of using tee with process substitution.
-# When restart-backend.sh is called headlessly (e.g., from Claude Code's Bash tool),
-# the calling shell exits after the script completes. If tee's stdout is connected to
-# that shell's pipe, it gets EPIPE when the backend writes — this propagates to the
-# Claude Agent SDK subprocess and crashes the analysis with "exited with code 1".
-PORT="$BACKEND_PORT" \
-SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
-SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
-FRONTEND_URL="$FRONTEND_URL" \
-SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
-npm run dev >> "$BACKEND_LOG" 2>&1 &
-NEW_PID=$!
-echo "$NEW_PID" > "$PROJECT_ROOT/.backend.pid"
+# Launch into a separate process group with closed stdin. This keeps the watcher
+# alive after both interactive terminals and headless command runners return.
+NEW_PID=$(
+  PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
+  SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
+  FRONTEND_URL="$FRONTEND_URL" \
+  SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
+  SMARTPERFETTO_LOCK_RUNTIME_IDENTITY=1 \
+  SMARTPERFETTO_PACKAGE_ROOT="$PROJECT_ROOT" \
+  SMARTPERFETTO_DISTRIBUTION=source \
+  SMARTPERFETTO_BUILD_COMMIT="$SOURCE_BUILD_COMMIT" \
+  node "$DETACHED_PROCESS_LAUNCHER" \
+    --cwd "$BACKEND_CWD" --log "$BACKEND_LOG" -- npm run dev
+)
+BACKEND_GENERATION="$(smartperfetto_new_launch_generation backend)"
+if ! smartperfetto_write_pid_file \
+  "$BACKEND_PID_FILE" "$NEW_PID" "backend" "$PROJECT_ROOT" "$BACKEND_CWD" "$BACKEND_GENERATION"; then
+  smartperfetto_terminate_process_tree "$NEW_PID" "backend"
+  exit 1
+fi
 ln -sf "$BACKEND_LOG" "$LOGS_DIR/backend_latest.log"
 
 # Wait for health check
 echo "Waiting for backend..."
-for i in {1..15}; do
-  if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
-    echo "Backend ready! (${i}s) PID: $NEW_PID"
-    echo "Log: $BACKEND_LOG"
-    echo ""
-    echo "tsx watch is active — backend auto-restarts on .ts file changes."
-    exit 0
-  fi
-  sleep 1
-done
+if ! smartperfetto_wait_for_http \
+  "$NEW_PID" "Backend" "$BACKEND_HEALTH_URL" 15 "$BACKEND_LOG"; then
+  smartperfetto_terminate_process_tree "$NEW_PID" "backend"
+  smartperfetto_remove_pid_file_if_generation "$BACKEND_PID_FILE" "$BACKEND_GENERATION"
+  exit 1
+fi
 
-echo "WARNING: Backend not responding after 15s. Check: tail -f $BACKEND_LOG"
+echo "Backend ready! PID: $NEW_PID"
+echo "Log: $BACKEND_LOG"
+echo ""
+echo "tsx watch is active — backend auto-restarts on .ts file changes."

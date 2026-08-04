@@ -29,11 +29,13 @@ import { runConfigInitCommand } from './commands/config';
 import { runProviderListCommand, runProviderTestCommand } from './commands/provider';
 import { runQueryCommand } from './commands/query';
 import { runSkillCommand } from './commands/skill';
+import { runBatchSkillCommand } from './commands/batch';
 import { runCompareCommand } from './commands/compare';
 import {
   runCaptureAndroidCommand,
   runCaptureConfigCommand,
   runCapturePresetsCommand,
+  runCaptureSuggestCommand,
 } from './commands/capture';
 import { isCapturePresetId } from './services/captureConfig';
 import {
@@ -43,6 +45,12 @@ import {
   runCodebaseReindexCommand,
   runCodebaseSymbolsCommand,
 } from './commands/codebase';
+import {
+  runKnowledgePackStatusCommand,
+  runKnowledgePackUpdateCommand,
+} from './commands/knowledgePack';
+import {runUpdateCheckCommand} from './commands/update';
+import {beginCliUpdateNotice} from './updateNotice';
 import { DEFAULT_ANALYSIS_QUERY } from './constants';
 import type {CodeAwareMode} from '../services/codebase/codeAwareFeature';
 import type {CapturePresetId, CliAnalysisMode} from './types';
@@ -117,7 +125,13 @@ function main(): void {
   const format = (commandFormat?: string): OutputFormat => parseOutputFormat(commandFormat);
   const textJsonFormat = (commandFormat?: string) => parseTextJsonFormat(commandFormat);
   const runAndExit = async (fn: () => Promise<number>) => {
-    process.exit(await fn());
+    const g = globals();
+    const notice = beginCliUpdateNotice({
+      bootstrapOptions: {envFile: g.envFile, sessionDir: g.sessionDir},
+    });
+    const exitCode = await fn();
+    notice.flush();
+    process.exit(exitCode);
   };
   const collectCodebaseId = (value: string, previous: string[] = []): string[] => [...previous, value];
   const codeAwareMode = (value?: string): CodeAwareMode | undefined => {
@@ -133,7 +147,8 @@ function main(): void {
     .option('--mode <mode>', 'analysis mode: fast, full, auto')
     .option('--code-aware <mode>', 'code-aware mode: off, metadata_only, provider_send')
     .option('--codebase-id <id>', 'registered codebase id to expose to the analysis session', collectCodebaseId, [])
-    .action(async (trace: string, question: string[] | undefined, opts: { format?: string; mode?: string; codeAware?: string; codebaseId?: string[] }) => {
+    .option('--knowledge-source-id <id>', 'registered private knowledge source id to expose', collectCodebaseId, [])
+    .action(async (trace: string, question: string[] | undefined, opts: { format?: string; mode?: string; codeAware?: string; codebaseId?: string[]; knowledgeSourceId?: string[] }) => {
       const g = globals();
       await runAndExit(() => runAnalyzeCommand({
         trace,
@@ -146,6 +161,7 @@ function main(): void {
         analysisMode: parseAnalysisMode(opts.mode),
         codeAwareMode: codeAwareMode(opts.codeAware),
         codebaseIds: opts.codebaseId,
+        knowledgeSourceIds: opts.knowledgeSourceId,
       }));
     });
 
@@ -157,7 +173,8 @@ function main(): void {
     .option('--mode <mode>', 'analysis mode: fast, full, auto')
     .option('--code-aware <mode>', 'code-aware mode: off, metadata_only, provider_send')
     .option('--codebase-id <id>', 'registered codebase id to expose to the analysis session', collectCodebaseId, [])
-    .action(async (trace: string, opts: { query?: string; format?: string; mode?: string; codeAware?: string; codebaseId?: string[] }) => {
+    .option('--knowledge-source-id <id>', 'registered private knowledge source id to expose', collectCodebaseId, [])
+    .action(async (trace: string, opts: { query?: string; format?: string; mode?: string; codeAware?: string; codebaseId?: string[]; knowledgeSourceId?: string[] }) => {
       const g = globals();
       const query = g.prompt ?? g.query ?? opts.query ?? DEFAULT_ANALYSIS_QUERY;
       await runAndExit(() => runAnalyzeCommand({
@@ -171,6 +188,7 @@ function main(): void {
         analysisMode: parseAnalysisMode(opts.mode),
         codeAwareMode: codeAwareMode(opts.codeAware),
         codebaseIds: opts.codebaseId,
+        knowledgeSourceIds: opts.knowledgeSourceId,
       }));
     });
 
@@ -371,6 +389,52 @@ function main(): void {
       }));
     });
 
+  const knowledgePackCmd = program
+    .command('knowledge-pack')
+    .description('inspect or update the signed Android Internals Knowledge Pack');
+  knowledgePackCmd
+    .command('status')
+    .description('show the active, bundled, and signed-channel Pack state')
+    .option('--format <format>', 'output format: text or json')
+    .action(async (opts: {format?: string}) => {
+      const g = globals();
+      await runAndExit(() => runKnowledgePackStatusCommand({
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        format: textJsonFormat(opts.format) === 'json' ? 'json' : 'text',
+      }));
+    });
+
+  const updateCmd = program
+    .command('update')
+    .description('check for a newer SmartPerfetto CLI release');
+  updateCmd
+    .command('check')
+    .description('check npm for the latest stable SmartPerfetto version')
+    .option('--format <format>', 'output format: text or json')
+    .action(async (opts: {format?: string}) => {
+      const g = globals();
+      await runAndExit(() => runUpdateCheckCommand({
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        format: textJsonFormat(opts.format),
+      }));
+    });
+  knowledgePackCmd
+    .command('update')
+    .description('refresh TUF metadata and atomically install the stable Pack')
+    .option('--check', 'check for an update without installing it', false)
+    .option('--format <format>', 'output format: text or json')
+    .action(async (opts: {check?: boolean; format?: string}) => {
+      const g = globals();
+      await runAndExit(() => runKnowledgePackUpdateCommand({
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        checkOnly: opts.check,
+        format: textJsonFormat(opts.format) === 'json' ? 'json' : 'text',
+      }));
+    });
+
   codebaseCmd
     .command('preview <rootPath>')
     .description('preview files accepted by the path security gate')
@@ -483,6 +547,39 @@ function main(): void {
       }));
     });
 
+  const batchCmd = program.command('batch').description('run deterministic batch workflows');
+  batchCmd
+    .command('skill <skillId> [trace...]')
+    .description('execute a SmartPerfetto skill across a bounded local trace set')
+    .option('--trace-list <file>', 'file containing one trace path per line')
+    .option('--params <json>', 'skill params as a JSON object')
+    .option('--concurrency <n>', 'max local trace concurrency')
+    .option('--format <format>', 'output format: text, json, ndjson')
+    .option('--out <html>', 'write HTML report to this path')
+    .option('--json-out <json>', 'write JSON result to this path')
+    .action(async (skillId: string, traces: string[] | undefined, opts: {
+      traceList?: string;
+      params?: string;
+      concurrency?: string;
+      format?: string;
+      out?: string;
+      jsonOut?: string;
+    }) => {
+      const g = globals();
+      await runAndExit(() => runBatchSkillCommand({
+        skillId,
+        traces: traces ?? [],
+        traceList: opts.traceList,
+        params: opts.params,
+        concurrency: opts.concurrency,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        format: format(opts.format),
+        out: opts.out,
+        jsonOut: opts.jsonOut,
+      }));
+    });
+
   program
     .command('compare <currentTrace> <referenceTrace>')
     .description('compare two traces with AI-assisted analysis')
@@ -523,6 +620,27 @@ function main(): void {
       }));
     });
   captureCmd
+    .command('suggest <request...>')
+    .description('suggest a side-effect-free Android trace config proposal')
+    .option('--app <package>', 'target Android package name or *', '*')
+    .option('--duration <seconds>', 'capture duration in seconds', (v) => Number.parseFloat(v))
+    .option('--categories <category...>', 'additional atrace categories to include in the proposal')
+    .option('--cuj <name>', 'optional CUJ name to annotate generated config metadata')
+    .option('--format <format>', 'output format: text, json')
+    .action(async (requestParts: string[], opts: { app?: string; duration?: number; categories?: string[]; cuj?: string; format?: string }) => {
+      const g = globals();
+      await runAndExit(() => runCaptureSuggestCommand({
+        request: requestParts.join(' '),
+        app: opts.app,
+        durationSeconds: opts.duration,
+        categories: opts.categories,
+        cuj: opts.cuj,
+        envFile: g.envFile,
+        sessionDir: g.sessionDir,
+        format: textJsonFormat(opts.format),
+      }));
+    });
+  captureCmd
     .command('config')
     .description('render a built-in Android Perfetto trace config')
     .requiredOption('--preset <preset>', 'capture preset', parseCapturePreset)
@@ -549,7 +667,7 @@ function main(): void {
   captureCmd
     .command('android')
     .description('capture an Android Perfetto trace from a connected adb device')
-    .option('--preset <preset>', 'capture preset: startup, scrolling, anr, game, memory, cpu, power, overview, full', parseCapturePreset)
+    .option('--preset <preset>', 'capture preset: startup, scrolling, camera, anr, game, memory, cpu, power, overview, full', parseCapturePreset)
     .option('--config <pbtxt>', 'existing Perfetto textproto config file')
     .option('--app <package>', 'target Android package name or *')
     .requiredOption('--out <file>', 'output trace file path')
@@ -710,7 +828,7 @@ function parseAnalysisMode(mode: string | undefined): CliAnalysisMode | undefine
 
 function parseCapturePreset(preset: string): CapturePresetId {
   if (isCapturePresetId(preset)) return preset;
-  throw new Error(`Invalid capture preset: ${preset}. Expected startup, scrolling, anr, game, memory, cpu, power, overview, or full.`);
+  throw new Error(`Invalid capture preset: ${preset}. Expected startup, scrolling, camera, anr, game, memory, cpu, power, overview, or full.`);
 }
 
 function parseCodebaseKind(kind: string | undefined): 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk' {

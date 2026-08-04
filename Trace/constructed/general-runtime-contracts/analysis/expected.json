@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "case_id": "general-runtime-contracts",
+  "marker": "SmartPerfetto::CASE::general-runtime-contracts",
+  "expectations": [
+    {
+      "id": "execute-callstack_analysis",
+      "type": "skill",
+      "target": "callstack_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/deep/callstack_analysis.skill.yaml",
+      "parameters": {
+        "min_samples": 10
+      },
+      "required_steps": [
+        "check_samples",
+        "hot_functions",
+        "module_distribution",
+        "thread_hotspots",
+        "caller_analysis",
+        "analysis_conclusion"
+      ],
+      "required_sql_steps": [
+        "check_samples",
+        "hot_functions",
+        "module_distribution",
+        "thread_hotspots",
+        "caller_analysis",
+        "analysis_conclusion"
+      ],
+      "forced_sql_steps": [
+        "hot_functions",
+        "module_distribution",
+        "thread_hotspots",
+        "caller_analysis",
+        "analysis_conclusion"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "check_samples",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "execute-fence_wait_decomposition",
+      "type": "skill",
+      "target": "fence_wait_decomposition",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/fence_wait_decomposition.skill.yaml",
+      "parameters": {
+        "start_ts": "${trace_start}",
+        "end_ts": "${trace_end}"
+      },
+      "required_steps": [
+        "acquire_fence_wait",
+        "present_fence_timing",
+        "release_fence_impact",
+        "fence_attribution_hint"
+      ],
+      "required_sql_steps": [
+        "acquire_fence_wait",
+        "present_fence_timing",
+        "release_fence_impact",
+        "fence_attribution_hint"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "acquire_fence_wait",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "execute-global_trace_sanity_check",
+      "type": "skill",
+      "target": "global_trace_sanity_check",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/global_trace_sanity_check.skill.yaml",
+      "parameters": {
+        "max_rows": 20
+      },
+      "required_steps": [
+        "trace_window",
+        "top_long_slices",
+        "top_d_state_threads",
+        "top_runnable_waits",
+        "runqueue_pressure",
+        "top_cpu_processes"
+      ],
+      "required_sql_steps": [
+        "trace_window",
+        "top_long_slices",
+        "top_d_state_threads",
+        "top_runnable_waits",
+        "runqueue_pressure",
+        "top_cpu_processes"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "trace_window",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "execute-main_thread_slices_in_range",
+      "type": "skill",
+      "target": "main_thread_slices_in_range",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/main_thread_slices_in_range.skill.yaml",
+      "parameters": {
+        "start_ts": "${trace_start}",
+        "end_ts": "${trace_end}",
+        "upid": "${fixture_upid}",
+        "pid": 700000
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "execute-main_thread_states_in_range",
+      "type": "skill",
+      "target": "main_thread_states_in_range",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/main_thread_states_in_range.skill.yaml",
+      "parameters": {
+        "start_ts": "${trace_start}",
+        "end_ts": "${trace_end}",
+        "upid": "${fixture_upid}",
+        "pid": 700000
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "definition-multi_trace_result_comparison",
+      "type": "skill",
+      "target": "multi_trace_result_comparison",
+      "mode": "definition",
+      "source_file": "backend/skills/comparison/multi_trace_result_comparison.skill.yaml",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "execute-process_identity_resolver",
+      "type": "skill",
+      "target": "process_identity_resolver",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/process_identity_resolver.skill.yaml",
+      "parameters": {
+        "max_rows": 20
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-general",
+      "type": "strategy",
+      "target": "general",
+      "query": "分析这份 trace",
+      "expected_strategy": "general",
+      "source_file": "backend/strategies/general.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-multi_trace_result_comparison",
+      "type": "strategy",
+      "target": "multi_trace_result_comparison",
+      "query": "分析结果对比",
+      "expected_strategy": "multi_trace_result_comparison",
+      "source_file": "backend/strategies/multi-trace-result-comparison.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-overview",
+      "type": "strategy",
+      "target": "overview",
+      "query": "发生了什么",
+      "expected_strategy": "overview",
+      "source_file": "backend/strategies/overview.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-runtime_correctness",
+      "type": "strategy",
+      "target": "runtime_correctness",
+      "query": "runtime",
+      "expected_strategy": "runtime_correctness",
+      "source_file": "backend/strategies/runtime-correctness.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-smart",
+      "type": "strategy",
+      "target": "smart",
+      "query": "smart",
+      "expected_strategy": "smart",
+      "source_file": "backend/strategies/smart.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-teaching",
+      "type": "strategy",
+      "target": "teaching",
+      "query": "教学",
+      "expected_strategy": "teaching",
+      "source_file": "backend/strategies/teaching.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    },
+    {
+      "id": "strategy-verifier_misdiagnosis",
+      "type": "strategy",
+      "target": "verifier_misdiagnosis",
+      "query": "contract-only:verifier_misdiagnosis",
+      "expected_strategy": "verifier_misdiagnosis",
+      "source_file": "backend/strategies/verifier-misdiagnosis.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::general-runtime-contracts"
+    }
+  ]
+}

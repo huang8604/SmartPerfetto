@@ -12,6 +12,10 @@ import {
 } from './experimentalRuntime';
 import { createRuntimeFactoryEnv } from './runtimeFactoryEnv';
 import { createRuntimeRegistryForSelection } from './runtimeRegistry';
+import {
+  assertAiFeatureEnabled,
+  type AiCapabilityFeature,
+} from '../services/aiCapabilityPolicy';
 
 export type BackendAgentRuntimeKind = AgentRuntimeKind;
 export type ResolvedAgentRuntimeKind = BackendAgentRuntimeKind | ExperimentalAgentRuntimeKind;
@@ -34,6 +38,7 @@ export interface CreateAgentOrchestratorInput {
   providerId?: string | null;
   runtimeOverride?: BackendAgentRuntimeKind;
   providerScope?: ProviderScope;
+  aiFeature?: AiCapabilityFeature;
 }
 
 function parseRuntimeEnv(value: string | undefined): BackendAgentRuntimeKind | undefined {
@@ -77,7 +82,7 @@ export function resolveAgentRuntimeSelection(
   if (process.env.SMARTPERFETTO_AGENT_RUNTIME) {
     throw new Error(
       `Unsupported SMARTPERFETTO_AGENT_RUNTIME="${process.env.SMARTPERFETTO_AGENT_RUNTIME}". ` +
-      'Use "claude-agent-sdk", "openai-agents-sdk", "pi-agent-core", or "opencode".'
+      'Use "claude-agent-sdk", "openai-agents-sdk", "pi-agent-core", "opencode", or "qoder-agent-sdk".'
     );
   }
 
@@ -90,6 +95,7 @@ export function resolveAgentRuntimeSelection(
 }
 
 export function createAgentOrchestrator(input: CreateAgentOrchestratorInput): IOrchestrator {
+  assertAiFeatureEnabled(input.aiFeature ?? 'agent_analyze');
   const selection = resolveAgentRuntimeSelection(input.providerId, input.runtimeOverride, input.providerScope);
   const registry = createRuntimeRegistryForSelection(selection.kind);
   return registry.createOrchestrator(selection.kind, {

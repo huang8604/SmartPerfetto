@@ -17,9 +17,16 @@ jest.mock('../strategyLoader', () => ({
     {
       scene: 'multi_trace_result_comparison',
       priority: 0,
-      keywords: ['分析结果对比', '结果对比', '多 trace 对比', '另外一个 trace', 'compare analysis results'],
+      keywords: [
+        '分析结果对比',
+        '结果对比',
+        '多 trace 结果对比',
+        '另外一个 trace 的分析结果',
+        'compare analysis results',
+      ],
       compoundPatterns: [
-        /对比.*(?:分析结果|结果|另一个\s*Trace|另外一个\s*Trace|两个\s*Trace|多\s*Trace)/i,
+        /对比.*(?:分析结果|结果|snapshot|snapshots|SID|sid)/i,
+        /对比.*(?:另一个\s*Trace|另外一个\s*Trace|两个\s*Trace|多\s*Trace).*(?:分析结果|结果|snapshot|snapshots|SID|sid)/i,
         /(?:分析结果|结果|snapshot).*(?:对比|compare)/i,
       ],
     },
@@ -146,6 +153,13 @@ describe('classifyScene', () => {
     it('should classify multi-trace result comparison queries', () => {
       expect(classifyScene('把当前 Trace 的结果与另外一个 Trace 的分析结果进行对比')).toBe('multi_trace_result_comparison');
       expect(classifyScene('compare analysis results for two snapshots')).toBe('multi_trace_result_comparison');
+      expect(classifyScene('对比两个 Trace 的已有分析结果')).toBe('multi_trace_result_comparison');
+    });
+
+    it('should not route live raw trace pair comparison to result-snapshot comparison', () => {
+      expect(classifyScene('对比两个 Trace 的启动速度差异')).toBe('startup');
+      expect(classifyScene('对比左右 Trace 的滑动 fps 差异')).toBe('scrolling');
+      expect(classifyScene('对比两个 Trace 的频率差异')).toBe('general');
     });
 
     it('should be case-insensitive for keywords', () => {

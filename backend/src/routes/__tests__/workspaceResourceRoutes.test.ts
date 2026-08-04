@@ -49,14 +49,19 @@ function authHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Te
     .set('x-workspace-id', workspaceId);
 }
 
-function trustedSsoHeaders(req: request.Test, workspaceId = 'workspace-a'): request.Test {
+function trustedSsoHeaders(
+  req: request.Test,
+  workspaceId = 'workspace-a',
+  roles = 'analyst',
+  scopes = 'trace:read,report:read,agent:run',
+): request.Test {
   return req
     .set('X-SmartPerfetto-SSO-User-Id', 'sso-user')
     .set('X-SmartPerfetto-SSO-Email', 'sso-user@example.test')
     .set('X-SmartPerfetto-SSO-Tenant-Id', 'tenant-a')
     .set('X-SmartPerfetto-SSO-Workspace-Id', workspaceId)
-    .set('X-SmartPerfetto-SSO-Roles', 'analyst')
-    .set('X-SmartPerfetto-SSO-Scopes', 'trace:read,report:read,agent:run');
+    .set('X-SmartPerfetto-SSO-Roles', roles)
+    .set('X-SmartPerfetto-SSO-Scopes', scopes);
 }
 
 async function writeTraceMetadata(id: string, workspaceId: string): Promise<void> {
@@ -158,37 +163,46 @@ describe('workspace resource routes', () => {
   });
 
   it('mounts provider and agent aliases under the workspace resource root', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
     const app = makeWorkspaceApp();
 
-    const providerRes = await authHeaders(
+    const providerRes = await trustedSsoHeaders(
       request(app).get('/api/workspaces/workspace-b/providers/templates'),
-      'workspace-a',
+      'workspace-b',
+      'workspace_admin',
+      'provider:manage_workspace,agent:run',
     );
     expect(providerRes.status).toBe(200);
     expect(providerRes.headers.deprecation).toBeUndefined();
     expect(providerRes.body.success).toBe(true);
 
-    const runRes = await authHeaders(
+    const runRes = await trustedSsoHeaders(
       request(app)
         .post('/api/workspaces/workspace-b/agent/sessions/session-b/runs')
         .send({ query: '分析 trace' }),
-      'workspace-a',
+      'workspace-b',
+      'workspace_admin',
+      'provider:manage_workspace,agent:run',
     );
     expect(runRes.status).toBe(400);
     expect(runRes.body.error).toBe('traceId is required');
 
-    const respondRes = await authHeaders(
+    const respondRes = await trustedSsoHeaders(
       request(app)
         .post('/api/workspaces/workspace-b/agent/sessions/missing-session/respond')
         .send({ action: 'continue' }),
-      'workspace-a',
+      'workspace-b',
+      'workspace_admin',
+      'provider:manage_workspace,agent:run',
     );
     expect(respondRes.status).toBe(404);
     expect(respondRes.body.error).toBe('Session not found');
 
-    const streamRes = await authHeaders(
+    const streamRes = await trustedSsoHeaders(
       request(app).get('/api/workspaces/workspace-b/agent/runs/missing-run/stream'),
-      'workspace-a',
+      'workspace-b',
+      'workspace_admin',
+      'provider:manage_workspace,agent:run',
     );
     expect(streamRes.status).toBe(404);
     expect(streamRes.body.error).toBe('Run not found');

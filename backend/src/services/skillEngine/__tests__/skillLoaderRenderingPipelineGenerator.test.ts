@@ -22,7 +22,7 @@ describe('skill loader rendering pipeline generator', () => {
     const scoreStep = skill?.steps?.find((step: any) => step.id === 'score_pipelines');
     const determineStep = skill?.steps?.find((step: any) => step.id === 'determine_pipeline');
 
-    expect(skill?.version).toBe('3.3');
+    expect(skill?.version).toBe('4.0');
     expect(scoreStep).toBeTruthy();
     expect(determineStep).toBeTruthy();
     expect(scoreStep.save_as).toBe('pipeline_scores');

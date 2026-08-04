@@ -3,11 +3,15 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { describe, expect, it, jest } from '@jest/globals';
+import {EventEmitter} from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import {PassThrough} from 'stream';
+import net from 'net';
 import {
   EXPERIMENTAL_OPENCODE_RUNTIME_KIND,
+  OPENCODE_RUNTIME_KIND,
   OpenCodeRuntime,
   completeOpenCodeFinalReportPhaseIfDelivered,
   createOpenCodeHardenedConfig,
@@ -22,15 +26,38 @@ import {
   __testing as openCodeTesting,
   projectOpenCodeEventToStreamingUpdate,
   runOpenCodePrompt,
+  sanitizeOpenCodeConclusionText,
   type OpenCodeSdkModuleLoader,
 } from '../openCodeRuntime';
 import type { RuntimeFactoryInput } from '../runtimeRegistry';
+import type { QueryResult, TraceInfo, TraceProcessorService } from '../../services/traceProcessorService';
 import { createTraceProcessorQueryCancelledError } from '../../services/traceProcessorCancellation';
+import * as quickEvidenceDirectAnswer from '../quickEvidenceDirectAnswer';
 
-function createFakeRuntimeInput(): RuntimeFactoryInput {
+type FakeTraceProcessorService = TraceProcessorService & {
+  query: jest.MockedFunction<(traceId: string, sql: string) => Promise<QueryResult>>;
+  getTrace: jest.MockedFunction<(traceId: string) => TraceInfo>;
+};
+
+function createFakeTraceProcessorService(): FakeTraceProcessorService {
   return {
-    traceProcessorService: {} as any,
-    selection: {
+    query: jest.fn(async () => ({ columns: [], rows: [], durationMs: 1 })),
+    getTrace: jest.fn(() => ({
+      id: 'trace-opencode',
+      filename: 'trace.pftrace',
+      size: 1,
+      uploadTime: new Date(),
+      status: 'ready',
+      traceOs: 'android',
+      traceFormat: 'perfetto_protobuf',
+    })),
+  } as unknown as FakeTraceProcessorService;
+}
+
+function createFakeRuntimeInput(overrides: Partial<RuntimeFactoryInput> = {}): RuntimeFactoryInput {
+  return {
+    traceProcessorService: overrides.traceProcessorService ?? createFakeTraceProcessorService(),
+    selection: overrides.selection ?? {
       kind: EXPERIMENTAL_OPENCODE_RUNTIME_KIND,
       source: 'env',
     },
@@ -70,7 +97,7 @@ function createFakeModuleLoader(record: {
   closeCount: number;
 }): OpenCodeSdkModuleLoader {
   return jest.fn(async () => ({
-    createOpencode: jest.fn(async (options?: Record<string, unknown>) => {
+    createOpencodeWithEnv: jest.fn(async (options: Record<string, unknown>) => {
       record.createOptions = options;
       return {
         server: {
@@ -94,6 +121,150 @@ function createFakeModuleLoader(record: {
 }
 
 describe('experimental OpenCode runtime contract', () => {
+  it('cleans stale dead-owner private directories without deleting a live owner', () => {
+    const now = Date.now();
+    const liveRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-opencode-private-live-test-'));
+    const deadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-opencode-private-dead-test-'));
+    const staleDate = new Date(now - 25 * 60 * 60 * 1000);
+    try {
+      fs.writeFileSync(
+        path.join(liveRoot, '.owner.json'),
+        JSON.stringify({pid: process.pid, createdAt: now - 26 * 60 * 60 * 1000}),
+      );
+      fs.writeFileSync(
+        path.join(deadRoot, '.owner.json'),
+        JSON.stringify({pid: 2_147_483_647, createdAt: now - 26 * 60 * 60 * 1000}),
+      );
+      fs.utimesSync(liveRoot, staleDate, staleDate);
+      fs.utimesSync(deadRoot, staleDate, staleDate);
+
+      openCodeTesting.cleanupStaleEphemeralOpenCodeDirs(now);
+
+      expect(fs.existsSync(liveRoot)).toBe(true);
+      expect(fs.existsSync(deadRoot)).toBe(false);
+    } finally {
+      fs.rmSync(liveRoot, {recursive: true, force: true});
+      fs.rmSync(deadRoot, {recursive: true, force: true});
+    }
+  });
+
+  it('resolves the packaged OpenCode native CLI without relying on PATH shims', () => {
+    const cliPath = openCodeTesting.resolveOpenCodeCliPath();
+    expect(cliPath).toContain(`${path.sep}opencode-ai${path.sep}bin${path.sep}`);
+    expect(fs.statSync(cliPath).isFile()).toBe(true);
+  });
+
+  it('keeps draining server output after startup without retaining logs', async () => {
+    const child = new EventEmitter() as any;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.exitCode = null;
+    child.signalCode = null;
+
+    const ready = openCodeTesting.waitForOpenCodeServer(child, 1_000);
+    child.stdout.write('opencode server listening on http://127.0.0.1:43210\n');
+
+    await expect(ready).resolves.toBe('http://127.0.0.1:43210');
+    await Promise.all([
+      new Promise<void>(resolve => child.stdout.write(Buffer.alloc(256 * 1024), resolve)),
+      new Promise<void>(resolve => child.stderr.write(Buffer.alloc(256 * 1024), resolve)),
+    ]);
+    expect(child.stdout.readableFlowing).toBe(true);
+    expect(child.stderr.readableFlowing).toBe(true);
+  });
+
+  it('retries a dynamically selected non-zero port and authenticates the local client', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smartperfetto-opencode-start-test-'));
+    const dirs = {
+      projectDir: path.join(root, 'project'),
+      homeDir: path.join(root, 'home'),
+      configDir: path.join(root, 'config'),
+    };
+    Object.values(dirs).forEach(dir => fs.mkdirSync(dir, {recursive: true}));
+    const ports = [43101, 43102];
+    const spawned: Array<{args: string[]; env: NodeJS.ProcessEnv}> = [];
+    const clientConfig: Array<Record<string, any>> = [];
+    try {
+      const instance = await openCodeTesting.createOpenCodeInstanceWithExplicitEnv(
+        {
+          createOpencodeClient: jest.fn((config: Record<string, any>) => {
+            clientConfig.push(config);
+            return {session: {}};
+          }),
+        } as any,
+        dirs,
+        {
+          OPENCODE_SERVER_USERNAME: 'host-user',
+          OPENCODE_SERVER_PASSWORD: 'host-password',
+          SMARTPERFETTO_API_KEY: 'backend-secret-must-not-reach-child',
+          SMARTPERFETTO_SSO_COOKIE_SECRET: 'sso-secret-must-not-reach-child',
+          OPENAI_API_KEY: 'provider-secret-required-by-child',
+          PATH: process.env.PATH,
+        },
+        {hostname: '127.0.0.1', timeout: 1_000, config: {logLevel: 'error'}},
+        {
+          allocatePort: jest.fn(async () => ports.shift()!),
+          spawnChild: jest.fn((_executable: string, args: string[], options: any) => {
+            const child = new EventEmitter() as any;
+            child.stdout = new PassThrough();
+            child.stderr = new PassThrough();
+            child.exitCode = null;
+            child.signalCode = null;
+            child.pid = 4321 + spawned.length;
+            child.kill = jest.fn(() => {
+              if (child.exitCode === null) {
+                child.exitCode = 0;
+                queueMicrotask(() => child.emit('exit', 0));
+              }
+              return true;
+            });
+            spawned.push({args, env: options.env});
+            queueMicrotask(() => {
+              if (spawned.length === 1) {
+                child.stderr.write('EADDRINUSE: address already in use\n');
+                child.exitCode = 1;
+                child.emit('exit', 1);
+              } else {
+                child.stdout.write('opencode server listening on http://127.0.0.1:43102\n');
+              }
+            });
+            return child;
+          }),
+        },
+      );
+
+      expect(spawned).toHaveLength(2);
+      expect(spawned.map(item => item.args.find(arg => arg.startsWith('--port='))))
+        .toEqual(['--port=43101', '--port=43102']);
+      expect(spawned.every(item => !item.args.includes('--port=0'))).toBe(true);
+      expect(spawned[1].env.OPENCODE_SERVER_USERNAME).not.toBe('host-user');
+      expect(spawned[1].env.OPENCODE_SERVER_PASSWORD).not.toBe('host-password');
+      expect(spawned[1].env.SMARTPERFETTO_API_KEY).toBeUndefined();
+      expect(spawned[1].env.SMARTPERFETTO_SSO_COOKIE_SECRET).toBeUndefined();
+      expect(spawned[1].env.OPENAI_API_KEY).toBe('provider-secret-required-by-child');
+      expect(spawned[1].env.PATH).toBe(process.env.PATH);
+      const expectedAuth = `Basic ${Buffer.from(
+        `${spawned[1].env.OPENCODE_SERVER_USERNAME}:${spawned[1].env.OPENCODE_SERVER_PASSWORD}`,
+      ).toString('base64')}`;
+      expect(clientConfig).toEqual([expect.objectContaining({
+        baseUrl: 'http://127.0.0.1:43102',
+        headers: {Authorization: expectedAuth},
+      })]);
+      await instance.server?.close();
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('terminates the complete OpenCode process tree on Windows', () => {
+    expect(openCodeTesting.windowsTaskkillArgs(4321)).toEqual([
+      '/PID',
+      '4321',
+      '/T',
+      '/F',
+    ]);
+  });
+
   it('describes OpenCode as hidden, server-backed, JSON Schema, and no shell/file tools', () => {
     expect(getOpenCodeEngineCapabilities()).toEqual({
       kind: EXPERIMENTAL_OPENCODE_RUNTIME_KIND,
@@ -174,14 +345,69 @@ describe('experimental OpenCode runtime contract', () => {
     });
   });
 
-  it('uses the engine-local OpenCode MCP bridge child in source mode', () => {
+  it('uses the engine-local loader-free OpenCode MCP bridge child', () => {
     const command = openCodeTesting.resolveOpenCodeBridgeCommand({});
 
-    expect(command[0]).toContain('tsx');
-    expect(command[1]).toBe(path.resolve(
-      process.cwd(),
-      'src/agentRuntime/engines/opencode/openCodeMcpBridgeChild.ts',
-    ));
+    expect(command).toEqual([
+      process.execPath,
+      path.resolve(
+        process.cwd(),
+        'src/agentRuntime/engines/opencode/openCodeMcpBridgeChild.cjs',
+      ),
+    ]);
+  });
+
+  it('closes unauthenticated MCP bridge clients before they can buffer an oversized frame', async () => {
+    const bridge = await openCodeTesting.startOpenCodeMcpBridge([]);
+    const socket = net.createConnection({host: '127.0.0.1', port: bridge.port});
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
+
+    socket.write('x'.repeat(65 * 1024));
+    await closed;
+
+    expect(bridge.getDiagnostics().lastError).toBe('bridge_request_too_large');
+    await bridge.close();
+  });
+
+  it('accepts the configured SmartPerfetto MCP bridge only after OpenCode reports it connected', async () => {
+    const status = jest.fn(async (_input?: unknown) => ({
+      data: {smartperfetto: {status: 'connected'}},
+    }));
+
+    await expect(openCodeTesting.assertOpenCodeMcpReady({mcp: {status}} as any, '/tmp/project'))
+      .resolves.toBeUndefined();
+    expect(status).toHaveBeenCalledWith({query: {directory: '/tmp/project'}});
+  });
+
+  it('fails before prompting when OpenCode cannot connect the SmartPerfetto MCP bridge', async () => {
+    const diagnostics = {
+      connectionCount: 0,
+      requestCount: 0,
+    };
+    const status = jest.fn(async (_input?: unknown) => {
+      diagnostics.connectionCount = 1;
+      diagnostics.requestCount = 2;
+      return {
+        data: {
+          smartperfetto: {
+            status: 'failed',
+            error: 'bridge child exited before initialization',
+          },
+        },
+      };
+    });
+
+    await expect(openCodeTesting.assertOpenCodeMcpReady(
+      {mcp: {status}} as any,
+      '/tmp/project',
+      () => diagnostics,
+    )).rejects.toThrow(
+      'bridge child exited before initialization (connections=1, requests=2',
+    );
   });
 
   it('enumerates conservative standalone MCP tool-name variants for OpenCode', () => {
@@ -298,6 +524,85 @@ describe('experimental OpenCode runtime contract', () => {
     expect(extractOpenCodeAssistantText(result.messagesResponse)).toBe('异步最终报告');
   });
 
+  it('waits for the target OpenCode session to become idle after an intermediate message completes', async () => {
+    const promptAsync = jest.fn(async (_input?: unknown) => ({ response: { status: 204 } }));
+    const intermediateAssistant = {
+      info: { role: 'assistant', finish: 'tool-calls', id: 'msg-intermediate' },
+      parts: [{ type: 'text', text: '先提交分析计划，再继续调用工具。' }],
+    };
+    const finalAssistant = {
+      info: { role: 'assistant', finish: 'stop', id: 'msg-final' },
+      parts: [{ type: 'text', text: '完整最终报告' }],
+    };
+    const messages = jest.fn<any>()
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [intermediateAssistant] })
+      .mockResolvedValueOnce({ data: [intermediateAssistant, finalAssistant] });
+    const status = jest.fn<any>()
+      .mockResolvedValueOnce({ data: { 'ses-opencode': { type: 'busy' } } })
+      .mockResolvedValueOnce({ data: { 'ses-opencode': { type: 'idle' } } });
+
+    const result = await runOpenCodePrompt({
+      client: {
+        session: {
+          prompt: jest.fn(),
+          promptAsync,
+          messages,
+          status,
+        },
+      },
+      server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+    } as any, {
+      path: { id: 'ses-opencode' },
+      query: { directory: '/tmp/project' },
+      body: { parts: [{ type: 'text', text: '分析启动性能' }] },
+    }, {
+      sessionId: 'ses-opencode',
+      projectDir: '/tmp/project',
+      timeoutMs: 5_000,
+    });
+
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(messages).toHaveBeenCalledTimes(3);
+    expect((result.messagesResponse as any).data.at(-1)).toEqual(finalAssistant);
+  }, 10_000);
+
+  it('falls back to a completed assistant message when status omits the target session', async () => {
+    const promptAsync = jest.fn(async (_input?: unknown) => ({ response: { status: 204 } }));
+    const messages = jest.fn<any>()
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({
+        data: [{
+          info: { role: 'assistant', finish: 'stop', id: 'msg-final' },
+          parts: [{ type: 'text', text: '目标会话最终报告' }],
+        }],
+      });
+    const status = jest.fn(async () => ({ data: { 'ses-other': { type: 'idle' } } }));
+
+    const result = await runOpenCodePrompt({
+      client: {
+        session: {
+          prompt: jest.fn(),
+          promptAsync,
+          messages,
+          status,
+        },
+      },
+      server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+    } as any, {
+      path: { id: 'ses-opencode' },
+      query: { directory: '/tmp/project' },
+      body: { parts: [{ type: 'text', text: '分析启动性能' }] },
+    }, {
+      sessionId: 'ses-opencode',
+      projectDir: '/tmp/project',
+      timeoutMs: 5_000,
+    });
+
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(extractOpenCodeAssistantText(result.messagesResponse)).toBe('目标会话最终报告');
+  });
+
   it('does not return an assistant message that existed before the async prompt', async () => {
     const promptAsync = jest.fn(async (_input?: unknown) => ({ response: { status: 204 } }));
     const oldAssistant = {
@@ -395,6 +700,42 @@ describe('experimental OpenCode runtime contract', () => {
         }),
       }),
     ]);
+  });
+
+  it('projects private wiki results before emitting OpenCode responses', async () => {
+    const updates: any[] = [];
+    await dispatchOpenCodeBridgeRequest([{
+      name: 'lookup_blog_knowledge',
+      exposure: 'internal',
+      tool: {},
+      shared: {
+        name: 'lookup_blog_knowledge',
+        description: 'Lookup knowledge',
+        exposure: 'internal',
+        inputSchema: {},
+        handler: jest.fn(async () => ({content: [{type: 'text', text: JSON.stringify({result: {
+          query: 'Handler',
+          probed: ['android_internals_wiki'],
+          retrievedAt: 1,
+          legacyPath: false,
+          hits: [{
+            chunkId: 'wiki-1',
+            score: 1,
+            metadata: {kind: 'android_internals_wiki', knowledgeSourceId: 'source-a'},
+            snippet: 'OPENCODE_PRIVATE_WIKI_CANARY',
+          }],
+        }})}]})),
+      },
+    } as any], {
+      jsonrpc: '2.0',
+      id: 'wiki-call',
+      method: 'tools/call',
+      params: {name: 'lookup_blog_knowledge', arguments: {}},
+    }, update => updates.push(update));
+
+    const serialized = JSON.stringify(updates.filter(update => update.type === 'agent_response'));
+    expect(serialized).not.toContain('OPENCODE_PRIVATE_WIKI_CANARY');
+    expect(serialized).toContain('snippetHash');
   });
 
   it('records OpenCode MCP bridge tool executions into the shared analysis plan evidence log', async () => {
@@ -565,6 +906,55 @@ describe('experimental OpenCode runtime contract', () => {
     expect(getOpenCodePlanCompletionStatus(plan)).toMatchObject({ complete: true, pending: [] });
   });
 
+  it('recognizes a structurally named conclusion phase when auto-closing a delivered report', () => {
+    const plan = {
+      phases: [
+        {
+          id: 'p1',
+          name: '启动证据对比',
+          goal: '采集并核对双端启动证据',
+          status: 'completed',
+          summary: '已完成双端启动证据对比与根因交叉验证。',
+        },
+        {
+          id: 'p2',
+          name: '结构化结论',
+          goal: '输出 Delta 表格、根因分析和分层建议',
+          status: 'in_progress',
+        },
+      ],
+    } as any;
+    const report = [
+      '## 综合结论',
+      '',
+      '左侧冷启动显著慢于右侧。',
+      '',
+      '## 关键证据',
+      '- evidence/source: art-startup 显示 TTID 差异。',
+    ].join('\n');
+
+    const closed = completeOpenCodeFinalReportPhaseIfDelivered(plan, report, 'zh-CN', () => 43);
+
+    expect(closed?.id).toBe('p2');
+    expect(getOpenCodePlanCompletionStatus(plan)).toMatchObject({ complete: true, pending: [] });
+  });
+
+  it('removes provider process narration before a delivered OpenCode report', () => {
+    expect(sanitizeOpenCodeConclusionText([
+      'Now I have all evidence. Let me produce the final comprehensive analysis report.',
+      '',
+      '---',
+      '',
+      '## 综合结论',
+      '',
+      '主线程 animation 回调是主要卡顿来源。',
+    ].join('\n'))).toBe([
+      '## 综合结论',
+      '',
+      '主线程 animation 回调是主要卡顿来源。',
+    ].join('\n'));
+  });
+
   it('does not auto-close OpenCode phases when earlier work is still pending', () => {
     const plan = {
       phases: [
@@ -688,6 +1078,412 @@ describe('experimental OpenCode runtime contract', () => {
     ]));
   });
 
+  it('keeps private source sessions out of durable OpenCode state and removes temporary files', async () => {
+    await withBackendDataDir(async dataDir => {
+      const paths: {home?: string; config?: string; project?: string; env?: NodeJS.ProcessEnv} = {};
+      const runtime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+        env: {
+          XDG_DATA_HOME: '/host/xdg/data',
+          XDG_STATE_HOME: '/host/xdg/state',
+          XDG_CACHE_HOME: '/host/xdg/cache',
+          XDG_CONFIG_HOME: '/host/xdg/config',
+          USERPROFILE: 'C:\\host-profile',
+          APPDATA: 'C:\\host-appdata',
+          LOCALAPPDATA: 'C:\\host-localappdata',
+          OPENCODE_SERVER_USERNAME: 'host-user',
+          OPENCODE_SERVER_PASSWORD: 'host-password',
+        },
+        moduleLoader: async () => ({
+          createOpencodeWithEnv: jest.fn(async (_options: any, processEnv: NodeJS.ProcessEnv) => {
+            paths.env = processEnv;
+            paths.home = processEnv.HOME;
+            paths.config = processEnv.OPENCODE_CONFIG_DIR;
+            fs.writeFileSync(path.join(paths.home!, 'provider-state'), 'PRIVATE_PROVIDER_STATE');
+            fs.writeFileSync(path.join(paths.config!, 'tool-state'), 'PRIVATE_TOOL_STATE');
+            return {
+              server: {url: 'http://127.0.0.1:4106', close: jest.fn(() => undefined)},
+              client: {
+                session: {
+                  create: jest.fn(async () => ({data: {id: 'ses-private'}})),
+                  prompt: jest.fn(async (input: any) => {
+                    paths.project = input.query.directory;
+                    fs.writeFileSync(
+                      path.join(paths.project!, 'session-state'),
+                      'PRIVATE_SESSION_STATE',
+                    );
+                    return {data: {info: {role: 'user'}, parts: []}};
+                  }),
+                },
+              },
+            };
+          }),
+        }),
+      });
+
+      await runtime.analyze(
+        'analyze with private source',
+        'session-opencode-private',
+        'trace-opencode',
+        {
+          analysisMode: 'full',
+          codeAwareMode: 'provider_send',
+          codebaseIds: ['codebase-private'],
+        },
+      );
+
+      expect(paths.home).toContain('smartperfetto-opencode-private-');
+      expect(paths.config).toContain('smartperfetto-opencode-private-');
+      expect(paths.project).toContain('smartperfetto-opencode-private-');
+      const ephemeralRoot = path.dirname(paths.project!);
+      for (const key of [
+        'HOME',
+        'USERPROFILE',
+        'XDG_DATA_HOME',
+        'XDG_STATE_HOME',
+        'XDG_CACHE_HOME',
+        'XDG_CONFIG_HOME',
+        'APPDATA',
+        'LOCALAPPDATA',
+        'TMPDIR',
+        'TMP',
+        'TEMP',
+        'OPENCODE_CONFIG_DIR',
+      ]) {
+        expect(path.resolve(paths.env![key]!)).toContain(`${path.resolve(ephemeralRoot)}${path.sep}`);
+      }
+      expect(paths.env?.OPENCODE_SERVER_USERNAME).not.toBe('host-user');
+      expect(paths.env?.OPENCODE_SERVER_PASSWORD).not.toBe('host-password');
+      expect(fs.existsSync(paths.home!)).toBe(false);
+      expect(fs.existsSync(paths.config!)).toBe(false);
+      expect(fs.existsSync(paths.project!)).toBe(false);
+      expect(fs.existsSync(path.join(
+        dataDir,
+        'agent-runtime',
+        'opencode',
+        'session-opencode-private',
+      ))).toBe(false);
+    });
+  });
+
+  it('fails closed when a custom adapter cannot accept an explicit process environment', async () => {
+    const legacyCreate = jest.fn(async () => {
+      throw new Error('legacy create should not be called');
+    });
+    const runtime = new OpenCodeRuntime(createFakeRuntimeInput(), {
+      moduleLoader: async () => ({createOpencode: legacyCreate}),
+    });
+
+    await expect(runtime.analyze(
+      'private source analysis',
+      'session-opencode-legacy-adapter',
+      'trace-opencode',
+      {codeAwareMode: 'metadata_only', codebaseIds: ['codebase-private']},
+    )).rejects.toThrow('does not support explicit per-process environment isolation');
+    expect(legacyCreate).not.toHaveBeenCalled();
+  });
+
+  it('injects dual-trace pane mapping into the OpenCode comparison system prompt', async () => {
+    const record: { createOptions?: Record<string, unknown>; promptInput?: unknown; closeCount: number } = {
+      closeCount: 0,
+    };
+    const traceProcessorService = createFakeTraceProcessorService();
+    traceProcessorService.query.mockImplementation(async (traceId: string, sql: string) => {
+      if (!sql.includes('sqlite_master')) return {columns: [], rows: [], durationMs: 1};
+      return {
+        columns: ['name'],
+        rows: [[traceId === 'trace-current' ? 'android_current_only' : 'android_reference_only']],
+        durationMs: 1,
+      };
+    });
+    const runtime = new OpenCodeRuntime(
+      createFakeRuntimeInput({
+        traceProcessorService,
+        selection: { kind: OPENCODE_RUNTIME_KIND, source: 'env' },
+      }),
+      {
+        env: {
+          SMARTPERFETTO_OPENCODE_MODEL_JSON: '{"providerID":"smartperfetto","modelID":"test-model"}',
+        },
+        moduleLoader: createFakeModuleLoader(record),
+      },
+    );
+
+    await runtime.analyze(
+      '对比左右 Trace 的启动速度差异',
+      'session-opencode-compare',
+      'trace-current',
+      {
+        analysisMode: 'full',
+        packageName: 'com.example',
+        referenceTraceId: 'trace-reference',
+        tracePairContext: {
+          schemaVersion: 1,
+          layout: 'horizontal',
+          primarySide: 'left',
+          referenceSide: 'right',
+          workspaceOpen: true,
+          panes: [
+            {
+              side: 'left',
+              traceSide: 'current',
+              traceId: 'trace-current',
+              traceName: 'Current Trace',
+              visualState: 'live',
+            },
+            {
+              side: 'right',
+              traceSide: 'reference',
+              traceId: 'trace-reference',
+              traceName: 'Reference Trace',
+              visualState: 'live',
+            },
+          ],
+        },
+      },
+    );
+
+    const promptInput = record.promptInput as { body?: { system?: string } } | undefined;
+    expect(promptInput?.body?.system).toContain('## 对比模式');
+    expect(promptInput?.body?.system).toContain('### 窗口映射');
+    expect(promptInput?.body?.system).toContain('左侧/当前 Trace');
+    expect(promptInput?.body?.system).toContain('右侧/参考 Trace');
+    expect(promptInput?.body?.system).toContain('共有表/视图**: 0 个，不可直接对比');
+    expect(promptInput?.body?.system).toContain('android_current_only');
+    expect(promptInput?.body?.system).toContain('android_reference_only');
+  });
+
+  it('answers default auto trace facts directly without loading the OpenCode SDK', async () => {
+    const traceProcessorService = createFakeTraceProcessorService();
+    traceProcessorService.query.mockImplementation(async (_traceId: string, sql: string) => {
+      expect(sql).toContain('runtime_cpu_core_count');
+      return {
+        columns: [
+          'observed_cpu_count',
+          'observed_cpus',
+          'universe_source',
+          'cpu_table_count',
+          'cpu_table_cpus',
+          'source_table',
+        ],
+        rows: [[
+          7,
+          '0, 1, 2, 3, 4, 5, 6',
+          'sched_observed',
+          7,
+          '0, 1, 2, 3, 4, 5, 6',
+          'sched_slice/thread_state',
+        ]],
+        durationMs: 2,
+      };
+    });
+    const record: { createOptions?: Record<string, unknown>; promptInput?: unknown; closeCount: number } = {
+      closeCount: 0,
+    };
+    const moduleLoader = createFakeModuleLoader(record);
+    const runtime = new OpenCodeRuntime(
+      createFakeRuntimeInput({
+        traceProcessorService,
+        selection: { kind: OPENCODE_RUNTIME_KIND, source: 'env' },
+      }),
+      {
+        env: {
+          SMARTPERFETTO_OPENCODE_MODEL_JSON: '{"providerID":"smartperfetto","modelID":"test-model"}',
+        },
+        moduleLoader,
+      },
+    );
+    const updates: unknown[] = [];
+    runtime.on('update', update => updates.push(update));
+
+    const result = await runtime.analyze(
+      '这个 trace 的 CPU 有几个核心？',
+      'session-opencode-auto-quick',
+      'trace-opencode',
+    );
+
+    expect(moduleLoader).not.toHaveBeenCalled();
+    expect(record.promptInput).toBeUndefined();
+    expect(record.createOptions).toBeUndefined();
+    expect(record.closeCount).toBe(0);
+    expect(result.quickRun).toMatchObject({
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      actualTurns: 0,
+      stopReason: 'answered',
+      evidence: {
+        currentRunDataEnvelopes: 1,
+        citedEvidenceRefs: 1,
+      },
+    });
+    expect(result.rounds).toBe(0);
+    expect(result.conclusion).toContain('7 个 CPU 核心');
+    expect(result.conclusionContract?.claims?.[0]?.references?.[0]).toMatchObject({
+      column: 'observed_cpu_count',
+      value: 7,
+    });
+    expect(result.terminationReason).toBeUndefined();
+    expect(traceProcessorService.query).toHaveBeenCalledTimes(1);
+    expect(updates).toEqual([
+      expect.objectContaining({ type: 'data' }),
+      expect.objectContaining({ type: 'progress' }),
+      expect.objectContaining({ type: 'conclusion' }),
+      expect.objectContaining({ type: 'answer_token' }),
+    ]);
+  });
+
+  it('does not pre-run quick direct evidence for auto full scrolling diagnostics', async () => {
+    const traceProcessorService = createFakeTraceProcessorService();
+    const record: { createOptions?: Record<string, unknown>; promptInput?: unknown; closeCount: number } = {
+      closeCount: 0,
+    };
+    const moduleLoader = createFakeModuleLoader(record);
+    const runtime = new OpenCodeRuntime(
+      createFakeRuntimeInput({
+        traceProcessorService,
+        selection: { kind: OPENCODE_RUNTIME_KIND, source: 'env' },
+      }),
+      {
+        env: {
+          SMARTPERFETTO_OPENCODE_MODEL_JSON: '{"providerID":"smartperfetto","modelID":"test-model"}',
+        },
+        moduleLoader,
+      },
+    );
+    runtime.restoreArchitectureCache('trace-opencode-full-scroll', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    const directEvidence = jest.spyOn(
+      quickEvidenceDirectAnswer,
+      'buildRuntimeQuickEvidenceDirectAnswer',
+    );
+
+    try {
+      const result = await runtime.analyze(
+        '分析滑动性能',
+        'session-opencode-full-scroll',
+        'trace-opencode-full-scroll',
+      );
+
+      expect(directEvidence).not.toHaveBeenCalled();
+      expect(moduleLoader).toHaveBeenCalledTimes(1);
+      expect(record.promptInput).toBeDefined();
+      expect(result.quickRun).toBeUndefined();
+    } finally {
+      directEvidence.mockRestore();
+    }
+  });
+
+  it('bounds the OpenCode architecture cache with shared LRU semantics', () => {
+    const runtime = new OpenCodeRuntime(createFakeRuntimeInput());
+    for (let index = 0; index < 51; index += 1) {
+      runtime.restoreArchitectureCache(`trace-${index}`, {
+        type: 'STANDARD',
+        confidence: 1,
+        evidence: [],
+      });
+    }
+
+    expect(runtime.getCachedArchitecture('trace-0')).toBeUndefined();
+    expect(runtime.getCachedArchitecture('trace-50')).toBeDefined();
+    runtime.reset();
+    expect(runtime.getCachedArchitecture('trace-50')).toBeUndefined();
+  });
+
+  it('skips focus detection for package-scoped trace fact fallback preparation', async () => {
+    const traceProcessorService = createFakeTraceProcessorService();
+    const sqlQueries: string[] = [];
+    traceProcessorService.query.mockImplementation(async (_traceId: string, sql: string) => {
+      sqlQueries.push(sql);
+      return { columns: [], rows: [], durationMs: 1 };
+    });
+    const record: { createOptions?: Record<string, unknown>; promptInput?: unknown; closeCount: number } = {
+      closeCount: 0,
+    };
+    const moduleLoader = createFakeModuleLoader(record);
+    const runtime = new OpenCodeRuntime(
+      createFakeRuntimeInput({
+        traceProcessorService,
+        selection: { kind: OPENCODE_RUNTIME_KIND, source: 'env' },
+      }),
+      {
+        env: {
+          SMARTPERFETTO_OPENCODE_MODEL_JSON: '{"providerID":"smartperfetto","modelID":"test-model"}',
+        },
+        moduleLoader,
+      },
+    );
+    runtime.restoreArchitectureCache('trace-opencode', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+
+    await runtime.analyze(
+      '滑动 FPS 是多少？',
+      'session-opencode-package-fallback',
+      'trace-opencode',
+      { packageName: 'com.example.app' },
+    );
+
+    expect(moduleLoader).toHaveBeenCalledTimes(1);
+    expect(record.promptInput).toBeDefined();
+    expect(sqlQueries.some(sql => sql.includes('runtime_frame_metrics'))).toBe(true);
+    expect(sqlQueries.some(sql => sql.includes('android_battery_stats_event_slices'))).toBe(false);
+    expect(sqlQueries.some(sql => sql.includes('android_oom_adj_intervals'))).toBe(false);
+  });
+
+  it('answers acknowledgement follow-ups directly without loading the OpenCode SDK', async () => {
+    const traceProcessorService = createFakeTraceProcessorService();
+    const record: { createOptions?: Record<string, unknown>; promptInput?: unknown; closeCount: number } = {
+      closeCount: 0,
+    };
+    const moduleLoader = createFakeModuleLoader(record);
+    const runtime = new OpenCodeRuntime(
+      createFakeRuntimeInput({
+        traceProcessorService,
+        selection: { kind: OPENCODE_RUNTIME_KIND, source: 'env' },
+      }),
+      {
+        env: {},
+        moduleLoader,
+      },
+    );
+    const updates: unknown[] = [];
+    runtime.on('update', update => updates.push(update));
+
+    const result = await runtime.analyze(
+      '谢谢',
+      'session-opencode-ack',
+      'trace-opencode',
+    );
+
+    expect(moduleLoader).not.toHaveBeenCalled();
+    expect(record.promptInput).toBeUndefined();
+    expect(record.createOptions).toBeUndefined();
+    expect(record.closeCount).toBe(0);
+    expect(traceProcessorService.query).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: true,
+      conclusion: '收到。',
+      confidence: 1,
+      rounds: 0,
+      quickRun: {
+        requestedMode: 'auto',
+        resolvedMode: 'quick',
+        actualTurns: 0,
+        stopReason: 'answered',
+      },
+    });
+    expect(result.claimVerificationResult).toBeUndefined();
+    expect(updates).toEqual([
+      expect.objectContaining({ type: 'progress' }),
+      expect.objectContaining({ type: 'conclusion' }),
+      expect.objectContaining({ type: 'answer_token' }),
+    ]);
+  });
+
   it('hydrates OpenCode opaque session state and prompts the restored session', async () => {
     await withBackendDataDir(async (dataDir) => {
       const firstRecord = {
@@ -699,9 +1495,9 @@ describe('experimental OpenCode runtime contract', () => {
       };
       const firstRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
         moduleLoader: async () => ({
-          createOpencode: jest.fn(async () => {
-            firstRecord.homeAtCreate = process.env.HOME;
-            firstRecord.configAtCreate = process.env.OPENCODE_CONFIG_DIR;
+          createOpencodeWithEnv: jest.fn(async (_options: any, processEnv: NodeJS.ProcessEnv) => {
+            firstRecord.homeAtCreate = processEnv.HOME;
+            firstRecord.configAtCreate = processEnv.OPENCODE_CONFIG_DIR;
             return {
               server: {
                 url: 'http://127.0.0.1:4106',
@@ -756,9 +1552,9 @@ describe('experimental OpenCode runtime contract', () => {
       };
       const restoredRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
         moduleLoader: async () => ({
-          createOpencode: jest.fn(async () => {
-            restoredRecord.homeAtCreate = process.env.HOME;
-            restoredRecord.configAtCreate = process.env.OPENCODE_CONFIG_DIR;
+          createOpencodeWithEnv: jest.fn(async (_options: any, processEnv: NodeJS.ProcessEnv) => {
+            restoredRecord.homeAtCreate = processEnv.HOME;
+            restoredRecord.configAtCreate = processEnv.OPENCODE_CONFIG_DIR;
             return {
               server: {
                 url: 'http://127.0.0.1:4107',
@@ -808,8 +1604,8 @@ describe('experimental OpenCode runtime contract', () => {
     await withBackendDataDir(async () => {
       const runtime = new OpenCodeRuntime(createFakeRuntimeInput(), {
         moduleLoader: async () => ({
-          createOpencode: jest.fn(async () => ({
-            server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+          createOpencodeWithEnv: jest.fn(async () => ({
+            server: { url: 'http://127.0.0.1:4106', close: jest.fn(() => undefined) },
             client: {
               session: {
                 create: jest.fn(async () => ({ data: { id: 'ses-opencode-original' } })),
@@ -830,8 +1626,8 @@ describe('experimental OpenCode runtime contract', () => {
       const updates: any[] = [];
       const restoredRuntime = new OpenCodeRuntime(createFakeRuntimeInput(), {
         moduleLoader: async () => ({
-          createOpencode: jest.fn(async () => ({
-            server: { url: 'http://127.0.0.1:4107', close: jest.fn() },
+          createOpencodeWithEnv: jest.fn(async () => ({
+            server: { url: 'http://127.0.0.1:4107', close: jest.fn(() => undefined) },
             client: {
               session: {
                 get: jest.fn(async () => {
@@ -867,23 +1663,23 @@ describe('experimental OpenCode runtime contract', () => {
     });
   });
 
-  it('serializes OpenCode process env overrides while starting servers concurrently', async () => {
+  it('passes per-process OpenCode env without mutating global HOME during concurrent startup', async () => {
     await withBackendDataDir(async () => {
       let activeCreates = 0;
       let maxActiveCreates = 0;
       const createRecords: Array<{ home?: string; config?: string }> = [];
       const moduleLoader: OpenCodeSdkModuleLoader = async () => ({
-        createOpencode: jest.fn(async () => {
+        createOpencodeWithEnv: jest.fn(async (_options: any, processEnv: NodeJS.ProcessEnv) => {
           activeCreates += 1;
           maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
           createRecords.push({
-            home: process.env.HOME,
-            config: process.env.OPENCODE_CONFIG_DIR,
+            home: processEnv.HOME,
+            config: processEnv.OPENCODE_CONFIG_DIR,
           });
           await new Promise(resolve => setTimeout(resolve, 20));
           activeCreates -= 1;
           return {
-            server: { url: 'http://127.0.0.1:4106', close: jest.fn() },
+            server: { url: 'http://127.0.0.1:4106', close: jest.fn(() => undefined) },
             client: {
               session: {
                 create: jest.fn(async () => ({ data: { id: `ses-${createRecords.length}` } })),
@@ -895,13 +1691,17 @@ describe('experimental OpenCode runtime contract', () => {
       });
       const runtimeA = new OpenCodeRuntime(createFakeRuntimeInput(), { moduleLoader });
       const runtimeB = new OpenCodeRuntime(createFakeRuntimeInput(), { moduleLoader });
+      const originalHome = process.env.HOME;
+      const originalConfig = process.env.OPENCODE_CONFIG_DIR;
 
       await Promise.all([
         runtimeA.analyze('first', 'session-opencode-a', 'trace-opencode'),
         runtimeB.analyze('second', 'session-opencode-b', 'trace-opencode'),
       ]);
 
-      expect(maxActiveCreates).toBe(1);
+      expect(maxActiveCreates).toBe(2);
+      expect(process.env.HOME).toBe(originalHome);
+      expect(process.env.OPENCODE_CONFIG_DIR).toBe(originalConfig);
       expect(createRecords).toHaveLength(2);
       expect(createRecords[0].home).toContain('session-opencode-a');
       expect(createRecords[1].home).toContain('session-opencode-b');

@@ -7,14 +7,24 @@ import express from 'express';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import {Readable} from 'stream';
 import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { listEnterpriseAuditEvents } from '../../services/enterpriseAuditService';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
-import { ENTERPRISE_DATA_DIR_ENV } from '../../services/traceMetadataStore';
+import {
+  ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV,
+  ENTERPRISE_MIGRATION_PHASE_ENV,
+} from '../../services/enterpriseMigration';
+import {
+  ENTERPRISE_DATA_DIR_ENV,
+  writeTraceMetadata,
+} from '../../services/traceMetadataStore';
 import { setTraceProcessorServiceForTests } from '../../services/traceProcessorService';
 import { getTraceProcessorLeaseStore, setTraceProcessorLeaseStoreForTests } from '../../services/traceProcessorLeaseStore';
 import { TraceProcessorFactory } from '../../services/workingTraceProcessor';
+import {TRACE_PROCESSOR_CAPABILITY_SECRET_ENV} from '../../services/traceProcessorProxyCapability';
+import {setPublicHttpDownloadForTests} from '../../services/publicHttpDownload';
 import traceRoutes from '../simpleTraceRoutes';
 
 const originalEnv = {
@@ -24,6 +34,9 @@ const originalEnv = {
   enterpriseDataDir: process.env[ENTERPRISE_DATA_DIR_ENV],
   uploadDir: process.env.UPLOAD_DIR,
   apiKey: process.env.SMARTPERFETTO_API_KEY,
+  proxyCapabilitySecret: process.env[TRACE_PROCESSOR_CAPABILITY_SECRET_ENV],
+  migrationPhase: process.env[ENTERPRISE_MIGRATION_PHASE_ENV],
+  cutoverConfirmed: process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV],
 };
 
 interface TraceAssetRow {
@@ -46,6 +59,10 @@ let fakeTraceProcessorService: {
   initializeUploadWithId: jest.Mock;
   completeUpload: jest.Mock;
   getTraceWithPort: jest.Mock;
+  getTraceWithLeasePort: jest.Mock;
+  registerStoredTrace: jest.Mock;
+  ensureProcessorForLease: jest.Mock;
+  cleanupLeaseProcessor: jest.Mock;
   getAllTraces: jest.Mock;
   deleteTrace: jest.Mock;
   cleanupProcessorsForTraces: jest.Mock;
@@ -244,14 +261,26 @@ beforeEach(async () => {
   process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
   process.env[ENTERPRISE_DATA_DIR_ENV] = dataDir;
+  process.env[ENTERPRISE_MIGRATION_PHASE_ENV] = 'cutover';
+  process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV] = 'true';
   process.env.UPLOAD_DIR = uploadDir;
   delete process.env.SMARTPERFETTO_API_KEY;
+  process.env[TRACE_PROCESSOR_CAPABILITY_SECRET_ENV] =
+    'enterprise-trace-route-test-capability-secret-v1';
   await fs.mkdir(uploadDir, { recursive: true });
 
   fakeTraceProcessorService = {
     initializeUploadWithId: jest.fn(async () => undefined),
     completeUpload: jest.fn(async () => undefined),
     getTraceWithPort: jest.fn(() => undefined),
+    getTraceWithLeasePort: jest.fn(() => undefined),
+    registerStoredTrace: jest.fn((input: any) => ({
+      ...input,
+      uploadTime: new Date(),
+      status: 'ready',
+    })),
+    ensureProcessorForLease: jest.fn(async () => ({status: 'ready'})),
+    cleanupLeaseProcessor: jest.fn(() => false),
     getAllTraces: jest.fn(() => []),
     deleteTrace: jest.fn(async () => undefined),
     cleanupProcessorsForTraces: jest.fn(() => 0),
@@ -263,17 +292,135 @@ beforeEach(async () => {
 afterEach(async () => {
   jest.restoreAllMocks();
   setTraceProcessorServiceForTests(null);
+  setPublicHttpDownloadForTests();
   setTraceProcessorLeaseStoreForTests(null);
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
   restoreEnvValue(ENTERPRISE_DATA_DIR_ENV, originalEnv.enterpriseDataDir);
+  restoreEnvValue(ENTERPRISE_MIGRATION_PHASE_ENV, originalEnv.migrationPhase);
+  restoreEnvValue(
+    ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV,
+    originalEnv.cutoverConfirmed,
+  );
   restoreEnvValue('UPLOAD_DIR', originalEnv.uploadDir);
   restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
+  restoreEnvValue(
+    TRACE_PROCESSOR_CAPABILITY_SECRET_ENV,
+    originalEnv.proxyCapabilitySecret,
+  );
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 describe('enterprise trace metadata routes', () => {
+  it('opens an authorized stored trace through an isolated viewer lease', async () => {
+    const app = makeApp();
+    const traceId = 'viewer-trace';
+    const tracePath = path.join(
+      dataDir,
+      'tenant-a',
+      'workspace-a',
+      'traces',
+      `${traceId}.trace`,
+    );
+    await fs.mkdir(path.dirname(tracePath), {recursive: true});
+    await fs.writeFile(tracePath, 'viewer-trace-content');
+    await writeTraceMetadata({
+      id: traceId,
+      filename: 'viewer.trace',
+      size: 'viewer-trace-content'.length,
+      uploadedAt: new Date().toISOString(),
+      status: 'ready',
+      path: tracePath,
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+    });
+    fakeTraceProcessorService.getTraceWithLeasePort.mockReturnValue({
+      id: traceId,
+      filename: 'viewer.trace',
+      size: 'viewer-trace-content'.length,
+      uploadTime: new Date(),
+      status: 'ready',
+      port: 9123,
+      processor: {status: 'ready'},
+    });
+
+    const response = await scopedSsoHeaders(
+      request(app)
+        .post(`/api/traces/${traceId}/viewer`)
+        .send({sessionId: 'pane-current'}),
+      {scopes: 'trace:read'},
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.trace).toEqual(expect.objectContaining({
+      id: traceId,
+      port: 9123,
+      leaseMode: 'isolated',
+      leaseModeReason: 'requested_isolated',
+      websocketCapability: expect.objectContaining({
+        protocol: expect.any(String),
+      }),
+    }));
+    expect(fakeTraceProcessorService.registerStoredTrace).toHaveBeenCalledWith(
+      expect.objectContaining({id: traceId, filePath: tracePath}),
+    );
+    expect(fakeTraceProcessorService.ensureProcessorForLease).toHaveBeenCalledWith(
+      traceId,
+      expect.any(String),
+      'isolated',
+      expect.objectContaining({
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+      }),
+    );
+
+    const denied = await scopedSsoHeaders(
+      request(app)
+        .post(`/api/traces/${traceId}/viewer`)
+        .send({sessionId: 'pane-denied'}),
+      {roles: 'unprivileged', scopes: 'trace:write'},
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it('paginates scoped database metadata and reports its total without loading every row', async () => {
+    const app = makeApp();
+    for (const [index, id] of ['trace-a', 'trace-b', 'trace-c'].entries()) {
+      await writeTraceMetadata({
+        id,
+        filename: `${id}.trace`,
+        size: index + 1,
+        uploadedAt: new Date(Date.UTC(2026, 6, 16, 0, 0, index)).toISOString(),
+        status: 'ready',
+        path: path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${id}.trace`),
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: 'user-a',
+      });
+    }
+
+    const firstPage = await ssoHeaders(request(app).get('/api/traces?limit=2'));
+    expect(firstPage.status).toBe(200);
+    expect(firstPage.body.traces.map((trace: any) => trace.id)).toEqual(['trace-c', 'trace-b']);
+    expect(firstPage.body.nextCursor).toEqual(expect.any(String));
+
+    const secondPage = await ssoHeaders(request(app).get(
+      `/api/traces?limit=2&cursor=${encodeURIComponent(firstPage.body.nextCursor)}`,
+    ));
+    expect(secondPage.status).toBe(200);
+    expect(secondPage.body.traces.map((trace: any) => trace.id)).toEqual(['trace-a']);
+    expect(secondPage.body.nextCursor).toBeUndefined();
+
+    const stats = await ssoHeaders(request(app).get('/api/traces/stats'));
+    expect(stats.status).toBe(200);
+    expect(stats.body.stats.traces).toEqual(expect.objectContaining({
+      count: 0,
+      metadataCount: 3,
+    }));
+  });
+
   it('disables legacy direct RPC registration in enterprise mode before creating naked-port state', async () => {
     const app = makeApp();
 
@@ -843,16 +990,16 @@ describe('enterprise trace metadata routes', () => {
   it('streams URL uploads into scoped trace storage without buffering the response body', async () => {
     const app = makeApp();
     const traceBytes = 'url-trace-content';
-    const response = new Response(traceBytes, {
+    const fetchSpy = jest.fn(async (url: URL, _timeoutMs: number) => ({
       status: 200,
-      headers: {
-        'content-length': String(Buffer.byteLength(traceBytes)),
-      },
-    });
-    const arrayBufferSpy = jest.spyOn(response, 'arrayBuffer').mockImplementation(async () => {
-      throw new Error('arrayBuffer should not be used for URL trace uploads');
-    });
-    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(response);
+      statusText: 'OK',
+      headers: {get: (name: string) => name.toLowerCase() === 'content-length'
+        ? String(Buffer.byteLength(traceBytes))
+        : null},
+      body: Readable.from([traceBytes]) as any,
+      finalUrl: url,
+    }));
+    setPublicHttpDownloadForTests(fetchSpy);
 
     const uploadRes = await ssoHeaders(
       request(app)
@@ -862,10 +1009,9 @@ describe('enterprise trace metadata routes', () => {
 
     expect(uploadRes.status).toBe(200);
     expect(fetchSpy).toHaveBeenCalledWith(
-      'https://example.test/traces/url-stream.trace',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      new URL('https://example.test/traces/url-stream.trace'),
+      300000,
     );
-    expect(arrayBufferSpy).not.toHaveBeenCalled();
 
     const traceId = uploadRes.body.trace.id as string;
     const expectedTracePath = path.join(dataDir, 'tenant-a', 'workspace-a', 'traces', `${traceId}.trace`);

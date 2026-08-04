@@ -10,6 +10,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { spawnSync } from 'child_process';
 import { traceProcessorConfig } from '../config';
 
 const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
@@ -18,6 +19,32 @@ export interface PortAllocation {
   port: number;
   traceId: string;
   allocatedAt: Date;
+}
+
+export type PortBindProbe = (port: number) => boolean;
+
+const LOOPBACK_PORT_PROBE = [
+  "const net = require('net');",
+  'const port = Number(process.argv[1]);',
+  "const server = net.createServer();",
+  "server.once('error', () => process.exit(2));",
+  "server.listen({host: '127.0.0.1', port, exclusive: true}, () => server.close(() => process.exit(0)));",
+  'setTimeout(() => process.exit(3), 1500).unref();',
+].join('');
+
+/**
+ * Probe port ownership in a short-lived Node process so allocation remains
+ * synchronous for existing callers while still observing listeners owned by
+ * other SmartPerfetto, CLI, or test processes.
+ */
+export function canBindLoopbackPort(port: number): boolean {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return false;
+  const result = spawnSync(
+    process.execPath,
+    ['-e', LOOPBACK_PORT_PROBE, String(port)],
+    {stdio: 'ignore', timeout: 2_000},
+  );
+  return result.status === 0;
 }
 
 export class PortPool extends EventEmitter {
@@ -30,7 +57,8 @@ export class PortPool extends EventEmitter {
 
   constructor(
     minPort: number = traceProcessorConfig.portRange.min,
-    maxPort: number = traceProcessorConfig.portRange.max
+    maxPort: number = traceProcessorConfig.portRange.max,
+    private readonly isPortBindable: PortBindProbe = canBindLoopbackPort,
   ) {
     super();
     this.minPort = minPort;
@@ -66,8 +94,10 @@ export class PortPool extends EventEmitter {
       return existing.port;
     }
 
-    // Get the first available port
-    const port = this.getNextAvailablePort();
+    // Select the first locally free port that the OS also reports as bindable.
+    // Each process has its own in-memory pool, so the OS probe is the authority
+    // for ports currently owned by another backend or CLI instance.
+    const port = this.getNextBindablePort();
     if (port === null) {
       throw new Error(`No available ports in pool (${this.minPort}-${this.maxPort}). Active allocations: ${this.allocations.size}`);
     }
@@ -191,6 +221,22 @@ export class PortPool extends EventEmitter {
     }
     // Get the smallest available port for predictability
     return Math.min(...this.availablePorts);
+  }
+
+  private getNextBindablePort(): number | null {
+    while (this.availablePorts.size > 0) {
+      const port = this.getNextAvailablePort();
+      if (port === null) return null;
+      if (this.isPortBindable(port)) return port;
+
+      this.availablePorts.delete(port);
+      this.blockedPorts.add(port);
+      if (!IS_TEST_ENV) {
+        console.log(`[PortPool] Skipping externally occupied port ${port}`);
+      }
+      this.emit('blocked', { port, reason: 'external_listener' });
+    }
+    return null;
   }
 
   /**

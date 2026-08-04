@@ -11,7 +11,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Commit prefixes follow [Conventional Commits](https://www.conventionalcommits.org/).
 Detailed commit-level history is available via `git log`.
 
-## [Unreleased]
+## [1.4.0] - 2026-08-03
+
+### Added
+- Enterprise OIDC now provides an off-by-default discovery/login/callback
+  flow, CSRF-protected backend sessions, and user-bound personal workspaces
+  without trusting caller-supplied tenant or workspace identity.
+- The committed Perfetto browser frontend now includes Trace Doctor, unified
+  Stack Samples/flamegraphs, raw multi-trace open/merge, Video Frames, Pixel
+  input/CUJ views, experimental Memscope/OOM views, and newer local WASM input
+  and query capabilities.
+- Completed analysis results can now run source-run-pinned, no-tool Agent
+  triage for external feedback. It classifies reportability, ownership, and
+  useful contribution type, collects missing user context, and creates a
+  deidentified GitHub draft without submitting it.
+- A dedicated Agent-Assisted Analysis Feedback Issue Form, public-artifact
+  sanitizer, private/security fail-closed routing, and focused backend/UI tests
+  document and enforce the new feedback boundary.
+- An off-by-default Self-Evolution control plane now covers immutable run
+  attribution, reversible public/private feedback projections, fixed
+  validation/holdout paired replay, reviewable proposals, qualification gates,
+  content-addressed overlays, upgrade reconciliation, and explicit rollback.
+- The AI Assistant Evolution settings page and scoped admin API expose
+  proposal diffs, progress, overlay generations, persistence diagnostics, and
+  reconciliation without configuring an external L2 judge.
+
+### Changed
+- Browser timeline/plugin queries now have an explicit local WASM engine
+  boundary, while AI, Skills, CLI, and report evidence continue to use the
+  independently pinned native `trace_processor_shell`.
+- New RunManifests persist a non-secret provider snapshot hash. Historical
+  feedback triage must match the source run's provider/runtime snapshot or use
+  explicit deterministic fallback; it never switches silently to the current
+  provider.
+- Analysis runtimes now consume run-pinned effective registry snapshots so a
+  newly published overlay affects only new runs. Apply/revert requires an
+  accepted and still-qualified proposal plus writable external user data, and
+  remains fail-closed otherwise.
+- Feedback is an append-only scoped fact stream with rebuildable effective
+  projections. Private feedback stays in a separate local path and never enters
+  curation or contribution bundles.
+
+### Fixed
+- Claude-compatible runtimes can preserve an evidence-referenced final report
+  after an explicit stream interruption or maximum-turn termination. Generic
+  execution, authentication, quota, permission, and configuration errors remain
+  failed instead of being promoted to partial success.
+- OIDC callback identity, personal-workspace ownership, and request-scoped
+  authorization now stay aligned across login and subsequent API calls.
+- Cross-platform startup-contract tests normalize Windows script paths without
+  weakening the actual launcher contract.
+
+## [1.3.0] - 2026-07-28
+
+### Added
+- Code-aware analysis can select authorized local source directories through a
+  native folder picker, with bounded path validation, registry persistence, and
+  matching API and bilingual documentation.
+- Dual-trace workspaces can open large stored traces through isolated backend
+  trace-processor RPC sessions instead of copying the complete trace into each
+  browser pane.
+
+### Changed
+- Large-trace startup timeouts now scale with trace size, while processor leases
+  protect active viewers and a runtime supervisor reclaims abandoned isolated
+  processors.
+- The maintained Perfetto fork now carries all SmartPerfetto UI work on its
+  `main` branch, and the committed frontend prebuild matches that merged source.
+- Maintainer guidance now includes the repository-scoped GitNexus exploration,
+  impact-analysis, debugging, refactoring, and CLI workflows.
+
+### Fixed
+- Dual-trace reloads preserve stored trace identity, and the backend WebSocket
+  proxy now handles browser capability subprotocols and loopback origin
+  normalization correctly.
+- GitHub release asset downloads use the supported API media type.
+
+## [1.2.8] - 2026-07-28
+
+### Fixed
+- Windows cross-platform governance now builds and injects the same pinned Go
+  health and process helper used by the exact-archive release gate.
+- GitHub release download tests now inject a descriptor-level process runner,
+  preserving the production no-shell `gh api` contract without relying on
+  Windows command-shim resolution.
+
+## [1.2.7] - 2026-07-28
+
+### Fixed
+- Portable readiness checks now use explicit IPv4 loopback semantics from the
+  launcher through target-native release gates, preventing `localhost`
+  resolution or proxy behavior from masking a healthy backend as a connection
+  refusal.
+- The Windows exact-archive gate now uses the repository-owned fixed Go HTTP
+  probe and native Toolhelp32 process snapshots with bounded, fail-closed
+  parsing instead of PowerShell, CIM, or WMI.
+- Hosted lifecycle verification accepts legitimate native descendants while
+  still proving product parentage, helper isolation, graceful shutdown, port
+  release, and the absence of surviving launcher processes.
+
+## [1.2.4] - 2026-07-27
+
+### Added
+- Portable release promotion now consumes target-native smoke summaries that
+  bind the final archive name, byte size, SHA-256, source commit, health probes,
+  lifecycle receipt, and port-release result.
+- The application can surface GitHub update availability, and the maintained
+  platform-compatibility reference now separates declared, packaged, executed,
+  signed, and published support.
+
+### Changed
+- Portable launchers now own their complete backend/frontend process tree,
+  coordinate graceful shutdown through a runtime control file, drain active
+  HTTP and SSE responses, and record a shutdown receipt before releasing ports.
+- Portable Node.js 24 runtimes are pinned by archive and executable-content
+  digests. macOS deployment compatibility is derived from every bundled Mach-O
+  file instead of a manually declared target.
+- Public promotion now requires a clean release commit, exact-archive smoke on
+  Windows, macOS, and Linux, and Developer ID signing, notarization, stapling,
+  and Gatekeeper acceptance for the final macOS zip.
+
+### Fixed
+- Supersedes the broken v1.2.3 macOS portable asset: startup now preflights the
+  bundled Node runtime, reports actionable backend/frontend log paths, and no
+  longer masks an immediate runtime crash as a generic readiness timeout.
+- macOS packaging signs every nested Mach-O inside-out while preserving only
+  the required runtime identifiers and entitlements; release verification
+  rejects incomplete signatures, missing notarization receipts, and mismatched
+  final archive bytes.
+- Portable archive inspection rejects traversal, absolute paths, links,
+  duplicate normalized entries, and extraction-budget violations before
+  launch.
+- Loopback listeners and health checks consistently use `127.0.0.1`, and
+  shutdown now accounts for upgraded sockets, trace processors, child
+  descendants, interrupted startup, and forced-exit fallbacks.
+- GPT-5.6 Chat Completions requests use the supported output-token limit field.
+
+## [1.2.1] - 2026-07-18
+
+### Fixed
+- Docker releases now distribute AMD64 and ARM64 builds across native,
+  platform-isolated runners before assembling and signing the final OCI
+  manifest, preventing the bundled AIW Knowledge Pack from exhausting a shared
+  runner's disk.
+
+## [1.2.0] - 2026-07-18
+
+### Added
+- SmartPerfetto now ships a signed, versioned Android Internals Knowledge Pack
+  containing the projected body content of every AIW article, including draft,
+  review, finalized, and deprecated workflow states.
+- The CLI, backend startup worker, runtime health, and report pipeline can
+  inspect, update, and attribute the Pack through a TUF-verified stable channel
+  while retaining the bundled snapshot as an offline fallback.
+- AI analysis can retrieve bounded Android internals background excerpts with
+  provenance, redaction, privacy projection, and explicit separation from
+  current-trace SQL/Skill evidence.
+
+### Changed
+- npm, Docker, source, and three-platform portable packages now carry the
+  locked compressed Pack, its aggregate audit, licenses, trusted root, and
+  channel configuration as runtime assets.
+- Knowledge Pack references are projected into reports and session snapshots
+  without exposing excerpt bodies through logs or streaming metadata.
+
+## [1.1.1] - 2026-07-17
+
+### Fixed
+- Docker builds normalize the OpenCode runtime link so the packaged provider
+  entry remains usable across image layers.
+
+## [1.1.0] - 2026-07-17
+
+### Added
+- Smart Profile can now compose user-authorized source repositories and
+  external RAG knowledge independently or together, with pinned generations,
+  consent modes, provenance, and fail-closed authorization.
+- Provider-neutral run specifications align OpenAI Agents SDK, Pi Agent Core,
+  OpenCode, and Claude-compatible runtimes across analysis, comparison,
+  evidence verification, reports, snapshots, CLI output, and frontend chat.
+- Evidence-first Android 17 rendering, camera, managed-heap, GPU-compute,
+  kernel-wait, startup, and scrolling knowledge is backed by an expanded,
+  deterministic real/constructed trace corpus.
+- Cross-platform contracts cover Linux, macOS, Windows, Docker, the npm CLI,
+  portable launchers, and the public Perfetto Agent Skill projection.
+
+### Changed
+- Smart scene selection, presentation, recovery, and prompt methodology are
+  registry/template-driven, with final conclusions kept separate from
+  evidence, reports, snapshots, and readable chat projections.
+- The Perfetto UI uses unified analysis context and trace workspaces, with the
+  committed frontend prebuild regenerated from the matching submodule commit.
+- Trace listing, processor queues, report caching, source ingestion, RAG
+  accounting, and registry reads now use bounded, cursor-based, lease-aware,
+  or aggregate paths suitable for larger deployments.
+- Public `/health` exposes only liveness and version; authenticated runtime and
+  provider diagnostics are served by `/api/runtime-health`.
+- The public Perfetto-Skills export now classifies all 101 Strategy/registry
+  sources explicitly, exporting portable behavior while keeping product-only
+  orchestration behind the SmartPerfetto boundary.
+
+### Fixed
+- Private source/RAG context now preserves tenant, workspace, user, consent,
+  license, and provider-send boundaries through persistence, replay, SSE,
+  reports, and snapshots without leaking intermediate model content.
+- Provider endpoints enforce exact-origin allowlists, DNS/IP pinning, redirect
+  revalidation, deadlines, and credential reconfirmation after origin changes.
+- Cross-process trace-processor cleanup and port allocation no longer terminate
+  another live instance or claim a port already held by the operating system.
+- Chinese/English source and RAG controls, dual-trace language inheritance,
+  narrow layouts, keyboard focus, and ARIA semantics remain consistent across
+  partial-capability and error states.
+- Machine-readable CLI commands preserve parseable stdout, while bootstrap,
+  health, lifecycle, and cleanup diagnostics are routed to stderr.
 
 ## [1.0.21] - 2026-05-25
 
@@ -84,6 +296,12 @@ Detailed commit-level history is available via `git log`.
 - HTML report generation and CSV / JSON export.
 - AGPL v3.0 licensing throughout.
 
-[Unreleased]: https://github.com/Gracker/SmartPerfetto/compare/v1.0.21...HEAD
+[Unreleased]: https://github.com/Gracker/SmartPerfetto/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.8...v1.3.0
+[1.2.4]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.3...v1.2.4
+[1.2.1]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/Gracker/SmartPerfetto/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.0.39...v1.1.0
 [1.0.21]: https://github.com/Gracker/SmartPerfetto/compare/v1.0.20...v1.0.21
 [0.1.0]: https://github.com/Gracker/SmartPerfetto/releases/tag/v0.1.0

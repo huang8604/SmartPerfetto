@@ -22,6 +22,7 @@
  */
 
 import * as fs from 'fs';
+import {randomUUID} from 'crypto';
 import { AssistantApplicationService } from '../../assistant/application/assistantApplicationService';
 import {
   AgentAnalyzeSessionService,
@@ -34,6 +35,8 @@ import { SessionPersistenceService } from '../../services/sessionPersistenceServ
 import { getHTMLReportGenerator } from '../../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../../services/agentReportData';
 import { normalizeResultForReport } from '../../services/agentResultNormalizer';
+import { buildAnalysisReceipt } from '../../services/analysisReceiptBuilder';
+import { deriveUiActionProposals } from '../../services/uiActionProposalDeriver';
 import { persistAgentTurn } from '../../services/persistAgentSession';
 import { applyFinalResultQualityGate } from '../../services/finalResultQualityGate';
 import { runClaimVerification } from '../../services/verifier/claimVerificationRunner';
@@ -47,6 +50,10 @@ import {
   resolveAgentRuntimeSelection,
   type BackendAgentRuntimeKind,
 } from '../../agentRuntime/runtimeSelection';
+import {
+  getRuntimeDiagnosticModel,
+  getRuntimeDiagnostics,
+} from '../../agentRuntime/runtimeDiagnostics';
 import { isProductionAgentRuntimeKind } from '../../agentRuntime/runtimeKinds';
 import {
   getSnapshotRuntimeKind,
@@ -57,9 +64,48 @@ import {
 import type { StreamingUpdate } from '../../agent/types';
 import type { AnalysisResult } from '../../agent/core/orchestratorTypes';
 import type { QueryResult } from '../../services/traceProcessorService';
-import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
+import {
+  codeAwareFeatureEnabled,
+  MAX_CODEBASE_IDS_PER_ANALYSIS,
+  MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS,
+  normalizeCodeAwareMode,
+  type CodeAwareMode,
+} from '../../services/codebase/codeAwareFeature';
+import {CodebaseRegistry, resolveCodebaseScope} from '../../services/codebase/codebaseRegistry';
+import {getDefaultCodebaseRegistry} from '../../services/codebase/defaultCodebaseServices';
+import {codebaseHasActiveIndex} from '../../services/codebase/codebaseRegistry';
+import {
+  externalKnowledgeSourceHasActiveIndex,
+  getDefaultExternalKnowledgeSourceRegistry,
+} from '../../services/externalKnowledgeSourceRegistry';
+import type {KnowledgeScope} from '../../services/scopedKnowledgeStore';
+import {resolveKnowledgeScope} from '../../services/scopedKnowledgeStore';
+import {
+  AnalysisContextAuthorizationChangedError,
+  assertCurrentAnalysisContextAuthorization,
+  buildAnalysisContextAuthorizationFingerprint,
+} from '../../services/resolvedAnalysisContext';
+import {projectCodeAwareStreamingUpdate} from '../../services/security/codeAwareStreamingUpdateProjection';
+import {
+  clearCodeAwareOutputGuards,
+  revokeCodeAwareOutputGuards,
+} from '../../services/security/codeAwareOutputRegistry';
 import { validateDataEnvelope, type DataEnvelope } from '../../types/dataContract';
 import type { CliAnalysisMode, CliSessionLineage } from '../types';
+import {localize, parseOutputLanguage} from '../../agentv3/outputLanguage';
+import {resolveEffectiveAnalysisMode} from '../../services/effectiveAnalysisMode';
+import {
+  privateAnalysisFailureMessage,
+  privateAnalysisQueryMessage,
+  projectPrivateAnalysisResult,
+} from '../../services/security/privateAnalysisProjection';
+import {registerPrivateAnalysisQueryForEcho} from '../../services/security/codeAwareOutputRegistry';
+import {buildSkillRegistryAttribution} from '../../services/selfEvolution/skillFingerprint';
+import {getEffectiveRuntimeRegistrySnapshot} from '../../services/selfEvolution/effectiveRuntimeRegistryProvider';
+import {
+  createRunManifestLifecycle,
+  withRunManifestLifecycle,
+} from '../../services/selfEvolution/runManifestLifecycle';
 
 export interface RunTurnInput {
   tracePath?: string;
@@ -70,8 +116,16 @@ export interface RunTurnInput {
   analysisMode?: CliAnalysisMode;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
+  knowledgeSourceIds?: string[];
   /** Backend-session ancestry for CLI Level-3 degraded resume bridges. */
   lineage?: CliSessionLineage;
+  /** 1-indexed CLI-visible turn number, bound before analysis starts. */
+  turn: number;
+  /**
+   * Resolves the final durable CLI markdown path once the backend session id
+   * is known. The path is attribution only and is omitted for private runs.
+   */
+  resolveCliTurnPath: (sessionId: string, turn: number) => string;
   /** Receives every StreamingUpdate from the orchestrator in real time. */
   onEvent: (update: StreamingUpdate) => void;
   /**
@@ -94,6 +148,107 @@ export interface RunTurnOutput {
   providerId?: string | null;
   agentRuntimeKind?: BackendAgentRuntimeKind;
   providerSnapshotHash?: string | null;
+  /** Effective mode after defaults and feature-gate normalization. */
+  codeAwareMode: CodeAwareMode;
+  /** True when durable CLI artifacts must use the private projection. */
+  privateKnowledge?: boolean;
+}
+
+export function resolveEffectiveCliCodeAwareMode(input: Pick<
+  RunTurnInput,
+  'codeAwareMode' | 'codebaseIds'
+>): CodeAwareMode {
+  const outputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+  if (input.codebaseIds?.length) {
+    if (!codeAwareFeatureEnabled()) {
+      throw new Error(localize(
+        outputLanguage,
+        'FEATURE_DISABLED：注册源码分析已禁用',
+        'FEATURE_DISABLED: registered source analysis is disabled',
+      ));
+    }
+    const mode = normalizeCodeAwareMode(input.codeAwareMode);
+    if (mode === 'off') {
+      throw new Error(localize(
+        outputLanguage,
+        'CODEBASE_IDS_REQUIRE_CODE_AWARE_MODE：codebaseIds 需要 metadata_only 或 provider_send 模式',
+        'CODEBASE_IDS_REQUIRE_CODE_AWARE_MODE: codebaseIds require metadata_only or provider_send',
+      ));
+    }
+    return mode;
+  }
+  return input.codeAwareMode ?? 'off';
+}
+
+function validateCliAnalysisContext(input: RunTurnInput, scope: KnowledgeScope): void {
+  const outputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+  const codebaseIds = Array.from(new Set(input.codebaseIds ?? []));
+  const knowledgeSourceIds = Array.from(new Set(input.knowledgeSourceIds ?? []));
+  if (codebaseIds.length > MAX_CODEBASE_IDS_PER_ANALYSIS) {
+    throw new Error(localize(
+      outputLanguage,
+      `codebaseIds 超过上限 ${MAX_CODEBASE_IDS_PER_ANALYSIS}`,
+      `codebaseIds exceeds the maximum of ${MAX_CODEBASE_IDS_PER_ANALYSIS}`,
+    ));
+  }
+  if (knowledgeSourceIds.length > MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS) {
+    throw new Error(localize(
+      outputLanguage,
+      `knowledgeSourceIds 超过上限 ${MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS}`,
+      `knowledgeSourceIds exceeds the maximum of ${MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS}`,
+    ));
+  }
+
+  const codebaseRegistry = getDefaultCodebaseRegistry();
+  for (const codebaseId of codebaseIds) {
+    const ref = codebaseRegistry.get(codebaseId, scope);
+    if (!ref) {
+      throw new Error(localize(
+        outputLanguage,
+        `当前分析范围内未找到源码库“${codebaseId}”`,
+        `Codebase '${codebaseId}' not found in the current analysis scope`,
+      ));
+    }
+    if (!codebaseHasActiveIndex(ref)) {
+      throw new Error(
+        localize(
+          outputLanguage,
+          `ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE：源码库“${codebaseId}”没有可用的活动索引代际`,
+          `ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE: Codebase '${codebaseId}' has no active indexed source generation`,
+        ),
+      );
+    }
+    if (input.codeAwareMode === 'provider_send' && !ref.consent.sendToProvider) {
+      throw new Error(localize(
+        outputLanguage,
+        `源码库“${codebaseId}”尚未授权给模型服务使用`,
+        `Codebase '${codebaseId}' is not consented for provider source access`,
+      ));
+    }
+  }
+
+  const knowledgeRegistry = getDefaultExternalKnowledgeSourceRegistry();
+  for (const sourceId of knowledgeSourceIds) {
+    const source = knowledgeRegistry.get(sourceId, scope);
+    if (!source) {
+      throw new Error(localize(
+        outputLanguage,
+        `当前分析范围内未找到知识源“${sourceId}”`,
+        `Knowledge source '${sourceId}' not found in the current analysis scope`,
+      ));
+    }
+    if (
+      !source.rightsAcknowledged ||
+      !source.sendToProvider ||
+      !externalKnowledgeSourceHasActiveIndex(source)
+    ) {
+      throw new Error(localize(
+        outputLanguage,
+        `知识源“${sourceId}”未激活，或尚未授权给模型服务使用`,
+        `Knowledge source '${sourceId}' is inactive or not consented for provider use`,
+      ));
+    }
+  }
 }
 
 export function envelopesFromStreamingUpdate(update: StreamingUpdate): DataEnvelope[] {
@@ -130,6 +285,7 @@ export class CliAnalyzeService {
   private readonly appService = new AssistantApplicationService<AnalyzeManagedSession>();
   private readonly persistence: SessionPersistenceService;
   private readonly analyzeService: AgentAnalyzeSessionService<AnalyzeManagedSession>;
+  private readonly ownedSessionIds = new Set<string>();
 
   constructor() {
     this.persistence = SessionPersistenceService.getInstance();
@@ -142,6 +298,7 @@ export class CliAnalyzeService {
       // Only invoked on resume; PR1 covers fresh analyze only. Returning null
       // lets prepareSession fall through to a new session rather than throw.
       buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: revokeCodeAwareOutputGuards,
     });
   }
 
@@ -167,6 +324,10 @@ export class CliAnalyzeService {
     return getTraceProcessorService().query(traceId, sql);
   }
 
+  async prepareTraceProcessor(): Promise<void> {
+    await this.ensureTraceProcessorAvailable();
+  }
+
   async runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
     // Resolve traceId: either passed in (we assume caller already loaded), or load now.
     let traceId = input.traceId;
@@ -177,19 +338,51 @@ export class CliAnalyzeService {
       traceId = await this.loadTrace(input.tracePath);
     }
 
+    const knowledgeScope = resolveCodebaseScope();
+    const outputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+    const effectiveCodeAwareMode = resolveEffectiveCliCodeAwareMode(input);
+    const effectiveInput: RunTurnInput = {
+      ...input,
+      codeAwareMode: effectiveCodeAwareMode,
+    };
+    const privateKnowledge = Boolean(
+      (effectiveCodeAwareMode !== 'off' && input.codebaseIds?.length) || input.knowledgeSourceIds?.length
+    );
+    validateCliAnalysisContext(effectiveInput, knowledgeScope);
+
     if (isCliE2eFakeMode()) {
-      return runCliE2eFakeTurn(input, traceId);
+      const output = await runCliE2eFakeTurn(effectiveInput, traceId);
+      this.ownedSessionIds.add(output.sessionId);
+      return output;
     }
 
+    const analysisContextFingerprint = buildAnalysisContextAuthorizationFingerprint(effectiveInput, knowledgeScope);
     const { sessionId, session } = this.analyzeService.prepareSession({
       traceId,
       query: input.query,
       requestedSessionId: input.sessionId,
       referenceTraceId: input.referenceTraceId,
+      analysisContextFingerprint,
+      providerScope: knowledgeScope,
+      options: {
+        ...knowledgeScope,
+        outputLanguage,
+        codeAwareMode: effectiveCodeAwareMode,
+        codebaseIds: input.codebaseIds,
+        knowledgeSourceIds: input.knowledgeSourceIds,
+      },
     });
+    this.ownedSessionIds.add(sessionId);
+    session.codeAwareMode = effectiveCodeAwareMode;
+    session.codebaseIds = input.codebaseIds;
+    session.knowledgeSourceIds = input.knowledgeSourceIds;
+    if (privateKnowledge) registerPrivateAnalysisQueryForEcho(sessionId, input.query);
     if (input.lineage) {
       session.lineage = input.lineage;
     }
+    session.tenantId = knowledgeScope.tenantId;
+    session.workspaceId = knowledgeScope.workspaceId;
+    session.userId = knowledgeScope.userId;
     const effectiveReferenceTraceId = input.referenceTraceId ?? session.referenceTraceId;
 
     // Bump runSequence for this turn. HTTP route gets the incremented value
@@ -197,151 +390,269 @@ export class CliAnalyzeService {
     // turn index used by appendMessages (msg-<session>-turn<N>-role) is unique
     // across turns rather than colliding with prior turns of the same session.
     session.runSequence = (session.runSequence || 0) + 1;
+    const requestedAnalysisMode = resolveEffectiveAnalysisMode(input.analysisMode, {
+      referenceTraceId: effectiveReferenceTraceId,
+      codeAwareMode: effectiveCodeAwareMode,
+      codebaseIds: input.codebaseIds,
+      knowledgeSourceIds: input.knowledgeSourceIds,
+    });
+    if (!session.runtimeKind) {
+      throw new Error(`run_manifest_runtime_missing:${sessionId}`);
+    }
+    const resolvedScope = resolveKnowledgeScope(knowledgeScope);
+    const runtimeRegistrySnapshot = await getEffectiveRuntimeRegistrySnapshot({
+      scope: resolvedScope,
+    });
+    const runManifestLifecycle = createRunManifestLifecycle({
+      runId: randomUUID(),
+      sessionId,
+      scope: {
+        tenantId: resolvedScope.tenantId,
+        workspaceId: resolvedScope.workspaceId,
+      },
+      userId: resolvedScope.userId,
+      runtime: session.runtimeKind,
+      providerId: session.providerId ?? null,
+      ...(session.providerSnapshotHash
+        ? {providerSnapshotHash: session.providerSnapshotHash}
+        : {}),
+      outputLanguage,
+      analysisMode: requestedAnalysisMode,
+      referenceTraceId: effectiveReferenceTraceId,
+      skillRegistry: buildSkillRegistryAttribution(
+        runtimeRegistrySnapshot.skillRegistry,
+      ),
+      runtimeRegistrySnapshot,
+    });
+    const cliTurnPath = privateKnowledge ? undefined : input.resolveCliTurnPath(sessionId, input.turn);
 
-    // Surface sessionId to the caller now, before analyze() starts emitting
-    // events. Without this, callers must buffer events until runTurn resolves,
-    // which accumulates the entire analyze run's output in memory.
-    input.onSessionReady?.(sessionId);
-
-    const orchestrator = session.orchestrator;
-
-    // Subscribe to live updates. Wrap in off()-on-finally to avoid handler leaks
-    // if runTurn is called multiple times within one CLI process (REPL path).
-    const handler = (update: StreamingUpdate) => {
-      const envelopes = envelopesFromStreamingUpdate(update);
-      if (envelopes.length > 0) {
-        session.dataEnvelopes.push(...envelopes);
-      }
-      if (!shouldExposeLiveStreamingUpdate(update)) return;
-      try {
-        input.onEvent(update);
-      } catch (err) {
-        // Don't let a renderer bug kill the analysis — log and continue.
-        console.error('[CliAnalyzeService] onEvent handler threw:', (err as Error).message);
-      }
-    };
-    orchestrator.on('update', handler);
-
-    let result: AnalysisResult;
-    const agentQuery = session.agentQuery && session.query === input.query
-      ? session.agentQuery
-      : buildAgentQueryWithContinuityNotice(input.query, session.continuityBreaks);
     try {
-      result = await orchestrator.analyze(agentQuery, sessionId, traceId, {
-        providerId: session.providerId,
-        referenceTraceId: effectiveReferenceTraceId,
-        analysisMode: input.analysisMode,
-        codeAwareMode: input.codeAwareMode,
-        codebaseIds: input.codebaseIds,
-      });
-    } finally {
-      orchestrator.off('update', handler);
-    }
-    (session as unknown as {codeAwareMode?: CodeAwareMode; codebaseIds?: string[]}).codeAwareMode = input.codeAwareMode;
-    (session as unknown as {codeAwareMode?: CodeAwareMode; codebaseIds?: string[]}).codebaseIds = input.codebaseIds;
-    const normalized = normalizeResultForReport(result, {
-      dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
-    });
-    result.conclusion = normalized.conclusion;
-    if (normalized.conclusionContract) {
-      result.conclusionContract = normalized.conclusionContract;
-    }
-    const qualityArtifacts = runClaimVerification({
-      conclusionContract: normalized.conclusionContract,
-      dataEnvelopes: session.dataEnvelopes as any,
-      comparisonReportSection: session.comparisonReportSection,
-      policy: 'record_only',
-    });
-    result.claimSupport = qualityArtifacts.claimSupport;
-    result.claimVerificationResult = qualityArtifacts.claimVerificationResult;
-    result.identityResolutions = qualityArtifacts.identityResolutions;
-    session.claimSupport = qualityArtifacts.claimSupport;
-    session.claimVerificationResult = qualityArtifacts.claimVerificationResult;
-    session.identityResolutions = qualityArtifacts.identityResolutions;
-    const finalQualityIssue = applyFinalResultQualityGate({ result, query: input.query });
-    if (finalQualityIssue) {
-      try {
-        input.onEvent({
-          type: 'degraded',
-          content: {
-            module: 'cliAnalyzeService',
-            fallback: 'final_result_quality_gate',
-            code: finalQualityIssue.code,
-            partial: true,
-            message: result.terminationMessage || finalQualityIssue.message,
-          },
-          timestamp: Date.now(),
+      return await withRunManifestLifecycle(runManifestLifecycle, async () => {
+        // Surface sessionId to the caller now, before analyze() starts emitting
+        // events. Without this, callers must buffer events until runTurn resolves,
+        // which accumulates the entire analyze run's output in memory.
+        input.onSessionReady?.(sessionId);
+
+        const orchestrator = session.orchestrator;
+
+        // Subscribe to live updates. Wrap in off()-on-finally to avoid handler leaks
+        // if runTurn is called multiple times within one CLI process (REPL path).
+        const handler = (update: StreamingUpdate) => {
+          const envelopes = envelopesFromStreamingUpdate(update);
+          if (envelopes.length > 0) {
+            session.dataEnvelopes.push(...envelopes);
+          }
+          const projectedUpdate = projectCodeAwareStreamingUpdate(sessionId, update, privateKnowledge, outputLanguage);
+          if (!shouldExposeLiveStreamingUpdate(projectedUpdate)) return;
+          try {
+            input.onEvent(projectedUpdate);
+          } catch (err) {
+            // Don't let a renderer bug kill the analysis — log and continue.
+            console.error('[CliAnalyzeService] onEvent handler threw:', (err as Error).message);
+          }
+        };
+        orchestrator.on('update', handler);
+
+        let result: AnalysisResult;
+        const agentQuery =
+          session.agentQuery && session.query === input.query
+            ? session.agentQuery
+            : buildAgentQueryWithContinuityNotice(input.query, session.continuityBreaks);
+        try {
+          result = await orchestrator.analyze(agentQuery, sessionId, traceId, {
+            providerId: session.providerId,
+            referenceTraceId: effectiveReferenceTraceId,
+            analysisMode: requestedAnalysisMode,
+            codeAwareMode: effectiveCodeAwareMode,
+            codebaseIds: input.codebaseIds,
+            knowledgeSourceIds: input.knowledgeSourceIds,
+            analysisContextFingerprint,
+            runManifestAttributionSink: runManifestLifecycle.builder,
+            ...knowledgeScope,
+          });
+          if (privateKnowledge) {
+            assertCurrentAnalysisContextAuthorization(effectiveInput, knowledgeScope, analysisContextFingerprint);
+          }
+        } catch (error) {
+          if (error instanceof AnalysisContextAuthorizationChangedError) {
+            orchestrator.off('update', handler);
+            revokeCodeAwareOutputGuards(sessionId);
+            sessionContextManager.remove(sessionId);
+            if (typeof orchestrator.cleanupSession === 'function') {
+              await Promise.resolve(orchestrator.cleanupSession(sessionId)).catch(() => undefined);
+            }
+          }
+          throw error;
+        } finally {
+          orchestrator.off('update', handler);
+        }
+        session.codeAwareMode = effectiveCodeAwareMode;
+        session.codebaseIds = input.codebaseIds;
+        session.knowledgeSourceIds = input.knowledgeSourceIds;
+        session.analysisContextFingerprint = analysisContextFingerprint;
+        const normalized = normalizeResultForReport(result, {
+          dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
         });
-      } catch (err) {
-        console.error('[CliAnalyzeService] onEvent handler threw:', (err as Error).message);
+        result.conclusion = normalized.conclusion;
+        if (normalized.conclusionContract) {
+          result.conclusionContract = normalized.conclusionContract;
+        }
+        const qualityArtifacts = runClaimVerification({
+          conclusionContract: normalized.conclusionContract,
+          dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
+          comparisonReportSection: session.comparisonReportSection,
+          policy: 'record_only',
+        });
+        result.claimSupport = qualityArtifacts.claimSupport;
+        result.claimVerificationResult = qualityArtifacts.claimVerificationResult;
+        result.identityResolutions = qualityArtifacts.identityResolutions;
+        session.claimSupport = qualityArtifacts.claimSupport;
+        session.claimVerificationResult = qualityArtifacts.claimVerificationResult;
+        session.identityResolutions = qualityArtifacts.identityResolutions;
+        const finalQualityIssue = applyFinalResultQualityGate({ result, query: input.query });
+        if (finalQualityIssue) {
+          try {
+            input.onEvent({
+              type: 'degraded',
+              content: {
+                module: 'cliAnalyzeService',
+                fallback: 'final_result_quality_gate',
+                code: finalQualityIssue.code,
+                partial: true,
+                message: result.terminationMessage || finalQualityIssue.message,
+              },
+              timestamp: Date.now(),
+            });
+          } catch (err) {
+            console.error('[CliAnalyzeService] onEvent handler threw:', (err as Error).message);
+          }
+        }
+        result.uiActionProposals = deriveUiActionProposals({
+          dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
+          currentTraceId: traceId,
+          existingProposals: result.uiActionProposals,
+        });
+        const runManifest = runManifestLifecycle.sealOnceAndPersist({
+          turnCount:
+            Number.isSafeInteger(result.rounds) && result.rounds >= 0
+              ? result.rounds
+              : 0,
+        });
+        result.analysisReceipt = buildAnalysisReceipt({
+          runManifestId: runManifest.runManifestId,
+          runId: runManifest.runId,
+          session,
+          result,
+          qualityArtifacts,
+          quickRun: result.quickRun,
+          providerId: session.providerId ?? null,
+          cliTurnPath,
+        });
+        session.result = result;
+        sessionContextManager.get(sessionId, traceId)?.annotateLatestCompletedTurn({
+          success: result.success,
+          findings: result.findings,
+          message: result.conclusion,
+          confidence: result.confidence,
+          partial: result.partial,
+          terminationReason: result.terminationReason,
+          terminationMessage: result.terminationMessage,
+          conclusionContract: normalized.conclusionContract,
+          claimSupport: qualityArtifacts.claimSupport,
+          claimVerificationResult: qualityArtifacts.claimVerificationResult,
+          identityResolutions: qualityArtifacts.identityResolutions,
+        });
+
+        // Persist to SQLite BEFORE building the report — the snapshot is stashed on
+        // the session as `_lastSnapshot` and read by the HTML generator. Routes
+        // through the same shared helper the HTTP layer uses, so any future schema
+        // change applies to both paths automatically.
+        persistAgentTurn({
+          session,
+          sessionId,
+          traceId,
+          query: input.query,
+          result: { conclusion: result.conclusion, totalDurationMs: result.totalDurationMs },
+        });
+
+        const persistedSnapshot = (
+          session as unknown as {
+            _lastSnapshot?: SessionStateSnapshot;
+          }
+        )._lastSnapshot;
+        const persistedRuntimeKind = getSnapshotRuntimeKind(persistedSnapshot);
+        const persistedProviderId = getSnapshotRuntimeProviderId(persistedSnapshot);
+        const persistedProviderSnapshotHash = getSnapshotRuntimeProviderSnapshotHash(persistedSnapshot);
+        const runtimeSelection = persistedRuntimeKind ? null : resolveAgentRuntimeSelection(session.providerId ?? null);
+        const resolvedRuntimeKind = persistedRuntimeKind ?? runtimeSelection?.kind;
+        const publicRuntimeKind = isProductionAgentRuntimeKind(resolvedRuntimeKind) ? resolvedRuntimeKind : undefined;
+        const modelRuntimeSelection = runtimeSelection ?? {
+          kind: resolvedRuntimeKind!,
+          source: persistedProviderId ? 'provider' as const : 'env' as const,
+          ...(persistedProviderId ? {providerId: persistedProviderId} : {}),
+        };
+        let model: string | undefined;
+        try {
+          model = getRuntimeDiagnosticModel(
+            getRuntimeDiagnostics(modelRuntimeSelection),
+          ) || undefined;
+        } catch (error) {
+          // Provenance is optional metadata. Do not turn a completed analysis into
+          // a CLI failure when a runtime's diagnostic adapter is unavailable.
+          console.warn(
+            '[CliAnalyzeService] Failed to resolve runtime model provenance:',
+            (error as Error).message,
+          );
+        }
+
+        // SDK/session id is runtime-specific and exposed only through the orchestrator hook.
+        const sdkSessionId =
+          typeof orchestrator.getSdkSessionId === 'function'
+            ? orchestrator.getSdkSessionId(sessionId, effectiveReferenceTraceId)
+            : undefined;
+
+        const reportOutput = this.buildReportHtml(session, result);
+        const durableResult = privateKnowledge
+          ? projectPrivateAnalysisResult(sessionId, result, outputLanguage)
+          : result;
+
+        return {
+          sessionId,
+          traceId,
+          sdkSessionId,
+          result: durableResult,
+          reportHtml: reportOutput.html,
+          reportError:
+            privateKnowledge && reportOutput.error ? privateAnalysisFailureMessage(outputLanguage) : reportOutput.error,
+          model,
+          providerId: persistedProviderId !== undefined ? persistedProviderId : (session.providerId ?? null),
+          agentRuntimeKind: publicRuntimeKind,
+          providerSnapshotHash:
+            persistedProviderSnapshotHash !== undefined
+              ? persistedProviderSnapshotHash
+              : (session.providerSnapshotHash ?? null),
+          codeAwareMode: effectiveCodeAwareMode,
+          privateKnowledge,
+        };
+      });
+    } catch (error) {
+      if (runManifestLifecycle.state === 'collecting') {
+        try {
+          runManifestLifecycle.sealOnceAndPersist({
+            turnCount: 0,
+            closePendingSkillInvocationsAsErrors: true,
+          });
+        } catch (manifestError) {
+          console.error(
+            '[CliAnalyzeService] Failed to persist terminal run manifest:',
+            (manifestError as Error).message,
+          );
+        }
       }
+      throw error;
+    } finally {
+      runManifestLifecycle.dispose();
     }
-    session.result = result;
-    sessionContextManager.get(sessionId, traceId)?.annotateLatestCompletedTurn({
-      success: result.success,
-      findings: result.findings,
-      message: result.conclusion,
-      confidence: result.confidence,
-      partial: result.partial,
-      terminationReason: result.terminationReason,
-      terminationMessage: result.terminationMessage,
-      conclusionContract: normalized.conclusionContract,
-      claimSupport: qualityArtifacts.claimSupport,
-      claimVerificationResult: qualityArtifacts.claimVerificationResult,
-      identityResolutions: qualityArtifacts.identityResolutions,
-    });
-
-    // Persist to SQLite BEFORE building the report — the snapshot is stashed on
-    // the session as `_lastSnapshot` and read by the HTML generator. Routes
-    // through the same shared helper the HTTP layer uses, so any future schema
-    // change applies to both paths automatically.
-    persistAgentTurn({
-      session,
-      sessionId,
-      traceId,
-      query: input.query,
-      result: { conclusion: result.conclusion, totalDurationMs: result.totalDurationMs },
-    });
-
-    const persistedSnapshot = (session as unknown as {
-      _lastSnapshot?: SessionStateSnapshot;
-    })._lastSnapshot;
-    const persistedRuntimeKind = getSnapshotRuntimeKind(persistedSnapshot);
-    const persistedProviderId = getSnapshotRuntimeProviderId(persistedSnapshot);
-    const persistedProviderSnapshotHash = getSnapshotRuntimeProviderSnapshotHash(persistedSnapshot);
-    const runtimeSelection = persistedRuntimeKind
-      ? null
-      : resolveAgentRuntimeSelection(session.providerId ?? null);
-    const resolvedRuntimeKind = persistedRuntimeKind ?? runtimeSelection?.kind;
-    const publicRuntimeKind = isProductionAgentRuntimeKind(resolvedRuntimeKind)
-      ? resolvedRuntimeKind
-      : undefined;
-
-    // SDK/session id is runtime-specific and exposed only through the orchestrator hook.
-    const sdkSessionId =
-      typeof orchestrator.getSdkSessionId === 'function'
-        ? orchestrator.getSdkSessionId(sessionId, effectiveReferenceTraceId)
-        : undefined;
-
-    const reportOutput = this.buildReportHtml(session, result);
-
-    return {
-      sessionId,
-      traceId,
-      sdkSessionId,
-      result,
-      reportHtml: reportOutput.html,
-      reportError: reportOutput.error,
-      // The Claude model name is stored on ClaudeRuntime's config; not trivially
-      // exposed via IOrchestrator. Left undefined for PR1; fills in PR2 via
-      // CLAUDE_MODEL env read if needed for config.json provenance.
-      model: process.env.CLAUDE_MODEL,
-      providerId: persistedProviderId !== undefined ? persistedProviderId : session.providerId ?? null,
-      agentRuntimeKind: publicRuntimeKind,
-      providerSnapshotHash: persistedProviderSnapshotHash !== undefined
-        ? persistedProviderSnapshotHash
-        : session.providerSnapshotHash ?? null,
-    };
   }
 
   /**
@@ -376,6 +687,8 @@ export class CliAnalyzeService {
           partial: normalized.partial,
           terminationReason: normalized.terminationReason,
           terminationMessage: normalized.terminationMessage,
+          analysisReceipt: normalized.analysisReceipt ?? result.analysisReceipt,
+          uiActionProposals: normalized.uiActionProposals ?? result.uiActionProposals,
         },
       });
       const html = getHTMLReportGenerator().generateAgentDrivenHTML(reportData);
@@ -434,6 +747,8 @@ export class CliAnalyzeService {
    * trace_processor_shell subprocess — otherwise Node waits on it.
    */
   async shutdown(): Promise<void> {
+    for (const sessionId of this.ownedSessionIds) clearCodeAwareOutputGuards(sessionId);
+    this.ownedSessionIds.clear();
     try {
       await getTraceProcessorService().cleanup();
     } catch {
@@ -534,7 +849,7 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
     claimResults: [],
     issues: [],
   };
-  return {
+  const output: RunTurnOutput = {
     sessionId,
     traceId,
     sdkSessionId: `cli-e2e-fake-${sessionId}`,
@@ -542,6 +857,8 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
     providerId: null,
     agentRuntimeKind: 'openai-agents-sdk',
     providerSnapshotHash: null,
+    codeAwareMode: input.codeAwareMode ?? 'off',
+    privateKnowledge: false,
     reportHtml: buildCliE2eFakeReportHtml({
       sessionId,
       traceId,
@@ -578,6 +895,29 @@ async function runCliE2eFakeTurn(input: RunTurnInput, traceId: string): Promise<
       totalDurationMs,
     },
   };
+  const privateKnowledge = Boolean(
+    (output.codeAwareMode !== 'off' && input.codebaseIds?.length)
+    || input.knowledgeSourceIds?.length,
+  );
+  if (!privateKnowledge) return output;
+  const outputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+  const durableResult = projectPrivateAnalysisResult(sessionId, output.result, outputLanguage);
+  return {
+    ...output,
+    privateKnowledge: true,
+    result: durableResult,
+    reportHtml: buildCliE2eFakeReportHtml({
+      sessionId,
+      traceId,
+      referenceTraceId: input.referenceTraceId,
+      query: privateAnalysisQueryMessage(outputLanguage),
+      conclusion: durableResult.conclusion,
+      conclusionContract: durableResult.conclusionContract,
+      claimSupport: [],
+      identityResolutions: [],
+      totalDurationMs,
+    }),
+  };
 }
 
 interface CliE2eFakeCodeReference {
@@ -594,7 +934,8 @@ function buildCliE2eFakeCodeAwareContext(input: RunTurnInput): {codeReferences: 
   }
 
   const store = new RagStore(backendLogPath('rag_store.json'));
-  const resolver = new SymbolResolver(store);
+  const registry = new CodebaseRegistry(backendLogPath('codebase_registry.json'));
+  const resolver = new SymbolResolver(store, resolveCodebaseScope(), registry);
   const symbols = [
     'MainActivity',
     'onActivityCreate',

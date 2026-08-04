@@ -33,6 +33,11 @@ export interface ScenePlanTemplateAspect {
   suggestion: string;
   requiredExpectedCalls?: ExpectedCall[];
   alternativeExpectedCalls?: ExpectedCall[];
+  /** Calls selected by detected context; every matching group is additive. */
+  conditionalRequiredExpectedCalls?: Array<{
+    triggerKeywords: string[];
+    requiredExpectedCalls: ExpectedCall[];
+  }>;
   /** Defaults to true. Set false in strategy frontmatter for hard plan gates. */
   waivable?: boolean;
 }
@@ -169,6 +174,12 @@ export interface PlanValidationResult {
   missingAspectIds: string[];
   /** Missing aspects that explicitly disallow plan-level waivers/force-accept. */
   nonWaivableMissingAspectIds?: string[];
+  /** Machine-readable expectedCall requirements for each uncovered aspect. */
+  missingAspectRequirements?: Array<{
+    aspectId: string;
+    requiredExpectedCalls: ExpectedCall[];
+    alternativeExpectedCalls: ExpectedCall[];
+  }>;
 }
 
 export interface PlanValidationOptions {
@@ -200,6 +211,16 @@ function formatExpectedCallForPlanText(call: ExpectedCall): string {
   return call.skillId ? `${tool} ${call.skillId} ${tool}(${call.skillId})` : tool;
 }
 
+function uniqueExpectedCalls(calls: readonly ExpectedCall[]): ExpectedCall[] {
+  const seen = new Set<string>();
+  return calls.filter(call => {
+    const key = `${shortToolName(call.tool)}\u0000${call.skillId ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /**
  * Detect mandatory aspects of a scene's plan template that a submitted
  * `phases` array fails to mention. Returns empty arrays for scenes without
@@ -226,10 +247,11 @@ export function validatePlanAgainstSceneTemplate(
     .map(p => `${p.name} ${p.goal} ${(p.expectedTools ?? []).join(' ')} ${(p.expectedCalls ?? []).map(formatExpectedCallForPlanText).join(' ')}`)
     .join(' ')
     .toLowerCase();
-  const triggerContext = Array.isArray(options.triggerContext)
-    ? options.triggerContext.join(' ')
-    : options.triggerContext || '';
+  const triggerContext = typeof options.triggerContext === 'string'
+    ? options.triggerContext
+    : (options.triggerContext ?? []).join(' ');
   const triggerText = `${planText} ${triggerContext}`.toLowerCase();
+  const detectedContextText = triggerContext.toLowerCase();
   const declaredExpectedCalls = phases.flatMap(p => p.expectedCalls ?? []);
 
   const acceptedWaiverIds = new Set(
@@ -241,6 +263,7 @@ export function validatePlanAgainstSceneTemplate(
   const warnings: string[] = [];
   const missingAspectIds: string[] = [];
   const nonWaivableMissingAspectIds: string[] = [];
+  const missingAspectRequirements: NonNullable<PlanValidationResult['missingAspectRequirements']> = [];
   for (const aspect of template.mandatoryAspects) {
     const aspectId = aspect.id || aspect.matchKeywords[0];
     const waivable = aspect.waivable !== false;
@@ -250,11 +273,21 @@ export function validatePlanAgainstSceneTemplate(
       continue;
     }
     const covered = aspect.matchKeywords.some(kw => planText.includes(kw.toLowerCase()));
-    const missingRequiredCalls = (aspect.requiredExpectedCalls ?? [])
+    const matchedConditionalGroups = (aspect.conditionalRequiredExpectedCalls ?? [])
+      .filter(group => group.triggerKeywords.some(keyword =>
+        detectedContextText.includes(keyword.toLowerCase()),
+      ));
+    const requiredCalls = uniqueExpectedCalls([
+      ...(aspect.requiredExpectedCalls ?? []),
+      ...matchedConditionalGroups.flatMap(group => group.requiredExpectedCalls),
+    ]);
+    const missingRequiredCalls = requiredCalls
       .filter(required => !declaredExpectedCalls.some(declared =>
         expectedCallMatchesExpectedCall(required, declared),
       ));
-    const alternatives = aspect.alternativeExpectedCalls ?? [];
+    const alternatives = matchedConditionalGroups.length > 0
+      ? []
+      : aspect.alternativeExpectedCalls ?? [];
     const missingAlternative = alternatives.length > 0 &&
       !alternatives.some(required => declaredExpectedCalls.some(declared =>
         expectedCallMatchesExpectedCall(required, declared),
@@ -262,6 +295,11 @@ export function validatePlanAgainstSceneTemplate(
     if (!covered || missingRequiredCalls.length > 0 || missingAlternative) {
       warnings.push(aspect.suggestion);
       missingAspectIds.push(aspectId);
+      missingAspectRequirements.push({
+        aspectId,
+        requiredExpectedCalls: requiredCalls.map(call => ({ ...call })),
+        alternativeExpectedCalls: alternatives.map(call => ({ ...call })),
+      });
       if (!waivable) nonWaivableMissingAspectIds.push(aspectId);
     }
   }
@@ -269,5 +307,6 @@ export function validatePlanAgainstSceneTemplate(
     warnings,
     missingAspectIds,
     ...(nonWaivableMissingAspectIds.length > 0 ? { nonWaivableMissingAspectIds } : {}),
+    ...(missingAspectRequirements.length > 0 ? { missingAspectRequirements } : {}),
   };
 }

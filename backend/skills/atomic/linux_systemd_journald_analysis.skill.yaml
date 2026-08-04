@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: linux_systemd_journald_analysis
+version: "1.0"
+type: atomic
+category: system
+tier: B
+
+meta:
+  display_name: "Linux systemd-journald Analysis"
+  description: "Summarize v57 linux.systemd_journald log entries, prioritizing warning and error evidence"
+  icon: "article"
+  tags: [linux, systemd, journald, logs, upstream_v57, atomic]
+
+triggers:
+  keywords:
+    zh: [journald, systemd 日志, Linux 日志, 系统日志]
+    en: [journald, systemd, linux logs, syslog]
+  patterns:
+    - ".*(journald|systemd).*"
+    - ".*(linux|syslog).*logs?.*"
+
+prerequisites:
+  modules:
+    - linux.systemd_journald
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Start timestamp in ns"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "End timestamp in ns"
+  - name: unit
+    type: string
+    required: false
+    description: "Optional systemd unit substring"
+  - name: tag
+    type: string
+    required: false
+    description: "Optional SYSLOG_IDENTIFIER/program substring"
+  - name: max_prio
+    type: integer
+    required: false
+    default: 4
+    description: "Maximum syslog priority to show by default; lower is more severe, 4 means warnings and above"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 80
+    description: "Maximum rows to return"
+
+display:
+  level: summary
+  layer: list
+  title: "systemd-journald Signals"
+  columns:
+    - name: ts_str
+      label: "Timestamp"
+      type: timestamp
+      unit: ns
+    - name: prio_label
+      label: "Priority"
+      type: string
+    - name: signal_type
+      label: "Signal"
+      type: string
+    - name: tag
+      label: "Tag"
+      type: string
+    - name: comm
+      label: "Comm"
+      type: string
+    - name: systemd_unit
+      label: "Unit"
+      type: string
+    - name: hostname
+      label: "Host"
+      type: string
+    - name: transport
+      label: "Transport"
+      type: string
+    - name: msg_preview
+      label: "Message"
+      type: string
+
+sql: |
+  WITH input AS (
+    SELECT
+      MIN(MAX(COALESCE(${max_prio|4}, 4), 0), 7) AS max_prio,
+      MIN(MAX(COALESCE(${max_rows|80}, 80), 1), 500) AS max_rows
+  ),
+  entries AS (
+    SELECT
+      ts,
+      prio,
+      CASE prio
+        WHEN 0 THEN 'EMERG'
+        WHEN 1 THEN 'ALERT'
+        WHEN 2 THEN 'CRIT'
+        WHEN 3 THEN 'ERROR'
+        WHEN 4 THEN 'WARN'
+        WHEN 5 THEN 'NOTICE'
+        WHEN 6 THEN 'INFO'
+        WHEN 7 THEN 'DEBUG'
+        ELSE 'UNKNOWN'
+      END AS prio_label,
+      tag,
+      comm,
+      systemd_unit,
+      hostname,
+      transport,
+      msg,
+      CASE
+        WHEN prio <= 3 THEN 'error_or_higher'
+        WHEN prio = 4 THEN 'warning'
+        WHEN LOWER(COALESCE(msg, '')) GLOB '*panic*'
+          OR LOWER(COALESCE(msg, '')) GLOB '*crash*'
+          OR LOWER(COALESCE(msg, '')) GLOB '*oom*'
+          OR LOWER(COALESCE(msg, '')) GLOB '*timeout*'
+          OR LOWER(COALESCE(msg, '')) GLOB '*failed*'
+          THEN 'keyword_signal'
+        ELSE 'other'
+      END AS signal_type
+    FROM linux_systemd_journald_logs
+    WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
+      AND (${end_ts} IS NULL OR ts < ${end_ts})
+      AND ('${unit|}' = '' OR LOWER(COALESCE(systemd_unit, '')) GLOB '*' || LOWER('${unit|}') || '*')
+      AND ('${tag|}' = '' OR LOWER(COALESCE(tag, '')) GLOB '*' || LOWER('${tag|}') || '*')
+  ),
+  selected AS (
+    SELECT
+      printf('%d', ts) AS ts_str,
+      prio_label,
+      signal_type,
+      COALESCE(tag, '') AS tag,
+      COALESCE(comm, '') AS comm,
+      COALESCE(systemd_unit, '') AS systemd_unit,
+      COALESCE(hostname, '') AS hostname,
+      COALESCE(transport, '') AS transport,
+      SUBSTR(COALESCE(msg, ''), 1, 240) AS msg_preview,
+      ts AS sort_ts
+    FROM entries, input
+    WHERE prio <= input.max_prio
+      OR signal_type <> 'other'
+    ORDER BY ts
+    LIMIT (SELECT max_rows FROM input)
+  )
+  SELECT
+    ts_str,
+    prio_label,
+    signal_type,
+    tag,
+    comm,
+    systemd_unit,
+    hostname,
+    transport,
+    msg_preview
+  FROM selected
+  UNION ALL
+  SELECT
+    '0' AS ts_str,
+    'NONE' AS prio_label,
+    'no_journald_rows' AS signal_type,
+    '' AS tag,
+    '' AS comm,
+    '' AS systemd_unit,
+    '' AS hostname,
+    '' AS transport,
+    'No linux_systemd_journald_logs rows matched the current filters.' AS msg_preview
+  WHERE NOT EXISTS (SELECT 1 FROM entries)
+
+output:
+  format: structured
+  fields:
+    - name: signal_type
+      description: "Classification derived from syslog priority plus high-signal error keywords"
+    - name: prio_label
+      description: "Syslog priority label; lower numeric priorities are more severe"

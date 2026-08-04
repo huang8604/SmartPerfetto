@@ -2,68 +2,79 @@
 
 [English](README.en.md) | [中文](README.md)
 
-SmartPerfetto 是基于 Perfetto 的 Android 性能分析平台。本文档中心面向开源使用者、贡献者和维护者，按“先跑起来、再理解、再扩展”的顺序组织。
+<!-- i18n-headings: paired -->
 
-## 推荐阅读路径
+这里仅保留当前版本仍需维护的用户、架构、运行时和维护者文档。第一次使用请从
+[快速开始](getting-started/quick-start.md)进入；仓库历史由 Git、Issue 和 PR 保留，
+不再把完成后的计划、审查报告、研究材料或 Agent 证据作为长期文档提交。
 
-| 读者 | 从这里开始 | 继续阅读 |
-|---|---|---|
-| 第一次运行项目 | [快速开始](getting-started/quick-start.md) | [配置指南](getting-started/configuration.md), [功能总览](getting-started/features.md), [基本使用](getting-started/usage.md), [免安装包打包](reference/portable-packaging.md) |
-| 想了解 SmartPerfetto 能做什么 | [功能总览](getting-started/features.md) | [基本使用](getting-started/usage.md), [配置指南](getting-started/configuration.md) |
-| 想对比多个 Trace 的分析结果 | [多 Trace 分析结果对比](getting-started/multi-trace-result-comparison.md) | [基本使用](getting-started/usage.md), [API 参考](reference/api.md) |
-| 想让 AI 分析引用本机源码 | [Code-Aware Analysis](getting-started/code-aware-analysis.md) | [CLI 参考](reference/cli.md), [MCP 工具参考](reference/mcp-tools.md) |
-| 想接入后端 API | [API 参考](reference/api.md) | [MCP 工具参考](reference/mcp-tools.md) |
-| 想用命令行或脚本分析 trace | [CLI 参考](reference/cli.md) | [API 参考](reference/api.md) |
-| 想贡献代码 | [根目录 AGENTS.md](../AGENTS.md) | [产品面规则](../.claude/rules/product-surface.md), [测试规则](../.claude/rules/testing.md), [贡献指南](../CONTRIBUTING.md) |
-| 想新增 Skill | [Skill 系统指南](reference/skill-system.md) | [MCP 工具参考](reference/mcp-tools.md), [测试规则](../.claude/rules/testing.md) |
-| 想理解架构 | [架构总览](architecture/overview.md) | [Agent Runtime](architecture/agent-runtime.md), [技术架构深潜](architecture/technical-architecture.md) |
-| 想发布新版本 | [发布手册](reference/release.md) | [免安装包打包](reference/portable-packaging.md), [发布规则](../.claude/rules/release.md) |
-| 想看独立 feature 计划 | [多 Trace 分析结果对比开发计划](features/multi-trace-result-comparison/README.md) | [出图教学重构计划](features/rendering-pipeline-teaching-refactor/README.md), [企业级多用户与多租户](features/enterprise-multi-tenant/README.md) |
-| 想排查部署问题 | [故障排查](operations/troubleshooting.md) | [配置指南](getting-started/configuration.md) |
+## 使用与运维
 
-## 文档结构
+- [快速开始](getting-started/quick-start.md)
+- [功能总览](getting-started/features.md)
+- [基本使用](getting-started/usage.md)
+- [配置指南](getting-started/configuration.md)
+- [Agent 辅助 GitHub 反馈](getting-started/agent-assisted-feedback.md)
+- [Self-Evolution 使用与验收](getting-started/self-evolution.md)
+- [Code-Aware Analysis](getting-started/code-aware-analysis.md)
+- [多 Trace 分析结果对比](getting-started/multi-trace-result-comparison.md)
+- [Android Internals 知识包与私有知识库](getting-started/android-internals-knowledge.md)
+- [故障排查](operations/troubleshooting.md)
 
-```text
-docs/
-├── README.md                         # 文档入口
-├── getting-started/                  # 安装、配置、使用
-├── architecture/                     # 当前架构与权威设计
-├── features/                         # 独立 feature 开发文档
-├── reference/                        # API、CLI、MCP、Skill DSL
-├── operations/                       # 运行与故障排查
-├── rendering_pipelines/              # Android 渲染管线知识库，运行时会读取
-├── product/                          # 项目定位与外部介绍
-├── archive/                          # 历史方案、spike、决策记录
-└── images/                           # 文档图片资源
-```
+## 参考手册
 
-## 权威文档
+- [CLI](reference/cli.md)
+- [HTTP/SSE API](reference/api.md)
+- [MCP 工具](reference/mcp-tools.md)
+- [Skill 系统](reference/skill-system.md)
+- [平台兼容与验证边界](reference/platform-compatibility.md)
+- [发布流程](reference/release.md)
+- [免安装包](reference/portable-packaging.md)
+- [Windows 启动器](reference/windows-exe.md)
+- 应用更新：[产品提示与更新动作](../README.zh-CN.md#应用更新)、
+  [CLI](reference/cli.md#应用更新)、[API](reference/api.md#应用更新)
 
-- 当前系统入口与运行方式以 [快速开始](getting-started/quick-start.md)、[CLI 参考](reference/cli.md)、[免安装包打包](reference/portable-packaging.md) 和 [发布手册](reference/release.md) 为准。
-- Feature/Bug 修改前需要按 [产品面规则](../.claude/rules/product-surface.md) 检查 Web UI、CLI、API、报告、Docker、免安装包、runtime/provider、Node 版本和预置内容影响面。
-- 发布/npm/portable/Docker 相关工作以 [发布手册](reference/release.md) 和 [发布规则](../.claude/rules/release.md) 为准。
-- 当前后端 API 以 [API 参考](reference/api.md) 为准。
-- agentv3 与分析模式以 [agentv3 运行时](architecture/agent-runtime.md) 为准。
-- MCP 工具面以 [MCP 工具参考](reference/mcp-tools.md) 和 tool registry 为准，不以旧的静态工具数量为准。
-- Skill DSL 与分层结果以 [Skill 系统指南](reference/skill-system.md) 为准。
-- DataEnvelope 与前后端数据 contract 以 [Data Contract](../backend/docs/DATA_CONTRACT_DESIGN.md) 为准。
-- final report、evidence/claim verification、identity resolution、chat-vs-report 边界以 [架构总览](architecture/overview.md) 和 [Agent Runtime](architecture/agent-runtime.md) 为准。
-- 自改进系统以 [Self-Improving 设计](architecture/self-improving-design.md) 为准。
-- `archive/` 下文档只保留历史背景，不代表当前推荐实现。
+## 核心架构
 
-## 运行时依赖的文档
+- [架构总览](architecture/overview.md)：产品入口、主数据流与输出合约。
+- [技术架构](architecture/technical-architecture.md)：组件边界和修改位置。
+- [Agent Runtime](architecture/agent-runtime.md)：runtime/provider/session 语义。
+- [双 Trace 工作区](architecture/dual-trace-workspace.md)：双窗与 comparison 状态机。
+- [私有分析上下文](architecture/private-analysis-context.md)：授权、连续性与删除边界。
+- [Self-Improving](architecture/self-improving-design.md)：当前已接入能力与明确未接入能力。
+- Self-Evolution 的用户入口、权限、持久化和测试步骤以
+  [使用与验收指南](getting-started/self-evolution.md)为准。
+- 普通用户把分析 gap 转成外部反馈时，以
+  [Agent 辅助 GitHub 反馈](getting-started/agent-assisted-feedback.md)为准；它不会自动
+  进入 Self-Evolution 或 GitHub。
+- [Data Contract](../backend/docs/DATA_CONTRACT_DESIGN.md)：DataEnvelope、Query Review、
+  Analysis Receipt、UI Action 和多端投影。
 
-`docs/rendering_pipelines/` 不只是普通说明文档。渲染管线检测、教学模式和部分 Skill 结果会通过 `doc_path: rendering_pipelines/*.md` 引用这些 Markdown。移动或重命名这里的文件时，需要同步更新：
+## 贡献与治理
 
-- `backend/skills/pipelines/*.skill.yaml`
-- `backend/skills/atomic/rendering_pipeline_detection.skill.yaml`
-- `backend/src/services/pipelineDocService.ts`
-- `backend/src/config/teaching.config.ts`
+- [贡献指南](../CONTRIBUTING.md)
+- [Agent 入口规则](../AGENTS.md)
+- [产品面规则](../.claude/rules/product-surface.md)
+- [测试规则](../.claude/rules/testing.md)
+- [安全策略](../SECURITY.md)
+- [赞助与商业合作](sponsor.md)
 
-改动后至少运行：
+## 文档保留规则
+
+- 只提交当前用户操作、架构、运行时或维护流程所依赖的文档。
+- 完成后的计划、RFC 实施记录、review、研究材料、演示源码和 Agent evidence 不进仓库；
+  仍有效的结论必须合并到上面的核心文档。
+- Strategy、Prompt template、Skill SOP、测试 fixture、许可证和预构建 UI 帮助文本虽然使用
+  Markdown 扩展名，但属于运行时代码或发布资产，不按普通文档清理。
+- `npm run verify:docs` 检查链接、图片、npm script、CLI 覆盖、发布命令以及废弃文档拓扑
+  是否重新出现；中英文产品面使用 `npm run verify:i18n` 校验。
+
+## 运行时读取内容
+
+`docs/rendering_pipelines/` 是由固定上游 commit 同步的 Android 17 教学来源，构建会复制到
+`backend/dist/rendering_pipelines/`。移动或修改它需要同步 pipeline catalog/Skill 引用，并运行：
 
 ```bash
-cd backend
-npm run validate:skills
-npm run test:scene-trace-regression
+npm run verify:rendering-pipelines
+cd backend && npm run validate:skills
 ```

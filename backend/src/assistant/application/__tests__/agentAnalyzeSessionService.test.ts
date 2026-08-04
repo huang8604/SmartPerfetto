@@ -116,6 +116,7 @@ describe('AgentAnalyzeSessionService session continuity', () => {
       loadTraceAgentState: jest.fn().mockReturnValue(null),
       loadArchitectureSnapshot: jest.fn().mockReturnValue(null),
       loadRuntimeArrays: jest.fn().mockReturnValue(null),
+      clearPrivateSessionContextSnapshots: jest.fn().mockReturnValue(true),
     };
     mockCreateAgentOrchestrator.mockClear();
 
@@ -123,7 +124,7 @@ describe('AgentAnalyzeSessionService session continuity', () => {
       assistantAppService,
       createSessionLogger: () => createLogger(),
       sessionPersistenceService,
-      sessionContextManager: { set: jest.fn() },
+      sessionContextManager: {set: jest.fn(), remove: jest.fn()},
       buildRecoveredResultFromContext: () => null,
     });
   });
@@ -170,6 +171,150 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(prepared.session).toBe(existing);
     expect(prepared.session.query).toBe('new follow-up question');
     expect(prepared.session.status).toBe('pending');
+  });
+
+  test('never records private source queries in new or continuing session logs', () => {
+    const newLogger = createLogger();
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => newLogger,
+      sessionPersistenceService,
+      sessionContextManager: {set: jest.fn(), remove: jest.fn()},
+      buildRecoveredResultFromContext: () => null,
+    });
+    const canary = 'PRIVATE_LOG_QUERY_CANARY';
+    const prepared = service.prepareSession({
+      traceId: 'trace-private-log',
+      query: canary,
+      options: {
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['codebase-private'],
+      },
+    });
+    expect(JSON.stringify({
+      metadata: (newLogger.setMetadata as jest.Mock).mock.calls,
+      info: (newLogger.info as jest.Mock).mock.calls,
+    })).not.toContain(canary);
+
+    prepared.session.codeAwareMode = 'provider_send';
+    prepared.session.codebaseIds = ['codebase-private'];
+    service.prepareSession({
+      traceId: 'trace-private-log',
+      query: `${canary}-follow-up`,
+      requestedSessionId: prepared.sessionId,
+      options: {
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['codebase-private'],
+      },
+    });
+    expect(JSON.stringify((newLogger.info as jest.Mock).mock.calls)).not.toContain(canary);
+  });
+
+  test('never restores persisted context for a private source or RAG request', () => {
+    const securityCleanup = jest.fn();
+    const contextManager = {set: jest.fn(), remove: jest.fn()};
+    const logger = createLogger();
+    const canary = 'PRIVATE_PERSISTED_QUERY_CANARY';
+    sessionPersistenceService.getSession.mockReturnValue({
+      id: 'persisted-private',
+      traceId: 'trace-private',
+      question: 'old question',
+      createdAt: Date.now() - 1000,
+      updatedAt: Date.now(),
+      metadata: {},
+      messages: [],
+    });
+    sessionPersistenceService.loadSessionContext.mockReturnValue(createRestoredContext());
+    sessionPersistenceService.loadSessionStateSnapshot.mockReturnValue({
+      version: 1,
+      snapshotTimestamp: Date.now(),
+      sessionId: 'persisted-private',
+      traceId: 'trace-private',
+      outputLanguage: 'en',
+      analysisContextFingerprint: 'matching-private-fingerprint',
+      conversationSteps: [],
+      queryHistory: [],
+      conclusionHistory: [],
+      agentDialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      hypotheses: [],
+      analysisNotes: [],
+      analysisPlan: null,
+      planHistory: [],
+      uncertaintyFlags: [],
+      runSequence: 0,
+      conversationOrdinal: 0,
+    });
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => logger,
+      sessionPersistenceService,
+      sessionContextManager: contextManager,
+      buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: securityCleanup,
+    });
+
+    const prepared = service.prepareSession({
+      traceId: 'trace-private',
+      query: canary,
+      requestedSessionId: 'persisted-private',
+      analysisContextFingerprint: 'matching-private-fingerprint',
+      options: {
+        outputLanguage: 'en',
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['codebase-private'],
+        knowledgeSourceIds: ['wiki-private'],
+      },
+    });
+
+    const newOrchestrator = mockCreateAgentOrchestrator.mock.results[0]?.value as any;
+    expect(prepared.isNewSession).toBe(true);
+    expect(prepared.sessionId).not.toBe('persisted-private');
+    expect(sessionPersistenceService.loadSessionContext).not.toHaveBeenCalled();
+    expect(contextManager.set).not.toHaveBeenCalled();
+    expect(contextManager.remove).toHaveBeenCalledWith('persisted-private');
+    expect(securityCleanup).toHaveBeenCalledWith('persisted-private');
+    expect(sessionPersistenceService.clearPrivateSessionContextSnapshots)
+      .toHaveBeenCalledWith('persisted-private');
+    expect(newOrchestrator.restoreFromSnapshot).not.toHaveBeenCalled();
+    expect(JSON.stringify({
+      metadata: (logger.setMetadata as jest.Mock).mock.calls,
+      info: (logger.info as jest.Mock).mock.calls,
+    })).not.toContain(canary);
+  });
+
+  test('clears session security state exactly once when analysis context changes', () => {
+    const securityCleanup = jest.fn();
+    const contextManager = {set: jest.fn(), remove: jest.fn()};
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => createLogger(),
+      sessionPersistenceService,
+      sessionContextManager: contextManager,
+      buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: securityCleanup,
+    });
+    const existing = createSession('agent-session-1', 'trace-1');
+    existing.analysisContextFingerprint = 'analysis-context-before';
+    existing.orchestrator = {cleanupSession: jest.fn()} as any;
+    assistantAppService.setSession(existing.sessionId, existing);
+
+    const prepared = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'use a different source context',
+      requestedSessionId: existing.sessionId,
+      analysisContextFingerprint: 'analysis-context-after',
+      options: {},
+    });
+
+    expect(securityCleanup).toHaveBeenCalledTimes(1);
+    expect(securityCleanup).toHaveBeenCalledWith(existing.sessionId);
+    expect(contextManager.remove).toHaveBeenCalledTimes(1);
+    expect(contextManager.remove).toHaveBeenCalledWith(existing.sessionId);
+    expect(existing.orchestrator.cleanupSession).toHaveBeenCalledTimes(1);
+    expect(prepared.isNewSession).toBe(true);
+    expect(prepared.sessionId).not.toBe(existing.sessionId);
   });
 
   test('inherits reference trace identity when continuing an in-memory comparison session', () => {
@@ -319,7 +464,17 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     );
   });
 
-  test('refreshes an in-memory SDK session when the pinned provider snapshot changed', () => {
+  test('starts a clean security partition when the pinned provider snapshot changed', () => {
+    const securityCleanup = jest.fn();
+    const contextManager = {set: jest.fn(), remove: jest.fn()};
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => createLogger(),
+      sessionPersistenceService,
+      sessionContextManager: contextManager,
+      buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: securityCleanup,
+    });
     const provider = getProviderService().create({
       name: 'OpenAI Provider',
       category: 'official',
@@ -365,17 +520,20 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     });
 
     expect(nextHash).not.toBe(originalHash);
-    expect(prepared.isNewSession).toBe(false);
-    expect(prepared.sessionId).toBe(existing.sessionId);
+    expect(prepared.isNewSession).toBe(true);
+    expect(prepared.sessionId).not.toBe(existing.sessionId);
     expect(prepared.session.orchestrator).not.toBe(oldOrchestrator);
     expect(prepared.session.providerId).toBe(provider.id);
     expect(prepared.session.providerSnapshotHash).toBe(nextHash);
-    expect(prepared.session.providerSnapshotChanged).toBe(true);
-    expect(prepared.session.conversationSteps).toHaveLength(1);
+    expect(prepared.session.providerSnapshotChanged).toBe(false);
+    expect(prepared.session.conversationSteps).toHaveLength(0);
+    expect(assistantAppService.getSession(existing.sessionId)).toBeUndefined();
+    expect(securityCleanup).toHaveBeenCalledWith(existing.sessionId);
+    expect(contextManager.remove).toHaveBeenCalledWith(existing.sessionId);
     expect(oldOrchestrator.cleanupSession).toHaveBeenCalledWith(existing.sessionId);
   });
 
-  test('appends continuity breaks for consecutive in-memory provider snapshot mismatches', () => {
+  test('creates independent clean sessions for consecutive provider snapshot changes', () => {
     const provider = getProviderService().create({
       name: 'OpenAI Provider',
       category: 'official',
@@ -416,29 +574,34 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     const second = service.prepareSession({
       traceId: 'trace-1',
       query: 'second follow-up',
-      requestedSessionId: existing.sessionId,
+      requestedSessionId: first.sessionId,
       options: {},
     });
 
     expect(firstHash).not.toBe(originalHash);
-    expect(firstBreaks).toHaveLength(1);
-    expect(firstBreaks[0]).toEqual(expect.objectContaining({
-      previousProviderHash: originalHash,
-      reason: 'provider_snapshot_hash_mismatch',
-      at: expect.any(Number),
-    }));
-    expect(second.session.continuityBreaks).toHaveLength(2);
-    expect(second.session.continuityBreaks?.[1]).toEqual(expect.objectContaining({
-      previousProviderHash: firstHash,
-      reason: 'provider_snapshot_hash_mismatch',
-      at: expect.any(Number),
-    }));
+    expect(first.isNewSession).toBe(true);
+    expect(first.sessionId).not.toBe(existing.sessionId);
+    expect(firstBreaks).toHaveLength(0);
+    expect(second.isNewSession).toBe(true);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(second.session.providerSnapshotHash).not.toBe(firstHash);
+    expect(second.session.continuityBreaks).toBeUndefined();
+    expect(second.session.conversationSteps).toEqual([]);
     expect(second.session.query).toBe('second follow-up');
-    expect(second.session.agentQuery).toContain('provider SDK conversation context was reset');
-    expect(second.session.agentQuery).toContain('second follow-up');
+    expect(second.session.agentQuery).toBe('second follow-up');
   });
 
   test('reuses an in-memory session with its pinned provider when active provider changed elsewhere', () => {
+    const oldProvider = getProviderService().create({
+      name: 'Pinned OpenAI Provider',
+      category: 'official',
+      type: 'openai',
+      models: {primary: 'gpt-pinned-model', light: 'gpt-pinned-light'},
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-pinned-openai',
+      },
+    });
     const provider = getProviderService().create({
       name: 'OpenAI Provider',
       category: 'official',
@@ -452,7 +615,9 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     getProviderService().activate(provider.id);
 
     const existing = createSession('agent-session-1', 'trace-1');
-    existing.providerId = 'old-provider';
+    existing.providerId = oldProvider.id;
+    existing.providerSnapshotHash = providerSnapshotHash(oldProvider.id);
+    existing.runtimeKind = 'openai-agents-sdk';
     assistantAppService.setSession(existing.sessionId, existing);
 
     const prepared = service.prepareSession({
@@ -464,7 +629,50 @@ describe('AgentAnalyzeSessionService session continuity', () => {
 
     expect(prepared.isNewSession).toBe(false);
     expect(prepared.sessionId).toBe(existing.sessionId);
-    expect(prepared.session.providerId).toBe('old-provider');
+    expect(prepared.session.providerId).toBe(oldProvider.id);
+  });
+
+  test('retires a live session whose pinned provider was deleted', () => {
+    const removedProvider = getProviderService().create({
+      name: 'Removed Provider',
+      category: 'official',
+      type: 'openai',
+      models: {primary: 'gpt-removed', light: 'gpt-removed-light'},
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-removed-openai',
+      },
+    });
+    const replacementProvider = getProviderService().create({
+      name: 'Replacement Provider',
+      category: 'official',
+      type: 'openai',
+      models: {primary: 'gpt-replacement', light: 'gpt-replacement-light'},
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-replacement-openai',
+      },
+    });
+    getProviderService().activate(replacementProvider.id);
+    const existing = createSession('agent-session-removed-provider', 'trace-1');
+    existing.orchestrator = {cleanupSession: jest.fn()} as any;
+    existing.providerId = removedProvider.id;
+    existing.providerSnapshotHash = providerSnapshotHash(removedProvider.id);
+    existing.runtimeKind = 'openai-agents-sdk';
+    assistantAppService.setSession(existing.sessionId, existing);
+    getProviderService().delete(removedProvider.id);
+
+    const prepared = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'continue after provider deletion',
+      requestedSessionId: existing.sessionId,
+      options: {},
+    });
+
+    expect(prepared.isNewSession).toBe(true);
+    expect(prepared.sessionId).not.toBe(existing.sessionId);
+    expect(prepared.session.providerId).toBe(replacementProvider.id);
+    expect(existing.orchestrator.cleanupSession).toHaveBeenCalledWith(existing.sessionId);
   });
 
   test('keeps live sessions pinned when workspace default provider changes', () => {
@@ -533,7 +741,60 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(newSession.session.providerId).toBe(workspaceProviderB.id);
   });
 
+  test('inherits an existing session language when a continuation omits it', () => {
+    const previousDefault = process.env.SMARTPERFETTO_OUTPUT_LANGUAGE;
+    process.env.SMARTPERFETTO_OUTPUT_LANGUAGE = 'zh-CN';
+    try {
+      const first = service.prepareSession({
+        traceId: 'trace-language',
+        query: 'first turn',
+        options: {outputLanguage: 'en'},
+      });
+      const followUp = service.prepareSession({
+        traceId: 'trace-language',
+        query: 'follow up',
+        requestedSessionId: first.sessionId,
+        options: {},
+      });
+
+      expect(first.session.outputLanguage).toBe('en');
+      expect(followUp.isNewSession).toBe(false);
+      expect(followUp.sessionId).toBe(first.sessionId);
+      expect(followUp.session.outputLanguage).toBe('en');
+    } finally {
+      restoreEnvValue('SMARTPERFETTO_OUTPUT_LANGUAGE', previousDefault);
+    }
+  });
+
+  test('starts a fresh runtime conversation when language changes explicitly', () => {
+    const first = service.prepareSession({
+      traceId: 'trace-language-change',
+      query: 'first turn',
+      options: {outputLanguage: 'en'},
+    });
+    const replacement = service.prepareSession({
+      traceId: 'trace-language-change',
+      query: '切换语言',
+      requestedSessionId: first.sessionId,
+      options: {outputLanguage: 'zh-CN'},
+    });
+
+    expect(replacement.isNewSession).toBe(true);
+    expect(replacement.sessionId).not.toBe(first.sessionId);
+    expect(replacement.session.outputLanguage).toBe('zh-CN');
+  });
+
   test('starts a new session when an explicit provider override differs from the live session', () => {
+    const securityCleanup = jest.fn();
+    const contextManager = {set: jest.fn(), remove: jest.fn()};
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => createLogger(),
+      sessionPersistenceService,
+      sessionContextManager: contextManager,
+      buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: securityCleanup,
+    });
     const provider = getProviderService().create({
       name: 'OpenAI Provider',
       category: 'official',
@@ -547,6 +808,12 @@ describe('AgentAnalyzeSessionService session continuity', () => {
 
     const existing = createSession('agent-session-1', 'trace-1');
     existing.providerId = null;
+    existing.orchestratorUpdateHandler = jest.fn();
+    existing.orchestrator = {
+      off: jest.fn(),
+      abortSession: jest.fn(),
+      cleanupSession: jest.fn(),
+    } as any;
     assistantAppService.setSession(existing.sessionId, existing);
 
     const prepared = service.prepareSession({
@@ -560,6 +827,96 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     expect(prepared.isNewSession).toBe(true);
     expect(prepared.sessionId).not.toBe(existing.sessionId);
     expect(prepared.session.providerId).toBe(provider.id);
+    expect(assistantAppService.getSession(existing.sessionId)).toBeUndefined();
+    expect(securityCleanup).toHaveBeenCalledWith(existing.sessionId);
+    expect(contextManager.remove).toHaveBeenCalledWith(existing.sessionId);
+    expect(existing.orchestrator.off).toHaveBeenCalledWith(
+      'update',
+      expect.any(Function),
+    );
+    expect(existing.orchestrator.abortSession).toHaveBeenCalledWith(existing.sessionId, undefined);
+    expect(existing.orchestrator.cleanupSession).toHaveBeenCalledWith(existing.sessionId);
+  });
+
+  test('does not restore stale context when a persisted provider override changes', () => {
+    const securityCleanup = jest.fn();
+    const contextManager = {set: jest.fn(), remove: jest.fn()};
+    service = new AgentAnalyzeSessionService<AnalyzeManagedSession>({
+      assistantAppService,
+      createSessionLogger: () => createLogger(),
+      sessionPersistenceService,
+      sessionContextManager: contextManager,
+      buildRecoveredResultFromContext: () => null,
+      onSessionSecurityCleanup: securityCleanup,
+    });
+    const providerA = getProviderService().create({
+      name: 'Provider A',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-a', light: 'gpt-a-light' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-provider-a',
+      },
+    });
+    const providerB = getProviderService().create({
+      name: 'Provider B',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-b', light: 'gpt-b-light' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-provider-b',
+      },
+    });
+    sessionPersistenceService.getSession.mockReturnValue({
+      id: 'persisted-1',
+      traceId: 'trace-1',
+      question: 'q',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      metadata: {},
+      messages: [],
+    });
+    sessionPersistenceService.loadSessionContext.mockReturnValue(createRestoredContext());
+    sessionPersistenceService.loadSessionStateSnapshot.mockReturnValue({
+      version: 1,
+      snapshotTimestamp: Date.now(),
+      sessionId: 'persisted-1',
+      traceId: 'trace-1',
+      conversationSteps: [],
+      queryHistory: [],
+      conclusionHistory: [],
+      agentDialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      engineState: {
+        kind: 'openai-agents-sdk',
+        provider: {providerId: providerA.id},
+        openai: {},
+      },
+      runSequence: 0,
+      conversationOrdinal: 0,
+    });
+
+    const prepared = service.prepareSession({
+      traceId: 'trace-1',
+      query: 'follow-up with another provider',
+      requestedSessionId: 'persisted-1',
+      providerId: providerB.id,
+      options: {},
+    });
+
+    expect(prepared.isNewSession).toBe(true);
+    expect(prepared.sessionId).not.toBe('persisted-1');
+    expect(prepared.session.providerId).toBe(providerB.id);
+    expect(contextManager.set).not.toHaveBeenCalledWith(
+      'persisted-1',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(contextManager.remove).toHaveBeenCalledWith('persisted-1');
+    expect(securityCleanup).toHaveBeenCalledWith('persisted-1');
   });
 
   test('throws PROVIDER_NOT_FOUND when a persisted snapshot provider was deleted', () => {
@@ -629,7 +986,10 @@ describe('AgentAnalyzeSessionService session continuity', () => {
     });
     const originalHash = providerSnapshotHash(provider.id);
     getProviderService().update(provider.id, {
-      connection: { openaiBaseUrl: 'https://api.changed.example.test/v1' },
+      connection: {
+        openaiBaseUrl: 'https://api.changed.example.test/v1',
+        openaiApiKey: 'sk-provider-openai',
+      },
     });
     const nextHash = providerSnapshotHash(provider.id);
 

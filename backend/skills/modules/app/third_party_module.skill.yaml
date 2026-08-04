@@ -106,7 +106,6 @@ dialogue:
 
 prerequisites:
   modules:
-    - sched
     - android.slices
 
 inputs:

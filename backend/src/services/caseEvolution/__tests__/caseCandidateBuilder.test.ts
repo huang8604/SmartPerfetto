@@ -117,7 +117,7 @@ describe('buildCaseCandidatesFromRun', () => {
     const candidates = buildCaseCandidatesFromRun(input());
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
-      schemaVersion: 'case_candidate@1',
+      schemaVersion: 'case_candidate@2',
       provenance: {
         sourceSessionId: 'session-1',
         sourceAnalysisRunId: 'run-1',
@@ -126,6 +126,7 @@ describe('buildCaseCandidatesFromRun', () => {
         engine: 'claude',
         sceneType: 'scrolling',
         architectureType: 'unknown',
+        originScope: {tenantId: 'default-dev-tenant', workspaceId: 'default-workspace'},
       },
       cluster: {
         rootCause: 'shader_compile',
@@ -147,7 +148,9 @@ describe('buildCaseCandidatesFromRun', () => {
     });
     expect(candidates[0].candidateId).toMatch(/^casecand-/);
     expect(candidates[0].candidateId).toContain('run-1');
-    expect(caseCandidateDedupeKey(candidates[0])).toBe('trace-hash::scrolling::shader_compile');
+    expect(caseCandidateDedupeKey(candidates[0])).toBe(
+      'default-dev-tenant::default-workspace::trace-hash::scrolling::shader_compile',
+    );
   });
 
   it('fails closed when confidence, verifier, rounds, trace hash, or existing published keys disqualify the run', () => {
@@ -157,7 +160,25 @@ describe('buildCaseCandidatesFromRun', () => {
     expect(buildCaseCandidatesFromRun(input({claimVerificationResult: verification({issues: [{claimId: 'c1', severity: 'error', code: 'unsupported', message: 'bad'}]})}))).toEqual([]);
     expect(buildCaseCandidatesFromRun(input({result: result({rounds: 1})}))).toEqual([]);
     expect(buildCaseCandidatesFromRun(input({provenance: {...input().provenance, traceContentHash: null}}))).toEqual([]);
-    expect(buildCaseCandidatesFromRun(input(), {existingPublishedCaseKeys: new Set(['trace-hash::scrolling::shader_compile'])})).toEqual([]);
+    expect(buildCaseCandidatesFromRun(input(), {existingPublishedCaseKeys: new Set([
+      'default-dev-tenant::default-workspace::trace-hash::scrolling::shader_compile',
+    ])})).toEqual([]);
+  });
+
+  it('isolates candidate ids and dedupe keys for identical traces across tenants', () => {
+    const tenantA = buildCaseCandidatesFromRun(input({
+      knowledgeScope: {tenantId: 'tenant-a', workspaceId: 'workspace'},
+    }))[0];
+    const tenantB = buildCaseCandidatesFromRun(input({
+      knowledgeScope: {tenantId: 'tenant-b', workspaceId: 'workspace'},
+    }))[0];
+
+    expect(tenantA.candidateId).not.toBe(tenantB.candidateId);
+    expect(caseCandidateDedupeKey(tenantA)).not.toBe(caseCandidateDedupeKey(tenantB));
+    expect(tenantA.provenance.originScope).toEqual({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace',
+    });
   });
 
   // MAJOR-4 regression: the scene+rootCause dedupe set (populated from the

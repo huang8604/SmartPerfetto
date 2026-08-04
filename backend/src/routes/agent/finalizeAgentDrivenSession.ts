@@ -17,6 +17,11 @@ interface FinalizeSessionLike {
   runSequence?: number;
   activeRun?: { runId?: string; requestId?: string; sequence?: number };
   lastRun?: { runId?: string; requestId?: string; sequence?: number };
+  completedAnalysisFinalArtifacts?: unknown;
+  completedAnalysisSseEvents?: unknown;
+  completedAnalysisSseEventsQualityGateVersion?: unknown;
+  completedAnalysisFinalArtifactsByRunId?: Record<string, unknown>;
+  completedAnalysisSseEventsByRunId?: Record<string, unknown>;
   status: SessionStatus;
   sseClients: any[];
   logger: {
@@ -57,6 +62,13 @@ export interface FinalizeAgentDrivenSessionDeps<TSession extends FinalizeSession
   sendAgentDrivenResult(client: any, session: TSession, runId?: string): void;
 }
 
+function getCompletedResultRunId<TSession extends FinalizeSessionLike>(
+  session: TSession,
+  runId?: string,
+): string | undefined {
+  return runId ?? session.activeRun?.runId ?? session.lastRun?.runId;
+}
+
 export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>(input: {
   sessionId: string;
   query: string;
@@ -68,6 +80,7 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
 }, deps: FinalizeAgentDrivenSessionDeps<TSession>): void {
   const { sessionId, query, traceId, session, result, runId } = input;
   const { logger } = session;
+  const completedRunId = getCompletedResultRunId(session, runId);
   if (!deps.isRunCurrent(session, runId)) {
     logger.warn(input.logComponent, 'Skipping stale finalization', {
       sessionId,
@@ -77,13 +90,33 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
   }
 
   session.result = result;
-  if (runId) {
-    delete (session as any).completedAnalysisFinalArtifactsByRunId?.[runId];
-    delete (session as any).completedAnalysisSseEventsByRunId?.[runId];
-  } else {
-    delete (session as any).completedAnalysisFinalArtifacts;
-    delete (session as any).completedAnalysisSseEvents;
-    delete (session as any).completedAnalysisSseEventsQualityGateVersion;
+  if (completedRunId) {
+    delete session.completedAnalysisFinalArtifactsByRunId?.[completedRunId];
+    delete session.completedAnalysisSseEventsByRunId?.[completedRunId];
+  }
+  delete session.completedAnalysisFinalArtifacts;
+  delete session.completedAnalysisSseEvents;
+  delete session.completedAnalysisSseEventsQualityGateVersion;
+
+  const finalQualityIssue = deps.applyFinalResultQualityGate({ result, query });
+  if (finalQualityIssue) {
+    const update: StreamingUpdate = {
+      type: 'degraded',
+      content: {
+        module: 'agentRoutes',
+        fallback: 'final_result_quality_gate',
+        code: finalQualityIssue.code,
+        partial: true,
+        message: result.terminationMessage || finalQualityIssue.message,
+      },
+      timestamp: Date.now(),
+    };
+    deps.broadcast(sessionId, update, runId);
+    const conversationStep = deps.buildConversationStepUpdate(session, update, runId);
+    if (conversationStep) {
+      deps.appendConversationStep(session, conversationStep);
+      deps.broadcast(sessionId, conversationStep, runId);
+    }
   }
 
   const existingIds = new Set(session.hypotheses.map(h => h.id));
@@ -108,27 +141,6 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     });
   }
 
-  const finalQualityIssue = deps.applyFinalResultQualityGate({ result, query });
-  if (finalQualityIssue) {
-    const update: StreamingUpdate = {
-      type: 'degraded',
-      content: {
-        module: 'agentRoutes',
-        fallback: 'final_result_quality_gate',
-        code: finalQualityIssue.code,
-        partial: true,
-        message: result.terminationMessage || finalQualityIssue.message,
-      },
-      timestamp: Date.now(),
-    };
-    deps.broadcast(sessionId, update, runId);
-    const conversationStep = deps.buildConversationStepUpdate(session, update, runId);
-    if (conversationStep) {
-      deps.appendConversationStep(session, conversationStep);
-      deps.broadcast(sessionId, conversationStep, runId);
-    }
-  }
-
   deps.annotateLatestCompletedTurn(sessionId, traceId, result);
 
   const terminalRunStatus = deps.terminalRunStatusForResult(result);
@@ -146,7 +158,7 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     claimVerifierStatus: result.claimVerificationResult?.status,
     partial: result.partial,
     terminationReason: result.terminationReason,
-    runId: runId || session.activeRun?.runId || session.lastRun?.runId,
+    runId: completedRunId,
     requestId: session.activeRun?.requestId || session.lastRun?.requestId,
     runSequence: session.activeRun?.sequence || session.lastRun?.sequence,
   });
@@ -166,7 +178,7 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     logComponent: input.logComponent,
   });
 
-  deps.ensureCompletedAnalysisSseEvents(session, runId);
+  deps.ensureCompletedAnalysisSseEvents(session, completedRunId);
   const clientCount = session.sseClients.length;
   session.sseClients.forEach((client, index) => {
     try {

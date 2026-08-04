@@ -1033,6 +1033,10 @@ export class EnhancedSessionContext {
     });
   }
 
+  generateRecentSqlResultPromptContext(maxEntries: number = 5): string {
+    return this.generateRecentSqlResultContext(maxEntries);
+  }
+
   // ==========================================================================
   // Semantic Working Memory (v2.0)
   // ==========================================================================

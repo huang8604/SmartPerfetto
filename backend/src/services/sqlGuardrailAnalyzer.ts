@@ -7,6 +7,7 @@ export type SqlGuardrailRuleId =
   | 'safe-duration-boundary'
   | 'overlap-range-filter'
   | 'span-join-safety'
+  | 'span-join-non-overlap'
   | 'idempotent-create'
   | 'safe-arg-extraction';
 
@@ -54,6 +55,11 @@ export const SQL_GUARDRAIL_RULES: readonly SqlGuardrailRule[] = [
     defaultForValidate: true,
   },
   {
+    id: 'span-join-non-overlap',
+    title: 'Require reviewed non-overlapping inputs for SPAN_JOIN',
+    defaultForValidate: true,
+  },
+  {
     id: 'idempotent-create',
     title: 'Prefer idempotent CREATE statements in reusable SQL',
     defaultForValidate: true,
@@ -69,6 +75,7 @@ export const DEFAULT_VALIDATE_SQL_GUARDRAIL_RULES: readonly SqlGuardrailRuleId[]
   SQL_GUARDRAIL_RULES.filter(rule => rule.defaultForValidate).map(rule => rule.id);
 
 const IGNORE_TOKEN = 'smartperfetto-guardrail-ignore';
+const SPAN_JOIN_PROOF_TOKEN = 'perfetto-span-join-non-overlap-proof';
 const RULE_IDS = new Set<SqlGuardrailRuleId>(SQL_GUARDRAIL_RULES.map(rule => rule.id));
 
 /**
@@ -149,6 +156,20 @@ function lineSnippetAt(sql: string, index: number): string {
   const end = sql.indexOf('\n', start);
   const raw = sql.slice(start, end === -1 ? sql.length : end).trim();
   return raw.length > 160 ? `${raw.slice(0, 157)}...` : raw;
+}
+
+function hasAdjacentSpanJoinNonOverlapProof(sql: string, createIndex: number): boolean {
+  const createLineStart = findLineStart(sql, createIndex);
+  if (createLineStart === 0) return false;
+
+  const previousLineEnd = createLineStart - 1;
+  const previousLineStart = findLineStart(sql, previousLineEnd);
+  const previousLine = sql.slice(previousLineStart, previousLineEnd).trim();
+  const proof = new RegExp(
+    `^--\\s*${escapeRegex(SPAN_JOIN_PROOF_TOKEN)}\\s*:\\s*(\\S(?:.*\\S)?)\\s*$`,
+    'i',
+  ).exec(previousLine);
+  return proof !== null;
 }
 
 function makeIssue(
@@ -402,7 +423,14 @@ export function analyzeSqlGuardrails(
     );
   }
 
-  if (matchesRule('span-join-safety', includeRules) && /\bSPAN(?:_LEFT)?_JOIN\b/i.test(maskedSql)) {
+  const hasSpanJoin = /\bSPAN(?:_LEFT)?_JOIN\b/i.test(maskedSql);
+  if (
+    hasSpanJoin
+    && (
+      matchesRule('span-join-safety', includeRules)
+      || matchesRule('span-join-non-overlap', includeRules)
+    )
+  ) {
     const createSpanJoinRegex = /\bCREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w.]*)\s+USING\s+SPAN(?:_LEFT)?_JOIN\b[\s\S]*?(?:;|$)/gi;
     const createMatches = [...maskedSql.matchAll(createSpanJoinRegex)];
     if (createMatches.length > 0) {
@@ -413,7 +441,10 @@ export function analyzeSqlGuardrails(
         const joinIndexInStatement = statement.search(/\bSPAN(?:_LEFT)?_JOIN\b/i);
         const issueIndex = joinIndexInStatement === -1 ? createIndex : createIndex + joinIndexInStatement;
 
-        if (!/\bPARTITIONED\b/i.test(statement)) {
+        if (
+          matchesRule('span-join-safety', includeRules)
+          && !/\bPARTITIONED\b/i.test(statement)
+        ) {
           issues.push(makeIssue(
             sql,
             issueIndex,
@@ -422,7 +453,26 @@ export function analyzeSqlGuardrails(
           ));
         }
 
-        if (!hasPrecedingDropIfExists(maskedSql, createIndex, 'TABLE', tableName)) {
+        const partitionKeys = [
+          ...statement.matchAll(/\bPARTITIONED\s+([A-Za-z_][A-Za-z0-9_]*)/gi),
+        ].map(partition => partition[1].toLowerCase());
+        if (
+          matchesRule('span-join-safety', includeRules)
+          && partitionKeys.length > 1
+          && new Set(partitionKeys).size > 1
+        ) {
+          issues.push(makeIssue(
+            sql,
+            issueIndex,
+            'span-join-safety',
+            'When both SPAN_JOIN/SPAN_LEFT_JOIN inputs are PARTITIONED, they must use the same partition key; use a single shared identity column or leave a truly global interval input unpartitioned.',
+          ));
+        }
+
+        if (
+          matchesRule('span-join-safety', includeRules)
+          && !hasPrecedingDropIfExists(maskedSql, createIndex, 'TABLE', tableName)
+        ) {
           issues.push(makeIssue(
             sql,
             createIndex,
@@ -430,15 +480,37 @@ export function analyzeSqlGuardrails(
             'CREATE VIRTUAL TABLE ... USING SPAN_JOIN/SPAN_LEFT_JOIN should be preceded by DROP TABLE IF EXISTS when the SQL may run repeatedly in one trace session.',
           ));
         }
+
+        if (
+          matchesRule('span-join-non-overlap', includeRules)
+          && !hasAdjacentSpanJoinNonOverlapProof(sql, createIndex)
+        ) {
+          issues.push(makeIssue(
+            sql,
+            issueIndex,
+            'span-join-non-overlap',
+            'PARTITIONED scopes entity matching but does not make overlapping intervals within an input partition safe. Prove both inputs are non-overlapping with a fixture/assertion or witness query, then add an adjacent "perfetto-span-join-non-overlap-proof: <reference>" comment; otherwise merge intervals or use a suitable stdlib interval operator.',
+          ));
+        }
       }
     } else {
       const firstSpanJoin = maskedSql.search(/\bSPAN(?:_LEFT)?_JOIN\b/i);
-      issues.push(makeIssue(
-        sql,
-        firstSpanJoin,
-        'span-join-safety',
-        'Review SPAN_JOIN/SPAN_LEFT_JOIN usage for PARTITIONED keys and idempotent setup.',
-      ));
+      if (matchesRule('span-join-safety', includeRules)) {
+        issues.push(makeIssue(
+          sql,
+          firstSpanJoin,
+          'span-join-safety',
+          'Review SPAN_JOIN/SPAN_LEFT_JOIN usage for PARTITIONED keys and idempotent setup.',
+        ));
+      }
+      if (matchesRule('span-join-non-overlap', includeRules)) {
+        issues.push(makeIssue(
+          sql,
+          firstSpanJoin,
+          'span-join-non-overlap',
+          'Review SPAN_JOIN/SPAN_LEFT_JOIN inputs for overlapping intervals within each effective partition; PARTITIONED alone does not prove the required invariant.',
+        ));
+      }
     }
   }
 

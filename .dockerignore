@@ -32,7 +32,7 @@ backend/logs/
 *.log
 
 # Test data & outputs
-test-traces/
+Trace/
 backend/test-output/
 coverage/
 

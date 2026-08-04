@@ -8,9 +8,27 @@ COPY backend/package*.json ./
 RUN npm ci
 COPY scripts/trace-processor-pin.env /app/scripts/trace-processor-pin.env
 COPY scripts/perfetto-recording-tools-pin.env /app/scripts/perfetto-recording-tools-pin.env
+COPY docs/rendering_pipelines /app/docs/rendering_pipelines
 COPY backend/ ./
 COPY backend/data/perfettoSqlIndex.light.json backend/data/perfettoSqlIndex.json backend/data/perfettoStdlibSymbols.json ./data/
-RUN npm run build
+RUN npm run knowledge-pack:fetch && npm run build
+
+# Pin the runtime OpenCode executable independently of the builder CPU. The
+# upstream postinstall selects AVX2 from /proc/cpuinfo; copying that selection
+# into an amd64 image would make the image fail on baseline x86_64 hosts.
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64) OPENCODE_SOURCE="node_modules/opencode-linux-x64-baseline/bin/opencode" ;; \
+      aarch64) OPENCODE_SOURCE="node_modules/opencode-linux-arm64/bin/opencode" ;; \
+      *) echo "Unsupported OpenCode architecture: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    OPENCODE_DEST="node_modules/opencode-ai/bin/opencode.exe"; \
+    test -s "$OPENCODE_SOURCE"; \
+    rm -f "$OPENCODE_DEST"; \
+    ln "$OPENCODE_SOURCE" "$OPENCODE_DEST"; \
+    chmod +x "$OPENCODE_DEST"; \
+    "$OPENCODE_DEST" --version
 
 # Remove devDependencies to drastically reduce the final image size
 RUN npm prune --production
@@ -75,8 +93,13 @@ RUN node scripts/check-frontend-prebuild.cjs
 # ============================
 FROM node:24-bookworm-slim
 
+ARG SMARTPERFETTO_BUILD_COMMIT=unknown
+ARG SMARTPERFETTO_UPDATE_CHANNEL=stable
+ARG TARGETARCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -99,6 +122,8 @@ COPY --from=flamegraph-analyzer-builder /app/rust/flamegraph-analyzer/target/rel
 # Copy backend runtime files (skills, strategies, SQL packages, templates)
 COPY backend/skills ./backend/skills
 COPY backend/strategies ./backend/strategies
+COPY backend/knowledge ./backend/knowledge
+COPY backend/public ./backend/public
 # SmartPerfetto PerfettoSQL package (Spark Plan 03). Loader resolves from
 # `dist/services/../../sql/smartperfetto`, which lands on this path.
 COPY backend/sql ./backend/sql
@@ -108,7 +133,7 @@ COPY backend/sql ./backend/sql
 COPY --from=frontend-prebuild-check /app/frontend ./perfetto/out/ui/ui
 
 # Create required directories and fix ownership for non-root user
-RUN mkdir -p backend/uploads backend/logs/sessions backend/data backend/provider-data && \
+RUN mkdir -p backend/uploads backend/logs/sessions backend/data backend/provider-data backend/runtime-data && \
     chown -R node:node /app
 
 # Environment defaults
@@ -117,12 +142,21 @@ ENV SMARTPERFETTO_FRONTEND_PORT=10000
 ENV NODE_ENV=production
 ENV FRONTEND_URL=http://localhost:10000
 ENV PROVIDER_DATA_DIR_OVERRIDE=/app/backend/provider-data
+ENV SMARTPERFETTO_BACKEND_DATA_DIR=/app/backend/runtime-data
+ENV SMARTPERFETTO_PACKAGE_ROOT=/app
+ENV SMARTPERFETTO_LOCK_RUNTIME_IDENTITY=1
+ENV SMARTPERFETTO_DISTRIBUTION=docker
+ENV SMARTPERFETTO_UPDATE_CHANNEL=${SMARTPERFETTO_UPDATE_CHANNEL}
+ENV SMARTPERFETTO_BUILD_COMMIT=${SMARTPERFETTO_BUILD_COMMIT}
+ENV SMARTPERFETTO_PACKAGE_TARGET=linux-${TARGETARCH}
+ENV SMARTPERFETTO_SIGNING_MODE=container
 
 EXPOSE 3000 10000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f "http://localhost:${SMARTPERFETTO_BACKEND_PORT:-${PORT:-3000}}/health" || exit 1
+    CMD curl -fsS "http://127.0.0.1:${SMARTPERFETTO_BACKEND_PORT:-${PORT:-3000}}/health" >/dev/null && \
+        curl -fsS "http://127.0.0.1:${SMARTPERFETTO_FRONTEND_PORT:-10000}/health" >/dev/null || exit 1
 
 # Start both services
 COPY scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
@@ -130,4 +164,4 @@ RUN chmod +x /app/docker-entrypoint.sh && chown node:node /app/docker-entrypoint
 
 USER node
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker-entrypoint.sh"]

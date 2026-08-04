@@ -95,6 +95,71 @@ Click actions should be explicit, for example:
   DataEnvelope output can feed HTML reports, CLI artifacts, evidence contracts,
   analysis-result snapshots, and comparison.
 
+## Public Agent Skill Projection
+
+- `backend/skills/` is the product runtime source of truth.
+- `backend/skills/public-export.yaml` must explicitly classify every runtime
+  candidate and every selected strategy/pipeline source for the public
+  `Gracker/Perfetto-Skills` projection. Do not infer missing entries in normal
+  export or hand-edit generated public references.
+- Keep product-only provider, session, artifact, DataEnvelope, streaming, and
+  frontend semantics in SmartPerfetto. The public projection contains portable
+  workflows, SQL, methodology, pipeline knowledge, and local scripts.
+- After a source or policy change, regenerate in the public checkout, commit the
+  updated source commit/hash provenance, and run `npm run verify:public-skills`.
+- The verification script uses sibling `../Perfetto-Skills` by default; set
+  `PERFETTO_SKILLS_DIR` for another checkout.
+
+### Bidirectional impact review
+
+SmartPerfetto and Perfetto-Skills develop independently, but changes to their
+shared portable-analysis contract need an explicit paired review before commit
+or push. Run:
+
+```bash
+npm run check:perfetto-skills-impact -- \
+  --base "$(git merge-base HEAD origin/main)"
+```
+
+The command includes merge-base-to-HEAD, staged, unstaged, and untracked paths.
+The classifier triggers on Skills, Strategies, Skill engine/packs,
+evidence/claim/identity contracts, Perfetto SQL/schema services,
+rendering-pipeline knowledge, processor pins, export policy, and exporter
+verification. It only identifies candidates; the author must record one of:
+
+- `required`: pass `--paired-path PATH` and an immutable `--paired-ref COMMIT`
+  that exists and exactly equals the paired checkout HEAD, update
+  Perfetto-Skills in its architecture, run its independent complete gate, and
+  record the validated paired evidence;
+- `not_required`: provide a concrete reason the behavior remains product-only;
+- `deferred`: provide both a reason and a durable issue, PR, or commit handoff.
+
+Example:
+
+```bash
+npm run check:perfetto-skills-impact -- \
+  --base "$(git merge-base HEAD origin/main)" \
+  --decision required \
+  --reason "portable query and evidence contract changed" \
+  --paired-path /absolute/path/to/Perfetto-Skills
+```
+
+Record the emitted change fingerprint and paired evidence in the commit or PR
+notes. If a required paired update cannot be validated, use `deferred` with a
+stable shared issue/task URL instead of claiming completion.
+
+A public-project overlay must be reviewed, not copied mechanically into
+SmartPerfetto. Re-express an applicable fix as native YAML/Strategy/runtime
+behavior with SmartPerfetto tests, then regenerate the public projection. A
+paired update never makes either installed product depend on a sibling checkout.
+
+Perfetto-Skills owns its normal real-trace suite and upstream locks. Its
+`docs/maintenance/upstream-sync.md` is the public-side procedure for importing
+SmartPerfetto, gap-checking Google's official Skill, syncing PerfettoSQL stdlib,
+and validating local SQL overlays. SmartPerfetto remains responsible for its
+own real test traces and scene regressions; never replace them with public
+fixture downloads.
+
 ## Validation
 
 After changing Skill YAML:

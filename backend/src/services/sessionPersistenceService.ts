@@ -646,6 +646,8 @@ export class SessionPersistenceService {
         workspaceId?: string;
         userId?: string;
       };
+      /** Remove any previously persisted model-authored context for private source sessions. */
+      clearPrivateContext?: boolean;
     },
   ): boolean {
     try {
@@ -705,6 +707,15 @@ export class SessionPersistenceService {
         metadata.architectureSnapshot = snapshot.architecture;
       }
 
+      if (extras?.clearPrivateContext) {
+        delete metadata.sessionContextSnapshot;
+        delete metadata.entityStoreSnapshot;
+        delete metadata.focusStoreSnapshot;
+        delete metadata.traceAgentStateSnapshot;
+        delete metadata.architectureSnapshot;
+        delete metadata.lineage;
+      }
+
       // Write session context if provided
       if (extras?.sessionContext) {
         metadata.sessionContextSnapshot = extras.sessionContext.serialize();
@@ -729,6 +740,28 @@ export class SessionPersistenceService {
       return true;
     } catch (error) {
       console.error('[SessionPersistence] Failed to save session state snapshot:', error);
+      return false;
+    }
+  }
+
+  clearPrivateSessionContextSnapshots(sessionId: string): boolean {
+    try {
+      const session = this.getSession(sessionId);
+      if (!session) return false;
+      const metadata: SessionMetadata = session.metadata || {};
+      delete metadata.sessionContextSnapshot;
+      delete metadata.entityStoreSnapshot;
+      delete metadata.focusStoreSnapshot;
+      delete metadata.traceAgentStateSnapshot;
+      delete metadata.sessionStateSnapshot;
+      delete metadata.runtimeArraysSnapshot;
+      delete metadata.architectureSnapshot;
+      delete metadata.lineage;
+      this.db.prepare('UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(metadata), Date.now(), sessionId);
+      return true;
+    } catch (error) {
+      console.error('[SessionPersistence] Failed to clear private session context:', error);
       return false;
     }
   }

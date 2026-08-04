@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Public Perfetto-Skills validation fixtures. Trace binaries stay in their source repos.
+schema_version: 1
+fixtures:
+  - id: smart-launch-light-api36
+    source: Trace/real/android-startup-light/trace.pftrace
+    sha256: 6c5479fd1b765ee4d29692c43a8204b972bc0f97eb373aca98ea7e11e99fd8b4
+    license: AGPL-3.0-or-later
+    android: {api: 36, qpr: unknown, oem: Google, build_type: user}
+    kernel: 6.1.129-android14-11-gdc1fbab45e9b-ab13299063
+    capture_config: embedded_in_trace
+    assertions:
+      - {query_id: startup_slow_reasons/startup_overview, kind: non_empty, field: startup_type}
+  - id: smart-launch-heavy-api36
+    source: Trace/real/android-startup-heavy/trace.pftrace
+    sha256: 2a0c7b85e7f4a14e43b7f8d6de21172e05eba1ed3ad8ef7df539bb5e59b6ba63
+    license: AGPL-3.0-or-later
+    android: {api: 36, qpr: unknown, oem: Xiaomi, build_type: user}
+    kernel: 6.12.23-android16-5-gb23e74f69076-abogki452159376-4k
+    capture_config: embedded_in_trace
+    assertions:
+      - {query_id: main_thread_handler_callback_slices/callback_slices, kind: field_positive, field: callback_count, params: {package: com.android.systemui}}
+      - {query_id: main_thread_handler_callback_slices/callback_slices, kind: field_equals, field: first_ts, value: 564165861330471, params: {package: com.android.systemui, start_ts: 564165861330471, end_ts: 564165861430471, min_dur_ns: 1}}
+  - id: smart-aosp-scroll-api35
+    source: Trace/real/android-scroll-standard/trace.pftrace
+    sha256: df7eebc5c6ff19b48331f8f1bca346612d86a5ae26eae202d46842a83f87a653
+    license: AGPL-3.0-or-later
+    android: {api: 35, qpr: unknown, oem: Nubia, build_type: user}
+    kernel: 6.6.56-android15-8-g1b3a8e682e47-ab101-4k
+    capture_config: embedded_in_trace
+    assertions:
+      - {query_id: scrolling_analysis/frame_timeline_check, kind: field_equals, field: has_frame_timeline, value: 1}
+  - id: smart-flutter-texture-api35
+    source: Trace/real/flutter-scroll-texture-view/trace.pftrace
+    sha256: 645deaa9fc564e0ea33072c83f5ecf1d0a6f53a97055cc98c640e8294deb315e
+    license: AGPL-3.0-or-later
+    android: {api: 35, qpr: unknown, oem: Nubia, build_type: user}
+    kernel: 6.6.56-android15-8-g1b3a8e682e47-ab101-4k
+    capture_config: embedded_in_trace
+    assertions:
+      - {query_id: rendering_pipeline_detection/active_rendering_processes, kind: field_positive, field: frame_count, params: {package: com.example.friendscircle.v27.textureview}}
+      - {query_id: rendering_pipeline_detection/bufferqueue_path_signals, kind: field_positive, field: queue_buffer_count, params: {package: com.example.friendscircle.v27.textureview}}
+  - id: smart-flutter-surface-api35
+    source: Trace/real/flutter-scroll-surface-view/trace.pftrace
+    sha256: e876c56b5d7290acda596e73929c1a127df4255e9ca6951605dad40833e67a53
+    license: AGPL-3.0-or-later
+    android: {api: 35, qpr: unknown, oem: Nubia, build_type: user}
+    kernel: 6.6.56-android15-8-g1b3a8e682e47-ab101-4k
+    capture_config: embedded_in_trace
+    assertions: []
+  - id: smart-oppo-scroll-api36
+    source: Trace/real/android-scroll-customer/trace.pftrace
+    sha256: 1015ba963c49cd57d08d8997c4c48027026f2d6e41f7eb72b4b1356e39f7af3a
+    license: AGPL-3.0-or-later
+    android: {api: 36, qpr: unknown, oem: OPPO, build_type: user}
+    kernel: 6.6.89-android15-8-g97a9aaefab9a-ab14519050-4k
+    capture_config: embedded_in_trace
+    assertions: []
+  - id: upstream-startup-api24-cold
+    source: perfetto/test/data/api24_startup_cold.perfetto-trace
+    checksum_source: perfetto/test/data/api24_startup_cold.perfetto-trace.sha256
+    license: Apache-2.0
+    android: {api: 24, qpr: not_applicable, oem: AOSP, build_type: unknown}
+    capture_config: upstream_diff_test
+    assertions:
+      - {query_id: startup_slow_reasons/startup_overview, kind: non_empty, field: startup_id}
+  - id: upstream-startup-api31-cold
+    source: perfetto/test/data/api31_startup_cold.perfetto-trace
+    checksum_source: perfetto/test/data/api31_startup_cold.perfetto-trace.sha256
+    license: Apache-2.0
+    android: {api: 31, qpr: unknown, oem: AOSP, build_type: unknown}
+    capture_config: upstream_diff_test
+    assertions:
+      - {query_id: startup_slow_reasons/startup_overview, kind: field_equals, field: startup_type, value: cold}
+  - id: upstream-startup-api32-warm
+    source: perfetto/test/data/api32_startup_warm.perfetto-trace
+    checksum_source: perfetto/test/data/api32_startup_warm.perfetto-trace.sha256
+    license: Apache-2.0
+    android: {api: 32, qpr: unknown, oem: AOSP, build_type: unknown}
+    capture_config: upstream_diff_test
+    assertions:
+      - {query_id: startup_slow_reasons/startup_overview, kind: field_equals, field: startup_type, value: warm}
+  - id: upstream-startup-api34-cold
+    source: perfetto/test/data/api34_startup_cold.perfetto-trace
+    checksum_source: perfetto/test/data/api34_startup_cold.perfetto-trace.sha256
+    license: Apache-2.0
+    android: {api: 34, qpr: base_or_unknown, oem: AOSP, build_type: unknown}
+    capture_config: upstream_diff_test
+    assertions:
+      - {query_id: startup_slow_reasons/startup_overview, kind: non_empty, field: startup_id}
+  - id: upstream-callstack-sampling
+    source: perfetto/test/data/callstack_sampling.pftrace
+    checksum_source: perfetto/test/data/callstack_sampling.pftrace.sha256
+    license: Apache-2.0
+    android: {api: not_applicable, qpr: not_applicable, oem: not_applicable, build_type: unknown}
+    capture_config: upstream_diff_test
+    assertions:
+      - {query_id: callstack_analysis/check_samples, kind: field_positive, field: total_samples}

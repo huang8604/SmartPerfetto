@@ -24,6 +24,7 @@ export type TraceProcessorHolderType =
   | 'frontend_http_rpc'
   | 'agent_run'
   | 'report_generation'
+  | 'batch_trace_run'
   | 'metric_backfill'
   | 'manual_register';
 
@@ -57,6 +58,18 @@ export interface TraceProcessorLeaseRecord {
   expiresAt: number | null;
   holderCount: number;
   holders: TraceProcessorHolderRecord[];
+}
+
+export interface TraceProcessorLeaseSweepResult {
+  holdersRemoved: number;
+  leasesReleased: number;
+  releasedLeases: Array<{
+    id: string;
+    tenantId: string;
+    workspaceId: string;
+    traceId: string;
+    mode: TraceProcessorLeaseMode;
+  }>;
 }
 
 export interface TraceProcessorHolderRecord {
@@ -187,6 +200,13 @@ export function resolveHolderTtlPolicy(holder: TraceProcessorHolderInput): Trace
     return {
       heartbeatTtlMs: 5 * 60 * 1000,
       idleTtlMs: 30 * 60 * 1000,
+    };
+  }
+
+  if (holder.holderType === 'batch_trace_run') {
+    return {
+      heartbeatTtlMs: 5 * 60 * 1000,
+      idleTtlMs: 24 * 60 * 60 * 1000,
     };
   }
 
@@ -419,7 +439,19 @@ export class TraceProcessorLeaseStore {
       .some(lease => !TERMINAL_STATES.has(lease.state) && lease.holderCount > 0);
   }
 
-  sweepExpired(now = Date.now()): { holdersRemoved: number; leasesReleased: number } {
+  hasActiveHoldersForTrace(traceId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1
+      FROM trace_processor_leases l
+      INNER JOIN trace_processor_holders h ON h.lease_id = l.id
+      WHERE l.trace_id = ?
+        AND l.state NOT IN ('released', 'failed')
+      LIMIT 1
+    `).get(traceId);
+    return row !== undefined;
+  }
+
+  sweepExpired(now = Date.now()): TraceProcessorLeaseSweepResult {
     const holderResult = this.db.prepare(`
       DELETE FROM trace_processor_holders
       WHERE expires_at IS NOT NULL AND expires_at <= ?
@@ -443,8 +475,10 @@ export class TraceProcessorLeaseStore {
       FROM trace_processor_leases l
       LEFT JOIN trace_processor_holders h ON h.lease_id = l.id
       WHERE l.state NOT IN ('released', 'failed')
-        AND l.expires_at IS NOT NULL
-        AND l.expires_at <= ?
+        AND (
+          l.mode = 'isolated'
+          OR (l.expires_at IS NOT NULL AND l.expires_at <= ?)
+        )
       GROUP BY l.id
       HAVING COUNT(h.id) = 0
     `).all(now) as LeaseRow[];
@@ -460,6 +494,13 @@ export class TraceProcessorLeaseStore {
     return {
       holdersRemoved: holderResult.changes,
       leasesReleased: releasableRows.length,
+      releasedLeases: releasableRows.map((lease) => ({
+        id: lease.id,
+        tenantId: lease.tenant_id,
+        workspaceId: lease.workspace_id,
+        traceId: lease.trace_id,
+        mode: lease.mode as TraceProcessorLeaseMode,
+      })),
     };
   }
 

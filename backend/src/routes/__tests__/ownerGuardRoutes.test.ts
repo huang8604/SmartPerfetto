@@ -12,8 +12,13 @@ import request from 'supertest';
 import { authenticate } from '../../middleware/auth';
 import { registerAgentReportRoutes } from '../agentReportRoutes';
 import { registerAgentSessionCatalogRoutes } from '../agentSessionCatalogRoutes';
-import reportRoutes, { reportStore } from '../reportRoutes';
+import reportRoutes, { persistReport, reportStore } from '../reportRoutes';
 import traceRoutes from '../simpleTraceRoutes';
+import {
+  clearCodeAwareOutputGuards,
+  registerCodeAwareCanary,
+  registerPrivateAnalysisQueryForEcho,
+} from '../../services/security/codeAwareOutputRegistry';
 
 const originalApiKey = process.env.SMARTPERFETTO_API_KEY;
 const originalUploadDir = process.env.UPLOAD_DIR;
@@ -105,6 +110,39 @@ afterEach(async () => {
 });
 
 describe('owner guard for trace and report routes', () => {
+  it('paginates trace metadata with an opaque stable cursor and rejects invalid page input', async () => {
+    await Promise.all([
+      writeTraceMetadata('trace-a'),
+      writeTraceMetadata('trace-b'),
+      writeTraceMetadata('trace-c'),
+    ]);
+    const app = makeResourceApp();
+
+    const firstPage = await authHeaders(request(app).get('/api/traces?limit=2'));
+    expect(firstPage.status).toBe(200);
+    expect(firstPage.body.traces).toHaveLength(2);
+    expect(firstPage.body.nextCursor).toEqual(expect.any(String));
+
+    const secondPage = await authHeaders(
+      request(app).get(`/api/traces?limit=2&cursor=${encodeURIComponent(firstPage.body.nextCursor)}`),
+    );
+    expect(secondPage.status).toBe(200);
+    expect(secondPage.body.traces).toHaveLength(1);
+    expect(secondPage.body.nextCursor).toBeUndefined();
+    expect(new Set([
+      ...firstPage.body.traces.map((trace: any) => trace.id),
+      ...secondPage.body.traces.map((trace: any) => trace.id),
+    ])).toEqual(new Set(['trace-a', 'trace-b', 'trace-c']));
+
+    const invalidCursor = await authHeaders(request(app).get('/api/traces?cursor=not-a-cursor'));
+    expect(invalidCursor.status).toBe(400);
+    expect(invalidCursor.body.code).toBe('INVALID_TRACE_LIST_PAGE');
+
+    const invalidLimit = await authHeaders(request(app).get('/api/traces?limit=201'));
+    expect(invalidLimit.status).toBe(400);
+    expect(invalidLimit.body.code).toBe('INVALID_TRACE_LIST_PAGE');
+  });
+
   it('filters trace list and returns 404 for traces owned by another tenant', async () => {
     await writeTraceMetadata('own-trace');
     await writeTraceMetadata('other-trace', {
@@ -142,10 +180,15 @@ describe('owner guard for trace and report routes', () => {
     expect(devRes.body.trace.id).toBe('legacy-trace');
   });
 
-  it('hides global trace cleanup from non-privileged API-key requests', async () => {
+  it('hides global trace cleanup from non-privileged analyst requests', async () => {
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
     const app = makeResourceApp();
 
-    const res = await authHeaders(request(app).post('/api/traces/cleanup'));
+    const res = await ssoHeaders(
+      request(app).post('/api/traces/cleanup'),
+      'analyst-user',
+      'analyst',
+    );
 
     expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
@@ -230,6 +273,42 @@ describe('owner guard for trace and report routes', () => {
     expect(reportStore.has('other-report')).toBe(true);
   });
 
+  it('rejects decoded path separators for report reads and exports', async () => {
+    const escapedId = '../../frontend/index';
+    reportStore.set(escapedId, {
+      html: '<html><body>must not escape</body></html>',
+      generatedAt: Date.now(),
+      sessionId: 'unsafe-session',
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: API_USER_ID,
+    });
+    const app = makeResourceApp();
+
+    const readRes = await authHeaders(
+      request(app).get('/api/reports/..%2f..%2ffrontend%2findex'),
+    );
+    expect(readRes.status).toBe(404);
+    expect(readRes.text).not.toContain('must not escape');
+
+    const exportRes = await authHeaders(
+      request(app).get('/api/reports/..%2f..%2ffrontend%2findex/export'),
+    );
+    expect(exportRes.status).toBe(404);
+    expect(exportRes.text).not.toContain('must not escape');
+  });
+
+  it('rejects unsafe report IDs before caching or persistence', () => {
+    expect(() =>
+      persistReport('../escaped-report', {
+        html: '<html><body>must not persist</body></html>',
+        generatedAt: Date.now(),
+        sessionId: 'unsafe-session',
+      }),
+    ).toThrow('Unsafe report id');
+    expect(reportStore.has('../escaped-report')).toBe(false);
+  });
+
   it('returns 404 for same-workspace reports when caller lacks report read permission', async () => {
     process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
     reportStore.set('report-no-read', {
@@ -279,14 +358,31 @@ describe('owner guard for trace and report routes', () => {
 describe('owner guard for agent session routes', () => {
   function makeAgentApp() {
     const router = express.Router();
-    const recoverResultForSessionIfNeeded = jest.fn(() => ({
-      conclusion: 'done',
-      findings: [],
-      hypotheses: [],
-      confidence: 0.9,
-      totalDurationMs: 123,
-      rounds: 1,
-    }));
+    const recoverResultForSessionIfNeeded = jest.fn((sessionId: string) => sessionId === 'private-session'
+      ? {
+          success: true,
+          conclusion: 'safe conclusion PRIVATE_REPORT_CANARY',
+          findings: [{id: 'finding', title: 'PRIVATE_FINDING_CANARY'}],
+          hypotheses: [{id: 'hypothesis', description: 'PRIVATE_HYPOTHESIS_CANARY'}],
+          confidence: 0.9,
+          totalDurationMs: 123,
+          rounds: 1,
+          partial: true,
+          terminationReason: 'execution_error',
+          terminationMessage: 'PRIVATE_TERMINATION_CANARY',
+          claimSupport: [{claimId: 'PRIVATE_CLAIM_CANARY'}],
+          claimVerificationResult: {status: 'PRIVATE_VERIFY_CANARY'},
+          identityResolutions: [{identityRefId: 'PRIVATE_IDENTITY_CANARY'}],
+        }
+      : {
+          success: true,
+          conclusion: 'done',
+          findings: [],
+          hypotheses: [],
+          confidence: 0.9,
+          totalDurationMs: 123,
+          rounds: 1,
+        });
     const sessions = new Map<string, any>([
       ['own-session', {
         status: 'completed',
@@ -298,7 +394,7 @@ describe('owner guard for agent session routes', () => {
         userId: API_USER_ID,
         scenes: [],
         conversationSteps: [],
-        queryHistory: [],
+        queryHistory: [{query: 'PRIVATE_QUERY_HISTORY_CANARY'}],
         conclusionHistory: [],
         hypotheses: [],
         orchestrator: {},
@@ -320,6 +416,30 @@ describe('owner guard for agent session routes', () => {
         orchestrator: {},
         logger: { getLogFilePath: () => '/tmp/other.log' },
       }],
+      ['private-session', {
+        sessionId: 'private-session',
+        status: 'completed',
+        traceId: 'private-trace',
+        query: 'PRIVATE_QUERY_CANARY PRIVATE_REPORT_CANARY',
+        createdAt: 3000,
+        tenantId: 'tenant-a',
+        workspaceId: 'workspace-a',
+        userId: API_USER_ID,
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['cb-private'],
+        outputLanguage: 'en',
+        scenes: [],
+        conversationSteps: [{text: 'PRIVATE_TIMELINE_CANARY'}],
+        queryHistory: [],
+        conclusionHistory: [{conclusion: 'PRIVATE_HISTORY_CANARY'}],
+        hypotheses: [],
+        orchestrator: {
+          getSessionNotes: () => ['PRIVATE_NOTE_CANARY'],
+          getSessionPlan: () => ({text: 'PRIVATE_PLAN_CANARY'}),
+          getSessionUncertaintyFlags: () => ['PRIVATE_FLAG_CANARY'],
+        },
+        logger: {getLogFilePath: () => '/tmp/PRIVATE_LOG_CANARY.log'},
+      }],
     ]);
 
     registerAgentSessionCatalogRoutes(router, {
@@ -333,7 +453,14 @@ describe('owner guard for agent session routes', () => {
       recoverResultForSessionIfNeeded,
       normalizeNarrativeForClient: (narrative) => narrative,
       buildClientFindings: (findings) => findings,
-      buildSessionResultContract: () => ({}),
+      buildSessionResultContract: () => ({value: 'PRIVATE_RESULT_CONTRACT_CANARY'}),
+      getCompletedPayload: (session) => session.sessionId === 'private-session' ? {
+        qualityArtifacts: {
+          claimSupport: [{claimId: 'PRIVATE_PAYLOAD_CLAIM_CANARY'}],
+          claimVerificationResult: {status: 'PRIVATE_PAYLOAD_VERIFY_CANARY'},
+          identityResolutions: [{identityRefId: 'PRIVATE_PAYLOAD_IDENTITY_CANARY'}],
+        },
+      } : undefined,
     });
 
     const app = express();
@@ -349,7 +476,15 @@ describe('owner guard for agent session routes', () => {
     const res = await authHeaders(request(app).get('/api/agent/v1/sessions?includeRecoverable=false'));
 
     expect(res.status).toBe(200);
-    expect(res.body.activeSessions.map((session: any) => session.sessionId)).toEqual(['own-session']);
+    expect(res.body.activeSessions.map((session: any) => session.sessionId).sort()).toEqual([
+      'own-session',
+      'private-session',
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain('PRIVATE_QUERY_CANARY');
+    expect(res.body.activeSessions.find((session: any) =>
+      session.sessionId === 'private-session').query).toBe(
+      'Private source or knowledge analysis request (original content not persisted)',
+    );
   });
 
   it('returns 404 for another tenant session report without invoking report recovery', async () => {
@@ -363,5 +498,52 @@ describe('owner guard for agent session routes', () => {
     expect(missingRes.status).toBe(404);
     expect(missingRes.body).toEqual({ success: false, error: 'Session not found' });
     expect(recoverResultForSessionIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('projects private session reports without intermediate model state or provider errors', async () => {
+    const {app} = makeAgentApp();
+    registerPrivateAnalysisQueryForEcho(
+      'private-session',
+      'PRIVATE_QUERY_CANARY PRIVATE_REPORT_CANARY',
+    );
+    [
+      'PRIVATE_FINDING_CANARY',
+      'PRIVATE_HYPOTHESIS_CANARY',
+      'PRIVATE_PAYLOAD_CLAIM_CANARY',
+      'PRIVATE_PAYLOAD_VERIFY_CANARY',
+      'PRIVATE_PAYLOAD_IDENTITY_CANARY',
+      'PRIVATE_RESULT_CONTRACT_CANARY',
+      'PRIVATE_TERMINATION_CANARY',
+    ].forEach(canary => registerCodeAwareCanary('private-session', canary));
+
+    try {
+      const res = await authHeaders(request(app).get('/api/agent/v1/private-session/report'));
+
+      expect(res.status).toBe(200);
+      expect(res.body.report).toEqual(expect.objectContaining({
+        findings: [expect.objectContaining({id: 'finding'})],
+        hypotheses: [expect.objectContaining({id: 'hypothesis'})],
+        claimSupport: [expect.any(Object)],
+        claimVerificationResult: expect.any(Object),
+        identityResolutions: [expect.any(Object)],
+        resultContract: expect.any(Object),
+        conversationTimeline: [],
+        conclusionHistory: [],
+        analysisNotes: [],
+        analysisPlan: null,
+        uncertaintyFlags: [],
+      }));
+      expect(res.body.report.logFile).toBeUndefined();
+      expect(res.body.report.query).toBe(
+        'Private source or knowledge analysis request (original content not persisted)',
+      );
+      expect(res.body.report.summary.terminationMessage).toBe(
+        'Analysis did not complete; detailed model or tool errors are hidden by the privacy policy.',
+      );
+      expect(res.body.report.summary.terminationMessage).not.toContain('PRIVATE_TERMINATION_CANARY');
+      expect(JSON.stringify(res.body)).not.toMatch(/PRIVATE_[A-Z_]+_CANARY/);
+    } finally {
+      clearCodeAwareOutputGuards('private-session');
+    }
   });
 });

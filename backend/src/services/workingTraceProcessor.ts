@@ -3,7 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { EventEmitter } from 'events';
-import { spawn, spawnSync, ChildProcess, execSync } from 'child_process';
+import { spawn, spawnSync, ChildProcess, execFileSync } from 'child_process';
 import net from 'net';
 import fs from 'fs';
 import os from 'os';
@@ -16,11 +16,12 @@ import {
 import { executeTraceProcessorHttpRpcSql } from './traceProcessorHttpRpcClient';
 import { getPortPool } from './portPool';
 import { traceProcessorConfig } from '../config';
-import logger from '../utils/logger';
+import logger, {diagnosticLogIdentity} from '../utils/logger';
 import { getPerfettoStdlibModules, groupModulesByNamespace } from './perfettoStdlibScanner';
 import { readProcessRssBytes } from './processRss';
 import {
   TraceProcessorSqlWorker,
+  type TraceProcessorBoundedQueryOptions,
   type TraceProcessorQueryOptions,
 } from './traceProcessorSqlWorker';
 import {
@@ -32,8 +33,24 @@ import {
   getTraceProcessorRamBudgetStats,
   type TraceProcessorRamBudgetStats,
 } from './traceProcessorRamBudget';
+import { getTraceProcessorLeaseStore } from './traceProcessorLeaseStore';
 
 const IS_TEST_ENV = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+const GIB = 1024 * 1024 * 1024;
+
+export function resolveTraceProcessorStartupTimeoutMs(
+  traceSizeBytes: number,
+  config: {
+    startupTimeoutMs: number;
+    startupTimeoutPerGiBMs: number;
+    startupTimeoutMaxMs: number;
+  } = traceProcessorConfig,
+): number {
+  const sizeGiB = Math.max(1, Math.ceil(Math.max(0, traceSizeBytes) / GIB));
+  const sizeAdjusted = sizeGiB * config.startupTimeoutPerGiBMs;
+  const upperBound = Math.max(config.startupTimeoutMs, config.startupTimeoutMaxMs);
+  return Math.min(Math.max(config.startupTimeoutMs, sizeAdjusted), upperBound);
+}
 
 // Path to the trace_processor_shell binary.
 // Use the locally built version from perfetto/out/ui which has the viz stdlib modules.
@@ -172,19 +189,186 @@ export function isFatalTraceProcessorListenFailure(text: string): boolean {
     });
 }
 
+export interface TraceProcessorProcessInfo {
+  pid: number;
+  parentPid: number;
+  command: string;
+}
+
+export interface TraceProcessorOrphanCleanupOptions {
+  processTable?: string;
+  isProcessAlive?: (pid: number) => boolean;
+  resolveProcessExecutable?: (pid: number) => string | undefined;
+  terminateProcess?: (pid: number) => void;
+}
+
+function defaultResolveProcessExecutable(pid: number): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    return fs.realpathSync(`/proc/${pid}/exe`);
+  } catch {
+    return undefined;
+  }
+}
+
+function isTraceProcessorCommand(
+  pid: number,
+  command: string,
+  resolveProcessExecutable: (pid: number) => string | undefined,
+): boolean {
+  const executableName = path.basename(command.replace(/\\/g, '/')).toLowerCase();
+  if (executableName === 'trace_processor_shell' || executableName === 'trace_processor_shell.exe') {
+    return true;
+  }
+
+  // Linux truncates `comm` to TASK_COMM_LEN. Resolve /proc/<pid>/exe before
+  // accepting the truncated prefix so similarly named services are untouched.
+  if (executableName !== 'trace_processor') return false;
+  const resolved = resolveProcessExecutable(pid);
+  if (!resolved) return false;
+  const resolvedName = path.basename(resolved.replace(/\\/g, '/')).toLowerCase();
+  return resolvedName === 'trace_processor_shell' || resolvedName === 'trace_processor_shell.exe';
+}
+
+export function parseTraceProcessorProcessTable(
+  output: string,
+  resolveProcessExecutable: (pid: number) => string | undefined = defaultResolveProcessExecutable,
+): TraceProcessorProcessInfo[] {
+  const processes: TraceProcessorProcessInfo[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const command = match[3];
+    if (!isTraceProcessorCommand(pid, command, resolveProcessExecutable)) continue;
+    processes.push({
+      pid,
+      parentPid: Number(match[2]),
+      command,
+    });
+  }
+  return processes;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function readTraceProcessorProcessTable(): string {
+  if (process.platform === 'win32') {
+    const script = [
+      "$ErrorActionPreference = 'Stop';",
+      "Get-CimInstance Win32_Process -Filter \"Name = 'trace_processor_shell.exe'\" |",
+      "ForEach-Object { '{0} {1} trace_processor_shell.exe' -f $_.ProcessId, $_.ParentProcessId }",
+    ].join(' ');
+    return execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      {encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024},
+    );
+  }
+
+  if (process.platform === 'darwin') {
+    // Darwin's `ps ... comm=` truncates executable names to MAXCOMLEN, so
+    // trace_processor_shell appears as an unrelated path prefix. pgrep reads
+    // the kernel process name without that display truncation; after it has
+    // selected exact candidates, query only their parent PIDs and emit the
+    // canonical rows consumed by the platform-neutral ownership logic.
+    const result = spawnSync(
+      '/usr/bin/pgrep',
+      ['-x', 'trace_processor_shell'],
+      {encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024},
+    );
+    if (result.error) throw result.error;
+    if (result.status === 1) return '';
+    if (result.status !== 0) {
+      throw new Error(`pgrep failed with status ${result.status ?? 'unknown'}`);
+    }
+
+    const rows: string[] = [];
+    for (const value of result.stdout.split(/\s+/)) {
+      if (!/^\d+$/.test(value)) continue;
+      const pid = Number(value);
+      try {
+        const parentPidText = execFileSync(
+          '/bin/ps',
+          ['-p', String(pid), '-o', 'ppid='],
+          {encoding: 'utf-8', maxBuffer: 64 * 1024},
+        ).trim();
+        if (!/^\d+$/.test(parentPidText)) continue;
+        rows.push(`${pid} ${parentPidText} trace_processor_shell`);
+      } catch {
+        // The process can exit between pgrep and ps; omit that stale row.
+      }
+    }
+    return rows.join('\n');
+  }
+
+  if (process.platform === 'linux') {
+    const rows: string[] = [];
+    for (const entry of fs.readdirSync('/proc', {withFileTypes: true})) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      const pid = Number(entry.name);
+      try {
+        const executable = fs.realpathSync(`/proc/${pid}/exe`);
+        if (path.basename(executable) !== 'trace_processor_shell') continue;
+        const status = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
+        const parentMatch = /^PPid:\s+(\d+)$/m.exec(status);
+        if (!parentMatch) continue;
+        rows.push(`${pid} ${parentMatch[1]} trace_processor_shell`);
+      } catch {
+        // Processes can exit while /proc is being scanned, and inaccessible
+        // processes cannot belong to this user-owned backend instance.
+      }
+    }
+    return rows.join('\n');
+  }
+
+  // Fallback for other Unix-like platforms. Their `comm` output is accepted
+  // only when it exposes the exact executable name.
+  return execFileSync(
+    'ps',
+    ['-axo', 'pid=,ppid=,comm='],
+    {encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024},
+  );
+}
+
+export function findOrphanTraceProcessorPids(
+  processTable: string,
+  parentIsAlive: (pid: number) => boolean = isProcessAlive,
+  resolveProcessExecutable: (pid: number) => string | undefined = defaultResolveProcessExecutable,
+): number[] {
+  return parseTraceProcessorProcessTable(processTable, resolveProcessExecutable)
+    .filter(processInfo => processInfo.pid !== process.pid)
+    .filter(processInfo => processInfo.parentPid <= 1 || !parentIsAlive(processInfo.parentPid))
+    .map(processInfo => processInfo.pid);
+}
+
 /**
- * Kill all orphan trace_processor_shell processes.
- * This should be called at startup to clean up processes from previous runs.
+ * Clean up trace processors whose owning process has exited.
+ *
+ * A process with a live parent belongs to another active SmartPerfetto/CLI/test
+ * instance and must not be touched. After an owner crashes, Unix reparents the
+ * child to PID 1; the liveness fallback also covers a process-table race where
+ * the recorded parent has just exited.
  */
-export function killOrphanProcessors(): number {
+export function killOrphanProcessors(options: TraceProcessorOrphanCleanupOptions = {}): number {
   if (!IS_TEST_ENV) {
     console.log('[TraceProcessor] Checking for orphan trace_processor_shell processes...');
   }
 
   try {
-    // Find all trace_processor_shell processes
-    const result = execSync('pgrep -f trace_processor_shell 2>/dev/null || true', { encoding: 'utf-8' });
-    const pids = result.trim().split('\n').filter(pid => pid.length > 0);
+    const processTable = options.processTable ?? readTraceProcessorProcessTable();
+    const pids = findOrphanTraceProcessorPids(
+      processTable,
+      options.isProcessAlive ?? isProcessAlive,
+      options.resolveProcessExecutable ?? defaultResolveProcessExecutable,
+    );
 
     if (pids.length === 0) {
       if (!IS_TEST_ENV) {
@@ -197,16 +381,16 @@ export function killOrphanProcessors(): number {
       console.log(`[TraceProcessor] Found ${pids.length} orphan process(es): ${pids.join(', ')}`);
     }
 
-    // Kill each process
+    const terminateProcess = options.terminateProcess ?? ((pid: number) => process.kill(pid, 'SIGTERM'));
     let killed = 0;
     for (const pid of pids) {
       try {
-        execSync(`kill ${pid} 2>/dev/null || true`);
+        terminateProcess(pid);
         killed++;
         if (!IS_TEST_ENV) {
           console.log(`[TraceProcessor] Killed orphan process ${pid}`);
         }
-      } catch (e) {
+      } catch {
         // Process may already be dead
       }
     }
@@ -548,13 +732,16 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
       let stderr = '';
       let resolved = false;
 
-      // Timeout for server startup
+      const startupTimeoutMs = resolveTraceProcessorStartupTimeoutMs(
+        fs.statSync(this.tracePath).size,
+      );
+      // Timeout includes trace parsing before the HTTP ready line is emitted.
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           reject(new Error(`Server startup timeout. stdout: ${stdout}, stderr: ${stderr}`));
         }
-      }, traceProcessorConfig.startupTimeoutMs);
+      }, startupTimeoutMs);
 
       this.process.stdout?.on('data', (data) => {
         const text = data.toString();
@@ -660,8 +847,42 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
     }
     throwIfTraceProcessorQueryCancelled(options.signal);
 
-    logger.debug('TraceProcessor', `Executing HTTP query: ${sql.substring(0, 100)}...`);
+    logger.sql('TraceProcessor', sql);
     return this.enqueueHttpQuery(sql, options);
+  }
+
+  async queryBounded(
+    sql: string,
+    options: TraceProcessorBoundedQueryOptions,
+  ): Promise<QueryResult> {
+    throwIfTraceProcessorQueryCancelled(options.signal);
+    if (this.status !== 'ready') {
+      throw new Error(`Trace processor not ready (status: ${this.status})`);
+    }
+    if (!this.serverReady) {
+      throw new Error('HTTP server not ready');
+    }
+
+    if (!this._criticalModulesLoaded
+        && this._criticalModulesLoadFailures < WorkingTraceProcessor.MAX_STDLIB_LOAD_RETRIES
+        && !this._criticalModulesLoadPromise) {
+      this._criticalModulesLoadPromise = this._loadCriticalModulesSequentially();
+    }
+    if (this._criticalModulesLoadPromise) {
+      await raceWithTraceProcessorCancellation(this._criticalModulesLoadPromise, options.signal);
+    }
+    throwIfTraceProcessorQueryCancelled(options.signal);
+
+    logger.sql('TraceProcessor', sql);
+    this._activeQueries++;
+    try {
+      return await this.sqlWorker.queryBounded(sql, {
+        ...options,
+        timeoutMs: options.timeoutMs ?? traceProcessorConfig.queryTimeoutMs,
+      });
+    } finally {
+      this._activeQueries--;
+    }
   }
 
   async queryRaw(body: Buffer, options: TraceProcessorQueryOptions = {}): Promise<Buffer> {
@@ -751,7 +972,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         if (result.error) {
           failed++;
           if (!result.error.includes('not found') && !result.error.includes('no such')) {
-            console.warn(`[TraceProcessor] Failed to load stdlib module ${m}: ${result.error}`);
+            console.warn(
+              `[TraceProcessor] Failed to load stdlib module ${m}: ${diagnosticLogIdentity(result.error, {domain: 'trace_processor', classifier: 'sql'})}`,
+            );
           }
         } else {
           loaded++;
@@ -790,9 +1013,9 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
         `Query exceeded ${traceProcessorConfig.queryTimeoutMs}ms; aborting request for processor ${this.id}`,
       );
     } else if (result.error && !options.suppressErrorLog) {
-      logger.warn('TraceProcessor', `Query error: ${result.error}`);
+      logger.warn('TraceProcessor', `Query error: ${diagnosticLogIdentity(result.error, {domain: 'trace_processor', classifier: 'sql'})}`);
     } else if (result.error) {
-      logger.debug('TraceProcessor', `Suppressed query error: ${result.error}`);
+      logger.debug('TraceProcessor', `Suppressed query error: ${diagnosticLogIdentity(result.error, {domain: 'trace_processor', classifier: 'sql'})}`);
     } else {
       logger.debug('TraceProcessor', `Query returned ${result.rows.length} rows in ${result.durationMs}ms`);
     }
@@ -946,6 +1169,18 @@ export class WorkingTraceProcessor extends EventEmitter implements TraceProcesso
  */
 type ManagedTraceProcessor = WorkingTraceProcessor | ExternalRpcProcessor;
 
+export function isTraceProcessorEvictionCandidate(
+  processor: ManagedTraceProcessor,
+  hasActiveLeaseHolders = false,
+): boolean {
+  return (
+    processor instanceof WorkingTraceProcessor &&
+    processor.activeQueries === 0 &&
+    !processor.getRuntimeStats().leaseId &&
+    !hasActiveLeaseHolders
+  );
+}
+
 export class TraceProcessorFactory {
   private static processors: Map<string, ManagedTraceProcessor> = new Map();
   private static externalProcessorsByPort: Map<number, ExternalRpcProcessor> = new Map();
@@ -970,17 +1205,24 @@ export class TraceProcessorFactory {
       this.remove(processorKey);
     }
 
-    // Clean up oldest owned idle processors if too many (skip busy/external ones).
+    // Clean up oldest unleased idle processors if too many. A UI WebSocket does
+    // not increment activeQueries, so lease-backed processors must be preserved.
     while (this.processors.size >= this.maxProcessors) {
       const idle = Array.from(this.processors.entries())
-        .find(([, p]) => p instanceof WorkingTraceProcessor && p.activeQueries === 0);
+        .find(([, processor]) => {
+          const traceIdHasActiveLeaseHolders =
+            processor instanceof WorkingTraceProcessor &&
+            getTraceProcessorLeaseStore().hasActiveHoldersForTrace(processor.traceId);
+          return isTraceProcessorEvictionCandidate(processor, traceIdHasActiveLeaseHolders);
+        });
       if (idle) {
         console.log(`[TraceProcessorFactory] Cleaning up idle processor: ${idle[0]}`);
         idle[1].destroy();
         this.processors.delete(idle[0]);
       } else {
-        // All processors are busy — allow temporary over-limit rather than killing active work
-        console.warn(`[TraceProcessorFactory] All ${this.processors.size} processors are busy, allowing temporary over-limit`);
+        // All candidates are busy or lease-backed. RAM admission remains the
+        // authoritative guard for a temporary process-count overage.
+        console.warn(`[TraceProcessorFactory] All ${this.processors.size} processors are busy or leased, allowing temporary over-limit`);
         break;
       }
     }
@@ -1280,7 +1522,9 @@ export class ExternalRpcProcessor extends EventEmitter implements TraceProcessor
         if (result.error) {
           failed++;
           if (!result.error.includes('not found') && !result.error.includes('no such')) {
-            console.warn(`[ExternalRpcProcessor] Failed to load stdlib module ${m}: ${result.error}`);
+            console.warn(
+              `[ExternalRpcProcessor] Failed to load stdlib module ${m}: ${diagnosticLogIdentity(result.error, {domain: 'trace_processor', classifier: 'sql'})}`,
+            );
           }
         } else {
           loaded++;

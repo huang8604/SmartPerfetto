@@ -10,6 +10,7 @@ import { getProviderService, resetProviderService } from '../../services/provide
 
 const ENV_KEYS = [
   'PROVIDER_DATA_DIR_OVERRIDE',
+  'SMARTPERFETTO_AI_ENABLED',
   'SMARTPERFETTO_AGENT_RUNTIME',
   'SMARTPERFETTO_API_KEY',
   'SMARTPERFETTO_ENTERPRISE',
@@ -83,6 +84,7 @@ describe('buildRuntimeHealthPayload', () => {
       runtime: 'claude-agent-sdk',
       model: 'claude-test',
       providerMode: 'anthropic_direct',
+      aiEnabled: true,
       configured: true,
       source: 'default',
       credentialSource: 'env-or-default',
@@ -96,6 +98,46 @@ describe('buildRuntimeHealthPayload', () => {
       credentialSources: ['anthropic_api_key'],
     });
     expect(JSON.stringify(payload)).not.toContain('sk-claude-secret');
+  });
+
+  it('reports AI disabled policy without requiring runtime credentials', () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    process.env.SMARTPERFETTO_AGENT_RUNTIME = 'openai-agents-sdk';
+
+    const payload = buildRuntimeHealthPayload(new Date('2026-05-20T00:00:00.000Z'));
+
+    expect(payload.aiPolicy).toMatchObject({
+      schemaVersion: 1,
+      aiEnabled: false,
+      source: 'env',
+      env: {
+        key: 'SMARTPERFETTO_AI_ENABLED',
+        rawValue: 'false',
+        valid: true,
+      },
+    });
+    expect(payload.aiEngine).toMatchObject({
+      runtime: 'openai-agents-sdk',
+      aiEnabled: false,
+      disabledReason: 'AI is disabled by SMARTPERFETTO_AI_ENABLED=false',
+    });
+  });
+
+  it('reports invalid AI policy env values as fail-closed', () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'maybe';
+
+    const payload = buildRuntimeHealthPayload(new Date('2026-05-20T00:00:00.000Z'));
+
+    expect(payload.aiPolicy).toMatchObject({
+      aiEnabled: false,
+      env: {
+        key: 'SMARTPERFETTO_AI_ENABLED',
+        rawValue: 'maybe',
+        valid: false,
+      },
+    });
+    expect(payload.aiEngine.aiEnabled).toBe(false);
+    expect(payload.aiEngine.disabledReason).toContain('invalid value');
   });
 
   it('reports effective OpenAI env fallback details without leaking URL secrets', () => {

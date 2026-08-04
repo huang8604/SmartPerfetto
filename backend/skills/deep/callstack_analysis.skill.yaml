@@ -43,7 +43,6 @@ triggers:
 
 prerequisites:
   modules:
-    - stack_profile
 
 inputs:
   - name: package
@@ -94,6 +93,7 @@ steps:
         MAX(ts) as last_sample_ts,
         (MAX(ts) - MIN(ts)) / 1e9 as duration_sec
       FROM perf_sample
+      HAVING COUNT(*) > 0
     save_as: sample_stats
     on_empty: "未找到 CPU 采样数据，请确保 trace 包含 simpleperf/perf 数据"
 
@@ -102,6 +102,7 @@ steps:
     type: atomic
     name: "热点函数 Top 20"
     optional: true
+    condition: "sample_stats.data.length > 0 && sample_stats.data[0]?.total_samples > 0"
     display:
       level: detail
       layer: list
@@ -160,12 +161,22 @@ steps:
         SELECT
           fs.frame_id,
           fs.sample_count,
-          COALESCE(sps.name, 'unknown') as function_name,
+          COALESCE(
+            (
+              SELECT sps.name
+              FROM stack_profile_symbol sps
+              WHERE sps.symbol_set_id = spf.symbol_set_id
+              ORDER BY sps.inlined DESC, sps.id
+              LIMIT 1
+            ),
+            spf.deobfuscated_name,
+            spf.name,
+            'unknown'
+          ) as function_name,
           COALESCE(spm.name, 'unknown') as module_name
         FROM frame_samples fs
         LEFT JOIN stack_profile_frame spf ON fs.frame_id = spf.id
-        LEFT JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
-        LEFT JOIN stack_profile_mapping spm ON spf.mapping_id = spm.id
+        LEFT JOIN stack_profile_mapping spm ON spf.mapping = spm.id
       )
       SELECT
         function_name,
@@ -183,6 +194,7 @@ steps:
     type: atomic
     name: "模块采样分布"
     optional: true
+    condition: "sample_stats.data.length > 0 && sample_stats.data[0]?.total_samples > 0"
     display:
       level: detail
       layer: list
@@ -217,7 +229,7 @@ steps:
         FROM perf_sample ps
         LEFT JOIN stack_profile_callsite spc ON ps.callsite_id = spc.id
         LEFT JOIN stack_profile_frame spf ON spc.frame_id = spf.id
-        LEFT JOIN stack_profile_mapping spm ON spf.mapping_id = spm.id
+        LEFT JOIN stack_profile_mapping spm ON spf.mapping = spm.id
       )
       SELECT
         module_name,
@@ -235,6 +247,7 @@ steps:
     type: atomic
     name: "线程采样分布"
     optional: true
+    condition: "sample_stats.data.length > 0 && sample_stats.data[0]?.total_samples > 0"
     display:
       level: detail
       layer: list
@@ -279,6 +292,7 @@ steps:
     type: atomic
     name: "热点函数调用者分析"
     optional: true
+    condition: "(hot_functions?.data?.length || 0) > 0"
     display:
       level: detail
       layer: deep
@@ -303,10 +317,31 @@ steps:
       top_frames AS (
         SELECT DISTINCT
           spf.id as frame_id,
-          sps.name as function_name
+          COALESCE(
+            (
+              SELECT sps.name
+              FROM stack_profile_symbol sps
+              WHERE sps.symbol_set_id = spf.symbol_set_id
+              ORDER BY sps.inlined DESC, sps.id
+              LIMIT 1
+            ),
+            spf.deobfuscated_name,
+            spf.name,
+            'unknown'
+          ) as function_name
         FROM stack_profile_frame spf
-        JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
-        WHERE sps.name IN (
+        WHERE COALESCE(
+          (
+            SELECT sps.name
+            FROM stack_profile_symbol sps
+            WHERE sps.symbol_set_id = spf.symbol_set_id
+            ORDER BY sps.inlined DESC, sps.id
+            LIMIT 1
+          ),
+          spf.deobfuscated_name,
+          spf.name,
+          'unknown'
+        ) IN (
           SELECT function_name FROM (${hot_functions}) LIMIT 5
         )
       ),
@@ -344,11 +379,21 @@ steps:
         SELECT
           cc.hot_function,
           cc.depth,
-          COALESCE(sps.name, 'unknown') as caller_name
+          COALESCE(
+            (
+              SELECT sps.name
+              FROM stack_profile_symbol sps
+              WHERE sps.symbol_set_id = spf.symbol_set_id
+              ORDER BY sps.inlined DESC, sps.id
+              LIMIT 1
+            ),
+            spf.deobfuscated_name,
+            spf.name,
+            'unknown'
+          ) as caller_name
         FROM caller_chain cc
         JOIN stack_profile_callsite spc ON cc.parent_id = spc.id
         LEFT JOIN stack_profile_frame spf ON spc.frame_id = spf.id
-        LEFT JOIN stack_profile_symbol sps ON spf.symbol_id = sps.id
       )
       SELECT
         hot_function,
@@ -365,6 +410,7 @@ steps:
     type: atomic
     name: "分析结论"
     optional: true
+    condition: "sample_stats.data.length > 0 && sample_stats.data[0]?.total_samples > 0"
     display:
       level: summary
       layer: overview

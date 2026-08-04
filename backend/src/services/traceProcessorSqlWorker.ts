@@ -33,6 +33,12 @@ export interface TraceProcessorQueryOptions {
   signal?: AbortSignal;
 }
 
+export interface TraceProcessorBoundedQueryOptions
+  extends TraceProcessorQueryOptions {
+  maxResponseBytes: number;
+  maxRows: number;
+}
+
 export interface TraceProcessorSqlWorkerOptions {
   processorId: string;
   traceId: string;
@@ -40,6 +46,8 @@ export interface TraceProcessorSqlWorkerOptions {
   hostname?: string;
   forceInline?: boolean;
   rawExecutor?: (request: TraceProcessorHttpRpcRequest) => Promise<Buffer>;
+  maxQueuedTasks?: number;
+  maxQueuedBytes?: number;
 }
 
 interface QueueTask {
@@ -47,7 +55,10 @@ interface QueueTask {
   body: Buffer;
   priority: TraceProcessorQueryPriority;
   timeoutMs: number;
+  deadlineAt: number;
+  queueTimer?: NodeJS.Timeout;
   signal?: AbortSignal;
+  maxResponseBytes?: number;
   onAbort?: () => void;
   resolve: (body: Buffer) => void;
   reject: (error: Error) => void;
@@ -61,6 +72,24 @@ interface PendingWorkerRequest {
 }
 
 const PRIORITY_ORDER: TraceProcessorQueryPriority[] = ['p0', 'p1', 'p2'];
+const DEFAULT_MAX_QUEUED_TASKS = 256;
+const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024;
+
+export class TraceProcessorSqlQueueOverloadedError extends Error {
+  readonly code = 'TRACE_PROCESSOR_SQL_QUEUE_OVERLOADED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'TraceProcessorSqlQueueOverloadedError';
+  }
+}
+
+export class TraceProcessorSqlDeadlineExceededError extends Error {
+  readonly code = 'TRACE_PROCESSOR_SQL_DEADLINE_EXCEEDED';
+  constructor() {
+    super('Trace processor SQL query deadline exceeded while queued');
+    this.name = 'TraceProcessorSqlDeadlineExceededError';
+  }
+}
 
 export function normalizeTraceProcessorQueryPriority(
   value: unknown,
@@ -93,6 +122,8 @@ export class TraceProcessorSqlWorker {
   private readonly hostname: string;
   private readonly forceInline: boolean;
   private readonly rawExecutor?: (request: TraceProcessorHttpRpcRequest) => Promise<Buffer>;
+  private readonly maxQueuedTasks: number;
+  private readonly maxQueuedBytes: number;
   private readonly queues: Record<TraceProcessorQueryPriority, QueueTask[]> = {
     p0: [],
     p1: [],
@@ -103,6 +134,7 @@ export class TraceProcessorSqlWorker {
   private running = false;
   private destroyed = false;
   private nextTaskId = 1;
+  private queuedBytes = 0;
 
   constructor(options: TraceProcessorSqlWorkerOptions) {
     this.processorId = options.processorId;
@@ -111,6 +143,8 @@ export class TraceProcessorSqlWorker {
     this.hostname = options.hostname || '127.0.0.1';
     this.forceInline = options.forceInline ?? IS_TEST_ENV;
     this.rawExecutor = options.rawExecutor;
+    this.maxQueuedTasks = Math.max(1, options.maxQueuedTasks ?? DEFAULT_MAX_QUEUED_TASKS);
+    this.maxQueuedBytes = Math.max(1, options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES);
   }
 
   get activeCount(): number {
@@ -123,6 +157,7 @@ export class TraceProcessorSqlWorker {
     queuedP1: number;
     queuedP2: number;
     usesWorkerThread: boolean;
+    queuedBytes: number;
   } {
     return {
       running: this.running,
@@ -130,6 +165,7 @@ export class TraceProcessorSqlWorker {
       queuedP1: this.queues.p1.length,
       queuedP2: this.queues.p2.length,
       usesWorkerThread: !this.forceInline && !this.rawExecutor,
+      queuedBytes: this.queuedBytes,
     };
   }
 
@@ -157,7 +193,50 @@ export class TraceProcessorSqlWorker {
     }
   }
 
+  async queryBounded(
+    sql: string,
+    options: TraceProcessorBoundedQueryOptions,
+  ): Promise<QueryResult> {
+    const startTime = Date.now();
+    try {
+      if (
+        !Number.isSafeInteger(options.maxResponseBytes)
+        || options.maxResponseBytes < 0
+        || !Number.isSafeInteger(options.maxRows)
+        || options.maxRows < 0
+      ) {
+        throw new Error('trace_processor_query_budget_invalid');
+      }
+      const response = await this.enqueueRawInternal(
+        encodeQueryArgs(sql),
+        options,
+      );
+      const parsed = decodeQueryResult(response, {maxRows: options.maxRows});
+      return {
+        columns: parsed.columnNames,
+        rows: parsed.rows,
+        durationMs: Date.now() - startTime,
+        ...(parsed.error ? {error: parsed.error} : {}),
+      };
+    } catch (error: any) {
+      if (isTraceProcessorQueryCancelledError(error)) throw error;
+      return {
+        columns: [],
+        rows: [],
+        durationMs: Date.now() - startTime,
+        error: error?.message || String(error),
+      };
+    }
+  }
+
   enqueueRaw(body: Buffer, options: TraceProcessorQueryOptions = {}): Promise<Buffer> {
+    return this.enqueueRawInternal(body, options);
+  }
+
+  private enqueueRawInternal(
+    body: Buffer,
+    options: TraceProcessorQueryOptions & {maxResponseBytes?: number},
+  ): Promise<Buffer> {
     if (this.destroyed) {
       return Promise.reject(new Error(`SQL worker for processor ${this.processorId} is destroyed`));
     }
@@ -169,6 +248,12 @@ export class TraceProcessorSqlWorker {
 
     const priority = normalizeTraceProcessorQueryPriority(options.priority);
     const timeoutMs = options.timeoutMs ?? traceProcessorConfig.queryTimeoutMs;
+    const queuedTaskCount = this.activeCount - (this.running ? 1 : 0);
+    if (queuedTaskCount >= this.maxQueuedTasks || this.queuedBytes + body.byteLength > this.maxQueuedBytes) {
+      return Promise.reject(new TraceProcessorSqlQueueOverloadedError(
+        `SQL queue capacity exceeded for processor ${this.processorId}`,
+      ));
+    }
     const taskId = this.nextTaskId++;
 
     return new Promise((resolve, reject) => {
@@ -177,7 +262,9 @@ export class TraceProcessorSqlWorker {
         body,
         priority,
         timeoutMs,
+        deadlineAt: Date.now() + timeoutMs,
         signal: options.signal,
+        maxResponseBytes: options.maxResponseBytes,
         resolve,
         reject,
       };
@@ -190,7 +277,10 @@ export class TraceProcessorSqlWorker {
           return;
         }
       }
+      task.queueTimer = setTimeout(() => this.expireQueuedTask(task), timeoutMs);
+      task.queueTimer.unref?.();
       this.queues[priority].push(task);
+      this.queuedBytes += body.byteLength;
       this.drain();
     });
   }
@@ -201,10 +291,11 @@ export class TraceProcessorSqlWorker {
     for (const priority of PRIORITY_ORDER) {
       const tasks = this.queues[priority].splice(0);
       for (const task of tasks) {
-        this.cleanupTaskAbortListener(task);
+        this.cleanupQueuedTask(task);
         task.reject(error);
       }
     }
+    this.queuedBytes = 0;
     for (const pending of this.pendingWorkerRequests.values()) {
       this.cleanupPendingAbortListener(pending);
       pending.reject(error);
@@ -234,7 +325,8 @@ export class TraceProcessorSqlWorker {
     for (const priority of PRIORITY_ORDER) {
       const task = this.queues[priority].shift();
       if (task) {
-        this.cleanupTaskAbortListener(task);
+        this.queuedBytes -= task.body.byteLength;
+        this.cleanupQueuedTask(task);
         return task;
       }
     }
@@ -243,12 +335,15 @@ export class TraceProcessorSqlWorker {
 
   private async runTask(task: QueueTask): Promise<Buffer> {
     throwIfTraceProcessorQueryCancelled(task.signal);
+    const remainingTimeoutMs = task.deadlineAt - Date.now();
+    if (remainingTimeoutMs <= 0) throw new TraceProcessorSqlDeadlineExceededError();
     const request: TraceProcessorHttpRpcRequest = {
       hostname: this.hostname,
       port: this.port,
       body: task.body,
-      timeoutMs: task.timeoutMs,
+      timeoutMs: remainingTimeoutMs,
       signal: task.signal,
+      maxResponseBytes: task.maxResponseBytes,
     };
 
     if (this.forceInline || this.rawExecutor) {
@@ -258,7 +353,7 @@ export class TraceProcessorSqlWorker {
       );
     }
 
-    return this.postToWorker(task);
+    return this.postToWorker(task, remainingTimeoutMs);
   }
 
   private ensureWorker(): Worker {
@@ -299,7 +394,7 @@ export class TraceProcessorSqlWorker {
     return worker;
   }
 
-  private postToWorker(task: QueueTask): Promise<Buffer> {
+  private postToWorker(task: QueueTask, timeoutMs: number): Promise<Buffer> {
     const worker = this.ensureWorker();
     return new Promise((resolve, reject) => {
       const pending: PendingWorkerRequest = {
@@ -326,7 +421,8 @@ export class TraceProcessorSqlWorker {
         hostname: this.hostname,
         port: this.port,
         body: task.body,
-        timeoutMs: task.timeoutMs,
+        timeoutMs,
+        maxResponseBytes: task.maxResponseBytes,
       });
     });
   }
@@ -345,10 +441,32 @@ export class TraceProcessorSqlWorker {
       const index = queue.findIndex(candidate => candidate.id === task.id);
       if (index < 0) continue;
       queue.splice(index, 1);
-      this.cleanupTaskAbortListener(task);
+      this.queuedBytes -= task.body.byteLength;
+      this.cleanupQueuedTask(task);
       task.reject(createTraceProcessorQueryCancelledError(task.signal?.reason));
       return;
     }
+  }
+
+  private expireQueuedTask(task: QueueTask): void {
+    for (const priority of PRIORITY_ORDER) {
+      const queue = this.queues[priority];
+      const index = queue.findIndex(candidate => candidate.id === task.id);
+      if (index < 0) continue;
+      queue.splice(index, 1);
+      this.queuedBytes -= task.body.byteLength;
+      this.cleanupQueuedTask(task);
+      task.reject(new TraceProcessorSqlDeadlineExceededError());
+      return;
+    }
+  }
+
+  private cleanupQueuedTask(task: QueueTask): void {
+    if (task.queueTimer) {
+      clearTimeout(task.queueTimer);
+      task.queueTimer = undefined;
+    }
+    this.cleanupTaskAbortListener(task);
   }
 
   private cleanupTaskAbortListener(task: QueueTask): void {

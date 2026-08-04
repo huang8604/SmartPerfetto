@@ -7,13 +7,8 @@
 # =============================================================================
 # 系统级分析：硬中断和软中断的频率、耗时、嵌套情况
 #
-# 使用 Perfetto stdlib linux.cpu.irq 模块：
-# - linux_cpu_irq_stats: IRQ 统计聚合视图
-# - linux_cpu_hard_irq: 硬件中断事件
-# - linux_cpu_soft_irq: 软中断事件
-#
-# 回退机制：
-# - 如果 stdlib 视图不可用，使用 raw slice 数据 (name LIKE 'irq/%' / 'softirq/%')
+# 使用 Perfetto stdlib linux.irqs 模块的 linux_irqs 统一视图，避免依赖
+# trace processor 内部 IRQ slice 命名格式。
 #
 # 分析维度：
 # - L0: IRQ 数据存在性检查
@@ -49,7 +44,7 @@ prerequisites:
   required_tables:
     - slice
   modules:
-    - linux.cpu.irq
+    - linux.irqs
 
 inputs:
   - name: package
@@ -93,11 +88,7 @@ steps:
     display: false
     sql: |
       SELECT
-        CASE WHEN EXISTS (
-          SELECT 1 FROM slice
-          WHERE name LIKE 'irq/%' OR name LIKE 'softirq/%'
-             OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_'
-        ) THEN 1 ELSE 0 END as has_irq_data
+        CASE WHEN EXISTS (SELECT 1 FROM linux_irqs) THEN 1 ELSE 0 END as has_irq_data
     save_as: data_check
 
   # ========== L1: 中断类型概览 ==========
@@ -151,19 +142,13 @@ steps:
           format: compact
     sql: |
       SELECT
-        CASE
-          WHEN name LIKE 'irq/%' OR name LIKE 'irq_handler_%' THEN 'Hard IRQ'
-          WHEN name LIKE 'softirq/%' OR name LIKE 'softirq_%' THEN 'Soft IRQ'
-          ELSE 'Unknown'
-        END AS irq_type,
+        CASE WHEN is_soft_irq = 1 THEN 'Soft IRQ' ELSE 'Hard IRQ' END AS irq_type,
         COUNT(*) AS irq_count,
         ROUND(SUM(dur) / 1e6, 2) AS total_dur_ms,
         ROUND(AVG(dur) / 1e3, 2) AS avg_dur_us,
         ROUND(MAX(dur) / 1e3, 2) AS max_dur_us
-      FROM slice
-      WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
-             OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
-        AND (${start_ts} IS NULL OR ts >= ${start_ts})
+      FROM linux_irqs
+      WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY irq_type
       ORDER BY total_dur_ms DESC
@@ -224,18 +209,13 @@ steps:
       WITH irq_stats AS (
         SELECT
           name as irq_name,
-          CASE
-            WHEN name LIKE 'irq/%' OR name LIKE 'irq_handler_%' THEN 'Hard IRQ'
-            ELSE 'Soft IRQ'
-          END as irq_type,
+          CASE WHEN is_soft_irq = 1 THEN 'Soft IRQ' ELSE 'Hard IRQ' END as irq_type,
           COUNT(*) as irq_count,
           SUM(dur) as total_dur_ns,
           AVG(dur) as avg_dur_ns,
           MAX(dur) as max_dur_ns
-        FROM slice
-        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
-               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
-          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+        FROM linux_irqs
+        WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
         GROUP BY name
       ),
@@ -302,8 +282,8 @@ steps:
           WHEN MAX(dur) / 1e3 > ${hard_irq_long_threshold_us|1000} / 10 THEN 'notice'
           ELSE 'normal'
         END as severity
-      FROM slice
-      WHERE (name LIKE 'irq/%' OR name LIKE 'irq_handler_%')
+      FROM linux_irqs
+      WHERE is_soft_irq = 0
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY name
@@ -358,8 +338,8 @@ steps:
           WHEN MAX(dur) / 1e3 > ${soft_irq_long_threshold_us|10000} / 10 THEN 'notice'
           ELSE 'normal'
         END as severity
-      FROM slice
-      WHERE (name LIKE 'softirq/%' OR name LIKE 'softirq_%')
+      FROM linux_irqs
+      WHERE is_soft_irq = 1
         AND (${start_ts} IS NULL OR ts >= ${start_ts})
         AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY name
@@ -415,41 +395,36 @@ steps:
           type: string
     sql: |
       SELECT
-        printf('%d', s.ts) as ts,
-        s.name as irq_name,
+        printf('%d', li.ts) as ts,
+        li.name as irq_name,
+        CASE WHEN li.is_soft_irq = 1 THEN 'Soft IRQ' ELSE 'Hard IRQ' END AS irq_type,
+        ROUND(li.dur / 1e3, 2) AS dur_us,
+        extract_arg(t.dimension_arg_set_id, 'cpu') as cpu,
         CASE
-          WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%' THEN 'Hard IRQ'
-          ELSE 'Soft IRQ'
-        END AS irq_type,
-        ROUND(s.dur / 1e3, 2) AS dur_us,
-        t.cpu as cpu,
-        CASE
-          WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%' THEN
+          WHEN li.is_soft_irq = 0 THEN
             CASE
-              WHEN s.dur / 1e3 > ${hard_irq_long_threshold_us|1000} * 5 THEN 'critical'
-              WHEN s.dur / 1e3 > ${hard_irq_long_threshold_us|1000} THEN 'warning'
+              WHEN li.dur / 1e3 > ${hard_irq_long_threshold_us|1000} * 5 THEN 'critical'
+              WHEN li.dur / 1e3 > ${hard_irq_long_threshold_us|1000} THEN 'warning'
               ELSE 'notice'
             END
           ELSE
             CASE
-              WHEN s.dur / 1e3 > ${soft_irq_long_threshold_us|10000} * 5 THEN 'critical'
-              WHEN s.dur / 1e3 > ${soft_irq_long_threshold_us|10000} THEN 'warning'
+              WHEN li.dur / 1e3 > ${soft_irq_long_threshold_us|10000} * 5 THEN 'critical'
+              WHEN li.dur / 1e3 > ${soft_irq_long_threshold_us|10000} THEN 'warning'
               ELSE 'notice'
             END
         END as severity
-      FROM slice s
-      LEFT JOIN thread_track tt ON s.track_id = tt.id
-      LEFT JOIN thread t ON tt.utid = t.utid
-      WHERE (s.name LIKE 'irq/%' OR s.name LIKE 'softirq/%'
-             OR s.name LIKE 'irq_handler_%' OR s.name LIKE 'softirq_%')
-        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      FROM linux_irqs li
+      JOIN slice s ON s.id = li.id
+      JOIN track t ON t.id = s.track_id
+      WHERE (${start_ts} IS NULL OR li.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR li.ts < ${end_ts})
         -- 硬中断 > threshold 或 软中断 > threshold
         AND (
-          ((s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%') AND s.dur > ${hard_irq_long_threshold_us|1000} * 1000)
-          OR ((s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%') AND s.dur > ${soft_irq_long_threshold_us|10000} * 1000)
+          (li.is_soft_irq = 0 AND li.dur > ${hard_irq_long_threshold_us|1000} * 1000)
+          OR (li.is_soft_irq = 1 AND li.dur > ${soft_irq_long_threshold_us|10000} * 1000)
         )
-      ORDER BY s.dur DESC
+      ORDER BY li.dur DESC
       LIMIT 30
     save_as: long_irq_events
     optional: true
@@ -491,26 +466,18 @@ steps:
           format: compact
     sql: |
       WITH time_base AS (
-        SELECT MIN(ts) as base_ts FROM slice
-        WHERE name LIKE 'irq/%' OR name LIKE 'softirq/%'
-              OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%'
+        SELECT MIN(ts) as base_ts FROM linux_irqs
       )
       SELECT
-        CAST((s.ts - (SELECT base_ts FROM time_base)) / 1e9 AS INT) AS second,
-        SUM(CASE WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%'
-                 THEN 1 ELSE 0 END) AS hard_irq_count,
-        SUM(CASE WHEN s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%'
-                 THEN 1 ELSE 0 END) AS soft_irq_count,
-        ROUND(SUM(CASE WHEN s.name LIKE 'irq/%' OR s.name LIKE 'irq_handler_%'
-                       THEN s.dur ELSE 0 END) / 1e6, 2) AS hard_irq_dur_ms,
-        ROUND(SUM(CASE WHEN s.name LIKE 'softirq/%' OR s.name LIKE 'softirq_%'
-                       THEN s.dur ELSE 0 END) / 1e6, 2) AS soft_irq_dur_ms,
+        CAST((ts - (SELECT base_ts FROM time_base)) / 1e9 AS INT) AS second,
+        SUM(CASE WHEN is_soft_irq = 0 THEN 1 ELSE 0 END) AS hard_irq_count,
+        SUM(CASE WHEN is_soft_irq = 1 THEN 1 ELSE 0 END) AS soft_irq_count,
+        ROUND(SUM(CASE WHEN is_soft_irq = 0 THEN dur ELSE 0 END) / 1e6, 2) AS hard_irq_dur_ms,
+        ROUND(SUM(CASE WHEN is_soft_irq = 1 THEN dur ELSE 0 END) / 1e6, 2) AS soft_irq_dur_ms,
         COUNT(*) as total_irq_count
-      FROM slice s
-      WHERE (s.name LIKE 'irq/%' OR s.name LIKE 'softirq/%'
-             OR s.name LIKE 'irq_handler_%' OR s.name LIKE 'softirq_%')
-        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
-        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+      FROM linux_irqs
+      WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR ts < ${end_ts})
       GROUP BY second
       ORDER BY second
       LIMIT 120
@@ -569,35 +536,31 @@ steps:
         SELECT
           COUNT(*) as total_count,
           SUM(dur) / 1e6 as total_dur_ms,
-          SUM(CASE WHEN (name LIKE 'irq/%' OR name LIKE 'irq_handler_%') THEN 1 ELSE 0 END) as hard_count,
-          SUM(CASE WHEN (name LIKE 'softirq/%' OR name LIKE 'softirq_%') THEN 1 ELSE 0 END) as soft_count
-        FROM slice
-        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
-               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
-          AND (${start_ts} IS NULL OR ts >= ${start_ts})
+          SUM(CASE WHEN is_soft_irq = 0 THEN 1 ELSE 0 END) as hard_count,
+          SUM(CASE WHEN is_soft_irq = 1 THEN 1 ELSE 0 END) as soft_count
+        FROM linux_irqs
+        WHERE (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
       long_hard AS (
         SELECT COUNT(*) as cnt
-        FROM slice
-        WHERE (name LIKE 'irq/%' OR name LIKE 'irq_handler_%')
+        FROM linux_irqs
+        WHERE is_soft_irq = 0
           AND dur > ${hard_irq_long_threshold_us|1000} * 1000
           AND (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
       long_soft AS (
         SELECT COUNT(*) as cnt
-        FROM slice
-        WHERE (name LIKE 'softirq/%' OR name LIKE 'softirq_%')
+        FROM linux_irqs
+        WHERE is_soft_irq = 1
           AND dur > ${soft_irq_long_threshold_us|10000} * 1000
           AND (${start_ts} IS NULL OR ts >= ${start_ts})
           AND (${end_ts} IS NULL OR ts < ${end_ts})
       ),
       trace_duration AS (
         SELECT (MAX(ts) - MIN(ts)) / 1e9 as trace_sec
-        FROM slice
-        WHERE (name LIKE 'irq/%' OR name LIKE 'softirq/%'
-               OR name LIKE 'irq_handler_%' OR name LIKE 'softirq_%')
+        FROM linux_irqs
       )
       SELECT
         CASE

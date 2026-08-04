@@ -2,6 +2,8 @@
 
 [English](overview.en.md) | [中文](overview.md)
 
+<!-- i18n-headings: paired -->
+
 SmartPerfetto 在 Perfetto UI 之上增加 AI 分析层。Perfetto 仍负责 trace 加载、时间线和 SQL 基础能力；SmartPerfetto 后端负责 agent 编排、Skill 执行、报告生成和流式输出。
 
 ```text
@@ -10,6 +12,7 @@ Frontend: Perfetto UI @ :10000
        ├─ trace upload / open trace
        ├─ AI panel / floating window
        ├─ Codebase Config Panel
+       ├─ Self-Evolution control plane
        ├─ DataEnvelope tables and charts
        └─ SSE client
 
@@ -18,6 +21,7 @@ Backend: Express @ :3000
   ├─ /api/traces/*            trace 上传和生命周期
   ├─ /api/rag/*               RAG 与 codebase 管理
   ├─ /api/skills/*            Skill 查询和执行
+  ├─ /api/admin/self-evolution 管理闭环与 SSE
   ├─ /api/export/*            导出
   ├─ /api/reports/*           HTML report
   └─ trace_processor_shell    HTTP RPC pool, 9100-9900
@@ -40,32 +44,73 @@ Feature/Bug 设计要同时判断 Web UI、CLI、API、报告、Docker、免安�
 预构建内容和 Node 版本边界。LLM/Agent 的具体检查清单在
 [`../../.claude/rules/product-surface.md`](../../.claude/rules/product-surface.md)。
 
+## 启动生命周期边界
+
+源码入口共享 `scripts/service-lifecycle.sh`：PID 文件记录 launch generation、
+OS 进程启动身份、可执行文件、cwd 和用于诊断的命令快照，并原子写入。启动/停止
+只操作稳定身份仍匹配且属于当前 checkout 的进程树；端口冲突默认只诊断，不按
+端口或模糊命令名杀进程。Backend 和 Frontend 都是必需服务，任一在 readiness
+前退出、超时或运行中意外退出，launcher 都会停止另一端并返回非零。Docker 使用
+`tini` 承担 PID1 信号转发/子进程回收，entrypoint 和 container health 同时覆盖
+backend 与 frontend。
+
 ## 核心模块
 
 | 模块 | 位置 | 责任 |
 |---|---|---|
 | Perfetto UI plugin | `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/` | 面板、SSE、结果渲染、场景导航、选区交互 |
 | Express backend | `backend/src/index.ts` | 路由注册、健康检查、中间件、进程清理 |
-| Runtime selector | `backend/src/agentRuntime/` | 每个 session 选择 Claude Agent SDK、OpenAI Agents SDK、Pi Agent Core 或 OpenCode |
-| Claude runtime | `backend/src/agentv3/` | Claude Agent SDK 编排、MCP server、策略注入、verifier、记忆 |
-| OpenAI runtime | `backend/src/agentOpenAI/` | OpenAI Agents SDK 编排，通过同一 assistant contract 输出 |
-| Pi/OpenCode runtime adapters | `backend/src/agentRuntime/piAgentCoreRuntime.ts`, `backend/src/agentRuntime/openCodeRuntime.ts` | custom third-party runtime，复用共享分析契约、request-scoped tools 和 runtime-specific 安全边界 |
+| OIDC 与请求身份 | `backend/src/routes/enterpriseAuthRoutes.ts`、`enterpriseSsoService.ts`、`middleware/auth.ts` | 登录回调、Session/CSRF、个人工作区所有权、请求级 tenant/workspace/RBAC 绑定 |
+| Runtime contract 与 registry | `backend/src/agentRuntime/runtimeKinds.ts`、`runtimeDescriptors.ts`、`runtimeSelection.ts` | 定义当前 production runtime 集合、capabilities、canonical loader 和每个 session 的 runtime 选择 |
+| Runtime engines | `backend/src/agentRuntime/engines/{claude,openai,pi,opencode,qoder}/` | 五个当前 runtime 的 canonical 实现，复用统一 orchestrator、结果和安全边界 |
+| 共享 Agent 能力 | `backend/src/agentv3/` | MCP server/registry、策略注入、planning、verifier 和记忆；其中个别 runtime 文件仅保留 compatibility re-export |
+| OpenAI compatibility facades | `backend/src/agentOpenAI/` | 向旧 import path 提供 re-export；canonical OpenAI 实现在 `agentRuntime/engines/openai/` |
 | assistant application | `backend/src/assistant/` | session 管理、stream projection、结果 contract |
 | Skill engine | `backend/src/services/skillEngine/` | YAML Skill 加载、参数替换、SQL 执行、DataEnvelope 输出 |
 | Skills | `backend/skills/` | 原子、组合、深度、渲染管线分析 |
 | Strategies | `backend/strategies/` | 场景策略、Prompt 模板、知识模板 |
+| Self-Evolution | `backend/src/services/selfEvolution/`、`backend/src/routes/selfEvolutionAdminRoutes.ts` | RunManifest、反馈投影、eval/replay、提案门控、overlay、对账、RBAC 控制面 |
+| Agent 外部反馈 | `backend/src/services/externalIssueReporting/`、`agentExternalIssueRoutes.ts`、AI Assistant plugin | 源 run 信号、固定 provider triage、严格校验、去标识 GitHub 草稿；不自动提交 |
 | Code-aware analysis | `backend/src/services/codebase/`, `backend/src/services/rag/`, `backend/src/services/symbol/` | 本地代码库注册、源码索引、符号解析、lookup 过滤、patch 三态校验 |
+| External Android knowledge | `backend/src/services/androidInternalsWiki/`, `externalKnowledgeSourceRegistry.ts`, `ragStore.ts` | 外部 Wiki 全库审计、版本/指纹、分代索引、许可/同意/scope 和私有内容投影 |
 | Trace processor | `backend/src/services/traceProcessorService.ts` | trace 加载、RPC 管理、SQL 查询 |
 | Reports | `backend/src/services/htmlReportGenerator.ts` | HTML 报告生成 |
 | Result quality pipeline | `backend/src/services/agentResultNormalizer.ts`, `finalReportContractGate.ts`, `evidence/`, `verifier/`, `analysisResultSnapshotPipeline.ts` | final report contract、evidence/claim verification、identity resolution、snapshot |
 | CLI | `backend/src/cli-user/` | `smp` / `smartperfetto` 命令、session/history/report export |
 | Comparison services | `backend/src/services/comparison*Service.ts` | Raw trace 与 analysis-result 对比共享证据/报告 contract |
 
+## 双 Trace Engine 边界
+
+Web UI 打开 trace 后会形成两条用途不同的处理路径：
+
+```text
+本地时间线与 Perfetto 插件
+  浏览器 -> WasmEngineProxy -> 提交在 frontend/ 中的 trace_processor.wasm
+
+AI、SQL、Skill、CLI 与报告证据
+  浏览器后台上传 -> /api/traces/upload
+    -> TraceProcessorService -> scripts/trace-processor-pin.env 固定的 trace_processor_shell
+```
+
+第一条路径只服务浏览器内的时间线、轨道和 Perfetto 插件查询；第二条路径是
+SmartPerfetto AI 证据与自动化契约的权威执行面。两个 engine 可以使用经过独立审查的
+不同 Perfetto pin，当前具体身份分别由提交的 `frontend/` 目录名和
+`scripts/trace-processor-pin.env` 声明。浏览器 WASM 新增的表、模块、解析格式或 SQL
+能力，在 native pin 完成五平台预构建、回归与发布门禁前，不得被 Skills、Strategies、
+CLI 或 AI 报告宣称为可用。
+
 ## 主分析数据流
+
+OIDC 模式下，静态入口先通过 `/api/auth/session` 完成门禁，未就绪时不加载 Perfetto
+bundle。回调建立后端 Session 后，所有浏览器请求的 tenant、user 和 workspace 都以后端
+Session 和数据库所有权为准；前端请求头只是传输上下文，不能改变授权边界。个人工作区按
+`(tenant, user)` 唯一映射，租户管理员只有元数据读取权限。
 
 ```text
 1. 用户加载 trace
-   UI -> /api/traces/upload -> TraceProcessorService -> trace_processor_shell
+   UI -> WasmEngineProxy -> frontend/trace_processor.wasm（本地时间线与插件）
+      -> 后台 /api/traces/upload -> TraceProcessorService
+         -> pinned trace_processor_shell（AI / SQL / Skill）
 
 2. 用户发起分析
    UI -> POST /api/agent/v1/analyze
@@ -78,6 +123,12 @@ Feature/Bug 设计要同时判断 Web UI、CLI、API、报告、Docker、免安�
       -> execute_sql -> trace_processor_shell
       -> invoke_skill -> SkillExecutor -> SQL / DataEnvelope
       -> lookup_knowledge / lookup_sql_schema / fetch_artifact
+      -> lookup_blog_knowledge(source=android_internals_pack)
+         -> 会话固定签名 Pack 版本 -> FTS5/BM25 -> 脱敏、预算控制的背景引用
+      -> lookup_blog_knowledge(source=android_internals_wiki)
+         -> request source allowlist + live registry consent/scope check
+         -> active RAG generation -> bounded attributed background context
+      （两种 Android Internals 来源都不是当前 trace 证据）
       -> resolve_symbol / lookup_app_source / lookup_aosp_source / lookup_kernel_source
          -> LookupResponseFilter -> CodeRef metadata
       -> propose_patch -> PatchProposer -> verified / sketch / unverified
@@ -86,6 +137,7 @@ Feature/Bug 设计要同时判断 Web UI、CLI、API、报告、Docker、免安�
    raw runtime result -> agentResultNormalizer
       -> final_report_contract gate
       -> evidence contract / claim verification / identity resolutions
+      -> QueryReviewV1（查询可审查元数据，不是独立证据）
 
 5. 后端流式输出
    SDK/server events -> runtime bridge -> StreamProjector -> SSE
@@ -93,6 +145,7 @@ Feature/Bug 设计要同时判断 Web UI、CLI、API、报告、Docker、免安�
 
 6. 结束与报告
    conclusion -> analysis_completed -> sanitized CodeRef/patch metadata
+      -> AnalysisReceiptV1
       -> HTML report + CLI artifacts + analysis-result snapshot
       -> /api/reports/:id
 ```
@@ -100,6 +153,40 @@ Feature/Bug 设计要同时判断 Web UI、CLI、API、报告、Docker、免安�
 CLI `smp run` / `smp ask` / `smp compare` 复用同一 session、runtime、Skill、report
 和 trace_processor 路径；区别只是本地存储在 `~/.smartperfetto/`，输出可以是
 `text`、`json` 或 `ndjson`。
+
+外部 Wiki 与 trace 证据是两条独立数据流。正文只在显式请求 capability 下进入当前
+provider 的 tool result；运行时桥接到 SSE、日志、报告或 snapshot 时统一投影为
+chunk 引用/哈希/许可/出处。Wiki 背景不能被 claim verifier 当作当前 trace 的测量值。
+
+源码与外部知识的选择、授权指纹、非恢复策略和删除生命周期见
+[私有分析上下文架构](private-analysis-context.md)。该边界同时覆盖普通分析、Smart
+Profile 深度分析、Web UI、CLI 和 `PRODUCTION_RUNTIME_KINDS` 当前注册的 runtime。
+
+## Self-Evolution 控制闭环
+
+Self-Evolution 与在线分析解耦：分析先 seal 不可变 RunManifest；反馈进入 append-only
+事实日志和可重建投影；只有 effective public feedback 能被人工触发的策展读取。
+提案必须在同一 pinned 环境中完成 baseline/candidate 的 validation + holdout 配对
+回放，并经人工 accept，才可能显式 apply。
+
+apply 发布 content-addressed overlay artifact 和新 generation。已有 run 保留旧
+snapshot，新 run 才解析新 generation。启动和升级会先对账；冲突、漂移或验证失败
+的 overlay 被隔离，显式 revert 再发布一个不含该 overlay 的 generation。该路径默认
+关闭，apply 还要求包外持久化能力；详见
+[运行契约](self-improving-design.md)和
+[用户验收指南](../getting-started/self-evolution.md)。
+
+## Agent 辅助外部反馈闭环
+
+M10 从持久化 `analysis_completed`、匹配 RunManifest 和可选 result snapshot 构建
+deterministic opportunity；用户点击后才运行源 provider/runtime 固定的无工具
+triage。Agent 输出经过引用白名单、置信度、Skill trust、大小和公共工件脱敏校验，
+再结合用户回答生成 `notSubmitted` GitHub 草稿。
+
+这条路径不读取当前 session.result，不调用 GitHub API，也不创建 Self-Evolution
+feedback/proposal/overlay。private/code-aware 结果禁用公开草稿，安全漏洞改道到
+private advisory。详见
+[Agent 辅助 GitHub 反馈](../getting-started/agent-assisted-feedback.md)。
 
 ## Runtime 与 Provider 边界
 
@@ -109,6 +196,7 @@ CLI `smp run` / `smp ask` / `smp compare` 复用同一 session、runtime、Skill
 | `openai-agents-sdk` | OpenAI、Ollama、OpenAI-compatible provider | 按 OpenAI runtime 规则验证凭证和 chat-completions/Responses 协议 |
 | `pi-agent-core` | Custom provider | 需要显式 Pi model JSON 或等价 env；不读取 `.pi` project config、package extension、shell tool 或 file tool |
 | `opencode` | Custom provider | 需要显式 OpenCode/OpenAI-compatible model 配置；使用隔离 OpenCode server 和 request-scoped MCP tools，不读取个人 OpenCode 登录态/project state |
+| `qoder-agent-sdk` | Custom provider 或显式 env | Qoder SDK 是 opt-in optional peer；使用本机 Qoder CLI 登录态或 PAT，并隔离私有知识的 stream/session/snapshot |
 
 Provider Manager active profile 优先于 `.env` fallback。历史 session 恢复时必须保留
 原 provider/runtime/comparison identity，不能因为当前 active provider 变化而静默切换。
@@ -123,6 +211,12 @@ SmartPerfetto 的最终回答不是单一 Markdown 字符串，而是一组共�
 | HTML report | 浏览器、导出、分享 | 保留 evidence、claim verification、identity resolution 和 appendix |
 | CLI artifacts | `smp run` / `smp ask` / `smp capture --analyze` / `smp report` | 持久化 turn、report、claim verification 和 identity files |
 | analysis-result snapshot | 多结果对比、历史回看 | 保存 conclusion contract、claim support、verification 和 identity metadata |
+| Query Review | AI panel、HTML report、Artifact | 说明实际查询的读取、过滤、输出和限制；固定为 review metadata，不能单独支撑诊断结论 |
+| Analysis Receipt | AI panel、HTML report、CLI、snapshot | 绑定 run/session/trace/runtime，汇总证据计数、claim audit、质量门禁和实际输出 |
+
+这些结构的字段和投影规则以
+[Data Contract](../../backend/docs/DATA_CONTRACT_DESIGN.md) 为准。不同表面可以压缩显示，
+但不能把 Query Review 提升成证据，也不能把 Receipt 的 `partial`/`not_applicable` 显示为通过。
 
 修复结论质量时先确认是哪一层出了问题：runtime 产物、contract/gate、evidence/verification、report 生成、snapshot，还是 frontend projection。不要为了让聊天更干净而删除报告或 snapshot 需要的来源信息。
 
@@ -133,6 +227,9 @@ SmartPerfetto 的最终回答不是单一 Markdown 字符串，而是一组共�
 | Raw Trace Compare | 前端 reference trace、CLI `smp compare` | current trace + reference trace 实时查询 | 共享 comparison identity、evidence pack、session snapshot 和 report section |
 | Analysis Result Compare | 前端多结果对比 API | 已完成分析结果 snapshot | 保留 workspace/RBAC/matrix 能力，并复用共享 report section |
 
+Web UI 的双 Trace 工作区操作状态机见
+[双 Trace 工作区操作模型](dual-trace-workspace.md)。
+
 ## 文档与策略分工
 
 SmartPerfetto 有两类“内容”：
@@ -141,9 +238,15 @@ SmartPerfetto 有两类“内容”：
 |---|---|---|
 | Strategy / Prompt template | `backend/strategies/*.strategy.md`, `*.template.md` | 进入系统 Prompt，约束 agent 思考方式 |
 | YAML Skill | `backend/skills/**/*.skill.yaml` | 被 MCP `invoke_skill` 调用，确定性执行 SQL 分析 |
-| Rendering pipeline docs | `docs/rendering_pipelines/*.md` | 教学模式和管线结果的知识来源 |
+| Rendering pipeline catalog | `backend/skills/pipelines/index.yaml` | 固定上游 commit 与文档哈希，并把检测条目区分为主类型 variant 或附加 feature |
+| Rendering pipeline docs | `docs/rendering_pipelines/*.md` | 从 `Gracker/rendering_pipelines` 同步的 Android 17 权威教学来源；构建时复制到 `backend/dist/rendering_pipelines/` |
 | 普通 docs | `docs/` 其他目录 | 面向用户和贡献者 |
 
 不要在 TypeScript 中硬编码 Prompt 内容。TypeScript 只负责加载、变量替换和结构性编排。
 不要在文档或代码中写死 MCP 工具总数、Skill 总数或 scene 总数；这些分别由
 tool registry、`backend/skills/` 文件树和 strategy frontmatter 决定。
+
+渲染管线输出需要同时保留两层身份：教学文档定义 `rendering type`，
+catalog 中的 pipeline 条目定义 trace 检测子路径或 feature。只有 catalog 中
+`classification_role: variant` 且 `primary_eligible: true` 的条目能成为主判定；
+同步、哈希和引用完整性由 `npm run check:rendering-pipelines` 校验。

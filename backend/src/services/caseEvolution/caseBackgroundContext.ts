@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { estimatePromptTokens } from '../../agentv3/claudeSystemPrompt';
+import type {OutputLanguage} from '../../agentv3/outputLanguage';
 import { loadPromptTemplate, renderTemplate } from '../../agentv3/strategyLoader';
 import { backendLogPath } from '../../runtimePaths';
 import type { CaseEvidenceSignature, CaseKnowledgeQuality } from '../../types/caseKnowledge';
@@ -18,8 +19,23 @@ import {
   recordCaseEvolutionPromptDroppedForBudget,
   recordCaseEvolutionPromptSegmentBuilt,
 } from './caseEvolutionRuntimeMetrics';
+import {canonicalContentHash} from '../selfEvolution/canonicalJson';
+import {currentRunManifestAttributionSink} from '../selfEvolution/runManifestLifecycle';
+import {
+  isEvaluationInjectionAllowed,
+  registerEvaluationInjection,
+} from '../selfEvolution/evaluationInjectionContext';
 
-const TEMPLATE_NAME = 'case-background-context';
+const TEMPLATE_NAMES: Record<OutputLanguage, {context: string; line: string}> = {
+  'zh-CN': {
+    context: 'case-background-context',
+    line: 'case-background-case-line',
+  },
+  en: {
+    context: 'case-background-context-en',
+    line: 'case-background-case-line-en',
+  },
+};
 const DEFAULT_TOP_K = 3;
 const DEFAULT_CASE_BACKGROUND_TOKEN_BUDGET = 600;
 
@@ -30,6 +46,29 @@ export interface BuildCaseBackgroundContextOptions {
   topK?: number;
   loadTemplate?: typeof loadPromptTemplate;
   validateConfig?: typeof validateCaseEvolutionConfig;
+  outputLanguage?: OutputLanguage;
+}
+
+export interface RuntimeCaseBackgroundContextInput {
+  sceneType?: string;
+  architectureType?: string;
+  knowledgeScope?: KnowledgeScope;
+  outputLanguage: OutputLanguage;
+  privateAnalysisContext: boolean;
+}
+
+/** Shared privacy and localization boundary for every production runtime. */
+export function buildRuntimeCaseBackgroundContext(
+  input: RuntimeCaseBackgroundContextInput,
+  opts: BuildCaseBackgroundContextOptions = {},
+): string | undefined {
+  if (input.privateAnalysisContext) return undefined;
+  return buildCaseBackgroundContext(
+    input.sceneType,
+    input.architectureType,
+    input.knowledgeScope,
+    {...opts, outputLanguage: input.outputLanguage},
+  );
 }
 
 export function buildCaseBackgroundContext(
@@ -51,17 +90,49 @@ export function buildCaseBackgroundContext(
     topK: opts.topK ?? DEFAULT_TOP_K,
     knowledgeScope,
   });
-  if (cases.length === 0) return undefined;
+  const eligibleCases = cases.map(caseNode => ({
+    caseNode,
+    contentHash: canonicalContentHash({
+      title: caseNode.title,
+      status: caseNode.status,
+      knowledge: caseNode.knowledge,
+    }),
+  })).filter(entry => isEvaluationInjectionAllowed({
+    category: 'cases',
+    id: entry.caseNode.caseId,
+    contentHash: entry.contentHash,
+  }));
+  if (eligibleCases.length === 0) return undefined;
 
-  const template = (opts.loadTemplate ?? loadPromptTemplate)(TEMPLATE_NAME);
-  if (!template) return undefined;
+  const outputLanguage = opts.outputLanguage ?? 'zh-CN';
+  const templateNames = TEMPLATE_NAMES[outputLanguage];
+  const templateLoader = opts.loadTemplate ?? loadPromptTemplate;
+  const template = templateLoader(templateNames.context);
+  const lineTemplate = templateLoader(templateNames.line);
+  if (!template || !lineTemplate) return undefined;
   const context = renderTemplate(template, {
-    case_lines: cases.map(formatCaseLine).join('\n'),
+    case_lines: eligibleCases
+      .map(({caseNode}) => formatCaseLine(caseNode, lineTemplate))
+      .join('\n'),
   });
   const maxTokens = opts.maxTokens ?? DEFAULT_CASE_BACKGROUND_TOKEN_BUDGET;
   if (estimatePromptTokens(context) > maxTokens) {
     recordCaseEvolutionPromptDroppedForBudget();
     return undefined;
+  }
+  const sink = currentRunManifestAttributionSink();
+  for (const {caseNode, contentHash} of eligibleCases) {
+    registerEvaluationInjection({
+      category: 'cases',
+      id: caseNode.caseId,
+      contentHash,
+      placement: 'system_prompt:case_background',
+    });
+    sink?.recordInjection(
+      'cases',
+      caseNode.caseId,
+      contentHash,
+    );
   }
   recordCaseEvolutionPromptSegmentBuilt();
   return context;
@@ -153,21 +224,23 @@ function qualityRank(quality: CaseKnowledgeQuality | undefined): number {
   }
 }
 
-function formatCaseLine(caseNode: CaseNode): string {
+function formatCaseLine(caseNode: CaseNode, template: string): string {
   const knowledge = caseNode.knowledge!;
   const evidence = [
     ...knowledge.evidenceSignatures.required,
     ...knowledge.evidenceSignatures.supportive,
   ].slice(0, 3);
-  return [
-    `- ${caseNode.caseId} — ${caseNode.title}`,
-    `  状态：${caseNode.status}; 根因：${knowledge.taxonomy.primary_root_cause}; 匹配强度：background（待证据验证）`,
-    `  关键证据条件：${formatEvidenceConditions(evidence)}`,
-  ].join('\n');
+  return renderTemplate(template, {
+    case_id: caseNode.caseId,
+    title: caseNode.title,
+    status: caseNode.status,
+    primary_root_cause: knowledge.taxonomy.primary_root_cause,
+    evidence_conditions: formatEvidenceConditions(evidence),
+  });
 }
 
 function formatEvidenceConditions(signatures: CaseEvidenceSignature[]): string {
-  if (signatures.length === 0) return '未声明';
+  if (signatures.length === 0) return '-';
   return signatures
     .map(signature => `${signature.field} ${signature.op} ${JSON.stringify(signature.value)}`)
     .join('; ');

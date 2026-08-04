@@ -17,6 +17,7 @@ interface Pattern {
   hash: string;
   kind: 'exact' | 'line' | 'sliding' | 'canary';
   codeRef?: CodeRef;
+  replacement?: string;
 }
 
 export interface LlmEchoStats {
@@ -36,6 +37,7 @@ function hash(text: string): string {
 }
 
 function replacementFor(pattern: Pattern): string {
+  if (pattern.replacement) return pattern.replacement;
   if (pattern.kind === 'canary' || !pattern.codeRef) return '[REDACTED_CODE_ECHO]';
   const loc = pattern.codeRef.lineRange
     ? `${pattern.codeRef.filePath}:${pattern.codeRef.lineRange.start}-${pattern.codeRef.lineRange.end}`
@@ -44,7 +46,11 @@ function replacementFor(pattern: Pattern): string {
 }
 
 export class LLMEchoOutputStream {
+  private static readonly MAX_DERIVED_PATTERNS = 4096;
+  private static readonly MAX_DERIVED_PATTERN_BYTES = 512 * 1024;
   private patterns: Pattern[] = [];
+  private patternBytes = 0;
+  private overflowed = false;
   private buffer = '';
   private destroyed = false;
   private bytesProcessed = 0;
@@ -55,15 +61,7 @@ export class LLMEchoOutputStream {
 
   registerSnippet(snippet: string, ref: CodeRef): void {
     this.assertActive();
-    this.addPattern(snippet, 'exact', ref);
-    for (const line of snippet.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (trimmed.length >= 8) this.addPattern(trimmed, 'line', ref);
-    }
-    for (let i = 0; i < snippet.length; i += 80) {
-      const window = snippet.slice(i, i + 80).trim();
-      if (window.length >= 16) this.addPattern(window, 'sliding', ref);
-    }
+    this.registerDerivedPatterns(snippet, ref);
     this.sortPatterns();
   }
 
@@ -71,6 +69,36 @@ export class LLMEchoOutputStream {
     this.assertActive();
     this.addPattern(canary, 'canary');
     this.sortPatterns();
+  }
+
+  registerPrivateSnippet(snippet: string, replacement: string): void {
+    this.assertActive();
+    this.registerDerivedPatterns(snippet, undefined, replacement);
+    this.sortPatterns();
+  }
+
+  private registerDerivedPatterns(
+    snippet: string,
+    codeRef?: CodeRef,
+    replacement?: string,
+  ): void {
+    this.addPattern(snippet, 'exact', codeRef, replacement);
+    for (const line of snippet.split(/\r?\n/)) {
+      if (this.overflowed) break;
+      const trimmed = line.trim();
+      if (trimmed.length >= 8) this.addPattern(trimmed, 'line', codeRef, replacement);
+    }
+    for (let i = 0; i < snippet.length && !this.overflowed; i += 80) {
+      const window = snippet.slice(i, i + 80).trim();
+      if (window.length >= 16) this.addPattern(window, 'sliding', codeRef, replacement);
+    }
+    for (const token of snippet.match(/[A-Za-z0-9_.$:/-]{16,}/g) ?? []) {
+      if (this.overflowed) break;
+      this.addPattern(token, 'sliding', codeRef, replacement);
+    }
+    for (let i = 0; i + 24 <= snippet.length && !this.overflowed; i += 12) {
+      this.addPattern(snippet.slice(i, i + 24), 'sliding', codeRef, replacement);
+    }
   }
 
   write(tokenChunk: string | Buffer): string {
@@ -108,21 +136,42 @@ export class LLMEchoOutputStream {
   destroy(): void {
     this.buffer = '';
     this.patterns = [];
+    this.patternBytes = 0;
+    this.overflowed = false;
     this.destroyed = true;
   }
 
-  private addPattern(text: string, kind: Pattern['kind'], codeRef?: CodeRef): void {
+  private addPattern(
+    text: string,
+    kind: Pattern['kind'],
+    codeRef?: CodeRef,
+    replacement?: string,
+  ): void {
+    if (this.overflowed) return;
     const normalized = text.trim();
     if (!normalized) return;
+    const patternBytes = Buffer.byteLength(normalized, 'utf8');
+    if (
+      this.patterns.length >= LLMEchoOutputStream.MAX_DERIVED_PATTERNS ||
+      this.patternBytes + patternBytes > LLMEchoOutputStream.MAX_DERIVED_PATTERN_BYTES
+    ) {
+      this.patterns = [];
+      this.patternBytes = 0;
+      this.overflowed = true;
+      return;
+    }
     this.patterns.push({
       text: normalized,
       hash: hash(normalized),
       kind,
       ...(codeRef ? {codeRef} : {}),
+      ...(replacement ? {replacement} : {}),
     });
+    this.patternBytes += patternBytes;
   }
 
   private sortPatterns(): void {
+    if (this.overflowed) return;
     const seen = new Set<string>();
     this.patterns = this.patterns
       .filter(pattern => {
@@ -135,6 +184,7 @@ export class LLMEchoOutputStream {
   }
 
   private redact(input: string): string {
+    if (this.overflowed) return '[PRIVATE_OUTPUT_SUPPRESSED]';
     let output = input;
     for (const pattern of this.patterns) {
       let index = output.indexOf(pattern.text);
@@ -161,4 +211,3 @@ export class LLMEchoOutputStream {
     }
   }
 }
-

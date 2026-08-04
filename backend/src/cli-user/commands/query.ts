@@ -19,12 +19,14 @@ export interface QueryCommandArgs {
 
 export async function runQueryCommand(args: QueryCommandArgs): Promise<number> {
   const tracePath = path.resolve(args.trace);
-  bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
-  const service = new CliAnalyzeService();
   const format = args.format ?? 'text';
+  const lifecycle: { service?: CliAnalyzeService } = {};
 
   try {
     const { traceId, result } = await withConsoleLogToStderr(format !== 'text', async () => {
+      bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
       const loadedTraceId = await service.loadTrace(tracePath);
       const queryResult = await getTraceProcessorService().query(loadedTraceId, args.sql);
       return { traceId: loadedTraceId, result: queryResult };
@@ -35,7 +37,7 @@ export async function runQueryCommand(args: QueryCommandArgs): Promise<number> {
     writeError(format, (err as Error).message);
     return 1;
   } finally {
-    await service.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }
 

@@ -49,7 +49,7 @@ steps:
     sql: |
       SELECT
         ts,
-        ROUND(dur / 1e6, 1) AS dur_ms,
+        100.0 AS dur_ms,
         ROUND(utilization, 4) AS utilization
-      FROM cpu_utilization_per_period
+      FROM cpu_utilization_per_period(time_from_ms(100))
       ORDER BY ts ASC

@@ -105,15 +105,20 @@ describe('CLI renderer', () => {
 
 function captureStdout(fn: () => void): string {
   const original = process.stdout.write;
+  const originalConsoleLog = console.log;
   let output = '';
   (process.stdout.write as any) = (chunk: any) => {
     output += Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk);
     return true;
   };
+  console.log = (...values: unknown[]) => {
+    output += `${values.map(String).join(' ')}\n`;
+  };
   try {
     fn();
   } finally {
     process.stdout.write = original;
+    console.log = originalConsoleLog;
   }
   return output;
 }

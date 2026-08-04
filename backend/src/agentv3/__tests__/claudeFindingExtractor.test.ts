@@ -105,6 +105,26 @@ SELECT '[HIGH] this is not a finding' FROM slice WHERE dur > 100000
     expect(findings[1].evidence?.[0]?.text).toContain('trace_direct');
   });
 
+  it('should extract evidence when punctuation is inside a bold label', () => {
+    const text = `
+#### [CRITICAL] 合成负载代码主导启动 — 根因 SR12
+- **描述：** ChaosTask 与 LoadSimulator 合计贡献 1089ms self time。
+- **证据类型：** trace_direct / high
+- **根因推理链：** ChaosTask 456ms + LoadSimulator 632ms，占启动窗口 81.4%。
+- **建议：** 从真实业务构建中移除合成负载后复测。
+
+#### [HIGH] Main thread workload
+**Evidence Type:** derived_metric / high
+**Root Cause:** MainThread remained runnable for 219.5ms during startup.
+`;
+
+    const findings = extractFindingsFromText(text);
+
+    expect(findings).toHaveLength(2);
+    expect(findings[0].evidence?.[0]?.text).toContain('trace_direct');
+    expect(findings[1].evidence?.[0]?.text).toContain('derived_metric');
+  });
+
   it('should use a representative-frame metric code block as evidence after a real severity heading', () => {
     const text = `
 ### [CRITICAL] workload_heavy 代表帧：Frame 59665234（Session 1，62.73ms，7 VSync）
@@ -183,6 +203,25 @@ Binder: 0ms / GC: 0ms / IO: 0ms
     expect(findings[0].description).toContain('47-59ms');
     expect(findings[0].evidence?.[0]?.text).toContain('47-59ms');
     expect(findings[0].evidence?.[0]?.text).toContain('86%');
+  });
+
+  it('should use quantified impact bullets as evidence for severity-tagged recommendations', () => {
+    const text = `
+### 优化建议
+#### [App 层]
+
+1. **[CRITICAL] 将 \`CustomScroll_longFrameLoad\` 移出 ANIMATION 回调**
+- **收益**：消除 **6 帧掉帧（86%）**，帧耗时从 50–63ms 降至 <8ms
+- **方案**：ANIMATION 回调仅做轻量状态更新，计算逻辑从回调中剥离
+- **WHY**：ANIMATION 回调在 \`Choreographer#doFrame\` 的同步阶段执行，阻塞整帧管线
+`;
+
+    const findings = extractFindingsFromText(text);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].evidence?.[0]?.text).toContain('6 帧掉帧');
+    expect(findings[0].evidence?.[0]?.text).toContain('50–63ms');
+    expect(findings[0].evidence?.[0]?.text).toContain('WHY');
   });
 
   it('should still extract severity headings whose title contains pipe characters', () => {

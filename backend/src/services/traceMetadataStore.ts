@@ -36,6 +36,18 @@ export interface TraceMetadata extends ResourceOwnerFields {
   expiresAt?: number;
 }
 
+export interface TraceMetadataPage {
+  traces: TraceMetadata[];
+  nextCursor?: string;
+}
+
+export class InvalidTraceMetadataCursorError extends Error {
+  constructor() {
+    super('Invalid trace metadata cursor');
+    this.name = 'InvalidTraceMetadataCursorError';
+  }
+}
+
 interface TraceAssetRow extends Record<string, unknown> {
   id: string;
   tenant_id: string;
@@ -131,6 +143,37 @@ function parseMetadataJson(value: string | null): Record<string, unknown> {
 function metadataDateMs(uploadedAt: string | undefined): number {
   const parsed = uploadedAt ? Date.parse(uploadedAt) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function traceMetadataSortTimestamp(metadata: Pick<TraceMetadata, 'uploadedAt'>): number {
+  const parsed = Date.parse(metadata.uploadedAt);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+interface TraceMetadataCursor {
+  createdAt: number;
+  id: string;
+}
+
+function encodeTraceMetadataCursor(cursor: TraceMetadataCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeTraceMetadataCursor(value: string | undefined): TraceMetadataCursor | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<TraceMetadataCursor>;
+    const createdAt = parsed.createdAt;
+    const id = parsed.id;
+    if (typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt)
+      || typeof id !== 'string' || !isSafeTraceId(id)) {
+      throw new InvalidTraceMetadataCursorError();
+    }
+    return {createdAt, id};
+  } catch (error) {
+    if (error instanceof InvalidTraceMetadataCursorError) throw error;
+    throw new InvalidTraceMetadataCursorError();
+  }
 }
 
 function metadataJsonForRow(metadata: TraceMetadata): string {
@@ -295,6 +338,33 @@ export async function writeTraceMetadata(metadata: TraceMetadata): Promise<void>
   );
 }
 
+/**
+ * Mirror legacy/community trace metadata into the scoped SQLite graph required
+ * by processor lease foreign keys. This does not change the active metadata
+ * read/write mode.
+ */
+export function ensureTraceProcessorLeaseBackingMetadata(
+  metadata: TraceMetadata,
+  scope: EnterpriseRepositoryScope,
+): void {
+  writeEnterpriseTraceMetadata({
+    ...metadata,
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    ...(scope.userId ? {userId: scope.userId} : {}),
+  });
+}
+
+export function deleteTraceProcessorLeaseBackingMetadata(
+  traceId: string,
+  scope: EnterpriseRepositoryScope,
+): void {
+  withEnterpriseTraceDb((db) => {
+    createEnterpriseWorkspaceRepository<TraceAssetRow>(db, 'trace_assets')
+      .deleteById(scope, traceId);
+  });
+}
+
 function readEnterpriseTraceMetadata(traceId: string): TraceMetadata | null {
   return withEnterpriseTraceDb((db) => {
     const row = db.prepare<unknown[], TraceAssetRow>(`
@@ -389,12 +459,90 @@ export async function listTraceMetadataForContext(context: RequestContext): Prom
     });
   }
 
-  const ownedTraces: TraceMetadata[] = [];
-  for (const trace of await listTraceMetadata()) {
-    const owned = await readTraceMetadataForContext(trace.id, context);
-    if (owned) ownedTraces.push(owned);
+  return (await listTraceMetadata()).filter(trace => canReadTraceResource(trace, context));
+}
+
+export async function listTraceMetadataPageForContext(
+  context: RequestContext,
+  options: {limit: number; cursor?: string},
+): Promise<TraceMetadataPage> {
+  if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200) {
+    throw new RangeError('Trace metadata page limit must be between 1 and 200');
   }
-  return ownedTraces;
+  const cursor = decodeTraceMetadataCursor(options.cursor);
+
+  if (enterpriseTraceStoreEnabled()) {
+    return withEnterpriseTraceDb((db) => {
+      const rows = db.prepare<unknown[], TraceAssetRow>(`
+        SELECT *
+        FROM trace_assets
+        WHERE tenant_id = @tenantId
+          AND workspace_id = @workspaceId
+          AND (expires_at IS NULL OR expires_at > @now)
+          AND (
+            @cursorCreatedAt IS NULL
+            OR created_at < @cursorCreatedAt
+            OR (created_at = @cursorCreatedAt AND id < @cursorId)
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT @rowLimit
+      `).all({
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        now: Date.now(),
+        cursorCreatedAt: cursor?.createdAt ?? null,
+        cursorId: cursor?.id ?? '',
+        rowLimit: options.limit + 1,
+      });
+      const visibleRows = rows.filter(row => canReadTraceResource(rowToTraceMetadata(row), context));
+      const pageRows = visibleRows.slice(0, options.limit);
+      const lastRow = pageRows[pageRows.length - 1];
+      return {
+        traces: pageRows.map(rowToTraceMetadata),
+        ...(visibleRows.length > options.limit && lastRow
+          ? {nextCursor: encodeTraceMetadataCursor({createdAt: lastRow.created_at, id: lastRow.id})}
+          : {}),
+      };
+    });
+  }
+
+  const ordered = (await listTraceMetadata())
+    .filter(trace => canReadTraceResource(trace, context))
+    .sort((left, right) => (
+      traceMetadataSortTimestamp(right) - traceMetadataSortTimestamp(left)
+      || right.id.localeCompare(left.id)
+    ))
+    .filter(trace => !cursor
+      || traceMetadataSortTimestamp(trace) < cursor.createdAt
+      || (traceMetadataSortTimestamp(trace) === cursor.createdAt && trace.id < cursor.id));
+  const page = ordered.slice(0, options.limit);
+  const last = page[page.length - 1];
+  return {
+    traces: page,
+    ...(ordered.length > options.limit && last
+      ? {nextCursor: encodeTraceMetadataCursor({
+          createdAt: traceMetadataSortTimestamp(last),
+          id: last.id,
+        })}
+      : {}),
+  };
+}
+
+export async function countTraceMetadataForContext(context: RequestContext): Promise<number> {
+  if (!canReadTraceResource(ownerFieldsFromContext(context), context)) return 0;
+  if (enterpriseTraceStoreEnabled()) {
+    return withEnterpriseTraceDb((db) => {
+      const row = db.prepare<unknown[], {count: number}>(`
+        SELECT COUNT(*) AS count
+        FROM trace_assets
+        WHERE tenant_id = ?
+          AND workspace_id = ?
+          AND (expires_at IS NULL OR expires_at > ?)
+      `).get(context.tenantId, context.workspaceId, Date.now());
+      return row?.count ?? 0;
+    });
+  }
+  return (await listTraceMetadata()).filter(trace => canReadTraceResource(trace, context)).length;
 }
 
 export async function deleteTraceMetadata(traceId: string): Promise<void> {

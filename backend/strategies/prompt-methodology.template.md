@@ -54,3 +54,4 @@ Full 模式先 `submit_plan`，再执行 `invoke_skill` / `execute_sql` / `fetch
 - 形成可验证假设时用 `submit_hypothesis`，结论前用 `resolve_hypothesis` 确认或否定。
 - 信息不足但可推进时用 `flag_uncertainty` 记录假设和缺口。
 - 重要跨轮证据用 `write_analysis_note`；普通中间观察不写长期上下文。
+- `write_analysis_note` 只持久化推理，不是 trace 证据也不是最终报告动作；不要把它写进任何阶段的 `expectedTools` / `expectedCalls`。最终结论阶段直接综合前序已验证证据，通常不声明新的工具调用。

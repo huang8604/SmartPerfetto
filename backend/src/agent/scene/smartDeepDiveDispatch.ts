@@ -10,6 +10,12 @@ import type {
   SceneAnalysisSelection,
   SceneReport,
 } from './types';
+import {
+  DEFAULT_OUTPUT_LANGUAGE,
+  localize,
+  type OutputLanguage,
+} from '../../agentv3/outputLanguage';
+import {displaySceneType, projectDisplayedScene} from './scenePresentation';
 
 export interface SmartDeepDiveDispatch {
   query: string;
@@ -26,48 +32,30 @@ const NAVIGATION_TYPES = new Set(['back_key', 'home_key', 'recents_key', 'naviga
 const DEVICE_TYPES = new Set(['screen_on', 'screen_off', 'screen_sleep', 'idle']);
 const ANR_TYPES = new Set(['anr', 'jank_region']);
 
-const SCENE_TYPE_LABELS: Record<string, string> = {
-  cold_start: '冷启动',
-  warm_start: '温启动',
-  hot_start: '热启动',
-  scroll: '滑动',
-  inertial_scroll: '惯性滑动',
-  tap: '点击',
-  long_press: '长按',
-  screen_unlock: '解锁',
-  back_key: 'Back',
-  home_key: 'Home',
-  recents_key: 'Recents',
-  navigation: '导航',
-  window_transition: '窗口切换',
-  app_switch: '应用切换',
-  screen_on: '亮屏',
-  screen_off: '熄屏',
-  screen_sleep: '息屏',
-  idle: '空闲',
-  anr: 'ANR',
-  jank_region: '严重卡顿',
-  scroll_start: '滑动开始',
-};
-
 export function buildSmartDeepDiveDispatch(input: {
   report: SceneReport;
   selection?: SceneAnalysisSelection;
+  outputLanguage?: OutputLanguage;
 }): SmartDeepDiveDispatch | null {
+  const outputLanguage = input.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
   const selectedScenes = selectAnalysisEligibleScenes(
     input.report.displayedScenes,
     input.selection,
   );
   if (selectedScenes.length === 0) return null;
 
-  const query = buildDispatchQuery(input.selection, selectedScenes);
+  const query = buildDispatchQuery(input.selection, selectedScenes, outputLanguage);
   const selectionContext = buildAreaSelectionContext(selectedScenes);
-  const traceContext = buildSelectedScenesTraceContext(selectedScenes);
+  const traceContext = buildSelectedScenesTraceContext(
+    selectedScenes,
+    outputLanguage,
+  );
   const packageName = inferPackageName(selectedScenes);
 
   return {
     query,
-    selectedScenes,
+    selectedScenes: selectedScenes.map(scene =>
+      projectDisplayedScene(scene, outputLanguage)),
     selectionContext,
     traceContext,
     packageName,
@@ -77,26 +65,39 @@ export function buildSmartDeepDiveDispatch(input: {
 function buildDispatchQuery(
   selection: SceneAnalysisSelection | undefined,
   scenes: DisplayedScene[],
+  outputLanguage: OutputLanguage,
 ): string {
   const sceneTypes = new Set(scenes.map((scene) => scene.sceneType));
   const selectedCount = scenes.length;
-  const suffix = `（智能分析已选中 ${selectedCount} 个场景）`;
+  const suffix = localize(
+    outputLanguage,
+    `（智能分析已选中 ${selectedCount} 个场景）`,
+    ` (${selectedCount} Smart Analysis scenes selected)`,
+  );
 
   if (!selection || selection.scope === 'all') {
-    return `按场景时间线分析这个 trace 的性能问题${suffix}`;
+    return localize(
+      outputLanguage,
+      `按场景时间线分析这个 trace 的性能问题${suffix}`,
+      `Analyze performance issues across this trace's scene timeline${suffix}`,
+    );
   }
 
-  if (isSubset(sceneTypes, STARTUP_TYPES)) return `分析启动性能${suffix}`;
-  if (isSubset(sceneTypes, SCROLL_TYPES)) return `分析滑动性能${suffix}`;
-  if (isSubset(sceneTypes, CLICK_TYPES)) return `分析点击响应性能${suffix}`;
-  if (isSubset(sceneTypes, NAVIGATION_TYPES)) return `分析导航和转场性能${suffix}`;
-  if (isSubset(sceneTypes, DEVICE_TYPES)) return `分析设备状态变化对性能的影响${suffix}`;
-  if (isSubset(sceneTypes, ANR_TYPES)) return `分析 ANR 和严重卡顿区间${suffix}`;
+  if (isSubset(sceneTypes, STARTUP_TYPES)) return localize(outputLanguage, `分析启动性能${suffix}`, `Analyze startup performance${suffix}`);
+  if (isSubset(sceneTypes, SCROLL_TYPES)) return localize(outputLanguage, `分析滑动性能${suffix}`, `Analyze scrolling performance${suffix}`);
+  if (isSubset(sceneTypes, CLICK_TYPES)) return localize(outputLanguage, `分析点击响应性能${suffix}`, `Analyze tap response performance${suffix}`);
+  if (isSubset(sceneTypes, NAVIGATION_TYPES)) return localize(outputLanguage, `分析导航和转场性能${suffix}`, `Analyze navigation and transition performance${suffix}`);
+  if (isSubset(sceneTypes, DEVICE_TYPES)) return localize(outputLanguage, `分析设备状态变化对性能的影响${suffix}`, `Analyze how device state changes affect performance${suffix}`);
+  if (isSubset(sceneTypes, ANR_TYPES)) return localize(outputLanguage, `分析 ANR 和严重卡顿区间${suffix}`, `Analyze ANR and severe jank intervals${suffix}`);
 
   const label = selection.label?.trim();
-  return label
+  return outputLanguage === 'zh-CN' && label
     ? `分析${label}相关性能问题${suffix}`
-    : `分析所选场景的性能问题${suffix}`;
+    : localize(
+        outputLanguage,
+        `分析所选场景的性能问题${suffix}`,
+        `Analyze performance issues in the selected scenes${suffix}`,
+      );
 }
 
 function isSubset(values: Set<string>, allowed: Set<string>): boolean {
@@ -134,9 +135,16 @@ function buildAreaSelectionContext(scenes: DisplayedScene[]): SelectionContext |
   };
 }
 
-function buildSelectedScenesTraceContext(scenes: DisplayedScene[]): TraceDataset[] {
+function buildSelectedScenesTraceContext(
+  scenes: DisplayedScene[],
+  outputLanguage: OutputLanguage,
+): TraceDataset[] {
   return [{
-    label: '智能分析选中的场景时间线',
+    label: localize(
+      outputLanguage,
+      '智能分析选中的场景时间线',
+      'Smart Analysis selected scene timeline',
+    ),
     columns: [
       '#',
       'scene_type',
@@ -155,7 +163,7 @@ function buildSelectedScenesTraceContext(scenes: DisplayedScene[]): TraceDataset
     rows: scenes.map((scene, index) => [
       index + 1,
       scene.sceneType,
-      SCENE_TYPE_LABELS[scene.sceneType] || scene.label || scene.sceneType,
+      displaySceneType(scene.sceneType, outputLanguage),
       formatSeconds(scene.startTs),
       formatSeconds(scene.endTs),
       Math.round(scene.durationMs),

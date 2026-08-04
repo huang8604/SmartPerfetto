@@ -5,6 +5,7 @@
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
+import type { TraceProcessorService } from '../../services/traceProcessorService';
 
 let provider: any;
 let providerEnv: Record<string, string> | null;
@@ -48,6 +49,7 @@ jest.mock('../../services/providerManager', () => ({
 
 describe('resolveAgentRuntimeSelection', () => {
   const originalRuntime = process.env.SMARTPERFETTO_AGENT_RUNTIME;
+  const originalAiEnabled = process.env.SMARTPERFETTO_AI_ENABLED;
   const originalExperimentalEnabled = process.env.SMARTPERFETTO_ENABLE_EXPERIMENTAL_AGENT_RUNTIME;
   const originalExperimentalRuntime = process.env.SMARTPERFETTO_EXPERIMENTAL_AGENT_RUNTIME;
 
@@ -55,6 +57,7 @@ describe('resolveAgentRuntimeSelection', () => {
     provider = undefined;
     providerEnv = null;
     delete process.env.SMARTPERFETTO_AGENT_RUNTIME;
+    delete process.env.SMARTPERFETTO_AI_ENABLED;
     delete process.env.SMARTPERFETTO_ENABLE_EXPERIMENTAL_AGENT_RUNTIME;
     delete process.env.SMARTPERFETTO_EXPERIMENTAL_AGENT_RUNTIME;
     jest.resetModules();
@@ -63,6 +66,8 @@ describe('resolveAgentRuntimeSelection', () => {
   afterEach(() => {
     if (originalRuntime === undefined) delete process.env.SMARTPERFETTO_AGENT_RUNTIME;
     else process.env.SMARTPERFETTO_AGENT_RUNTIME = originalRuntime;
+    if (originalAiEnabled === undefined) delete process.env.SMARTPERFETTO_AI_ENABLED;
+    else process.env.SMARTPERFETTO_AI_ENABLED = originalAiEnabled;
     if (originalExperimentalEnabled === undefined) delete process.env.SMARTPERFETTO_ENABLE_EXPERIMENTAL_AGENT_RUNTIME;
     else process.env.SMARTPERFETTO_ENABLE_EXPERIMENTAL_AGENT_RUNTIME = originalExperimentalEnabled;
     if (originalExperimentalRuntime === undefined) delete process.env.SMARTPERFETTO_EXPERIMENTAL_AGENT_RUNTIME;
@@ -311,7 +316,7 @@ describe('resolveAgentRuntimeSelection', () => {
     const createClaudeRuntime = jest.fn(() => claudeRuntime);
     jest.doMock('../engines/claude', () => ({ createClaudeRuntime }));
 
-    const traceProcessorService = { kind: 'trace-processor' } as any;
+    const traceProcessorService = { kind: 'trace-processor' } as unknown as TraceProcessorService;
     const { createAgentOrchestrator } = await import('../runtimeSelection');
     const orchestrator = createAgentOrchestrator({ traceProcessorService });
 
@@ -322,6 +327,23 @@ describe('resolveAgentRuntimeSelection', () => {
       undefined,
       { kind: 'claude-agent-sdk', source: 'default' },
     );
+  });
+
+  it('blocks runtime creation while leaving runtime selection inspectable when AI is disabled', async () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    const claudeRuntime = createMockOrchestrator('claude');
+    const createClaudeRuntime = jest.fn(() => claudeRuntime);
+    jest.doMock('../engines/claude', () => ({ createClaudeRuntime }));
+
+    const traceProcessorService = { kind: 'trace-processor' } as unknown as TraceProcessorService;
+    const { createAgentOrchestrator, resolveAgentRuntimeSelection } = await import('../runtimeSelection');
+
+    expect(resolveAgentRuntimeSelection()).toEqual({
+      kind: 'claude-agent-sdk',
+      source: 'default',
+    });
+    expect(() => createAgentOrchestrator({ traceProcessorService })).toThrow('AI is disabled');
+    expect(createClaudeRuntime).not.toHaveBeenCalled();
   });
 
   it('passes the resolved OpenAI provider selection snapshot into the runtime instance', async () => {

@@ -46,6 +46,7 @@ inputs:
 
 steps:
   - id: detect_vsync_period
+    type: atomic
     description: Detect VSync period using multiple data sources
     sql: |
       -- VSync Period Detection with Multiple Sources

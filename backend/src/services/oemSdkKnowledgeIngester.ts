@@ -168,6 +168,7 @@ export class OemSdkKnowledgeIngester {
       try {
         const uri = uriFor(doc.vendor, doc.docPath);
         const packed = chunkText(doc.content, maxChars);
+        const documentChunks: RagChunk[] = [];
         for (const p of packed) {
           const chunk: RagChunk = {
             chunkId: makeChunkId(uri, p.offset),
@@ -181,9 +182,10 @@ export class OemSdkKnowledgeIngester {
             verifiedAt: doc.fetchedAt,
             author: doc.author,
           };
-          this.store.addChunk(chunk);
-          result.chunksAdded++;
+          documentChunks.push(chunk);
         }
+        this.store.addChunks(documentChunks);
+        result.chunksAdded += documentChunks.length;
       } catch (err) {
         result.errors.push({
           vendor: doc.vendor,

@@ -1,0 +1,1207 @@
+{
+  "schema_version": 1,
+  "id": "rendering-jank",
+  "kind": "constructed",
+  "title": "Rendering pipeline jank",
+  "description": "Deterministic rendering pipeline jank signals over the android-scroll-customer real base trace.",
+  "scene": "scrolling",
+  "tags": [
+    "android",
+    "constructed",
+    "scrolling"
+  ],
+  "aliases": [],
+  "trace": {
+    "file": "trace.overlay.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "3545492fc56cacbc73022aae8db4528c9c8f3fe54df733ff6273d95a416b2f55",
+    "materialization": "base-plus-overlay"
+  },
+  "android": {
+    "release": "16",
+    "api_level": 36,
+    "device": "OPPO PKH110 base",
+    "build_fingerprint": null,
+    "compatibility": {
+      "min_api": 35,
+      "max_api": 36
+    }
+  },
+  "source": {
+    "origin": "SmartPerfetto deterministic trace generator",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": "AGPL-3.0-or-later",
+    "consent": "generated",
+    "privacy_review": "not-applicable",
+    "sanitization_review": "not-applicable",
+    "publication": "public"
+  },
+  "analysis": {
+    "results": [
+      "analysis/expected.json"
+    ],
+    "logs": []
+  },
+  "construction": {
+    "base_case_id": "android-scroll-customer",
+    "scenario_file": "scenario.json",
+    "generator_version": 1,
+    "seed": "rendering-jank-v1",
+    "output": "Trace/.generated/constructed/rendering-jank/trace.pftrace"
+  },
+  "coverage": {
+    "skills": [
+      "app_frame_production",
+      "buffer_transaction_lifecycle",
+      "choreographer_module",
+      "chrome_scroll_jank_frame_timeline",
+      "consumer_jank_detection",
+      "flutter_scrolling_analysis",
+      "fpsgo_analysis",
+      "frame_blocking_calls",
+      "frame_overrun_summary",
+      "frame_pipeline_variance",
+      "frame_production_gap",
+      "frame_ui_time_breakdown",
+      "game_fps_analysis",
+      "game_main_loop_jank",
+      "gl_standalone_swap_jank",
+      "gpu_render_in_range",
+      "input_to_frame_latency",
+      "jank_frame_detail",
+      "pipeline_flutter_textureview",
+      "pipeline_hardware_buffer_renderer",
+      "pipeline_textureview_standard",
+      "pipeline_webview_textureview_custom",
+      "present_fence_timing",
+      "render_pipeline_latency",
+      "render_thread_slices",
+      "rendering_pipeline_detection",
+      "rn_bridge_to_frame_jank",
+      "rn_fabric_render_jank",
+      "scroll_response_latency",
+      "scroll_session_analysis",
+      "scrolling_analysis",
+      "sf_composition_in_range",
+      "sf_frame_consumption",
+      "sf_layer_count_in_range",
+      "surfaceflinger_analysis",
+      "surfaceflinger_module",
+      "textureview_producer_frame_timing",
+      "vrr_detection",
+      "vsync_alignment_in_range",
+      "vsync_config",
+      "vsync_period_detection",
+      "vsync_phase_alignment",
+      "webview_drawfunctor_jank_chain"
+    ],
+    "strategies": [
+      "game",
+      "scroll_response",
+      "scrolling"
+    ],
+    "expectations": [
+      {
+        "id": "execute-app_frame_production",
+        "type": "skill",
+        "target": "app_frame_production",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/app_frame_production.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "app_production_stats"
+        ],
+        "required_sql_steps": [
+          "app_production_stats"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "app_production_stats",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-buffer_transaction_lifecycle",
+        "type": "skill",
+        "target": "buffer_transaction_lifecycle",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/buffer_transaction_lifecycle.skill.yaml",
+        "parameters": {
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "apply_transaction_summary",
+          "queue_to_transaction_delay",
+          "per_layer_transactions"
+        ],
+        "required_sql_steps": [
+          "apply_transaction_summary",
+          "queue_to_transaction_delay",
+          "per_layer_transactions"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "apply_transaction_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-choreographer_module",
+        "type": "skill",
+        "target": "choreographer_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/framework/choreographer_module.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "doframe_overview",
+          "doframe_timeline",
+          "callback_breakdown",
+          "vsync_timing",
+          "long_frames",
+          "view_traversal",
+          "frame_pipeline"
+        ],
+        "required_sql_steps": [
+          "doframe_overview",
+          "doframe_timeline",
+          "callback_breakdown",
+          "long_frames",
+          "view_traversal",
+          "frame_pipeline"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "doframe_overview",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-chrome_scroll_jank_frame_timeline",
+        "type": "skill",
+        "target": "chrome_scroll_jank_frame_timeline",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/chrome_scroll_jank_frame_timeline.skill.yaml",
+        "parameters": {
+          "min_janky_frames": 1
+        },
+        "required_steps": [
+          "chrome_trace_availability",
+          "chrome_scroll_v3_summary",
+          "chrome_scroll_v4_janky_frames",
+          "chrome_preferred_frame_timeline"
+        ],
+        "required_sql_steps": [
+          "chrome_trace_availability",
+          "chrome_scroll_v3_summary",
+          "chrome_scroll_v4_janky_frames",
+          "chrome_preferred_frame_timeline"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "chrome_trace_availability",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-consumer_jank_detection",
+        "type": "skill",
+        "target": "consumer_jank_detection",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/consumer_jank_detection.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "vsync_config",
+          "consumer_jank_frames",
+          "consumer_jank_summary",
+          "jank_severity_distribution"
+        ],
+        "required_sql_steps": [
+          "vsync_config",
+          "consumer_jank_frames",
+          "consumer_jank_summary",
+          "jank_severity_distribution"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "consumer_jank_frames",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-flutter_scrolling_analysis",
+        "type": "skill",
+        "target": "flutter_scrolling_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/flutter_scrolling_analysis.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "flutter_frame_overview",
+          "flutter_thread_analysis",
+          "flutter_consumer_jank",
+          "flutter_jank_frames",
+          "flutter_ui_thread_long_slices",
+          "flutter_raster_thread_long_slices"
+        ],
+        "required_sql_steps": [
+          "flutter_frame_overview",
+          "flutter_thread_analysis",
+          "flutter_consumer_jank",
+          "flutter_jank_frames",
+          "flutter_ui_thread_long_slices",
+          "flutter_raster_thread_long_slices"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "flutter_frame_overview",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-fpsgo_analysis",
+        "type": "skill",
+        "target": "fpsgo_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/fpsgo_analysis.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-frame_blocking_calls",
+        "type": "skill",
+        "target": "frame_blocking_calls",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/frame_blocking_calls.skill.yaml",
+        "parameters": {
+          "process_name": "com.smartperfetto.fixture"
+        },
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-frame_overrun_summary",
+        "type": "skill",
+        "target": "frame_overrun_summary",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/frame_overrun_summary.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "overrun_frames"
+        ],
+        "required_sql_steps": [
+          "overrun_frames"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "overrun_frames",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-frame_pipeline_variance",
+        "type": "skill",
+        "target": "frame_pipeline_variance",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/frame_pipeline_variance.skill.yaml",
+        "parameters": {
+          "transition_threshold_ms": 8
+        },
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-frame_production_gap",
+        "type": "skill",
+        "target": "frame_production_gap",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/frame_production_gap.skill.yaml",
+        "parameters": {
+          "process_name": "com.smartperfetto.fixture"
+        },
+        "required_steps": [
+          "gap_summary",
+          "gap_list"
+        ],
+        "required_sql_steps": [
+          "gap_summary",
+          "gap_list"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "gap_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-frame_ui_time_breakdown",
+        "type": "skill",
+        "target": "frame_ui_time_breakdown",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/frame_ui_time_breakdown.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "ui_time"
+        ],
+        "required_sql_steps": [
+          "ui_time"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "ui_time",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-game_fps_analysis",
+        "type": "skill",
+        "target": "game_fps_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/game_fps_analysis.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "detect_target_fps",
+          "frame_interval_stats",
+          "jank_detection"
+        ],
+        "required_sql_steps": [
+          "detect_target_fps",
+          "frame_interval_stats",
+          "jank_detection"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "detect_target_fps",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-game_main_loop_jank",
+        "type": "skill",
+        "target": "game_main_loop_jank",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/game_main_loop_jank.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "engine_loop_summary",
+          "slow_engine_slices"
+        ],
+        "required_sql_steps": [
+          "engine_loop_summary",
+          "slow_engine_slices"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "engine_loop_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-gl_standalone_swap_jank",
+        "type": "skill",
+        "target": "gl_standalone_swap_jank",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/gl_standalone_swap_jank.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "swap_interval_summary",
+          "slow_swap_events"
+        ],
+        "required_sql_steps": [
+          "swap_interval_summary",
+          "slow_swap_events"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "swap_interval_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-gpu_render_in_range",
+        "type": "skill",
+        "target": "gpu_render_in_range",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/gpu_render_in_range.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-input_to_frame_latency",
+        "type": "skill",
+        "target": "input_to_frame_latency",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/input_to_frame_latency.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "vsync_period",
+          "input_sampling_rate",
+          "per_frame_latency",
+          "latency_statistics",
+          "latency_spikes"
+        ],
+        "required_sql_steps": [
+          "vsync_period",
+          "input_sampling_rate",
+          "per_frame_latency",
+          "latency_statistics",
+          "latency_spikes"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "vsync_period",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-jank_frame_detail",
+        "type": "skill",
+        "target": "jank_frame_detail",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/jank_frame_detail.skill.yaml",
+        "parameters": {
+          "package": "com.smartperfetto.fixture",
+          "pid": 700000,
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "init_cpu_topology",
+          "monitor_contention_check",
+          "gc_table_check",
+          "gpu_table_check",
+          "binder_table_check",
+          "quadrant_analysis",
+          "binder_calls",
+          "cpu_freq_analysis",
+          "main_thread_slices",
+          "choreographer_resync_markers",
+          "render_thread_slices",
+          "cpu_freq_timeline",
+          "lock_contention",
+          "gc_in_frame",
+          "io_blocking",
+          "sched_latency",
+          "task_migration",
+          "gpu_render",
+          "binder_blocking",
+          "cpu_throttling",
+          "cpu_cluster_load",
+          "page_fault",
+          "sf_composition",
+          "gpu_freq",
+          "vsync_alignment",
+          "render_pipeline",
+          "root_cause_summary"
+        ],
+        "required_sql_steps": [
+          "monitor_contention_check",
+          "gc_table_check",
+          "gpu_table_check",
+          "binder_table_check",
+          "quadrant_analysis",
+          "binder_calls",
+          "cpu_freq_analysis",
+          "main_thread_slices",
+          "choreographer_resync_markers",
+          "render_thread_slices",
+          "cpu_freq_timeline",
+          "lock_contention",
+          "gc_in_frame",
+          "io_blocking",
+          "root_cause_summary"
+        ],
+        "forced_sql_steps": [
+          "lock_contention",
+          "gc_in_frame"
+        ],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "quadrant_analysis",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "definition-pipeline_flutter_textureview",
+        "type": "skill",
+        "target": "pipeline_flutter_textureview",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/flutter_textureview.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "definition-pipeline_hardware_buffer_renderer",
+        "type": "skill",
+        "target": "pipeline_hardware_buffer_renderer",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/hardware_buffer_renderer.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "definition-pipeline_textureview_standard",
+        "type": "skill",
+        "target": "pipeline_textureview_standard",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/textureview_standard.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "definition-pipeline_webview_textureview_custom",
+        "type": "skill",
+        "target": "pipeline_webview_textureview_custom",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/webview_textureview_custom.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-present_fence_timing",
+        "type": "skill",
+        "target": "present_fence_timing",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/present_fence_timing.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "present_fence_stats"
+        ],
+        "required_sql_steps": [
+          "present_fence_stats"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "present_fence_stats",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-render_pipeline_latency",
+        "type": "skill",
+        "target": "render_pipeline_latency",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/render_pipeline_latency.skill.yaml",
+        "parameters": {
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-render_thread_slices",
+        "type": "skill",
+        "target": "render_thread_slices",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/render_thread_slices.skill.yaml",
+        "parameters": {
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "render_slices"
+        ],
+        "required_sql_steps": [
+          "render_slices"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "render_slices",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-rendering_pipeline_detection",
+        "type": "skill",
+        "target": "rendering_pipeline_detection",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/rendering_pipeline_detection.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "score_pipelines",
+          "determine_pipeline",
+          "subvariants",
+          "trace_requirements",
+          "active_rendering_processes",
+          "layer_signals",
+          "extra_rhythm_signals",
+          "bufferqueue_path_signals"
+        ],
+        "required_sql_steps": [
+          "score_pipelines",
+          "determine_pipeline",
+          "subvariants",
+          "trace_requirements",
+          "active_rendering_processes",
+          "layer_signals",
+          "extra_rhythm_signals",
+          "bufferqueue_path_signals"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "score_pipelines",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-rn_bridge_to_frame_jank",
+        "type": "skill",
+        "target": "rn_bridge_to_frame_jank",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/rn_bridge_to_frame_jank.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "rn_bridge_frame_overlap"
+        ],
+        "required_sql_steps": [
+          "rn_bridge_frame_overlap"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "rn_bridge_frame_overlap",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-rn_fabric_render_jank",
+        "type": "skill",
+        "target": "rn_fabric_render_jank",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/rn_fabric_render_jank.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "fabric_frame_overlap"
+        ],
+        "required_sql_steps": [
+          "fabric_frame_overlap"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "fabric_frame_overlap",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-scroll_response_latency",
+        "type": "skill",
+        "target": "scroll_response_latency",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/scroll_response_latency.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-scroll_session_analysis",
+        "type": "skill",
+        "target": "scroll_session_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/scroll_session_analysis.skill.yaml",
+        "parameters": {
+          "session_id": 1,
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}",
+          "touch_start_ts": "${trace_start}",
+          "touch_end_ts": "${trace_end}",
+          "fling_start_ts": "${trace_start}",
+          "fling_end_ts": "${trace_end}",
+          "has_fling": 1
+        },
+        "required_steps": [
+          "full_session_stats",
+          "touch_phase_stats",
+          "fling_phase_stats",
+          "identify_janky_frames"
+        ],
+        "required_sql_steps": [
+          "full_session_stats",
+          "touch_phase_stats",
+          "fling_phase_stats",
+          "identify_janky_frames"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [
+          {
+            "step": "touch_phase_stats",
+            "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+          },
+          {
+            "step": "fling_phase_stats",
+            "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+          }
+        ],
+        "semantic_step": "full_session_stats",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-scrolling_analysis",
+        "type": "skill",
+        "target": "scrolling_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/scrolling_analysis.skill.yaml",
+        "parameters": {
+          "enable_expert_probes": true,
+          "frame_variance_probe_min_janky_frames": 1,
+          "frame_variance_transition_threshold_ms": 1,
+          "input_handling_budget_ratio": 0.5,
+          "input_event_backlog_threshold": 3
+        },
+        "required_steps": [
+          "init_cpu_topology",
+          "frame_timeline_check",
+          "vsync_config",
+          "performance_summary",
+          "input_data_fallback_view",
+          "input_data_check",
+          "input_latency_summary",
+          "expert_analysis_window",
+          "frame_variance_probe",
+          "jank_type_stats",
+          "scroll_sessions",
+          "session_stats_batch",
+          "session_jank",
+          "get_app_jank_frames",
+          "batch_frame_root_cause",
+          "global_context_flags",
+          "session_quadrant_summary",
+          "session_cpu_freq",
+          "session_thread_core_affinity",
+          "root_cause_classification",
+          "fallback_no_frame_timeline"
+        ],
+        "required_sql_steps": [
+          "frame_timeline_check",
+          "vsync_config",
+          "performance_summary",
+          "input_data_fallback_view",
+          "input_data_check",
+          "input_latency_summary",
+          "expert_analysis_window",
+          "jank_type_stats",
+          "scroll_sessions",
+          "session_stats_batch",
+          "session_jank",
+          "get_app_jank_frames",
+          "batch_frame_root_cause",
+          "global_context_flags",
+          "session_quadrant_summary",
+          "session_cpu_freq",
+          "session_thread_core_affinity",
+          "root_cause_classification",
+          "fallback_no_frame_timeline"
+        ],
+        "forced_sql_steps": [
+          "vsync_config",
+          "performance_summary",
+          "input_data_check",
+          "input_latency_summary",
+          "expert_analysis_window",
+          "jank_type_stats",
+          "scroll_sessions",
+          "session_stats_batch",
+          "session_jank",
+          "get_app_jank_frames",
+          "batch_frame_root_cause",
+          "session_quadrant_summary",
+          "session_cpu_freq",
+          "session_thread_core_affinity",
+          "root_cause_classification",
+          "fallback_no_frame_timeline"
+        ],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [
+          {
+            "step": "input_data_fallback_view",
+            "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+          }
+        ],
+        "semantic_step": "vsync_config",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-sf_composition_in_range",
+        "type": "skill",
+        "target": "sf_composition_in_range",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/sf_composition_in_range.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-sf_frame_consumption",
+        "type": "skill",
+        "target": "sf_frame_consumption",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/sf_frame_consumption.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "sf_consumption_stats"
+        ],
+        "required_sql_steps": [
+          "sf_consumption_stats"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "sf_consumption_stats",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-sf_layer_count_in_range",
+        "type": "skill",
+        "target": "sf_layer_count_in_range",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/sf_layer_count_in_range.skill.yaml",
+        "parameters": {
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "layer_summary",
+          "layer_list"
+        ],
+        "required_sql_steps": [
+          "layer_summary",
+          "layer_list"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "layer_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-surfaceflinger_analysis",
+        "type": "skill",
+        "target": "surfaceflinger_analysis",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/surfaceflinger_analysis.skill.yaml",
+        "parameters": {
+          "slow_composition_multiplier": 1.5,
+          "composition_rating_poor_ms": 12,
+          "composition_rating_fair_ms": 8,
+          "composition_rating_good_ms": 4,
+          "long_fence_threshold_ms": 10,
+          "fence_critical_ms": 16,
+          "fence_warning_ms": 8,
+          "slow_pct_threshold": 10,
+          "gpu_comp_ratio_threshold": 0.5
+        },
+        "required_steps": [
+          "data_check",
+          "vsync_config",
+          "composition_overview",
+          "gpu_hwc_stats",
+          "slow_compositions",
+          "fence_analysis",
+          "composition_phases",
+          "layer_stats",
+          "root_cause_classification",
+          "fallback_no_sf_data"
+        ],
+        "required_sql_steps": [
+          "data_check",
+          "vsync_config",
+          "composition_overview",
+          "gpu_hwc_stats",
+          "slow_compositions",
+          "fence_analysis",
+          "composition_phases",
+          "layer_stats",
+          "root_cause_classification",
+          "fallback_no_sf_data"
+        ],
+        "forced_sql_steps": [
+          "vsync_config",
+          "composition_overview",
+          "gpu_hwc_stats",
+          "slow_compositions",
+          "fence_analysis",
+          "layer_stats",
+          "root_cause_classification",
+          "fallback_no_sf_data"
+        ],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [
+          {
+            "step": "composition_phases",
+            "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+          }
+        ],
+        "semantic_step": "vsync_config",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-surfaceflinger_module",
+        "type": "skill",
+        "target": "surfaceflinger_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/framework/surfaceflinger_module.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "frame_overview",
+          "jank_breakdown",
+          "thread_timing",
+          "worst_frames"
+        ],
+        "required_sql_steps": [
+          "frame_overview",
+          "jank_breakdown",
+          "thread_timing",
+          "worst_frames"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "frame_overview",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-textureview_producer_frame_timing",
+        "type": "skill",
+        "target": "textureview_producer_frame_timing",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/textureview_producer_frame_timing.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "textureview_signal_summary",
+          "textureview_producer_intervals"
+        ],
+        "required_sql_steps": [
+          "textureview_signal_summary",
+          "textureview_producer_intervals"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "textureview_signal_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-vrr_detection",
+        "type": "skill",
+        "target": "vrr_detection",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/vrr_detection.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "vsync_interval_distribution",
+          "vrr_mode_detection",
+          "refresh_rate_switches"
+        ],
+        "required_sql_steps": [
+          "vsync_interval_distribution",
+          "vrr_mode_detection",
+          "refresh_rate_switches"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "vsync_interval_distribution",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-vsync_alignment_in_range",
+        "type": "skill",
+        "target": "vsync_alignment_in_range",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/vsync_alignment_in_range.skill.yaml",
+        "parameters": {
+          "start_ts": "${trace_start}",
+          "end_ts": "${trace_end}"
+        },
+        "required_steps": [
+          "root"
+        ],
+        "required_sql_steps": [
+          "root"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "root",
+        "min_rows": 0,
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-vsync_config",
+        "type": "skill",
+        "target": "vsync_config",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/vsync_config.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "detect_vsync_config"
+        ],
+        "required_sql_steps": [
+          "detect_vsync_config"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "detect_vsync_config",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-vsync_period_detection",
+        "type": "skill",
+        "target": "vsync_period_detection",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/vsync_period_detection.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "detect_vsync_period"
+        ],
+        "required_sql_steps": [
+          "detect_vsync_period"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "detect_vsync_period",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-vsync_phase_alignment",
+        "type": "skill",
+        "target": "vsync_phase_alignment",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/vsync_phase_alignment.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "vsync_timeline",
+          "phase_analysis",
+          "phase_distribution"
+        ],
+        "required_sql_steps": [
+          "vsync_timeline",
+          "phase_analysis",
+          "phase_distribution"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "vsync_timeline",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "execute-webview_drawfunctor_jank_chain",
+        "type": "skill",
+        "target": "webview_drawfunctor_jank_chain",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/webview_drawfunctor_jank_chain.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "drawfunctor_signal_summary",
+          "drawfunctor_frame_overlap"
+        ],
+        "required_sql_steps": [
+          "drawfunctor_signal_summary",
+          "drawfunctor_frame_overlap"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "drawfunctor_signal_summary",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "strategy-game",
+        "type": "strategy",
+        "target": "game",
+        "query": "游戏",
+        "expected_strategy": "game",
+        "source_file": "backend/strategies/game.strategy.md",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "strategy-scroll_response",
+        "type": "strategy",
+        "target": "scroll_response",
+        "query": "滑动响应",
+        "expected_strategy": "scroll_response",
+        "source_file": "backend/strategies/scroll-response.strategy.md",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      },
+      {
+        "id": "strategy-scrolling",
+        "type": "strategy",
+        "target": "scrolling",
+        "query": "滑动",
+        "expected_strategy": "scrolling",
+        "source_file": "backend/strategies/scrolling.strategy.md",
+        "required_marker": "SmartPerfetto::CASE::rendering-jank"
+      }
+    ]
+  }
+}

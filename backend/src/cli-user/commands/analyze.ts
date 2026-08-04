@@ -32,6 +32,7 @@ export interface AnalyzeCommandArgs {
   analysisMode?: CliAnalysisMode;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
+  knowledgeSourceIds?: string[];
 }
 
 export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<number> {
@@ -39,13 +40,15 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
   // pins cwd to the backend root for consistent service-layer path resolution,
   // which would otherwise change how a relative trace argument gets interpreted.
   const tracePath = path.resolve(args.trace);
-  const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
   const renderer = createRenderer({ verbose: args.verbose, useColor: !args.noColor, format: args.format });
-  const service = new CliAnalyzeService();
+  const lifecycle: { service?: CliAnalyzeService } = {};
   let exitCode = 0;
 
   try {
     await withConsoleLogToStderr(renderer.format !== 'text', async () => {
+      const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
       assertAnalysisRuntimeReady();
       const turn = await startSession({ paths, service, renderer }, {
         tracePath,
@@ -53,6 +56,7 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
         analysisMode: args.analysisMode,
         codeAwareMode: args.codeAwareMode,
         codebaseIds: args.codebaseIds,
+        knowledgeSourceIds: args.knowledgeSourceIds,
       });
       exitCode = turn.success ? 0 : 1;
     });
@@ -61,6 +65,6 @@ export async function runAnalyzeCommand(args: AnalyzeCommandArgs): Promise<numbe
     renderer.printError((err as Error).message);
     return 1;
   } finally {
-    await service.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }

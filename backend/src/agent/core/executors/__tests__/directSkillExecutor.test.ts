@@ -45,6 +45,13 @@ jest.mock('../../../../services/skillEngine/skillExecutor', () => ({
     setFragmentRegistry: jest.fn(),
   })),
   SkillExecutor: class {
+    static toDataEnvelopes(result: SkillExecutionResult) {
+      return result.displayResults.map((dr) => ({
+        meta: {type: 'skill_result', version: '2.0', source: `${result.skillId}:${dr.stepId}`},
+        data: dr.data,
+        display: {layer: dr.layer || 'list', format: dr.format, title: dr.title},
+      }));
+    }
     execute = mockExecute;
     registerSkills = mockRegisterSkills;
   },

@@ -15,6 +15,7 @@
 
 import {
   SceneStoryService,
+  projectSceneReport,
   type SceneStoryServiceDeps,
   type SceneStorySession,
 } from '../sceneStoryService';
@@ -572,6 +573,33 @@ describe('SceneStoryService', () => {
       expect(await built.service.getReport('rpt-get')).toBe(stored);
       expect(await built.service.getReport('rpt-missing')).toBeNull();
       expect(built.store.loadById).toHaveBeenCalledWith('rpt-get');
+    });
+
+    it('projects a cached core report into English without mutating it', () => {
+      const stored = makeReport({ reportId: 'rpt-en', hash: 'sha-en' });
+      const bilingualStored = {
+        ...stored,
+        insights: [{
+          title: 'scene_story_summary',
+          body: stored.summary ?? '',
+          relatedDisplayedSceneIds: ['scene-1'],
+        }],
+        summaries: {
+          'zh-CN': stored.summary ?? '',
+          en: 'The user scrolled and encountered visible jank.',
+        },
+      };
+
+      const projected = projectSceneReport(bilingualStored, 'en');
+
+      expect(projected.summary).toBe(
+        'The user scrolled and encountered visible jank.',
+      );
+      expect(projected.insights.find(item => item.title === 'scene_story_summary')?.body)
+        .toBe('The user scrolled and encountered visible jank.');
+      expect(projected.displayedScenes[0].label).toBe('Scroll (1000ms)');
+      expect(stored.summary).toBe('整体叙述测试');
+      expect(stored.displayedScenes[0].label).toBe('scroll (1000ms)');
     });
   });
 });

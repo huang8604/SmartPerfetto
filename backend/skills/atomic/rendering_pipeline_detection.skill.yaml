@@ -1,71 +1,44 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2024-2026 Gracker (Chris)
 # This file is part of SmartPerfetto. See LICENSE for details.
-
-# =============================================================================
-# Rendering Pipeline Detection (24-Type Fine-Grained Detection)
-# =============================================================================
-# Identifies the primary rendering pipeline type used by the application.
-#
-# Supported Pipeline Types (24):
-#   HWUI Family:
-#     - ANDROID_VIEW_STANDARD_BLAST: Standard HWUI + BLAST (Android 12+)
-#     - ANDROID_VIEW_STANDARD_LEGACY: Standard HWUI + Legacy BufferQueue
-#     - ANDROID_VIEW_SOFTWARE: CPU Skia rendering (no RenderThread)
-#     - ANDROID_VIEW_MIXED: View + SurfaceView hybrid
-#     - ANDROID_VIEW_MULTI_WINDOW: Same-process multi-window serialization
-#
-#   Surface-Based:
-#     - ANDROID_PIP_FREEFORM: PIP/Freeform window features
-#     - SURFACEVIEW_BLAST: Independent Surface + BLAST
-#     - TEXTUREVIEW_STANDARD: SurfaceTexture updateTexImage
-#     - SURFACE_CONTROL_API: NDK SurfaceControl transactions
-#
-#   Graphics APIs:
-#     - OPENGL_ES: GLES/EGL thread rendering
-#     - VULKAN_NATIVE: vkQueuePresent/Swappy
-#     - ANGLE_GLES_VULKAN: GLES-over-Vulkan (ANGLE)
-#
-#   Flutter:
-#     - FLUTTER_SURFACEVIEW_IMPELLER: Flutter + Impeller engine
-#     - FLUTTER_SURFACEVIEW_SKIA: Flutter + Skia engine
-#     - FLUTTER_TEXTUREVIEW: Flutter PlatformView fallback
-#
-#   WebView:
-#     - WEBVIEW_GL_FUNCTOR: App RT sync wait for WebView
-#     - WEBVIEW_SURFACE_CONTROL: Viz/OOP-R/SC independent composition
-#     - WEBVIEW_SURFACEVIEW_WRAPPER: Full-screen video wrapper
-#     - WEBVIEW_TEXTUREVIEW_CUSTOM: X5/UC custom kernel
-#
-#   Specialized:
-#     - GAME_ENGINE: Unity/Unreal/Godot engines
-#     - CAMERA_PIPELINE: Camera2/HAL3 multi-stream
-#     - VIDEO_OVERLAY_HWC: HWC video layer overlay
-#     - HARDWARE_BUFFER_RENDERER: Android 14+ HBR
-#     - VARIABLE_REFRESH_RATE: VRR/ARR/FrameTimeline
-#
-# =============================================================================
+# GENERATED FILE: run npm run generate:pipeline-detection; do not edit by hand.
 
 name: rendering_pipeline_detection
-version: "2.0"
+version: "4.0"
 type: composite
 category: rendering
 tier: S
-
 meta:
-  display_name: "渲染管线检测 (24 类型)"
-  description: "细粒度识别应用使用的渲染管线类型，输出主链路+候选+特性"
-  icon: "layers"
-  tags: [rendering, pipeline, detection, teaching]
-
+  display_name: 渲染管线检测 (YAML 驱动)
+  description: 从 catalog 与 pipeline YAML 生成子路径评分、主出图类型、候选与正交特性
+  icon: layers
+  tags:
+    - rendering
+    - pipeline
+    - detection
+    - teaching
+    - yaml
 triggers:
   keywords:
-    zh: [渲染管线, 管线检测, SurfaceView, TextureView, Flutter, WebView, 游戏渲染]
-    en: [rendering pipeline, pipeline detection, surfaceview, textureview, flutter, webview]
+    zh:
+      - 渲染管线
+      - 管线检测
+      - 出图类型
+      - SurfaceView
+      - TextureView
+      - Flutter
+      - WebView
+    en:
+      - rendering pipeline
+      - rendering type
+      - pipeline detection
+      - surfaceview
+      - textureview
+      - flutter
+      - webview
   patterns:
-    - ".*(渲染管线|SurfaceView|TextureView|WebView|Flutter).*"
-    - ".*(rendering pipeline|surfaceview|textureview|webview|flutter).*"
-
+    - .*(渲染管线|出图类型|SurfaceView|TextureView|WebView|Flutter).*
+    - .*(rendering pipeline|rendering type|surfaceview|textureview|webview|flutter).*
 prerequisites:
   required_tables:
     - slice
@@ -78,693 +51,1247 @@ prerequisites:
   modules:
     - slices.with_context
     - android.frames.timeline
-
 inputs:
   - name: package
     type: string
     required: false
-    description: "应用包名 (可选，用于过滤)"
-
+    description: 应用包名 (可选，用于过滤)
 steps:
-  # ==========================================================================
-  # Step 1: Collect Thread Signals
-  # ==========================================================================
-  - id: thread_signals
-    type: atomic
-    name: "采集线程信号"
-    display:
-      level: detail
-      title: "线程特征检测"
-    sql: |
-      WITH app_threads AS (
-        SELECT DISTINCT
-          t.name as thread_name,
-          p.name as process_name
-        FROM thread t
-        JOIN process p ON t.upid = p.upid
-        WHERE t.name IS NOT NULL
-          AND (p.name GLOB '${package}*' OR '${package}' = '')
-      )
-      SELECT
-        -- Flutter signals
-        SUM(CASE WHEN thread_name IN ('ui', '1.ui') THEN 1 ELSE 0 END) as flutter_ui_count,
-        SUM(CASE WHEN thread_name GLOB '*raster*' OR thread_name = '1.raster' THEN 1 ELSE 0 END) as flutter_raster_count,
-        SUM(CASE WHEN thread_name GLOB '*io.flutter*' THEN 1 ELSE 0 END) as flutter_io_count,
-        SUM(CASE WHEN thread_name GLOB '*io.flutter.impeller*' THEN 1 ELSE 0 END) as flutter_impeller_thread_count,
-        -- Standard Android signals
-        SUM(CASE WHEN thread_name = 'RenderThread' THEN 1 ELSE 0 END) as render_thread_count,
-        SUM(CASE WHEN thread_name = 'main' THEN 1 ELSE 0 END) as main_thread_count,
-        -- WebView/Chromium signals
-        SUM(CASE WHEN thread_name GLOB '*Chrome*' THEN 1 ELSE 0 END) as chrome_count,
-        SUM(CASE WHEN thread_name GLOB '*CrRenderer*' THEN 1 ELSE 0 END) as cr_renderer_count,
-        SUM(CASE WHEN thread_name GLOB '*CompositorTileW*' THEN 1 ELSE 0 END) as compositor_tile_count,
-        SUM(CASE WHEN thread_name GLOB '*VizCompositor*' THEN 1 ELSE 0 END) as viz_compositor_count,
-        SUM(CASE WHEN thread_name GLOB '*WebViewCore*' THEN 1 ELSE 0 END) as webview_core_count,
-        -- Game Engine signals
-        SUM(CASE WHEN thread_name GLOB '*UnityMain*' THEN 1 ELSE 0 END) as unity_main_count,
-        SUM(CASE WHEN thread_name GLOB '*UnityGfx*' THEN 1 ELSE 0 END) as unity_gfx_count,
-        SUM(CASE WHEN thread_name GLOB '*GameThread*' THEN 1 ELSE 0 END) as unreal_game_count,
-        SUM(CASE WHEN thread_name GLOB '*RHIThread*' THEN 1 ELSE 0 END) as unreal_rhi_count,
-        SUM(CASE WHEN thread_name GLOB '*GodotMain*' THEN 1 ELSE 0 END) as godot_count,
-        -- Surface-related signals
-        SUM(CASE WHEN thread_name GLOB '*GLThread*' OR thread_name GLOB '*GLSurface*' THEN 1 ELSE 0 END) as gl_thread_count,
-        SUM(CASE WHEN thread_name GLOB '*MediaCodec*' OR thread_name GLOB '*Decoder*' THEN 1 ELSE 0 END) as media_thread_count,
-        SUM(CASE WHEN thread_name GLOB '*Camera*' THEN 1 ELSE 0 END) as camera_thread_count,
-        -- Vulkan signals
-        SUM(CASE WHEN thread_name GLOB '*Vulkan*' OR thread_name GLOB '*VkQueue*' THEN 1 ELSE 0 END) as vulkan_thread_count
-      FROM app_threads
-    save_as: thread_signals
-
-  # ==========================================================================
-  # Step 2: Collect Slice Signals
-  # ==========================================================================
-  - id: slice_signals
-    type: atomic
-    name: "采集 Slice 信号"
-    display:
-      level: detail
-      title: "Slice 特征检测"
-    sql: |
-      WITH candidate_upids AS (
-        SELECT DISTINCT p.upid
-        FROM process p
-        LEFT JOIN thread t ON t.upid = p.upid
-        WHERE (p.name GLOB '${package}*' OR '${package}' = '')
-          AND (
-            '${package}' != ''
-            OR t.name IN ('main', 'RenderThread')
-            OR t.name GLOB '*ui*'
-            OR t.name GLOB '*Flutter*'
-            OR t.name GLOB '*Chrome*'
-            OR t.name GLOB '*CrRenderer*'
-            OR t.name GLOB '*Unity*'
-          )
-      ),
-      slice_counts AS (
-        SELECT
-          s.name as slice_name,
-          COUNT(*) as cnt
-        FROM slice s
-        JOIN thread_track tt ON s.track_id = tt.id
-        JOIN thread t ON tt.utid = t.utid
-        JOIN process p ON t.upid = p.upid
-        WHERE p.upid IN (SELECT upid FROM candidate_upids)
-        GROUP BY s.name
-      )
-      SELECT
-        -- BLAST signals
-        SUM(CASE WHEN slice_name GLOB '*BLASTBufferQueue*' THEN cnt ELSE 0 END) as blast_bq_count,
-        SUM(CASE WHEN slice_name GLOB '*applyTransaction*' THEN cnt ELSE 0 END) as apply_transaction_count,
-        SUM(CASE WHEN slice_name GLOB '*setTransactionState*' THEN cnt ELSE 0 END) as set_transaction_count,
-        -- Standard HWUI signals
-        SUM(CASE WHEN slice_name GLOB 'DrawFrame*' THEN cnt ELSE 0 END) as draw_frame_count,
-        SUM(CASE WHEN slice_name GLOB '*syncFrameState*' THEN cnt ELSE 0 END) as sync_frame_count,
-        SUM(CASE WHEN slice_name GLOB '*Choreographer#doFrame*' THEN cnt ELSE 0 END) as choreographer_count,
-        SUM(CASE WHEN slice_name GLOB '*queueBuffer*' THEN cnt ELSE 0 END) as queue_buffer_count,
-        SUM(CASE WHEN slice_name GLOB '*dequeueBuffer*' THEN cnt ELSE 0 END) as dequeue_buffer_count,
-        -- Flutter signals
-        SUM(CASE WHEN slice_name GLOB '*Flutter*' THEN cnt ELSE 0 END) as flutter_slice_count,
-        SUM(CASE WHEN slice_name GLOB '*Engine::BeginFrame*' THEN cnt ELSE 0 END) as flutter_begin_frame_count,
-        SUM(CASE WHEN slice_name GLOB '*Rasterizer*' THEN cnt ELSE 0 END) as flutter_rasterizer_count,
-        SUM(CASE WHEN slice_name GLOB '*EntityPass*' OR slice_name GLOB '*InlinePassContext*' OR slice_name GLOB '*ImpellerValidationBreak*' THEN cnt ELSE 0 END) as impeller_entity_count,
-        SUM(CASE WHEN slice_name GLOB '*SkGpu*' OR slice_name GLOB '*SkiaGpu*' OR slice_name GLOB '*GrGpu*' OR slice_name GLOB '*GrContext*' THEN cnt ELSE 0 END) as skia_gpu_count,
-        -- WebView signals
-        SUM(CASE WHEN slice_name GLOB '*DrawGL*' OR slice_name GLOB '*DrawFunctor*' THEN cnt ELSE 0 END) as draw_gl_functor_count,
-        SUM(CASE WHEN slice_name GLOB '*Blink*' THEN cnt ELSE 0 END) as blink_count,
-        SUM(CASE WHEN slice_name GLOB '*V8*' THEN cnt ELSE 0 END) as v8_count,
-        SUM(CASE WHEN slice_name GLOB '*WebView*' THEN cnt ELSE 0 END) as webview_slice_count,
-        -- Vulkan signals
-        SUM(CASE WHEN slice_name GLOB '*vkQueuePresent*' THEN cnt ELSE 0 END) as vk_present_count,
-        SUM(CASE WHEN slice_name GLOB '*Swappy*' THEN cnt ELSE 0 END) as swappy_count,
-        SUM(CASE WHEN slice_name GLOB '*vkCmd*' THEN cnt ELSE 0 END) as vk_cmd_count,
-        -- ANGLE signals
-        SUM(CASE WHEN slice_name GLOB '*ANGLE*' THEN cnt ELSE 0 END) as angle_count,
-        -- OpenGL signals
-        SUM(CASE WHEN slice_name GLOB '*eglSwapBuffers*' THEN cnt ELSE 0 END) as egl_swap_count,
-        SUM(CASE WHEN slice_name GLOB '*glDraw*' THEN cnt ELSE 0 END) as gl_draw_count,
-        -- SurfaceView/TextureView signals
-        SUM(CASE WHEN slice_name GLOB '*SurfaceView*' THEN cnt ELSE 0 END) as surfaceview_count,
-        SUM(CASE WHEN slice_name GLOB '*SurfaceTexture*' OR slice_name GLOB '*updateTexImage*' THEN cnt ELSE 0 END) as texture_view_count,
-        -- SurfaceControl signals
-        SUM(CASE WHEN slice_name GLOB '*SurfaceControl*' THEN cnt ELSE 0 END) as surface_control_count,
-        -- Game Engine signals
-        SUM(CASE WHEN slice_name GLOB '*Unity*' THEN cnt ELSE 0 END) as unity_slice_count,
-        SUM(CASE WHEN slice_name GLOB '*PlayerLoop*' THEN cnt ELSE 0 END) as unity_player_loop_count,
-        SUM(CASE WHEN slice_name GLOB '*Unreal*' THEN cnt ELSE 0 END) as unreal_slice_count,
-        -- Camera signals
-        SUM(CASE WHEN slice_name GLOB '*Camera*' THEN cnt ELSE 0 END) as camera_slice_count,
-        SUM(CASE WHEN slice_name GLOB '*CaptureSession*' THEN cnt ELSE 0 END) as capture_session_count,
-        -- Video/HWC signals
-        SUM(CASE WHEN slice_name GLOB '*MediaCodec*' OR slice_name GLOB '*Video*' THEN cnt ELSE 0 END) as video_slice_count,
-        SUM(CASE WHEN slice_name GLOB '*HWC*' OR slice_name GLOB '*HardwareComposer*' THEN cnt ELSE 0 END) as hwc_slice_count,
-        -- VRR/ARR signals
-        SUM(CASE WHEN slice_name GLOB '*FrameTimeline*' THEN cnt ELSE 0 END) as frame_timeline_count,
-        SUM(CASE WHEN slice_name GLOB '*setFrameRate*' OR slice_name GLOB '*FrameRateVote*' THEN cnt ELSE 0 END) as frame_rate_count,
-        -- Software rendering signals
-        SUM(CASE WHEN slice_name GLOB '*lockCanvas*' THEN cnt ELSE 0 END) as lock_canvas_count,
-        -- Multi-window signals
-        SUM(CASE WHEN slice_name GLOB '*Dialog*' OR slice_name GLOB '*PopupWindow*' THEN cnt ELSE 0 END) as dialog_count,
-        -- PIP/Freeform signals
-        SUM(CASE WHEN slice_name GLOB '*PictureInPicture*' OR slice_name GLOB '*PIP*' THEN cnt ELSE 0 END) as pip_count,
-        -- X5/UC custom kernel signals
-        SUM(CASE WHEN slice_name GLOB '*TBS*' OR slice_name GLOB '*X5*' OR slice_name GLOB '*UCCore*' THEN cnt ELSE 0 END) as custom_webview_count,
-        -- HardwareBufferRenderer signals
-        SUM(CASE WHEN slice_name GLOB '*HardwareBufferRenderer*' OR slice_name GLOB '*HBR*' THEN cnt ELSE 0 END) as hbr_count
-      FROM slice_counts
-    save_as: slice_signals
-
-  # ==========================================================================
-  # Step 3: Score Pipeline Types
-  # ==========================================================================
   - id: score_pipelines
     type: atomic
-    name: "计算管线得分"
+    name: 计算管线类型评分 (YAML 驱动)
     display:
       level: detail
-      title: "管线类型评分"
-    sql: |
-      WITH thread_data AS (SELECT * FROM ${thread_signals}),
-           slice_data AS (SELECT * FROM ${slice_signals}),
-           scores AS (
-        SELECT
-          -- =====================================================================
-          -- HWUI Family
-          -- =====================================================================
-          -- ANDROID_VIEW_STANDARD_BLAST: HWUI + BLAST
-          -- Max 0.90: HWUI is the most common Android rendering pipeline
-          CASE
-            WHEN (SELECT render_thread_count FROM thread_data) > 0
-                 AND (SELECT blast_bq_count + apply_transaction_count FROM slice_data) > 0
-                 AND (SELECT flutter_ui_count FROM thread_data) = 0
-                 AND (SELECT chrome_count + cr_renderer_count + viz_compositor_count FROM thread_data) = 0
-                 AND (SELECT unity_main_count + unity_gfx_count + unreal_game_count + unreal_rhi_count + godot_count FROM thread_data) = 0
-            THEN 0.45 +
-                 CASE WHEN (SELECT draw_frame_count FROM slice_data) > 0 THEN 0.20 ELSE 0 END +
-                 CASE WHEN (SELECT choreographer_count FROM slice_data) > 0 THEN 0.15 ELSE 0 END +
-                 CASE WHEN (SELECT sync_frame_count FROM slice_data) > 0 THEN 0.10 ELSE 0 END
-            ELSE 0
-          END as score_android_view_standard_blast,
+      title: 管线类型评分
+    sql: |2-
 
-          -- ANDROID_VIEW_STANDARD_LEGACY: HWUI + Legacy (no BLAST)
-          -- Max 0.75: pre-Android 12, increasingly rare but still valid
-          CASE
-            WHEN (SELECT render_thread_count FROM thread_data) > 0
-                 AND (SELECT blast_bq_count + apply_transaction_count FROM slice_data) = 0
-                 AND (SELECT queue_buffer_count FROM slice_data) > 0
-                 AND (SELECT flutter_ui_count FROM thread_data) = 0
-                 AND (SELECT chrome_count + cr_renderer_count + viz_compositor_count FROM thread_data) = 0
-                 AND (SELECT unity_main_count + unity_gfx_count + unreal_game_count + unreal_rhi_count + godot_count FROM thread_data) = 0
-            THEN 0.40 +
-                 CASE WHEN (SELECT draw_frame_count FROM slice_data) > 0 THEN 0.20 ELSE 0 END +
-                 CASE WHEN (SELECT choreographer_count FROM slice_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_android_view_standard_legacy,
+            WITH
+            -- Identify a dominant app (when package is not provided) by looking for rendering-related slices,
+            -- then include *all* processes that share the same package prefix. This reduces false positives
+            -- from multi-app traces while still supporting multi-process apps (e.g. WebView renderers).
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (t.name = 'main' AND s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*lockCanvas*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*Swappy*')
+                  OR (s.name GLOB '*FrameTimeline*')
+                  OR (s.name GLOB '*updateTexImage*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            ),
+            thread_counts AS (
+              SELECT
+                t.name as thread_name,
+                SUM(CASE WHEN t.upid IN (SELECT upid FROM app_filter_upids) THEN 1 ELSE 0 END) as app_cnt,
+                COUNT(*) as global_cnt
+              FROM thread t
+              WHERE t.name IS NOT NULL
+              GROUP BY t.name
+            ),
+            slice_counts AS (
+              SELECT
+                s.name as slice_name,
+                SUM(CASE WHEN p.upid IN (SELECT upid FROM app_filter_upids) THEN 1 ELSE 0 END) as app_cnt,
+                COUNT(*) as global_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE s.name IS NOT NULL
+              GROUP BY s.name
+            ),
+            pipeline_list(pipeline_id) AS (
+              VALUES
+              ('ANDROID_PIP_FREEFORM'),
+              ('ANDROID_VIEW_MIXED'),
+              ('ANDROID_VIEW_MULTI_WINDOW'),
+              ('ANDROID_VIEW_SOFTWARE'),
+              ('ANDROID_VIEW_STANDARD_BLAST'),
+              ('ANDROID_VIEW_STANDARD_LEGACY'),
+              ('ANGLE_GLES_VULKAN'),
+              ('CAMERA_PIPELINE'),
+              ('CHROME_BROWSER_VIZ'),
+              ('COMPOSE_STANDARD'),
+              ('FLUTTER_SURFACEVIEW_IMPELLER'),
+              ('FLUTTER_SURFACEVIEW_SKIA'),
+              ('FLUTTER_TEXTUREVIEW'),
+              ('GAME_ENGINE'),
+              ('HARDWARE_BUFFER_RENDERER'),
+              ('IMAGEREADER_PIPELINE'),
+              ('OPENGL_ES'),
+              ('RN_NEW_ARCH_HWUI'),
+              ('RN_OLD_ARCH_HWUI'),
+              ('RN_SKIA_RENDERER'),
+              ('SOFTWARE_COMPOSITING'),
+              ('SURFACE_CONTROL_API'),
+              ('SURFACEVIEW_BLAST'),
+              ('TEXTUREVIEW_STANDARD'),
+              ('VARIABLE_REFRESH_RATE'),
+              ('VIDEO_OVERLAY_HWC'),
+              ('VULKAN_NATIVE'),
+              ('WEBVIEW_GL_FUNCTOR'),
+              ('WEBVIEW_SURFACE_CONTROL'),
+              ('WEBVIEW_SURFACEVIEW_WRAPPER'),
+              ('WEBVIEW_TEXTUREVIEW_CUSTOM')
+            ),
+            signal_defs(signal_id, pipeline_id, signal_type, signal_name, weight, min_count, source, op, pattern, scope) AS (
+              VALUES
+              (0, 'ANDROID_PIP_FREEFORM', 's', 'has_enter_pip_api', 50, 1, 's', 'glob', '*enterPictureInPictureMode*', 'g'),
+              (1, 'ANDROID_PIP_FREEFORM', 's', 'has_pip_marker', 50, 1, 's', 'glob', '*PictureInPicture*', 'g'),
+              (2, 'ANDROID_PIP_FREEFORM', 's', 'has_wms_resize_task', 50, 1, 's', 'glob', '*WMS.resizeTask*', 'g'),
+              (3, 'ANDROID_VIEW_MIXED', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (4, 'ANDROID_VIEW_MIXED', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (5, 'ANDROID_VIEW_MIXED', 's', 'has_surfaceview', 50, 1, 's', 'glob', '*SurfaceView*', 'a'),
+              (6, 'ANDROID_VIEW_MIXED', 's', 'has_draw_frame', 20, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (7, 'ANDROID_VIEW_MIXED', 's', 'has_mediacodec_thread', 12, 1, 't', 'glob', '*MediaCodec*', 'a'),
+              (8, 'ANDROID_VIEW_MIXED', 's', 'has_decoder_thread', 8, 1, 't', 'glob', '*Decoder*', 'a'),
+              (9, 'ANDROID_VIEW_MIXED', 's', 'has_update_tex_image_active', 8, 2, 's', 'glob', '*updateTexImage*', 'a'),
+              (10, 'ANDROID_VIEW_MIXED', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (11, 'ANDROID_VIEW_MIXED', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (12, 'ANDROID_VIEW_MIXED', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (13, 'ANDROID_VIEW_MULTI_WINDOW', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (14, 'ANDROID_VIEW_MULTI_WINDOW', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (15, 'ANDROID_VIEW_MULTI_WINDOW', 's', 'has_dialog', 20, 1, 's', 'glob', '*Dialog*', 'a'),
+              (16, 'ANDROID_VIEW_MULTI_WINDOW', 's', 'has_popup_window', 20, 1, 's', 'glob', '*PopupWindow*', 'a'),
+              (17, 'ANDROID_VIEW_MULTI_WINDOW', 's', 'has_draw_frame', 20, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (18, 'ANDROID_VIEW_MULTI_WINDOW', 's', 'has_perform_traversals_multi', 12, 2, 's', 'glob', '*performTraversals*', 'a'),
+              (19, 'ANDROID_VIEW_SOFTWARE', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (20, 'ANDROID_VIEW_SOFTWARE', 's', 'has_lock_canvas', 55, 1, 's', 'glob', '*lockCanvas*', 'a'),
+              (21, 'ANDROID_VIEW_SOFTWARE', 's', 'has_unlock_canvas_post', 55, 1, 's', 'glob', '*unlockCanvasAndPost*', 'a'),
+              (22, 'ANDROID_VIEW_SOFTWARE', 'e', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (23, 'ANDROID_VIEW_SOFTWARE', 'e', 'slice_pattern:DrawFrame*', 0, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (24, 'ANDROID_VIEW_STANDARD_BLAST', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (25, 'ANDROID_VIEW_STANDARD_BLAST', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (26, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_draw_frame', 25, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (27, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_choreographer', 20, 1, 's', 'glob', '*Choreographer#doFrame*', 'a'),
+              (28, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_sync_frame', 15, 1, 's', 'glob', '*syncFrameState*', 'a'),
+              (29, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_queue_buffer', 12, 1, 's', 'glob', '*queueBuffer*', 'a'),
+              (30, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_blast_buffer_queue_hint', 10, 1, 's', 'glob', '*BLASTBufferQueue*', 'a'),
+              (31, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_set_transaction_state', 10, 1, 's', 'glob', '*setTransactionState*', 'a'),
+              (32, 'ANDROID_VIEW_STANDARD_BLAST', 's', 'has_apply_transaction', 12, 1, 's', 'glob', '*applyTransaction*', 'a'),
+              (33, 'ANDROID_VIEW_STANDARD_BLAST', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (34, 'ANDROID_VIEW_STANDARD_BLAST', 'e', 'thread:1.raster', 0, 1, 't', 'eq', '1.raster', 'a'),
+              (35, 'ANDROID_VIEW_STANDARD_BLAST', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (36, 'ANDROID_VIEW_STANDARD_BLAST', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (37, 'ANDROID_VIEW_STANDARD_BLAST', 'e', 'thread:UnityGfx', 0, 1, 't', 'eq', 'UnityGfx', 'a'),
+              (38, 'ANDROID_VIEW_STANDARD_LEGACY', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (39, 'ANDROID_VIEW_STANDARD_LEGACY', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (40, 'ANDROID_VIEW_STANDARD_LEGACY', 's', 'has_queue_buffer', 30, 1, 's', 'glob', '*queueBuffer*', 'a'),
+              (41, 'ANDROID_VIEW_STANDARD_LEGACY', 's', 'has_dequeue_buffer', 20, 1, 's', 'glob', '*dequeueBuffer*', 'a'),
+              (42, 'ANDROID_VIEW_STANDARD_LEGACY', 's', 'has_draw_frame', 25, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (43, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'slice_pattern:*BLASTBufferQueue*', 0, 1, 's', 'glob', '*BLASTBufferQueue*', 'a'),
+              (44, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'slice_pattern:*applyTransaction*', 0, 1, 's', 'glob', '*applyTransaction*', 'a'),
+              (45, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (46, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (47, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (48, 'ANDROID_VIEW_STANDARD_LEGACY', 'e', 'thread:UnityGfx', 0, 1, 't', 'eq', 'UnityGfx', 'a'),
+              (49, 'ANGLE_GLES_VULKAN', 'r', 'slice_pattern:*vkQueuePresentKHR*', 0, 1, 's', 'glob', '*vkQueuePresentKHR*', 'a'),
+              (50, 'ANGLE_GLES_VULKAN', 's', 'has_angle', 80, 1, 's', 'glob', '*ANGLE*', 'a'),
+              (51, 'CAMERA_PIPELINE', 's', 'has_camera_thread', 30, 1, 't', 'glob', '*Camera*', 'a'),
+              (52, 'CAMERA_PIPELINE', 's', 'has_cam_abbrev_thread', 10, 1, 't', 'glob', '*Cam*', 'a'),
+              (53, 'CAMERA_PIPELINE', 's', 'has_camera_slice', 30, 1, 's', 'glob', '*Camera*', 'a'),
+              (54, 'CAMERA_PIPELINE', 's', 'has_capture_session', 30, 1, 's', 'glob', '*CaptureSession*', 'a'),
+              (55, 'CHROME_BROWSER_VIZ', 'r', 'thread:VizCompositorThread', 0, 1, 't', 'eq', 'VizCompositorThread', 'a'),
+              (56, 'CHROME_BROWSER_VIZ', 'r', 'thread_pattern:CrBrowserMain*', 0, 1, 't', 'glob', 'CrBrowserMain*', 'a'),
+              (57, 'CHROME_BROWSER_VIZ', 's', 'has_viz_compositor_thread', 40, 1, 't', 'glob', 'VizCompositorThread', 'a'),
+              (58, 'CHROME_BROWSER_VIZ', 's', 'has_cr_renderer_main', 25, 1, 't', 'glob', 'CrRendererMain*', 'a'),
+              (59, 'CHROME_BROWSER_VIZ', 's', 'has_gpu_main', 20, 1, 't', 'glob', 'CrGpuMain*', 'a'),
+              (60, 'CHROME_BROWSER_VIZ', 's', 'has_display_scheduler', 15, 1, 's', 'glob', '*DisplayScheduler*', 'a'),
+              (61, 'CHROME_BROWSER_VIZ', 's', 'has_begin_frame', 10, 1, 's', 'glob', '*BeginFrame*', 'a'),
+              (62, 'CHROME_BROWSER_VIZ', 's', 'has_chromium_compositor', 10, 1, 's', 'glob', '*Chromium.Compositor*', 'a'),
+              (63, 'CHROME_BROWSER_VIZ', 'e', 'slice_pattern:*WebViewChromium*', 0, 1, 's', 'glob', '*WebViewChromium*', 'a'),
+              (64, 'CHROME_BROWSER_VIZ', 'e', 'slice_pattern:*WebView*loadUrl*', 0, 1, 's', 'glob', '*WebView*loadUrl*', 'a'),
+              (65, 'CHROME_BROWSER_VIZ', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (66, 'CHROME_BROWSER_VIZ', 'e', 'thread:1.raster', 0, 1, 't', 'eq', '1.raster', 'a'),
+              (67, 'CHROME_BROWSER_VIZ', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (68, 'CHROME_BROWSER_VIZ', 'e', 'thread:UnityGfx', 0, 1, 't', 'eq', 'UnityGfx', 'a'),
+              (69, 'COMPOSE_STANDARD', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (70, 'COMPOSE_STANDARD', 'r', 'thread:main', 0, 1, 't', 'eq', 'main', 'a'),
+              (71, 'COMPOSE_STANDARD', 's', 'has_recomposition', 80, 1, 's', 'glob', 'Recompos*', 'a'),
+              (72, 'COMPOSE_STANDARD', 's', 'has_compose_prefix', 40, 1, 's', 'glob', 'Compose:*', 'a'),
+              (73, 'COMPOSE_STANDARD', 's', 'has_composition_local', 30, 1, 's', 'glob', '*CompositionLocal*', 'a'),
+              (74, 'COMPOSE_STANDARD', 's', 'has_measure_layout', 10, 1, 's', 'glob', '*measure*', 'a'),
+              (75, 'COMPOSE_STANDARD', 's', 'has_draw_frame', 15, 1, 's', 'glob', 'DrawFrame*', 'a'),
+              (76, 'COMPOSE_STANDARD', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (77, 'COMPOSE_STANDARD', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (78, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_impeller', 45, 1, 's', 'glob', '*Impeller*', 'a'),
+              (79, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_entity_pass_hint', 20, 1, 's', 'glob', '*EntityPass*', 'a'),
+              (80, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_flutter_raster', 12, 1, 't', 'glob', '*raster*', 'a'),
+              (81, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_flutter_ui_hint', 8, 1, 't', 'glob', '*ui*', 'a'),
+              (82, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_dart_worker', 18, 1, 't', 'glob', 'DartWorker*', 'a'),
+              (83, 'FLUTTER_SURFACEVIEW_IMPELLER', 's', 'has_flutter_jit', 12, 1, 's', 'glob', '*io.flutter*', 'a'),
+              (84, 'FLUTTER_SURFACEVIEW_IMPELLER', 'e', 'slice_pattern:*SkGpu*', 0, 1, 's', 'glob', '*SkGpu*', 'a'),
+              (85, 'FLUTTER_SURFACEVIEW_IMPELLER', 'e', 'slice_pattern:*SkiaGpu*', 0, 1, 's', 'glob', '*SkiaGpu*', 'a'),
+              (86, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_skgpu', 35, 1, 's', 'glob', '*SkGpu*', 'a'),
+              (87, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_skiagpu', 30, 1, 's', 'glob', '*SkiaGpu*', 'a'),
+              (88, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_flutter_raster', 10, 1, 't', 'glob', '*raster*', 'a'),
+              (89, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_flutter_ui_hint', 8, 1, 't', 'glob', '*ui*', 'a'),
+              (90, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_dart_worker', 18, 1, 't', 'glob', 'DartWorker*', 'a'),
+              (91, 'FLUTTER_SURFACEVIEW_SKIA', 's', 'has_flutter_jit', 12, 1, 's', 'glob', '*io.flutter*', 'a'),
+              (92, 'FLUTTER_SURFACEVIEW_SKIA', 'e', 'slice_pattern:*EntityPass*', 0, 1, 's', 'glob', '*EntityPass*', 'a'),
+              (93, 'FLUTTER_TEXTUREVIEW', 's', 'has_surface_texture', 30, 1, 's', 'glob', '*SurfaceTexture*', 'a'),
+              (94, 'FLUTTER_TEXTUREVIEW', 's', 'has_update_tex_image', 15, 1, 's', 'glob', '*updateTexImage*', 'a'),
+              (95, 'FLUTTER_TEXTUREVIEW', 's', 'has_host_render_thread', 12, 1, 't', 'glob', 'RenderThread*', 'a'),
+              (96, 'FLUTTER_TEXTUREVIEW', 's', 'has_flutter_raster', 10, 1, 't', 'glob', '*raster*', 'a'),
+              (97, 'GAME_ENGINE', 's', 'has_unity_main', 85, 1, 't', 'glob', 'UnityMain*', 'a'),
+              (98, 'GAME_ENGINE', 's', 'has_unity_gfx', 85, 1, 't', 'glob', 'UnityGfx*', 'a'),
+              (99, 'GAME_ENGINE', 's', 'has_unreal_game', 85, 1, 't', 'glob', 'GameThread*', 'a'),
+              (100, 'GAME_ENGINE', 's', 'has_unreal_rhi', 85, 1, 't', 'glob', 'RHIThread*', 'a'),
+              (101, 'GAME_ENGINE', 's', 'has_godot', 80, 1, 't', 'glob', 'GodotMain*', 'a'),
+              (102, 'GAME_ENGINE', 's', 'has_cocos_lower', 35, 1, 't', 'glob', '*cocos*', 'a'),
+              (103, 'GAME_ENGINE', 's', 'has_cocos_upper', 40, 1, 't', 'glob', '*Cocos*', 'a'),
+              (104, 'GAME_ENGINE', 's', 'has_unity_slice', 45, 1, 's', 'glob', '*Unity*', 'a'),
+              (105, 'GAME_ENGINE', 's', 'has_player_loop', 30, 1, 's', 'glob', '*PlayerLoop*', 'a'),
+              (106, 'GAME_ENGINE', 's', 'has_unreal_slice', 75, 1, 's', 'glob', '*Unreal*', 'a'),
+              (107, 'GAME_ENGINE', 's', 'has_swappy', 10, 1, 's', 'glob', '*Swappy*', 'a'),
+              (108, 'GAME_ENGINE', 's', 'has_frame_pacing', 5, 1, 's', 'glob', '*FramePacing*', 'a'),
+              (109, 'HARDWARE_BUFFER_RENDERER', 's', 'has_hardware_buffer_renderer', 55, 1, 's', 'glob', '*HardwareBufferRenderer*', 'a'),
+              (110, 'HARDWARE_BUFFER_RENDERER', 's', 'has_ahardware_buffer_renderer', 20, 1, 's', 'glob', '*AHardwareBufferRenderer*', 'a'),
+              (111, 'HARDWARE_BUFFER_RENDERER', 's', 'has_render_node', 15, 1, 's', 'glob', '*RenderNode*', 'a'),
+              (112, 'HARDWARE_BUFFER_RENDERER', 's', 'has_recording_canvas', 10, 1, 's', 'glob', '*RecordingCanvas*', 'a'),
+              (113, 'IMAGEREADER_PIPELINE', 'r', 'slice_pattern:*ImageReader*', 0, 1, 's', 'glob', '*ImageReader*', 'a'),
+              (114, 'IMAGEREADER_PIPELINE', 's', 'has_acquire_next_image', 30, 1, 's', 'glob', '*acquireNextImage*', 'a'),
+              (115, 'IMAGEREADER_PIPELINE', 's', 'has_ndk_imagereader', 25, 1, 's', 'glob', '*AImageReader*', 'a'),
+              (116, 'IMAGEREADER_PIPELINE', 's', 'has_hardware_buffer', 20, 1, 's', 'glob', '*HardwareBuffer*', 'a'),
+              (117, 'IMAGEREADER_PIPELINE', 's', 'has_on_image_available', 20, 1, 's', 'glob', '*onImageAvailable*', 'a'),
+              (118, 'IMAGEREADER_PIPELINE', 's', 'has_queue_buffer', 15, 1, 's', 'glob', '*queueBuffer*', 'a'),
+              (119, 'IMAGEREADER_PIPELINE', 's', 'has_media_codec', 10, 1, 's', 'glob', '*MediaCodec*', 'a'),
+              (120, 'OPENGL_ES', 'r', 'thread_pattern:*GLThread*', 0, 1, 't', 'glob', '*GLThread*', 'a'),
+              (121, 'OPENGL_ES', 's', 'has_egl_swap', 50, 1, 's', 'glob', '*eglSwapBuffers*', 'a'),
+              (122, 'OPENGL_ES', 's', 'has_gl_draw', 20, 1, 's', 'glob', '*glDraw*', 'a'),
+              (123, 'OPENGL_ES', 's', 'has_gl_thread', 15, 1, 't', 'glob', '*GLThread*', 'a'),
+              (124, 'OPENGL_ES', 'e', 'slice_pattern:*vkQueuePresentKHR*', 0, 1, 's', 'glob', '*vkQueuePresentKHR*', 'a'),
+              (125, 'OPENGL_ES', 'e', 'slice_pattern:*ANGLE*', 0, 1, 's', 'glob', '*ANGLE*', 'a'),
+              (126, 'OPENGL_ES', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (127, 'OPENGL_ES', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (128, 'OPENGL_ES', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (129, 'RN_NEW_ARCH_HWUI', 'r', 'slice_pattern:*FabricUIManager*', 0, 1, 's', 'glob', '*FabricUIManager*', 'a'),
+              (130, 'RN_NEW_ARCH_HWUI', 's', 'has_fabric_uimanager', 50, 1, 's', 'glob', '*FabricUIManager*', 'a'),
+              (131, 'RN_NEW_ARCH_HWUI', 's', 'has_fabric_commit', 25, 1, 's', 'glob', '*FabricCommit*', 'a'),
+              (132, 'RN_NEW_ARCH_HWUI', 's', 'has_fabric_mount', 25, 1, 's', 'glob', '*FabricMount*', 'a'),
+              (133, 'RN_NEW_ARCH_HWUI', 's', 'has_jsi_call', 15, 1, 's', 'glob', '*JSI*', 'a'),
+              (134, 'RN_NEW_ARCH_HWUI', 's', 'has_turbomodule', 15, 1, 's', 'glob', '*TurboModule*', 'a'),
+              (135, 'RN_NEW_ARCH_HWUI', 's', 'has_mqt_js', 20, 1, 't', 'glob', 'mqt_js*', 'a'),
+              (136, 'RN_NEW_ARCH_HWUI', 'e', 'thread_pattern:mqt_shadow*', 0, 1, 't', 'glob', 'mqt_shadow*', 'a'),
+              (137, 'RN_OLD_ARCH_HWUI', 'r', 'thread_pattern:mqt_*', 0, 1, 't', 'glob', 'mqt_*', 'a'),
+              (138, 'RN_OLD_ARCH_HWUI', 's', 'has_mqt_js', 50, 1, 't', 'glob', 'mqt_js*', 'a'),
+              (139, 'RN_OLD_ARCH_HWUI', 's', 'has_mqt_native_modules', 30, 1, 't', 'glob', 'mqt_native_modules*', 'a'),
+              (140, 'RN_OLD_ARCH_HWUI', 's', 'has_mqt_shadow', 25, 1, 't', 'glob', 'mqt_shadow*', 'a'),
+              (141, 'RN_OLD_ARCH_HWUI', 's', 'has_yoga_layout', 15, 1, 's', 'glob', '*Yoga*', 'a'),
+              (142, 'RN_OLD_ARCH_HWUI', 's', 'has_native_to_js', 10, 1, 's', 'glob', '*NativeToJsBridge*', 'a'),
+              (143, 'RN_OLD_ARCH_HWUI', 's', 'has_js_to_native', 10, 1, 's', 'glob', '*JsToNativeBridge*', 'a'),
+              (144, 'RN_OLD_ARCH_HWUI', 's', 'has_uimanager', 12, 1, 's', 'glob', '*UIManager*dispatchViewUpdates*', 'a'),
+              (145, 'RN_OLD_ARCH_HWUI', 'e', 'slice_pattern:*FabricUIManager*', 0, 1, 's', 'glob', '*FabricUIManager*', 'a'),
+              (146, 'RN_SKIA_RENDERER', 's', 'has_mqt_js', 30, 1, 't', 'glob', 'mqt_js*', 'a'),
+              (147, 'RN_SKIA_RENDERER', 's', 'has_skia_renderer', 25, 1, 's', 'glob', '*SkiaRenderer*', 'a'),
+              (148, 'RN_SKIA_RENDERER', 's', 'has_skia_picture', 20, 1, 's', 'glob', '*SkiaPicture*', 'a'),
+              (149, 'RN_SKIA_RENDERER', 's', 'has_react_native_skia', 25, 1, 's', 'glob', '*react-native-skia*', 'a'),
+              (150, 'RN_SKIA_RENDERER', 's', 'has_skia_paint', 10, 1, 's', 'glob', '*SkPaint*', 'a'),
+              (151, 'RN_SKIA_RENDERER', 's', 'has_skia_canvas', 10, 1, 's', 'glob', '*SkCanvas*', 'a'),
+              (152, 'RN_SKIA_RENDERER', 'e', 'slice_pattern:*FabricUIManager*', 0, 1, 's', 'glob', '*FabricUIManager*', 'a'),
+              (153, 'RN_SKIA_RENDERER', 'e', 'thread_pattern:mqt_shadow*', 0, 1, 't', 'glob', 'mqt_shadow*', 'a'),
+              (154, 'RN_SKIA_RENDERER', 'e', 'slice_pattern:*EntityPass*', 0, 1, 's', 'glob', '*EntityPass*', 'a'),
+              (155, 'SOFTWARE_COMPOSITING', 'r', 'thread:SurfaceFlinger', 0, 1, 't', 'eq', 'SurfaceFlinger', 'g'),
+              (156, 'SOFTWARE_COMPOSITING', 's', 'has_handle_message_refresh', 30, 1, 's', 'glob', '*handleMessageRefresh*', 'g'),
+              (157, 'SOFTWARE_COMPOSITING', 's', 'has_sf_commit', 15, 1, 's', 'glob', '*commit*', 'g'),
+              (158, 'SOFTWARE_COMPOSITING', 's', 'has_sf_composite', 15, 1, 's', 'glob', '*composite*', 'g'),
+              (159, 'SOFTWARE_COMPOSITING', 's', 'has_validate_display', 20, 1, 's', 'glob', '*validateDisplay*', 'g'),
+              (160, 'SOFTWARE_COMPOSITING', 's', 'has_present_display', 20, 1, 's', 'glob', '*presentDisplay*', 'g'),
+              (161, 'SOFTWARE_COMPOSITING', 'e', 'slice_pattern:GPU completion*', 0, 1, 's', 'glob', 'GPU completion*', 'g'),
+              (162, 'SOFTWARE_COMPOSITING', 'e', 'slice_pattern:*eglSwapBuffers*', 0, 1, 's', 'glob', '*eglSwapBuffers*', 'g'),
+              (163, 'SURFACE_CONTROL_API', 'r', 'slice_pattern:*ASurfaceTransaction*', 0, 1, 's', 'glob', '*ASurfaceTransaction*', 'a'),
+              (164, 'SURFACE_CONTROL_API', 's', 'has_asurface_control', 30, 5, 's', 'glob', '*ASurfaceControl*', 'a'),
+              (165, 'SURFACE_CONTROL_API', 's', 'has_asurface_transaction', 35, 5, 's', 'glob', '*ASurfaceTransaction*', 'a'),
+              (166, 'SURFACE_CONTROL_API', 's', 'has_apply_transaction', 20, 1, 's', 'glob', '*ASurfaceTransaction_apply*', 'a'),
+              (167, 'SURFACE_CONTROL_API', 's', 'has_native_window', 15, 1, 's', 'glob', '*ANativeWindow*', 'a'),
+              (168, 'SURFACEVIEW_BLAST', 's', 'has_surfaceview', 55, 10, 's', 'glob', '*SurfaceView*', 'a'),
+              (169, 'SURFACEVIEW_BLAST', 's', 'has_blast', 20, 1, 's', 'glob', '*BLASTBufferQueue*', 'a'),
+              (170, 'SURFACEVIEW_BLAST', 's', 'has_gl_thread', 12, 1, 't', 'glob', '*GLThread*', 'a'),
+              (171, 'SURFACEVIEW_BLAST', 's', 'has_glsurface_thread', 8, 1, 't', 'glob', '*GLSurface*', 'a'),
+              (172, 'SURFACEVIEW_BLAST', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (173, 'SURFACEVIEW_BLAST', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (174, 'SURFACEVIEW_BLAST', 'e', 'thread:UnityMain', 0, 1, 't', 'eq', 'UnityMain', 'a'),
+              (175, 'SURFACEVIEW_BLAST', 'e', 'thread:UnityGfx', 0, 1, 't', 'eq', 'UnityGfx', 'a'),
+              (176, 'TEXTUREVIEW_STANDARD', 's', 'has_surface_texture', 25, 5, 's', 'glob', '*SurfaceTexture*', 'a'),
+              (177, 'TEXTUREVIEW_STANDARD', 's', 'has_update_tex_image', 15, 1, 's', 'glob', '*updateTexImage*', 'a'),
+              (178, 'TEXTUREVIEW_STANDARD', 's', 'has_on_frame_available', 8, 1, 's', 'glob', '*onFrameAvailable*', 'a'),
+              (179, 'TEXTUREVIEW_STANDARD', 's', 'has_render_thread', 20, 1, 't', 'glob', 'RenderThread*', 'a'),
+              (180, 'TEXTUREVIEW_STANDARD', 's', 'has_deferred_layer_updater', 8, 1, 's', 'glob', '*DeferredLayerUpdater*', 'a'),
+              (181, 'TEXTUREVIEW_STANDARD', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (182, 'TEXTUREVIEW_STANDARD', 'e', 'thread:1.raster', 0, 1, 't', 'eq', '1.raster', 'a'),
+              (183, 'TEXTUREVIEW_STANDARD', 'e', 'thread:CrRendererMain', 0, 1, 't', 'eq', 'CrRendererMain', 'a'),
+              (184, 'TEXTUREVIEW_STANDARD', 'e', 'slice_pattern:*TBS*', 0, 1, 's', 'glob', '*TBS*', 'a'),
+              (185, 'TEXTUREVIEW_STANDARD', 'e', 'slice_pattern:*X5*', 0, 1, 's', 'glob', '*X5*', 'a'),
+              (186, 'TEXTUREVIEW_STANDARD', 'e', 'slice_pattern:*UCCore*', 0, 1, 's', 'glob', '*UCCore*', 'a'),
+              (187, 'VARIABLE_REFRESH_RATE', 'r', 'thread:SurfaceFlinger', 0, 1, 't', 'eq', 'SurfaceFlinger', 'g'),
+              (188, 'VARIABLE_REFRESH_RATE', 's', 'has_frame_timeline', 40, 5, 's', 'glob', '*FrameTimeline*', 'g'),
+              (189, 'VARIABLE_REFRESH_RATE', 's', 'has_set_frame_rate', 15, 1, 's', 'glob', '*setFrameRate*', 'g'),
+              (190, 'VARIABLE_REFRESH_RATE', 's', 'has_frame_rate_vote', 5, 1, 's', 'glob', '*FrameRateVote*', 'g'),
+              (191, 'VARIABLE_REFRESH_RATE', 's', 'has_set_frame_rate_category', 6, 1, 's', 'glob', '*setFrameRateCategory*', 'g'),
+              (192, 'VARIABLE_REFRESH_RATE', 's', 'has_frame_rate_category', 6, 1, 's', 'glob', '*FRAME_RATE_CATEGORY*', 'g'),
+              (193, 'VARIABLE_REFRESH_RATE', 's', 'has_display_mode', 8, 1, 's', 'glob', '*DisplayMode*', 'g'),
+              (194, 'VARIABLE_REFRESH_RATE', 's', 'has_refresh_rate', 7, 1, 's', 'glob', '*RefreshRate*', 'g'),
+              (195, 'VIDEO_OVERLAY_HWC', 's', 'has_hwc', 20, 1, 's', 'glob', '*HWC*', 'g'),
+              (196, 'VIDEO_OVERLAY_HWC', 's', 'has_hardware_composer', 15, 1, 's', 'glob', '*HardwareComposer*', 'g'),
+              (197, 'VIDEO_OVERLAY_HWC', 's', 'has_video', 15, 1, 's', 'glob', '*Video*', 'g'),
+              (198, 'VIDEO_OVERLAY_HWC', 's', 'has_mediacodec', 20, 1, 's', 'glob', '*MediaCodec*', 'g'),
+              (199, 'VULKAN_NATIVE', 'r', 'slice_pattern:*vkQueuePresentKHR*', 0, 5, 's', 'glob', '*vkQueuePresentKHR*', 'a'),
+              (200, 'VULKAN_NATIVE', 's', 'has_vk_present', 60, 1, 's', 'glob', '*vkQueuePresentKHR*', 'a'),
+              (201, 'VULKAN_NATIVE', 's', 'has_vk_cmd', 20, 10, 's', 'glob', '*vkCmd*', 'a'),
+              (202, 'VULKAN_NATIVE', 's', 'has_swappy', 20, 1, 's', 'glob', '*Swappy*', 'a'),
+              (203, 'VULKAN_NATIVE', 's', 'has_vulkan_thread', 6, 1, 't', 'glob', '*Vulkan*', 'a'),
+              (204, 'VULKAN_NATIVE', 's', 'has_vkqueue_thread', 4, 1, 't', 'glob', '*VkQueue*', 'a'),
+              (205, 'VULKAN_NATIVE', 's', 'has_vk_acquire', 5, 1, 's', 'glob', '*vkAcquireNextImage*', 'a'),
+              (206, 'WEBVIEW_GL_FUNCTOR', 'r', 'thread:RenderThread', 0, 1, 't', 'eq', 'RenderThread', 'a'),
+              (207, 'WEBVIEW_GL_FUNCTOR', 's', 'has_draw_gl', 25, 1, 's', 'glob', '*DrawGL*', 'a'),
+              (208, 'WEBVIEW_GL_FUNCTOR', 's', 'has_draw_fn_draw_gl', 20, 1, 's', 'glob', '*DrawFn_DrawGL*', 'a'),
+              (209, 'WEBVIEW_GL_FUNCTOR', 's', 'has_draw_functor', 15, 1, 's', 'glob', '*DrawFunctor*', 'a'),
+              (210, 'WEBVIEW_GL_FUNCTOR', 's', 'has_cr_renderer', 25, 1, 't', 'glob', 'CrRendererMain*', 'a'),
+              (211, 'WEBVIEW_GL_FUNCTOR', 's', 'has_render_thread', 10, 1, 't', 'glob', 'RenderThread*', 'a'),
+              (212, 'WEBVIEW_GL_FUNCTOR', 'e', 'thread_pattern:VizCompositorThread*', 0, 1, 't', 'glob', 'VizCompositorThread*', 'a'),
+              (213, 'WEBVIEW_GL_FUNCTOR', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (214, 'WEBVIEW_SURFACE_CONTROL', 's', 'has_viz_compositor', 55, 1, 't', 'glob', 'VizCompositorThread*', 'a'),
+              (215, 'WEBVIEW_SURFACE_CONTROL', 's', 'has_cr_renderer', 12, 1, 't', 'glob', 'CrRendererMain*', 'a'),
+              (216, 'WEBVIEW_SURFACE_CONTROL', 's', 'has_surface_control', 15, 1, 's', 'glob', '*SurfaceControl*', 'a'),
+              (217, 'WEBVIEW_SURFACE_CONTROL', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (218, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_webview', 30, 1, 's', 'glob', '*WebView*', 'a'),
+              (219, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_webview_core', 10, 1, 't', 'glob', 'WebViewCore*', 'a'),
+              (220, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_cr_renderer', 10, 1, 't', 'glob', 'CrRendererMain*', 'a'),
+              (221, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_surfaceview', 25, 1, 's', 'glob', '*SurfaceView*', 'a'),
+              (222, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_video', 12, 1, 's', 'glob', '*Video*', 'a'),
+              (223, 'WEBVIEW_SURFACEVIEW_WRAPPER', 's', 'has_mediacodec', 13, 1, 's', 'glob', '*MediaCodec*', 'a'),
+              (224, 'WEBVIEW_SURFACEVIEW_WRAPPER', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a'),
+              (225, 'WEBVIEW_TEXTUREVIEW_CUSTOM', 's', 'has_tbs', 30, 1, 's', 'glob', '*TBS*', 'a'),
+              (226, 'WEBVIEW_TEXTUREVIEW_CUSTOM', 's', 'has_x5', 30, 1, 's', 'glob', '*X5*', 'a'),
+              (227, 'WEBVIEW_TEXTUREVIEW_CUSTOM', 's', 'has_uccore', 20, 1, 's', 'glob', '*UCCore*', 'a'),
+              (228, 'WEBVIEW_TEXTUREVIEW_CUSTOM', 'e', 'thread:1.ui', 0, 1, 't', 'eq', '1.ui', 'a')
+            ),
+            signal_counts AS (
+              SELECT
+                sd.signal_id,
+                sd.pipeline_id,
+                sd.signal_type,
+                sd.signal_name,
+                sd.weight,
+                sd.min_count,
+                SUM(
+                  CASE
+                    WHEN sd.source = 't' THEN CASE WHEN sd.scope = 'g' THEN COALESCE(tc.global_cnt, 0) ELSE COALESCE(tc.app_cnt, 0) END
+                    WHEN sd.source = 's' THEN CASE WHEN sd.scope = 'g' THEN COALESCE(sc.global_cnt, 0) ELSE COALESCE(sc.app_cnt, 0) END
+                    ELSE 0
+                  END
+                ) as cnt
+              FROM signal_defs sd
+              LEFT JOIN thread_counts tc
+                ON sd.source = 't'
+               AND (
+                 (sd.op = 'eq' AND tc.thread_name = sd.pattern)
+                 OR (sd.op = 'glob' AND tc.thread_name GLOB sd.pattern)
+               )
+              LEFT JOIN slice_counts sc
+                ON sd.source = 's'
+               AND (
+                 (sd.op = 'eq' AND sc.slice_name = sd.pattern)
+                 OR (sd.op = 'glob' AND sc.slice_name GLOB sd.pattern)
+               )
+              GROUP BY sd.signal_id, sd.pipeline_id, sd.signal_type, sd.signal_name, sd.weight, sd.min_count
+            ),
+            signal_agg AS (
+              SELECT
+                pipeline_id,
+                MIN(
+                  CASE
+                    WHEN signal_type = 'r' THEN CASE WHEN cnt >= min_count THEN 1 ELSE 0 END
+                    ELSE 1
+                  END
+                ) as required_ok,
+                MAX(
+                  CASE
+                    WHEN signal_type = 'e' THEN CASE WHEN cnt > 0 THEN 1 ELSE 0 END
+                    ELSE 0
+                  END
+                ) as excluded,
+                SUM(CASE WHEN signal_type = 's' THEN weight ELSE 0 END) as total_weight,
+                SUM(CASE WHEN signal_type = 's' AND cnt >= min_count THEN weight ELSE 0 END) as matched_weight
+              FROM signal_counts
+              GROUP BY pipeline_id
+            ),
+            pipeline_scores AS (
+              SELECT
+                pl.pipeline_id,
+                COALESCE(sa.required_ok, 1) as required_ok,
+                COALESCE(sa.excluded, 0) as excluded,
+                COALESCE(sa.total_weight, 0) as total_weight,
+                COALESCE(sa.matched_weight, 0) as matched_weight
+              FROM pipeline_list pl
+              LEFT JOIN signal_agg sa ON sa.pipeline_id = pl.pipeline_id
+            ),
+            scores AS (
+              SELECT
+                pipeline_id,
+                required_ok,
+                excluded,
+                total_weight,
+                matched_weight,
+                CASE
+                  WHEN required_ok = 1 AND excluded = 0 AND total_weight > 0
+                  THEN matched_weight * 1.0 / total_weight
+                  ELSE 0
+                END as score
+              FROM pipeline_scores
+            )
+            SELECT * FROM scores
 
-          -- ANDROID_VIEW_SOFTWARE: No RenderThread, CPU Skia
-          CASE
-            WHEN (SELECT render_thread_count FROM thread_data) = 0
-                 AND (SELECT lock_canvas_count FROM slice_data) > 0
-            THEN 0.60 + CASE WHEN (SELECT draw_frame_count FROM slice_data) = 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_android_view_software,
-
-          -- ANDROID_VIEW_MIXED: View + SurfaceView hybrid
-          CASE
-            WHEN (SELECT render_thread_count FROM thread_data) > 0
-                 AND (SELECT surfaceview_count FROM slice_data) > 0
-                 AND (SELECT draw_frame_count FROM slice_data) > 0
-                 AND (SELECT chrome_count + cr_renderer_count + viz_compositor_count FROM thread_data) = 0
-            THEN 0.50 + CASE WHEN (SELECT media_thread_count FROM thread_data) > 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_android_view_mixed,
-
-          -- ANDROID_VIEW_MULTI_WINDOW: Dialog/PopupWindow serialization
-          CASE
-            WHEN (SELECT dialog_count FROM slice_data) > 0
-            THEN 0.40 + CASE WHEN (SELECT render_thread_count FROM thread_data) > 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_android_view_multi_window,
-
-          -- =====================================================================
-          -- Surface-Based
-          -- =====================================================================
-          -- ANDROID_PIP_FREEFORM: PIP/Freeform
-          CASE
-            WHEN (SELECT pip_count FROM slice_data) > 0
-            THEN 0.70
-            ELSE 0
-          END as score_android_pip_freeform,
-
-          -- SURFACEVIEW_BLAST: Independent SurfaceView + BLAST
-          CASE
-            WHEN (SELECT surfaceview_count FROM slice_data) > 10
-                 AND (SELECT blast_bq_count FROM slice_data) > 0
-                 AND (SELECT flutter_ui_count FROM thread_data) = 0
-                 AND (SELECT chrome_count + cr_renderer_count FROM thread_data) = 0
-                 AND (SELECT unity_main_count + unity_gfx_count + unreal_game_count + unreal_rhi_count + godot_count FROM thread_data) = 0
-            THEN 0.55 + CASE WHEN (SELECT gl_thread_count FROM thread_data) > 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_surfaceview_blast,
-
-          -- TEXTUREVIEW_STANDARD: SurfaceTexture updateTexImage
-          CASE
-            WHEN (SELECT texture_view_count FROM slice_data) > 5
-                 AND (SELECT flutter_ui_count FROM thread_data) = 0
-                 AND (SELECT custom_webview_count FROM slice_data) = 0
-            THEN 0.60 + CASE WHEN (SELECT render_thread_count FROM thread_data) > 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_textureview_standard,
-
-          -- SURFACE_CONTROL_API: NDK SurfaceControl
-          CASE
-            WHEN (SELECT surface_control_count FROM slice_data) > 10
-            THEN 0.65 + CASE WHEN (SELECT apply_transaction_count FROM slice_data) > 0 THEN 0.20 ELSE 0 END
-            ELSE 0
-          END as score_surface_control_api,
-
-          -- =====================================================================
-          -- Graphics APIs
-          -- =====================================================================
-          -- OPENGL_ES: GLES/EGL rendering
-          CASE
-            WHEN (SELECT egl_swap_count FROM slice_data) > 0
-                 AND (SELECT vk_present_count FROM slice_data) = 0
-                 AND (SELECT angle_count FROM slice_data) = 0
-                 AND (SELECT flutter_ui_count FROM thread_data) = 0
-                 AND (SELECT chrome_count + cr_renderer_count + viz_compositor_count FROM thread_data) = 0
-                 AND (SELECT unity_main_count + unity_gfx_count + unreal_game_count + unreal_rhi_count + godot_count FROM thread_data) = 0
-            THEN 0.50 +
-                 CASE WHEN (SELECT gl_draw_count FROM slice_data) > 0 THEN 0.20 ELSE 0 END +
-                 CASE WHEN (SELECT gl_thread_count FROM thread_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_opengl_es,
-
-          -- VULKAN_NATIVE: Native Vulkan
-          CASE
-            WHEN (SELECT vk_present_count FROM slice_data) > 0
-                 OR (SELECT vk_cmd_count FROM slice_data) > 10
-            THEN 0.60 +
-                 CASE WHEN (SELECT swappy_count FROM slice_data) > 0 THEN 0.20 ELSE 0 END +
-                 CASE WHEN (SELECT vulkan_thread_count FROM thread_data) > 0 THEN 0.10 ELSE 0 END
-            ELSE 0
-          END as score_vulkan_native,
-
-          -- ANGLE_GLES_VULKAN: ANGLE translation layer
-          CASE
-            WHEN (SELECT angle_count FROM slice_data) > 0
-            THEN 0.80
-            ELSE 0
-          END as score_angle_gles_vulkan,
-
-          -- =====================================================================
-          -- Flutter
-          -- =====================================================================
-          -- FLUTTER_SURFACEVIEW_IMPELLER: Flutter + Impeller
-          CASE
-            WHEN (SELECT flutter_ui_count FROM thread_data) > 0
-                 AND (SELECT impeller_entity_count FROM slice_data) > 0
-            THEN 0.80 + CASE WHEN (SELECT flutter_raster_count FROM thread_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_flutter_surfaceview_impeller,
-
-          -- FLUTTER_SURFACEVIEW_SKIA: Flutter + Skia
-          CASE
-            WHEN (SELECT flutter_ui_count FROM thread_data) > 0
-                 AND (SELECT skia_gpu_count FROM slice_data) > 0
-                 AND (SELECT impeller_entity_count FROM slice_data) = 0
-            THEN 0.75 + CASE WHEN (SELECT flutter_raster_count FROM thread_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_flutter_surfaceview_skia,
-
-          -- FLUTTER_TEXTUREVIEW: Flutter TextureView rendering
-          CASE
-            WHEN (SELECT flutter_ui_count FROM thread_data) > 0
-                 AND (SELECT texture_view_count FROM slice_data) > 5
-            THEN 0.75 +
-                 CASE WHEN (SELECT render_thread_count FROM thread_data) > 0 THEN 0.10 ELSE 0 END
-            ELSE 0
-          END as score_flutter_textureview,
-
-          -- =====================================================================
-          -- WebView
-          -- =====================================================================
-          -- WEBVIEW_GL_FUNCTOR: App RT sync wait
-          CASE
-            WHEN (SELECT draw_gl_functor_count FROM slice_data) > 0
-                 OR ((SELECT cr_renderer_count FROM thread_data) > 0
-                     AND (SELECT render_thread_count FROM thread_data) > 0
-                     AND (SELECT viz_compositor_count FROM thread_data) = 0)
-            THEN 0.70 + CASE WHEN (SELECT blink_count + v8_count FROM slice_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_webview_gl_functor,
-
-          -- WEBVIEW_SURFACE_CONTROL: Viz/OOP-R/SC
-          CASE
-            WHEN (SELECT viz_compositor_count FROM thread_data) > 0
-            THEN 0.75 + CASE WHEN (SELECT surface_control_count FROM slice_data) > 0 THEN 0.15 ELSE 0 END
-            ELSE 0
-          END as score_webview_surface_control,
-
-          -- WEBVIEW_SURFACEVIEW_WRAPPER: Full-screen video
-          CASE
-            WHEN (SELECT webview_slice_count FROM slice_data) > 0
-                 OR (SELECT webview_core_count FROM thread_data) > 0
-                 AND (SELECT surfaceview_count FROM slice_data) > 0
-                 AND (SELECT video_slice_count FROM slice_data) > 0
-            THEN 0.65
-            ELSE 0
-          END as score_webview_surfaceview_wrapper,
-
-          -- WEBVIEW_TEXTUREVIEW_CUSTOM: X5/UC custom kernel
-          CASE
-            WHEN (SELECT custom_webview_count FROM slice_data) > 0
-            THEN 0.80
-            ELSE 0
-          END as score_webview_textureview_custom,
-
-          -- =====================================================================
-          -- Specialized
-          -- =====================================================================
-          -- GAME_ENGINE: Unity/Unreal/Godot
-          CASE
-            WHEN (SELECT unity_main_count + unity_gfx_count FROM thread_data) > 0
-            THEN 0.85
-            WHEN (SELECT unreal_game_count + unreal_rhi_count FROM thread_data) > 0
-            THEN 0.85
-            WHEN (SELECT godot_count FROM thread_data) > 0
-            THEN 0.80
-            WHEN (SELECT unity_slice_count + unity_player_loop_count FROM slice_data) > 0
-            THEN 0.75
-            WHEN (SELECT unreal_slice_count FROM slice_data) > 0
-            THEN 0.75
-            ELSE 0
-          END as score_game_engine,
-
-          -- CAMERA_PIPELINE: Camera2/HAL3
-          CASE
-            WHEN (SELECT camera_thread_count FROM thread_data) > 0
-                 AND (SELECT camera_slice_count + capture_session_count FROM slice_data) > 0
-            THEN 0.70
-            ELSE 0
-          END as score_camera_pipeline,
-
-          -- VIDEO_OVERLAY_HWC: HWC video layer
-          CASE
-            WHEN (SELECT hwc_slice_count FROM slice_data) > 0
-                 AND (SELECT video_slice_count FROM slice_data) > 0
-            THEN 0.65
-            ELSE 0
-          END as score_video_overlay_hwc,
-
-          -- HARDWARE_BUFFER_RENDERER: Android 14+ HBR
-          CASE
-            WHEN (SELECT hbr_count FROM slice_data) > 0
-            THEN 0.75
-            ELSE 0
-          END as score_hardware_buffer_renderer,
-
-          -- VARIABLE_REFRESH_RATE: VRR/ARR
-          CASE
-            WHEN (SELECT frame_timeline_count FROM slice_data) > 0
-                 AND (SELECT frame_rate_count FROM slice_data) > 0
-            THEN 0.60
-            WHEN (SELECT frame_timeline_count FROM slice_data) > 5
-            THEN 0.40
-            ELSE 0
-          END as score_variable_refresh_rate
-      )
-      SELECT * FROM scores
     save_as: pipeline_scores
-
-  # ==========================================================================
-  # Step 4: Determine Primary Pipeline and Candidates
-  # ==========================================================================
   - id: determine_pipeline
     type: atomic
-    name: "确定主管线"
+    name: 确定主管线 (YAML 驱动)
     display:
       level: summary
-      title: "渲染管线识别结果"
-    sql: |
-      WITH scores AS (SELECT * FROM ${pipeline_scores}),
-           all_scores AS (
-        SELECT 'ANDROID_VIEW_STANDARD_BLAST' as pipeline_id, score_android_view_standard_blast as score FROM scores
-        UNION ALL SELECT 'ANDROID_VIEW_STANDARD_LEGACY', score_android_view_standard_legacy FROM scores
-        UNION ALL SELECT 'ANDROID_VIEW_SOFTWARE', score_android_view_software FROM scores
-        UNION ALL SELECT 'ANDROID_VIEW_MIXED', score_android_view_mixed FROM scores
-        UNION ALL SELECT 'ANDROID_VIEW_MULTI_WINDOW', score_android_view_multi_window FROM scores
-        UNION ALL SELECT 'ANDROID_PIP_FREEFORM', score_android_pip_freeform FROM scores
-        UNION ALL SELECT 'SURFACEVIEW_BLAST', score_surfaceview_blast FROM scores
-        UNION ALL SELECT 'TEXTUREVIEW_STANDARD', score_textureview_standard FROM scores
-        UNION ALL SELECT 'SURFACE_CONTROL_API', score_surface_control_api FROM scores
-        UNION ALL SELECT 'OPENGL_ES', score_opengl_es FROM scores
-        UNION ALL SELECT 'VULKAN_NATIVE', score_vulkan_native FROM scores
-        UNION ALL SELECT 'ANGLE_GLES_VULKAN', score_angle_gles_vulkan FROM scores
-        UNION ALL SELECT 'FLUTTER_SURFACEVIEW_IMPELLER', score_flutter_surfaceview_impeller FROM scores
-        UNION ALL SELECT 'FLUTTER_SURFACEVIEW_SKIA', score_flutter_surfaceview_skia FROM scores
-        UNION ALL SELECT 'FLUTTER_TEXTUREVIEW', score_flutter_textureview FROM scores
-        UNION ALL SELECT 'WEBVIEW_GL_FUNCTOR', score_webview_gl_functor FROM scores
-        UNION ALL SELECT 'WEBVIEW_SURFACE_CONTROL', score_webview_surface_control FROM scores
-        UNION ALL SELECT 'WEBVIEW_SURFACEVIEW_WRAPPER', score_webview_surfaceview_wrapper FROM scores
-        UNION ALL SELECT 'WEBVIEW_TEXTUREVIEW_CUSTOM', score_webview_textureview_custom FROM scores
-        UNION ALL SELECT 'GAME_ENGINE', score_game_engine FROM scores
-        UNION ALL SELECT 'CAMERA_PIPELINE', score_camera_pipeline FROM scores
-        UNION ALL SELECT 'VIDEO_OVERLAY_HWC', score_video_overlay_hwc FROM scores
-        UNION ALL SELECT 'HARDWARE_BUFFER_RENDERER', score_hardware_buffer_renderer FROM scores
-        UNION ALL SELECT 'VARIABLE_REFRESH_RATE', score_variable_refresh_rate FROM scores
-      ),
-      ranked AS (
-        SELECT
-          pipeline_id,
-          score,
-          ROW_NUMBER() OVER (ORDER BY score DESC) as rank
-        FROM all_scores
-        WHERE score > 0.3
-      ),
-      primary_pipeline AS (
-        SELECT pipeline_id, score FROM ranked WHERE rank = 1
-      ),
-      candidates AS (
-        SELECT pipeline_id, score FROM ranked WHERE rank <= 5
-      ),
-      features AS (
-        SELECT pipeline_id, score FROM all_scores
-        WHERE pipeline_id IN ('VARIABLE_REFRESH_RATE', 'VIDEO_OVERLAY_HWC', 'SURFACE_CONTROL_API')
-          AND score > 0.3
-      ),
-      candidate_list AS (
-        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') as candidates_list
-        FROM candidates
-        GROUP BY 'all_candidates'
-      ),
-      feature_list AS (
-        SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), '; ') as features_list
-        FROM features
-        GROUP BY 'all_features'
-      )
-      SELECT
-        COALESCE((SELECT pipeline_id FROM primary_pipeline), 'ANDROID_VIEW_STANDARD_BLAST') as primary_pipeline_id,
-        COALESCE((SELECT score FROM primary_pipeline), 0.50) as primary_confidence,
-        (SELECT candidates_list FROM candidate_list) as candidates_list,
-        (SELECT features_list FROM feature_list) as features_list,
-        CASE COALESCE((SELECT pipeline_id FROM primary_pipeline), 'ANDROID_VIEW_STANDARD_BLAST')
-          WHEN 'ANDROID_VIEW_STANDARD_BLAST' THEN 'rendering_pipelines/android_view_standard.md'
-          WHEN 'ANDROID_VIEW_STANDARD_LEGACY' THEN 'rendering_pipelines/android_view_standard.md'
-          WHEN 'ANDROID_VIEW_SOFTWARE' THEN 'rendering_pipelines/android_view_software.md'
-          WHEN 'ANDROID_VIEW_MIXED' THEN 'rendering_pipelines/android_view_mixed.md'
-          WHEN 'ANDROID_VIEW_MULTI_WINDOW' THEN 'rendering_pipelines/android_view_multi_window.md'
-          WHEN 'ANDROID_PIP_FREEFORM' THEN 'rendering_pipelines/android_pip_freeform.md'
-          WHEN 'SURFACEVIEW_BLAST' THEN 'rendering_pipelines/surfaceview.md'
-          WHEN 'TEXTUREVIEW_STANDARD' THEN 'rendering_pipelines/textureview.md'
-          WHEN 'SURFACE_CONTROL_API' THEN 'rendering_pipelines/surface_control_api.md'
-          WHEN 'OPENGL_ES' THEN 'rendering_pipelines/opengl_es.md'
-          WHEN 'VULKAN_NATIVE' THEN 'rendering_pipelines/vulkan_native.md'
-          WHEN 'ANGLE_GLES_VULKAN' THEN 'rendering_pipelines/angle_gles_vulkan.md'
-          WHEN 'FLUTTER_SURFACEVIEW_IMPELLER' THEN 'rendering_pipelines/flutter_surfaceview.md'
-          WHEN 'FLUTTER_SURFACEVIEW_SKIA' THEN 'rendering_pipelines/flutter_surfaceview.md'
-          WHEN 'FLUTTER_TEXTUREVIEW' THEN 'rendering_pipelines/flutter_textureview.md'
-          WHEN 'WEBVIEW_GL_FUNCTOR' THEN 'rendering_pipelines/webview_gl_functor.md'
-          WHEN 'WEBVIEW_SURFACE_CONTROL' THEN 'rendering_pipelines/webview_surface_control.md'
-          WHEN 'WEBVIEW_SURFACEVIEW_WRAPPER' THEN 'rendering_pipelines/webview_surfaceview_wrapper.md'
-          WHEN 'WEBVIEW_TEXTUREVIEW_CUSTOM' THEN 'rendering_pipelines/webview_textureview_custom.md'
-          WHEN 'GAME_ENGINE' THEN 'rendering_pipelines/game_engine.md'
-          WHEN 'CAMERA_PIPELINE' THEN 'rendering_pipelines/camera_pipeline.md'
-          WHEN 'VIDEO_OVERLAY_HWC' THEN 'rendering_pipelines/video_overlay_hwc.md'
-          WHEN 'HARDWARE_BUFFER_RENDERER' THEN 'rendering_pipelines/hardware_buffer_renderer.md'
-          WHEN 'VARIABLE_REFRESH_RATE' THEN 'rendering_pipelines/variable_refresh_rate.md'
-          ELSE 'rendering_pipelines/android_view_standard.md'
-        END as doc_path
-    save_as: pipeline_result
+      title: 渲染管线识别结果
+    sql: |2-
 
-  # ==========================================================================
-  # Step 5: Determine Subvariants
-  # ==========================================================================
+            WITH
+            pipeline_scores AS (
+              SELECT * FROM ${pipeline_scores}
+            ),
+            pipeline_metadata(
+              pipeline_id,
+              rendering_type_id,
+              primary_eligible,
+              feature_visible,
+              doc_path
+            ) AS (
+              VALUES
+              ('ANDROID_PIP_FREEFORM', NULL, 0, 1, 'rendering_pipelines/S06_multi_window_type.md'),
+              ('ANDROID_VIEW_MIXED', 'S05_MIXED_RENDERING', 1, 0, 'rendering_pipelines/S05_mixed_rendering_type.md'),
+              ('ANDROID_VIEW_MULTI_WINDOW', NULL, 0, 1, 'rendering_pipelines/S06_multi_window_type.md'),
+              ('ANDROID_VIEW_SOFTWARE', 'S07_SOFTWARE_OFFSCREEN', 1, 0, 'rendering_pipelines/S07_software_offscreen_type.md'),
+              ('ANDROID_VIEW_STANDARD_BLAST', 'S02_AOSP_STANDARD', 1, 0, 'rendering_pipelines/S02_aosp_standard_type.md'),
+              ('ANDROID_VIEW_STANDARD_LEGACY', 'S02_AOSP_STANDARD', 1, 0, 'rendering_pipelines/S02_aosp_standard_type.md'),
+              ('ANGLE_GLES_VULKAN', NULL, 0, 1, 'rendering_pipelines/S08_native_graphics_type.md'),
+              ('CAMERA_PIPELINE', 'S11_CAMERA', 1, 0, 'rendering_pipelines/S11_camera_type.md'),
+              ('CHROME_BROWSER_VIZ', 'S09_WEBVIEW', 1, 0, 'rendering_pipelines/S09_webview_type.md'),
+              ('COMPOSE_STANDARD', 'S02_AOSP_STANDARD', 1, 0, 'rendering_pipelines/S02_aosp_standard_type.md'),
+              ('FLUTTER_SURFACEVIEW_IMPELLER', 'S10_FLUTTER', 1, 0, 'rendering_pipelines/S10_flutter_type.md'),
+              ('FLUTTER_SURFACEVIEW_SKIA', 'S10_FLUTTER', 1, 0, 'rendering_pipelines/S10_flutter_type.md'),
+              ('FLUTTER_TEXTUREVIEW', 'S10_FLUTTER', 1, 0, 'rendering_pipelines/S10_flutter_type.md'),
+              ('GAME_ENGINE', 'S13_GAME', 1, 0, 'rendering_pipelines/S13_game_type.md'),
+              ('HARDWARE_BUFFER_RENDERER', NULL, 0, 1, 'rendering_pipelines/S07_software_offscreen_type.md'),
+              ('IMAGEREADER_PIPELINE', NULL, 0, 1, 'rendering_pipelines/S07_software_offscreen_type.md'),
+              ('OPENGL_ES', 'S08_NATIVE_GRAPHICS', 1, 0, 'rendering_pipelines/S08_native_graphics_type.md'),
+              ('RN_NEW_ARCH_HWUI', 'S14_REACT_NATIVE', 1, 0, 'rendering_pipelines/S14_react_native_type.md'),
+              ('RN_OLD_ARCH_HWUI', 'S14_REACT_NATIVE', 1, 0, 'rendering_pipelines/S14_react_native_type.md'),
+              ('RN_SKIA_RENDERER', 'S14_REACT_NATIVE', 1, 0, 'rendering_pipelines/S14_react_native_type.md'),
+              ('SOFTWARE_COMPOSITING', NULL, 0, 1, 'rendering_pipelines/S01_rendering_types_overview.md'),
+              ('SURFACE_CONTROL_API', NULL, 0, 1, 'rendering_pipelines/S07_software_offscreen_type.md'),
+              ('SURFACEVIEW_BLAST', 'S03_SURFACEVIEW', 1, 0, 'rendering_pipelines/S03_surfaceview_type.md'),
+              ('TEXTUREVIEW_STANDARD', 'S04_TEXTUREVIEW', 1, 0, 'rendering_pipelines/S04_textureview_type.md'),
+              ('VARIABLE_REFRESH_RATE', NULL, 0, 1, 'rendering_pipelines/S01_rendering_types_overview.md'),
+              ('VIDEO_OVERLAY_HWC', NULL, 0, 1, 'rendering_pipelines/S12_video_overlay_hwc_type.md'),
+              ('VULKAN_NATIVE', 'S08_NATIVE_GRAPHICS', 1, 0, 'rendering_pipelines/S08_native_graphics_type.md'),
+              ('WEBVIEW_GL_FUNCTOR', 'S09_WEBVIEW', 1, 0, 'rendering_pipelines/S09_webview_type.md'),
+              ('WEBVIEW_SURFACE_CONTROL', 'S09_WEBVIEW', 1, 0, 'rendering_pipelines/S09_webview_type.md'),
+              ('WEBVIEW_SURFACEVIEW_WRAPPER', 'S09_WEBVIEW', 1, 0, 'rendering_pipelines/S09_webview_type.md'),
+              ('WEBVIEW_TEXTUREVIEW_CUSTOM', 'S09_WEBVIEW', 1, 0, 'rendering_pipelines/S09_webview_type.md')
+            ),
+            pipeline_related_rendering_types(
+              pipeline_id,
+              rendering_type_id
+            ) AS (
+              VALUES
+              ('ANDROID_PIP_FREEFORM', 'S06_MULTI_WINDOW'),
+              ('ANDROID_VIEW_MULTI_WINDOW', 'S06_MULTI_WINDOW'),
+              ('ANGLE_GLES_VULKAN', 'S08_NATIVE_GRAPHICS'),
+              ('HARDWARE_BUFFER_RENDERER', 'S07_SOFTWARE_OFFSCREEN'),
+              ('IMAGEREADER_PIPELINE', 'S07_SOFTWARE_OFFSCREEN'),
+              ('SURFACE_CONTROL_API', 'S07_SOFTWARE_OFFSCREEN'),
+              ('VIDEO_OVERLAY_HWC', 'S12_VIDEO_OVERLAY_HWC')
+            ),
+            ranked AS (
+              SELECT
+                ps.pipeline_id,
+                ps.score,
+                pm.rendering_type_id,
+                ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.pipeline_id ASC) as rank
+              FROM pipeline_scores ps
+              JOIN pipeline_metadata pm USING (pipeline_id)
+              WHERE ps.score >= 0.3
+                AND pm.primary_eligible = 1
+            ),
+            primary_pipeline AS (
+              SELECT pipeline_id, rendering_type_id, score FROM ranked WHERE rank = 1
+            ),
+            candidates AS (
+              SELECT pipeline_id, rendering_type_id, score, rank
+              FROM ranked
+              WHERE rank <= 5
+            ),
+            features AS (
+              SELECT
+                ps.pipeline_id,
+                ps.score,
+                ROW_NUMBER() OVER (ORDER BY ps.score DESC, ps.pipeline_id ASC) as rank
+              FROM pipeline_scores ps
+              JOIN pipeline_metadata pm USING (pipeline_id)
+              WHERE pm.feature_visible = 1
+                AND ps.score >= 0.3
+            ),
+            rendering_type_scores AS (
+              SELECT
+                rendering_type_id,
+                MAX(score) as score
+              FROM ranked
+              WHERE rendering_type_id IS NOT NULL
+              GROUP BY rendering_type_id
+            ),
+            ranked_rendering_types AS (
+              SELECT
+                rendering_type_id,
+                score,
+                ROW_NUMBER() OVER (ORDER BY score DESC, rendering_type_id ASC) as rank
+              FROM rendering_type_scores
+            ),
+            related_rendering_type_scores AS (
+              SELECT
+                prt.rendering_type_id,
+                MAX(f.score) as score
+              FROM features f
+              JOIN pipeline_related_rendering_types prt USING (pipeline_id)
+              GROUP BY prt.rendering_type_id
+            ),
+            ranked_related_rendering_types AS (
+              SELECT
+                rendering_type_id,
+                score,
+                ROW_NUMBER() OVER (ORDER BY score DESC, rendering_type_id ASC) as rank
+              FROM related_rendering_type_scores
+            ),
+            candidate_list AS (
+              SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as candidates_list
+              FROM (
+                SELECT pipeline_id, score
+                FROM candidates
+                ORDER BY rank ASC
+              )
+              GROUP BY 'all_candidates'
+            ),
+            rendering_type_candidate_list AS (
+              SELECT GROUP_CONCAT(rendering_type_id || ':' || ROUND(score, 2), ',') as rendering_type_candidates_list
+              FROM (
+                SELECT rendering_type_id, score
+                FROM ranked_rendering_types
+                WHERE rank <= 5
+                ORDER BY rank ASC
+              )
+              GROUP BY 'all_rendering_type_candidates'
+            ),
+            related_rendering_type_candidate_list AS (
+              SELECT GROUP_CONCAT(rendering_type_id || ':' || ROUND(score, 2), ',') as related_rendering_type_candidates_list
+              FROM (
+                SELECT rendering_type_id, score
+                FROM ranked_related_rendering_types
+                WHERE rank <= 5
+                ORDER BY rank ASC
+              )
+              GROUP BY 'all_related_rendering_type_candidates'
+            ),
+            feature_list AS (
+              SELECT GROUP_CONCAT(pipeline_id || ':' || ROUND(score, 2), ',') as features_list
+              FROM (
+                SELECT pipeline_id, score
+                FROM features
+                ORDER BY rank ASC
+              )
+              GROUP BY 'all_features'
+            ),
+            result AS (
+              SELECT
+                COALESCE((SELECT pipeline_id FROM primary_pipeline), 'ANDROID_VIEW_STANDARD_BLAST') as primary_pipeline_id,
+                COALESCE((SELECT rendering_type_id FROM primary_pipeline), 'S02_AOSP_STANDARD') as primary_rendering_type_id,
+                COALESCE((SELECT score FROM primary_pipeline), 0.50) as primary_confidence,
+                COALESCE((SELECT candidates_list FROM candidate_list), '') as candidates_list,
+                COALESCE((SELECT rendering_type_candidates_list FROM rendering_type_candidate_list), '') as rendering_type_candidates_list,
+                COALESCE((SELECT related_rendering_type_candidates_list FROM related_rendering_type_candidate_list), '') as related_rendering_type_candidates_list,
+                COALESCE((SELECT features_list FROM feature_list), '') as features_list
+            )
+            SELECT
+              r.primary_pipeline_id,
+              r.primary_rendering_type_id,
+              r.primary_confidence,
+              r.candidates_list,
+              r.rendering_type_candidates_list,
+              r.related_rendering_type_candidates_list,
+              r.features_list,
+              COALESCE((SELECT doc_path FROM pipeline_metadata WHERE pipeline_id = r.primary_pipeline_id), 'rendering_pipelines/S02_aosp_standard_type.md') as doc_path
+            FROM result r
+
+    save_as: pipeline_result
   - id: subvariants
     type: atomic
-    name: "确定子变体"
+    name: 确定子变体
     display:
       level: detail
-      title: "子变体检测"
-    sql: |
-      WITH slice_data AS (SELECT * FROM ${slice_signals}),
-           thread_data AS (SELECT * FROM ${thread_signals})
-      SELECT
-        -- Buffer Mode
-        CASE
-          WHEN (SELECT blast_bq_count + apply_transaction_count FROM slice_data) > 0 THEN 'BLAST'
-          WHEN (SELECT queue_buffer_count FROM slice_data) > 0 THEN 'LEGACY'
-          ELSE 'UNKNOWN'
-        END as buffer_mode,
-        -- Flutter Engine (slice-based primary, thread-based fallback)
-        CASE
-          WHEN (SELECT impeller_entity_count FROM slice_data) > 0 THEN 'IMPELLER'
-          WHEN (SELECT flutter_impeller_thread_count FROM thread_data) > 0 THEN 'IMPELLER'
-          WHEN (SELECT skia_gpu_count FROM slice_data) > 0 THEN 'SKIA'
-          WHEN (SELECT flutter_ui_count FROM thread_data) > 0 THEN 'UNKNOWN'
-          ELSE 'N/A'
-        END as flutter_engine,
-        -- WebView Mode
-        CASE
-          WHEN (SELECT viz_compositor_count FROM thread_data) > 0 THEN 'SURFACE_CONTROL'
-          WHEN (SELECT draw_gl_functor_count FROM slice_data) > 0 THEN 'GL_FUNCTOR'
-          WHEN (SELECT custom_webview_count FROM slice_data) > 0 THEN 'TEXTUREVIEW_CUSTOM'
-          WHEN (SELECT webview_slice_count FROM slice_data) > 0 AND (SELECT surfaceview_count FROM slice_data) > 0 THEN 'SURFACEVIEW_WRAPPER'
-          WHEN (SELECT chrome_count + cr_renderer_count FROM thread_data) > 0 THEN 'UNKNOWN'
-          ELSE 'N/A'
-        END as webview_mode,
-        -- Game Engine
-        CASE
-          WHEN (SELECT unity_main_count FROM thread_data) > 0 THEN 'UNITY'
-          WHEN (SELECT unreal_game_count FROM thread_data) > 0 THEN 'UNREAL'
-          WHEN (SELECT godot_count FROM thread_data) > 0 THEN 'GODOT'
-          ELSE 'N/A'
-        END as game_engine
+      title: 子变体检测
+    sql: |2-
+
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (t.name = 'main' AND s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*lockCanvas*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*Swappy*')
+                  OR (s.name GLOB '*FrameTimeline*')
+                  OR (s.name GLOB '*updateTexImage*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            ),
+            thread_counts AS (
+              SELECT
+                t.name as thread_name,
+                COUNT(*) as cnt
+              FROM thread t
+              WHERE t.name IS NOT NULL
+                AND t.upid IN (SELECT upid FROM app_filter_upids)
+              GROUP BY t.name
+            ),
+            slice_counts AS (
+              SELECT
+                s.name as slice_name,
+                COUNT(*) as cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE s.name IS NOT NULL
+                AND p.upid IN (SELECT upid FROM app_filter_upids)
+              GROUP BY s.name
+            )
+            SELECT
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) > 0 THEN 'BLAST'
+                WHEN COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*queueBuffer*'), 0) > 0 THEN 'LEGACY'
+                ELSE 'UNKNOWN'
+              END as buffer_mode,
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name IN ('ui', '1.ui')), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*Impeller*' OR slice_name GLOB '*EntityPass*'), 0) > 0
+                THEN 'IMPELLER'
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name IN ('ui', '1.ui')), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*SkGpu*' OR slice_name GLOB '*SkiaGpu*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*EntityPass*'), 0) = 0
+                THEN 'SKIA'
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name IN ('ui', '1.ui')), 0) > 0
+                THEN 'UNKNOWN'
+                ELSE 'N/A'
+              END as flutter_engine,
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts
+                               WHERE thread_name = 'VizCompositorThread'
+                                  OR thread_name GLOB 'VizCompositorThread*'
+                                  OR thread_name = 'VizCompositor'
+                                  OR thread_name GLOB 'VizCompositor*'), 0) > 0
+                THEN 'SURFACE_CONTROL'
+                WHEN COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*DrawGL*' OR slice_name GLOB '*DrawFunctor*'), 0) > 0
+                THEN 'GL_FUNCTOR'
+                WHEN COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*TBS*' OR slice_name GLOB '*X5*' OR slice_name GLOB '*UCCore*'), 0) > 0
+                THEN 'TEXTUREVIEW_CUSTOM'
+                WHEN COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*WebView*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM slice_counts WHERE slice_name GLOB '*SurfaceView*'), 0) > 0
+                THEN 'SURFACEVIEW_WRAPPER'
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name GLOB '*Chrome*' OR thread_name GLOB 'CrRendererMain*'), 0) > 0
+                THEN 'UNKNOWN'
+                ELSE 'N/A'
+              END as webview_mode,
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name GLOB 'UnityMain*'), 0) > 0 THEN 'UNITY'
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name GLOB 'GameThread*' OR thread_name GLOB 'RHIThread*'), 0) > 0 THEN 'UNREAL'
+                WHEN COALESCE((SELECT SUM(cnt) FROM thread_counts WHERE thread_name GLOB 'GodotMain*'), 0) > 0 THEN 'GODOT'
+                ELSE 'N/A'
+              END as game_engine
+
     save_as: subvariants
-
-  # ==========================================================================
-  # Step 6: Generate Pin Instructions
-  # ==========================================================================
-  - id: pin_instructions
-    type: atomic
-    name: "生成 Pin 指令"
-    display:
-      level: detail
-      title: "Track 固定建议"
-    sql: |
-      WITH pipeline AS (SELECT * FROM ${pipeline_result})
-      SELECT
-        (SELECT primary_pipeline_id FROM pipeline) as pipeline_id,
-        CASE (SELECT primary_pipeline_id FROM pipeline)
-          -- HWUI Family
-          WHEN 'ANDROID_VIEW_STANDARD_BLAST' THEN 'main|RenderThread|SurfaceFlinger|VSYNC'
-          WHEN 'ANDROID_VIEW_STANDARD_LEGACY' THEN 'main|RenderThread|SurfaceFlinger'
-          WHEN 'ANDROID_VIEW_SOFTWARE' THEN 'main|SurfaceFlinger'
-          WHEN 'ANDROID_VIEW_MIXED' THEN 'main|RenderThread|SurfaceFlinger|GLThread'
-          WHEN 'ANDROID_VIEW_MULTI_WINDOW' THEN 'main|RenderThread|SurfaceFlinger'
-          -- Surface-Based
-          WHEN 'SURFACEVIEW_BLAST' THEN 'GLThread|SurfaceFlinger|VSYNC'
-          WHEN 'TEXTUREVIEW_STANDARD' THEN 'main|RenderThread|SurfaceFlinger'
-          WHEN 'SURFACE_CONTROL_API' THEN 'main|SurfaceFlinger|SurfaceControl'
-          -- Graphics APIs
-          WHEN 'OPENGL_ES' THEN 'GLThread|RenderThread|SurfaceFlinger'
-          WHEN 'VULKAN_NATIVE' THEN 'main|RenderThread|SurfaceFlinger|VkQueue'
-          WHEN 'ANGLE_GLES_VULKAN' THEN 'main|RenderThread|SurfaceFlinger'
-          -- Flutter
-          WHEN 'FLUTTER_SURFACEVIEW_IMPELLER' THEN '1.ui|1.raster|io.flutter|SurfaceFlinger'
-          WHEN 'FLUTTER_SURFACEVIEW_SKIA' THEN '1.ui|1.raster|io.flutter|SurfaceFlinger'
-          WHEN 'FLUTTER_TEXTUREVIEW' THEN '1.ui|1.raster|JNISurfaceTextu|RenderThread|SurfaceFlinger'
-          -- WebView
-          WHEN 'WEBVIEW_GL_FUNCTOR' THEN 'main|RenderThread|CrRendererMain|SurfaceFlinger'
-          WHEN 'WEBVIEW_SURFACE_CONTROL' THEN 'CrRendererMain|VizCompositor|SurfaceFlinger'
-          WHEN 'WEBVIEW_SURFACEVIEW_WRAPPER' THEN 'main|CrRendererMain|SurfaceFlinger'
-          WHEN 'WEBVIEW_TEXTUREVIEW_CUSTOM' THEN 'main|RenderThread|CrRendererMain|SurfaceFlinger'
-          -- Specialized
-          WHEN 'GAME_ENGINE' THEN 'UnityMain|UnityGfx|GameThread|RenderThread|SurfaceFlinger'
-          WHEN 'CAMERA_PIPELINE' THEN 'CameraSession|SurfaceFlinger'
-          WHEN 'VIDEO_OVERLAY_HWC' THEN 'MediaCodec|SurfaceFlinger|HWC'
-          WHEN 'HARDWARE_BUFFER_RENDERER' THEN 'main|SurfaceFlinger'
-          WHEN 'VARIABLE_REFRESH_RATE' THEN 'main|RenderThread|SurfaceFlinger|VSYNC'
-          ELSE 'main|RenderThread|SurfaceFlinger'
-        END as pin_patterns
-    save_as: pin_instructions
-
-  # ==========================================================================
-  # Step 7: Check Trace Requirements
-  # ==========================================================================
   - id: trace_requirements
     type: atomic
-    name: "检查采集完整性"
+    name: 检查采集完整性
     display:
       level: detail
-      title: "采集建议"
-    sql: |
-      WITH slice_data AS (SELECT * FROM ${slice_signals}),
-           thread_data AS (SELECT * FROM ${thread_signals})
-      SELECT
-        -- Check for common missing data
-        CASE WHEN (SELECT draw_frame_count FROM slice_data) = 0 THEN 'gfx:RenderThread slices missing - add atrace category: gfx' ELSE NULL END as hint_gfx,
-        CASE WHEN (SELECT choreographer_count FROM slice_data) = 0 THEN 'Choreographer slices missing - add atrace category: input' ELSE NULL END as hint_input,
-        CASE WHEN (SELECT blast_bq_count FROM slice_data) = 0
-             AND (SELECT queue_buffer_count FROM slice_data) = 0
-        THEN 'BufferQueue slices missing - add atrace category: binder_driver' ELSE NULL END as hint_buffer,
-        CASE WHEN NOT EXISTS (SELECT 1 FROM slice WHERE name GLOB '*SurfaceFlinger*' LIMIT 1)
-        THEN 'SurfaceFlinger slices missing - add atrace category: sf or run as root' ELSE NULL END as hint_sf,
-        CASE WHEN (SELECT frame_timeline_count FROM slice_data) = 0
-        THEN 'FrameTimeline missing - add ftrace event: surfaceflinger/frametimeline' ELSE NULL END as hint_timeline
-    save_as: trace_requirements
+      title: 采集建议
+    sql: |2-
 
-  # ==========================================================================
-  # Step 8: Identify Active Rendering Processes (v3 Smart Pin Enhancement)
-  # ==========================================================================
-  # Uses actual_frame_timeline_slice to identify processes that are actually
-  # producing frames, avoiding pinning idle background RenderThreads.
-  #
-  # FALLBACK: If actual_frame_timeline_slice doesn't exist (Android <12 or
-  # FrameTimeline not enabled), falls back to heuristic detection based on
-  # DrawFrame slice counts per process.
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (t.name = 'main' AND s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*lockCanvas*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*Swappy*')
+                  OR (s.name GLOB '*FrameTimeline*')
+                  OR (s.name GLOB '*updateTexImage*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            )
+            SELECT
+              CASE
+                WHEN NOT EXISTS (
+                  SELECT 1
+                  FROM slice s
+                  JOIN thread_track tt ON s.track_id = tt.id
+                  JOIN thread t ON tt.utid = t.utid
+                  JOIN process p ON t.upid = p.upid
+                  WHERE p.upid IN (SELECT upid FROM app_filter_upids)
+                    AND t.name = 'RenderThread'
+                    AND s.name GLOB 'DrawFrame*'
+                  LIMIT 1
+                )
+                THEN 'gfx: RenderThread/DrawFrame slices missing (enable atrace: gfx)'
+                ELSE NULL
+              END as hint_gfx,
+              CASE
+                WHEN NOT EXISTS (
+                  SELECT 1
+                  FROM slice s
+                  JOIN thread_track tt ON s.track_id = tt.id
+                  JOIN thread t ON tt.utid = t.utid
+                  JOIN process p ON t.upid = p.upid
+                  WHERE p.upid IN (SELECT upid FROM app_filter_upids)
+                    AND s.name GLOB '*Choreographer#doFrame*'
+                  LIMIT 1
+                )
+                THEN 'input: Choreographer#doFrame missing (enable atrace: input/view)'
+                ELSE NULL
+              END as hint_input,
+              CASE
+                WHEN NOT EXISTS (
+                  SELECT 1
+                  FROM slice s
+                  JOIN thread_track tt ON s.track_id = tt.id
+                  JOIN thread t ON tt.utid = t.utid
+                  JOIN process p ON t.upid = p.upid
+                  WHERE p.upid IN (SELECT upid FROM app_filter_upids)
+                    AND (
+                      s.name GLOB '*BLASTBufferQueue*'
+                      OR s.name GLOB '*applyTransaction*'
+                      OR s.name GLOB '*queueBuffer*'
+                      OR s.name GLOB '*dequeueBuffer*'
+                    )
+                  LIMIT 1
+                )
+                THEN 'BufferQueue/Transaction slices missing (enable atrace: gfx/sf)'
+                ELSE NULL
+              END as hint_buffer,
+              CASE
+                WHEN NOT EXISTS (SELECT 1 FROM process p WHERE p.name = 'surfaceflinger' LIMIT 1)
+                THEN 'SurfaceFlinger process missing (need system tracing / root on some devices)'
+                ELSE NULL
+              END as hint_sf,
+              CASE
+                WHEN NOT EXISTS (SELECT 1 FROM slice s WHERE s.name GLOB '*FrameTimeline*' LIMIT 1)
+                THEN 'FrameTimeline missing (enable SurfaceFlinger FrameTimeline / Android 12+)'
+                ELSE NULL
+              END as hint_timeline
+
+    save_as: trace_requirements
   - id: active_rendering_processes
     type: atomic
-    name: "识别活跃渲染进程"
+    name: 识别活跃渲染进程
     display:
       level: detail
-      title: "活跃渲染进程"
-    sql: |
-      -- Fallback-first approach: Use DrawFrame slice counts
-      -- This works on all Android versions and is more reliable
-      -- actual_frame_timeline_slice is only available on Android 12+ with FrameTimeline enabled
-      SELECT
-        p.upid,
-        p.name as process_name,
-        COUNT(*) as frame_count,
-        MAX(t.tid) as render_thread_tid
-      FROM slice s
-      JOIN thread_track tt ON s.track_id = tt.id
-      JOIN thread t ON tt.utid = t.utid
-      JOIN process p ON t.upid = p.upid
-      WHERE t.name = 'RenderThread'
-        AND s.name GLOB 'DrawFrame*'
-        AND p.name IS NOT NULL
-        AND p.name NOT LIKE 'com.android.systemui%'
-        AND p.name NOT LIKE '/system/%'
-        AND p.name NOT LIKE 'system_server%'
-      GROUP BY p.upid
-      HAVING frame_count > 5  -- Require at least 5 frames to be considered active
-      ORDER BY frame_count DESC
-      LIMIT 10
-    save_as: active_rendering_processes
+      title: 活跃渲染进程
+    sql: |2-
 
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (t.name = 'main' AND s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*lockCanvas*')
+                  OR (s.name GLOB '*unlockCanvasAndPost*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*Swappy*')
+                  OR (s.name GLOB '*FramePacing*')
+                  OR (s.name GLOB '*FrameTimeline*')
+                  OR (s.name GLOB '*updateTexImage*')
+                  OR (s.name GLOB '*Rasterizer::DrawToSurfaces*')
+                  OR (s.name GLOB '*Engine::BeginFrame*')
+                  OR (s.name GLOB '*EntityPass*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            ),
+            marker_slices AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                t.tid,
+                t.name as thread_name
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.upid IN (SELECT upid FROM app_filter_upids)
+                AND p.name IS NOT NULL
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*Swappy*')
+                  OR (s.name GLOB '*FramePacing*')
+                  OR (s.name GLOB '*updateTexImage*')
+                  OR (s.name GLOB '*Rasterizer::DrawToSurfaces*')
+                  OR (s.name GLOB '*Engine::BeginFrame*')
+                  OR (s.name GLOB '*EntityPass*')
+                  OR (s.name GLOB '*lockCanvas*')
+                  OR (s.name GLOB '*unlockCanvasAndPost*')
+                )
+            )
+            SELECT
+              upid,
+              process_name,
+              COUNT(*) as frame_count,
+              MAX(CASE WHEN thread_name = 'RenderThread' THEN tid ELSE NULL END) as render_thread_tid
+            FROM marker_slices
+            GROUP BY upid
+            HAVING frame_count > 5
+            ORDER BY frame_count DESC
+            LIMIT 10
+
+    save_as: active_rendering_processes
+  - id: layer_signals
+    type: atomic
+    name: SF Layer 数与名字模式 (辅助证据)
+    display:
+      level: detail
+      title: Layer 信号
+    sql: |2-
+
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                  OR (s.name GLOB '*FrameTimeline*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_layers AS (
+              -- FrameTimeline 提供 layer_name 维度（Android 12+）
+              SELECT DISTINCT layer_name
+              FROM android_frames_layers
+              WHERE layer_name IS NOT NULL
+                AND (
+                  ('${package}' <> '' AND layer_name GLOB '*' || '${package}' || '*')
+                  OR ('${package}' = '' AND layer_name GLOB '*' || (SELECT pkg FROM dominant_pkg) || '*')
+                )
+            )
+            SELECT
+              COALESCE((SELECT COUNT(*) FROM app_layers), 0) as app_layer_count,
+              COALESCE((SELECT GROUP_CONCAT(layer_name, '; ') FROM app_layers), '') as app_layer_names,
+              CASE
+                WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*SurfaceView*' OR layer_name GLOB 'SurfaceView*') > 0 THEN 1
+                ELSE 0
+              END as has_surfaceview_layer,
+              CASE
+                WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*video*' OR layer_name GLOB '*Video*' OR layer_name GLOB '*MediaCodec*') > 0 THEN 1
+                ELSE 0
+              END as has_video_layer,
+              CASE
+                WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*io.flutter*' OR layer_name GLOB '*Flutter*') > 0 THEN 1
+                ELSE 0
+              END as has_flutter_layer,
+              CASE
+                WHEN (SELECT COUNT(*) FROM app_layers WHERE layer_name GLOB '*Camera*' OR layer_name GLOB '*camera*') > 0 THEN 1
+                ELSE 0
+              END as has_camera_layer
+
+    save_as: layer_signals
+  - id: extra_rhythm_signals
+    type: atomic
+    name: 额外节奏源 (辅助证据)
+    display:
+      level: detail
+      title: 额外节奏源
+    sql: |2-
+
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            ),
+            app_slices AS (
+              SELECT s.name as slice_name, COUNT(*) as cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE s.name IS NOT NULL
+                AND p.upid IN (SELECT upid FROM app_filter_upids)
+              GROUP BY s.name
+            )
+            SELECT
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*Swappy*'), 0) as swappy_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*SwappyVk_*'), 0) as swappy_vk_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*AChoreographer*'), 0) as achoreographer_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*setFrameRate*'), 0) as set_frame_rate_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*setFrameRateCategory*'), 0) as set_frame_rate_category_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*PlayerLoop*' OR slice_name GLOB '*FEngineLoop*' OR slice_name GLOB '*MainLoop*'), 0) as engine_main_loop_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*' OR slice_name GLOB '*processCaptureResult*'), 0) as camera_capture_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*releaseOutputBuffer*' OR slice_name GLOB '*MediaCodec*'), 0) as mediacodec_pacing_count,
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*Swappy*' OR slice_name GLOB '*SwappyVk_*'), 0) > 0 THEN 'swappy_pacing'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*AChoreographer*'), 0) > 0 THEN 'achoreographer'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*PlayerLoop*' OR slice_name GLOB '*FEngineLoop*' OR slice_name GLOB '*MainLoop*'), 0) > 0 THEN 'engine_main_loop'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*processCaptureRequest*'), 0) > 0 THEN 'camera_request_activity'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*releaseOutputBuffer*'), 0) > 0 THEN 'video_codec_pacing'
+                ELSE 'vsync_app_only'
+              END as primary_rhythm_source
+
+    save_as: extra_rhythm_signals
+  - id: bufferqueue_path_signals
+    type: atomic
+    name: BufferQueue 路径证据
+    display:
+      level: detail
+      title: BufferQueue 路径
+    sql: |2-
+
+            WITH
+            dominant_process AS (
+              SELECT
+                p.upid,
+                p.name as process_name,
+                COUNT(*) as render_cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE p.name IS NOT NULL
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+                AND s.name IS NOT NULL
+                AND (
+                  (t.name = 'RenderThread' AND s.name GLOB 'DrawFrame*')
+                  OR (s.name GLOB '*Choreographer#doFrame*')
+                  OR (s.name GLOB '*eglSwapBuffers*')
+                  OR (s.name GLOB '*vkQueuePresentKHR*')
+                )
+              GROUP BY p.upid
+              HAVING COUNT(*) > 5
+              ORDER BY render_cnt DESC
+              LIMIT 1
+            ),
+            dominant_pkg AS (
+              SELECT
+                CASE
+                  WHEN instr(process_name, ':') > 0 THEN substr(process_name, 1, instr(process_name, ':') - 1)
+                  ELSE process_name
+                END as pkg
+              FROM dominant_process
+            ),
+            app_filter_upids AS (
+              SELECT p.upid
+              FROM process p
+              WHERE '${package}' <> '' AND p.name GLOB '${package}*'
+              UNION
+              SELECT p.upid
+              FROM process p
+              JOIN dominant_pkg dp
+              WHERE '${package}' = ''
+                AND dp.pkg IS NOT NULL
+                AND p.name GLOB dp.pkg || '*'
+                AND p.name NOT LIKE 'com.android.systemui%'
+                AND p.name NOT LIKE 'system_server%'
+                AND p.name NOT LIKE '/system/%'
+            ),
+            app_slices AS (
+              SELECT s.name as slice_name, COUNT(*) as cnt
+              FROM slice s
+              JOIN thread_track tt ON s.track_id = tt.id
+              JOIN thread t ON tt.utid = t.utid
+              JOIN process p ON t.upid = p.upid
+              WHERE s.name IS NOT NULL
+                AND p.upid IN (SELECT upid FROM app_filter_upids)
+              GROUP BY s.name
+            )
+            SELECT
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) as blast_bq_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) as apply_transaction_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*queueBuffer*'), 0) as queue_buffer_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*updateTexImage*'), 0) as update_tex_image_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*lockCanvas*'), 0) as lock_canvas_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*unlockCanvasAndPost*'), 0) as unlock_canvas_post_count,
+              COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*ASurfaceTransaction*'), 0) as asurface_transaction_count,
+              CASE
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) > 0
+                  THEN 'BBQ_TRANSACTION_INPROC'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*ASurfaceTransaction*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+                  THEN 'SURFACECONTROL_TRANSACTION_DIRECT'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*updateTexImage*'), 0) > 0
+                  THEN 'HOST_RESAMPLE'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*lockCanvas*' OR slice_name GLOB '*unlockCanvasAndPost*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+                  THEN 'ACQUIRE_FENCE_NONE_INPROC'
+                WHEN COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*queueBuffer*'), 0) > 0
+                     AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*BLASTBufferQueue*'), 0) = 0
+                     AND COALESCE((SELECT SUM(cnt) FROM app_slices WHERE slice_name GLOB '*applyTransaction*'), 0) = 0
+                  THEN 'BUFFERQUEUE_INPROC'
+                ELSE 'UNKNOWN'
+              END as bufferqueue_path
+
+    save_as: bufferqueue_path_signals
 output:
-  format: structured
   fields:
-    - name: pipeline_result
-      description: "主管线识别结果"
-    - name: subvariants
-      description: "子变体信息"
-    - name: pin_instructions
-      description: "Track 固定建议"
-    - name: trace_requirements
-      description: "采集完整性检查"
     - name: pipeline_scores
-      description: "各管线类型得分 (调试用)"
+      label: 各管线类型得分 (调试用)
+    - name: pipeline_result
+      label: 主管线识别结果
+    - name: subvariants
+      label: 子变体信息
+    - name: trace_requirements
+      label: 采集完整性检查
     - name: active_rendering_processes
-      description: "活跃渲染进程列表 (用于智能 Pin)"
+      label: 活跃渲染进程列表 (用于智能 Pin)
+    - name: layer_signals
+      label: Layer 信号 (SF 侧 layer 数与命名模式)
+    - name: extra_rhythm_signals
+      label: 额外节奏源 (Swappy/AChoreographer/Camera/Codec)
+    - name: bufferqueue_path_signals
+      label: BufferQueue 路径分型

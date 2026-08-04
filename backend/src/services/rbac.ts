@@ -30,8 +30,14 @@ export type RbacPermission =
   | 'codebase:admin'
   | 'provider:manage_workspace'
   | 'provider:manage_org'
+  | 'tenant:metadata'
   | 'audit:read'
-  | 'runtime:manage';
+  | 'runtime:manage'
+  | 'self_evolution:read'
+  | 'self_evolution:curate'
+  | 'self_evolution:apply'
+  | 'self_evolution:export'
+  | 'self_evolution:revert';
 
 const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
   viewer: ['trace:read', 'report:read', 'analysis_result:read', 'comparison:read'],
@@ -48,6 +54,27 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'comparison:create',
     'comparison:read',
     'codebase:read',
+    'self_evolution:read',
+  ],
+  personal_workspace_owner: [
+    'trace:read',
+    'trace:write',
+    'trace:download',
+    'trace:delete_own',
+    'trace:delete_any',
+    'agent:run',
+    'report:read',
+    'report:delete',
+    'analysis_result:read',
+    'analysis_result:create',
+    'analysis_result:share',
+    'analysis_result:delete',
+    'comparison:create',
+    'comparison:read',
+    'codebase:read',
+    'codebase:manage',
+    'provider:manage_workspace',
+    'self_evolution:read',
   ],
   workspace_admin: [
     'trace:read',
@@ -69,6 +96,11 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'provider:manage_workspace',
     'audit:read',
     'runtime:manage',
+    'self_evolution:read',
+    'self_evolution:curate',
+    'self_evolution:apply',
+    'self_evolution:export',
+    'self_evolution:revert',
   ],
   org_admin: [
     'trace:read',
@@ -92,7 +124,13 @@ const ROLE_PERMISSIONS: Record<string, RbacPermission[]> = {
     'provider:manage_org',
     'audit:read',
     'runtime:manage',
+    'self_evolution:read',
+    'self_evolution:curate',
+    'self_evolution:apply',
+    'self_evolution:export',
+    'self_evolution:revert',
   ],
+  tenant_admin: ['tenant:metadata'],
 };
 
 const SCOPE_IMPLICATIONS: Partial<Record<RbacPermission, string[]>> = {

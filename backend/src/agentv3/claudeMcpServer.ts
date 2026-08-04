@@ -2,7 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import { tool } from '@anthropic-ai/claude-agent-sdk';
+import { tool as sdkTool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
@@ -10,11 +10,42 @@ import * as path from 'path';
 
 import type { TraceProcessorService } from '../services/traceProcessorService';
 import type { SkillExecutor } from '../services/skillEngine/skillExecutor';
-import { getSkillAnalysisAdapter } from '../services/skillEngine/skillAnalysisAdapter';
+import {
+  createSkillAnalysisAdapter,
+  type SkillRegistryView,
+} from '../services/skillEngine/skillAnalysisAdapter';
 import { skillRegistry } from '../services/skillEngine/skillLoader';
+import { getWorkspaceSkillRegistry } from '../services/skillPacks/workspaceSkillRegistryProvider';
+import type {RunManifestAttributionSink} from '../types/selfEvolution';
+import {canonicalContentHash} from '../services/selfEvolution/canonicalJson';
+import {
+  currentRunManifestAttributionSink,
+  resolveRunManifestAttributionSink,
+} from '../services/selfEvolution/runManifestLifecycle';
+import {buildSkillRegistryAttribution} from '../services/selfEvolution/skillFingerprint';
+import {
+  currentEffectiveRuntimeRegistrySnapshot,
+} from '../services/selfEvolution/effectiveRuntimeRegistryContext';
+import {
+  commitEvaluationExposureSince,
+  currentEvaluationInjectionContract,
+  discardPendingEvaluationExposures,
+  evaluationExposureCursor,
+  registerEvaluationInjection,
+} from '../services/selfEvolution/evaluationInjectionContext';
+import {
+  currentEvaluationTelemetryActive,
+  recordEvaluationToolCall,
+} from '../services/selfEvolution/evaluationTelemetry';
+import {
+  evaluationPhaseHintInjectionContentHash,
+} from '../services/selfEvolution/evaluationTreatment';
 import { createArchitectureDetector } from '../agent/detectors/architectureDetector';
 import { createDataEnvelope, displayResultToEnvelope } from '../types/dataContract';
-import type { DisplayResult as SkillDisplayResult } from '../services/skillEngine/types';
+import type {
+  DisplayResult as SkillDisplayResult,
+  SkillExecutionResult,
+} from '../services/skillEngine/types';
 import type { IdentityResolutionV1 } from '../types/identityContract';
 import type { StreamingUpdate } from '../agent/types';
 import type { ArchitectureInfo } from '../agent/detectors/types';
@@ -35,6 +66,7 @@ import {
 } from '../services/perfettoSqlDocs';
 import {
   buildTraceProcessorQueryProvenance,
+  type TraceProcessorPaneSide,
   type TraceProcessorQueryProvenance,
   type TraceProcessorTraceSide,
 } from '../services/traceProcessorConnectionModel';
@@ -51,19 +83,33 @@ import {
 } from './strategyLoader';
 import { matchPhaseHintForNextPhase } from './phaseHintMatcher';
 import { buildActivePhaseReminder } from './activePhaseReminder';
-import { validatePlanAgainstSceneTemplate, MIN_WAIVER_REASON_CHARS } from './scenePlanTemplates';
+import {
+  validatePlanAgainstSceneTemplate,
+  MIN_WAIVER_REASON_CHARS,
+  type PlanValidationResult,
+} from './scenePlanTemplates';
 import { summarizeToolCallInput } from './toolCallSummary';
+import { buildQuickArtifactGuidance } from './quickAnswerContract';
 import {
   findBestPhaseForExpectedCallGap,
   findCompletedPhaseEvidenceGaps,
   findMissingExpectedCallsForPhase,
   formatPlanEvidenceGap,
+  replayPrePlanToolCalls,
 } from './planToolCallRecorder';
 import { isConclusionLikePlanPhase } from './planPhaseSemantics';
-import { formatToolCallNarration } from './toolNarration';
-import type { ArtifactStore } from './artifactStore';
+import { formatToolCallNarration, type ToolNarrationOptions } from './toolNarration';
+import type { ArtifactStore, CompactArtifactSummary } from './artifactStore';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
-import { RagStore } from '../services/ragStore';
+import {
+  localizeSkillDefinition,
+  localizeSkillDiagnostics,
+  localizeSkillDisplayResults,
+} from '../services/skillLocalization';
+import { buildSqlQueryReview } from '../services/queryReview/queryReviewBuilder';
+import { buildSkillQueryReview } from '../services/queryReview/skillQueryReviewBuilder';
+import { compactQueryReviewForToolResponse, type QueryReviewV1 } from '../types/queryReviewContract';
+import { RagStore, getDefaultRagStore } from '../services/ragStore';
 import {
   BaselineStore,
   deriveBaselineId,
@@ -77,6 +123,44 @@ import {ProjectMemory} from './projectMemory';
 import {CaseLibrary} from '../services/caseLibrary';
 import { createCaseRetriever } from '../services/caseEvolution/caseRecommendationRetriever';
 import {
+  DEFAULT_DEV_USER_ID,
+  DEFAULT_TENANT_ID,
+  DEFAULT_WORKSPACE_ID,
+} from '../middleware/auth';
+import { openEnterpriseDb } from '../services/enterpriseDb';
+import { createAnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
+
+const tool: typeof sdkTool = ((
+  name: string,
+  description: string,
+  schema: unknown,
+  handler: (...args: unknown[]) => unknown,
+) => sdkTool(
+  name,
+  description,
+  schema as never,
+  async (...args: unknown[]) => {
+    if (currentEvaluationTelemetryActive()) recordEvaluationToolCall();
+    const cursor = currentEvaluationInjectionContract()
+      ? evaluationExposureCursor()
+      : undefined;
+    try {
+      const result = await handler(...args);
+      if (cursor !== undefined) {
+        commitEvaluationExposureSince(cursor, 'sdk_handoff_observed');
+      }
+      return result as never;
+    } catch (error) {
+      if (cursor !== undefined) discardPendingEvaluationExposures(cursor);
+      throw error;
+    }
+  },
+)) as unknown as typeof sdkTool;
+import {
+  createTraceSimilarityService,
+  type TraceSimilaritySnapshotRepository,
+} from '../services/similarity/similarityService';
+import {
   enterpriseKnowledgeStoreEnabled,
   type KnowledgeScope,
   resolveKnowledgeScope,
@@ -87,13 +171,33 @@ import {
   type ToolRequestScope,
 } from './mcpToolRegistry';
 import { backendLogPath } from '../runtimePaths';
-import {CodebaseRegistry} from '../services/codebase/codebaseRegistry';
+import {diagnosticLogIdentity} from '../utils/logger';
+import {activeCodebaseGeneration, CodebaseRegistry} from '../services/codebase/codebaseRegistry';
 import {getDefaultCodebaseRegistry} from '../services/codebase/defaultCodebaseServices';
 import {CodeLookupLedger} from '../services/codebase/codeLookupLedger';
 import {PatchProposer} from '../services/codebase/patchProposer';
 import {normalizeCodeAwareMode, type CodeAwareMode} from '../services/codebase/codeAwareFeature';
-import {filterRagLookup} from '../services/rag/lookupResponseFilter';
+import {
+  filterRagLookup,
+  type SanitizedRagResult,
+} from '../services/rag/lookupResponseFilter';
+import {
+  getDefaultAndroidInternalsPackStore,
+  isAndroidInternalsPackRevoked,
+} from '../services/androidInternalsPack/androidInternalsPackResolver';
+import type {
+  AndroidInternalsPackStoreLike,
+} from '../services/androidInternalsPack/types';
+import {
+  ExternalKnowledgeSourceRegistry,
+  getDefaultExternalKnowledgeSourceRegistry,
+} from '../services/externalKnowledgeSourceRegistry';
 import {SymbolResolver} from '../services/symbol/symbolResolver';
+import {
+  analysisContextUsesPrivateKnowledge,
+  buildAnalysisContextAuthorizationFingerprint,
+  type AnalysisContextSelection,
+} from '../services/resolvedAnalysisContext';
 import type { RuntimeToolExtra } from '../agentRuntime/runtimeToolSpec';
 import {
   rethrowIfTraceProcessorQueryCancelled,
@@ -108,12 +212,10 @@ import {
  * Storage path lives next to the existing analysis_*.json files so
  * operators can find every long-lived agent state in one directory.
  */
-const RAG_STORE_PATH = backendLogPath('rag_store.json');
-let cachedRagStore: RagStore | null = null;
 function getRagStore(): RagStore {
-  if (!cachedRagStore) cachedRagStore = new RagStore(RAG_STORE_PATH);
-  return cachedRagStore;
+  return getDefaultRagStore();
 }
+
 
 function getRuntimeToolSignal(extra: unknown): AbortSignal | undefined {
   const runtimeExtra = extra && typeof extra === 'object' ? extra as RuntimeToolExtra : undefined;
@@ -401,6 +503,11 @@ const CORE_EXPECTED_CALL_TOOL_NAMES = new Set([
   'mark_uncertainty',
 ]);
 
+type SkillArtifactSummaryForModel = CompactArtifactSummary & {
+  evidenceRefId: string;
+  sourceToolCallId?: string;
+};
+
 function shortExpectedToolName(toolName: string): string {
   const MCP_PREFIX = 'mcp__smartperfetto__';
   return toolName.startsWith(MCP_PREFIX) ? toolName.slice(MCP_PREFIX.length) : toolName;
@@ -412,7 +519,11 @@ function normalizeExpectedCall(call: unknown): NonNullable<PlanPhase['expectedCa
   }
   if (!call || typeof call !== 'object') return undefined;
   const tool = coercePlanString(readAliasedField(call, ['tool', 'toolName', 'tool_name', 'name']));
-  const skillId = coercePlanString(readAliasedField(call, ['skillId', 'skill_id', 'skill', 'skillName', 'skill_name']));
+  const nestedParams = readAliasedField(call, ['params', 'arguments', 'args', 'input']);
+  const nestedSkillId = nestedParams && typeof nestedParams === 'object'
+    ? coercePlanString(readAliasedField(nestedParams, ['skillId', 'skill_id', 'skill', 'skillName', 'skill_name']))
+    : undefined;
+  const skillId = coercePlanString(readAliasedField(call, ['skillId', 'skill_id', 'skill', 'skillName', 'skill_name'])) || nestedSkillId;
   if (!tool) return undefined;
   const normalizedTool = shortExpectedToolName(tool.trim());
   const normalizedSkillId = skillId ? shortExpectedToolName(skillId.trim()) : undefined;
@@ -426,9 +537,10 @@ function normalizeExpectedCall(call: unknown): NonNullable<PlanPhase['expectedCa
 function parseExpectedCallShorthand(value: string): Record<string, unknown> | undefined {
   const text = value.trim();
   if (!text) return undefined;
-  const functionMatch = text.match(/^([A-Za-z0-9_.:-]+)\(([^)]+)\)$/);
+  const functionMatch = text.match(/^([A-Za-z0-9_.:-]+)\(([^)]*)\)$/);
   if (functionMatch) {
-    return { tool: functionMatch[1], skillId: functionMatch[2] };
+    const skillId = functionMatch[2].trim();
+    return skillId ? { tool: functionMatch[1], skillId } : { tool: functionMatch[1] };
   }
   const colonIndex = text.indexOf(':');
   if (colonIndex > 0) {
@@ -616,7 +728,7 @@ const PHASE_SEMANTIC_PATTERNS: Array<{ kind: PhaseSemanticKind; pattern: RegExp 
   },
   {
     kind: 'overview',
-    pattern: /(概览|批量根因分类|滑动性能概览|启动概览|启动事件|启动类型|数据质量|ttid|ttfd|dur\s*=|帧统计|掉帧分布|scrolling_analysis|startup_overview|overview|startup event|launch type)/i,
+    pattern: /(概览|批量根因分类|根因分布|reason_code\s*分布|batch_frame_root_cause|滑动性能概览|启动概览|启动事件|启动类型|数据质量|ttid|ttfd|dur\s*=|帧统计|掉帧分布|scrolling_analysis|startup_overview|overview|startup event|launch type)/i,
   },
 ];
 
@@ -764,6 +876,19 @@ const REASONING_NUDGE_ZH = '\n\n[REFLECT] 在执行下一步之前：这个数�
 const REASONING_NUDGE_EN = '\n\n[REFLECT] Before the next action: what is the key finding from this data? Does it support or refute your hypothesis? If there is an important inference, record it with submit_hypothesis or write_analysis_note.';
 export const MIN_PHASE_SUMMARY_CHARS = 15;
 
+const EXPECTED_CALL_SKIP_CONDITION_PATTERN =
+  /(条件|触发条件|阈值|threshold|condition).{0,32}(未触发|未达到|未满足|不满足|not (?:triggered|met|satisfied)|below (?:the )?threshold)|(不是|并非)(?:冷|热|温)?启动|not (?:a )?(?:cold|warm|hot) start/i;
+const EXPECTED_CALL_SKIP_EVIDENCE_SUBJECT_PATTERN =
+  /(trace|跟踪|数据|信号|事件|窗口|进程|线程|帧|启动记录|schema|字段|列|表|模块|stdlib|data|signal|event|window|process|thread|frame|startup)/i;
+const EXPECTED_CALL_SKIP_UNAVAILABLE_PATTERN =
+  /(无(?:对应|相关|可用|足够)?|没有(?:对应|相关|可用|足够)?|缺少|缺失|不可用|不支持|无法执行|not (?:available|present|found|supported)|missing|absent|unavailable|unsupported|insufficient|no (?:matching |relevant |available )?)/i;
+
+function skipSummaryExplainsEvidenceBoundary(summary: string): boolean {
+  if (EXPECTED_CALL_SKIP_CONDITION_PATTERN.test(summary)) return true;
+  return EXPECTED_CALL_SKIP_EVIDENCE_SUBJECT_PATTERN.test(summary) &&
+    EXPECTED_CALL_SKIP_UNAVAILABLE_PATTERN.test(summary);
+}
+
 function sqlErrorLogFile(scope?: KnowledgeScope): string {
   if (!enterpriseKnowledgeStoreEnabled() && !scope) {
     return path.join(SQL_ERROR_LOG_DIR, 'error_fix_pairs.json');
@@ -780,7 +905,9 @@ function sqlErrorLogFile(scope?: KnowledgeScope): string {
 export function loadLearnedSqlFixPairs(
   maxPairs = 10,
   scope?: KnowledgeScope,
+  selection: AnalysisContextSelection = {},
 ): SqlErrorFixPair[] {
+  if (analysisContextUsesPrivateKnowledge(selection)) return [];
   try {
     const logFile = sqlErrorLogFile(scope);
     if (!fs.existsSync(logFile)) return [];
@@ -954,6 +1081,19 @@ function normalizeSynthesizeDataForStorage(data: any): { columns: string[]; rows
   return { columns: ['value'], rows: [[data]] };
 }
 
+function previewFromColumnarData(data: any): Record<string, any> | undefined {
+  const columns: string[] = Array.isArray(data?.columns)
+    ? data.columns.filter((col: unknown): col is string => typeof col === 'string')
+    : [];
+  const firstRow = Array.isArray(data?.rows) ? data.rows[0] : undefined;
+  if (columns.length === 0 || !Array.isArray(firstRow)) return undefined;
+  const preview: Record<string, any> = {};
+  columns.forEach((column, index) => {
+    preview[column] = index < firstRow.length ? firstRow[index] : null;
+  });
+  return preview;
+}
+
 export interface ClaudeMcpServerOptions {
   traceId: string;
   traceProcessorService: TraceProcessorService;
@@ -974,7 +1114,7 @@ export interface ClaudeMcpServerOptions {
   /** Per-session SQL error-fix pairs for in-context learning */
   recentSqlErrors?: SqlErrorFixPair[];
   /** Mutable analysis plan — passed by reference from analyze() scope */
-  analysisPlan?: { current: AnalysisPlanV3 | null };
+  analysisPlan?: { current: AnalysisPlanV3 | null; prePlanToolCallLog?: ToolCallRecord[] };
   /** Mutable watchdog warning — set by runtime when repetitive failures detected, consumed by next tool call */
   watchdogWarning?: { current: string | null };
   /** Mutable hypotheses array for hypothesis-verify cycle (P0-G4) */
@@ -1008,6 +1148,12 @@ export interface ClaudeMcpServerOptions {
   codeAwareMode?: CodeAwareMode;
   /** Codebase ids whitelisted for this analysis session. */
   codebaseIds?: string[];
+  /** Private external-knowledge source ids whitelisted for this analysis session. */
+  knowledgeSourceIds?: string[];
+  /** Non-secret authorization partition for active lookup/patch capability state. */
+  analysisContextFingerprint?: string;
+  /** Test hook / alternate private external-knowledge registry. */
+  externalKnowledgeRegistry?: ExternalKnowledgeSourceRegistry;
   /** Test hook / alternate registry. */
   codebaseRegistry?: CodebaseRegistry;
   /** Test hook / alternate code lookup ledger. */
@@ -1016,6 +1162,13 @@ export interface ClaudeMcpServerOptions {
   caseLibrary?: CaseLibrary;
   /** Test hook / alternate case RAG store. */
   ragStore?: RagStore;
+  /** Test hook / session-pinned built-in Android Internals Knowledge Pack. */
+  androidInternalsPackStore?: AndroidInternalsPackStoreLike | null;
+  /** Immutable public Knowledge Pack identity pinned by the session snapshot. */
+  androidInternalsPackPin?: import('../services/androidInternalsPack/types').AndroidInternalsPackIdentity;
+  analysisResultSnapshotRepository?: TraceSimilaritySnapshotRepository;
+  /** Explicit per-run attribution boundary for detached/shared tool callbacks. */
+  runManifestAttributionSink?: RunManifestAttributionSink;
 }
 
 /**
@@ -1026,21 +1179,333 @@ export interface ClaudeMcpServerOptions {
 export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const { traceId, traceProcessorService, skillExecutor, packageName, emitUpdate, onSkillResult, analysisNotes, artifactStore } = options;
   const recentSqlErrors: SqlErrorFixPair[] = options.recentSqlErrors || [];
-  const skillAdapter = getSkillAnalysisAdapter(traceProcessorService);
   const watchdogRef = options.watchdogWarning;
   const skillNotesBudget = options.skillNotesBudget;
   const outputLanguage = options.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
   const knowledgeScope = options.knowledgeScope;
-  const codeAwareMode = normalizeCodeAwareMode(options.codeAwareMode);
-  const codebaseIds = Array.from(new Set(options.codebaseIds ?? [])).filter(Boolean);
-  const codebaseRegistry = options.codebaseRegistry ?? getDefaultCodebaseRegistry();
-  const codeLookupLedger = options.codeLookupLedger ?? (
-    options.sessionId ? CodeLookupLedger.restore(options.sessionId, 12_000, 2) : undefined
+  const runManifestAttributionSink = resolveRunManifestAttributionSink(
+    options.runManifestAttributionSink,
+    currentRunManifestAttributionSink(),
   );
+  const runtimeRegistrySnapshot = currentEffectiveRuntimeRegistrySnapshot();
+  if (runManifestAttributionSink && !runtimeRegistrySnapshot) {
+    throw new Error('effective_runtime_registry_snapshot_missing_for_run');
+  }
+  let pinnedSkillRegistry: SkillRegistryView =
+    runtimeRegistrySnapshot?.skillRegistry ?? skillRegistry;
+  let pinnedSkillRegistryFingerprint =
+    runtimeRegistrySnapshot?.skillRegistry.registryFingerprint ?? 'built_in';
+  const skillAdapter = createSkillAnalysisAdapter(
+    traceProcessorService,
+    undefined,
+    {
+      registry: pinnedSkillRegistry,
+      registryFingerprint: pinnedSkillRegistryFingerprint,
+    },
+  );
+  skillExecutor.setRunManifestAttributionSink(runManifestAttributionSink);
+  runManifestAttributionSink?.recordSkillRegistry(
+    buildSkillRegistryAttribution(pinnedSkillRegistry),
+  );
+  const codeAwareMode = normalizeCodeAwareMode(options.codeAwareMode);
+  const codebaseIds = codeAwareMode === 'off'
+    ? []
+    : Array.from(new Set(options.codebaseIds ?? [])).filter(Boolean);
+  const knowledgeSourceIds = Array.from(new Set(options.knowledgeSourceIds ?? [])).filter(Boolean);
+  const retrievedContextSafety = loadPromptTemplate('retrieved-context-tool-safety');
+  if (!retrievedContextSafety) {
+    throw new Error('Missing required retrieved-context-safety prompt template');
+  }
+  const retrievedContextToolBoundary = retrievedContextSafety.replace(/\s+/g, ' ').trim();
+  const retrievedData = <T extends Record<string, unknown>>(payload: T): T & {
+    dataTrust: 'untrusted_retrieved_data';
+  } => ({...payload, dataTrust: 'untrusted_retrieved_data'});
+  const filterAndRecordKnowledgeDocuments = (
+    value: SanitizedRagResult,
+  ): SanitizedRagResult => {
+    const exactKeys = (
+      record: Record<string, unknown>,
+      allowed: readonly string[],
+    ) => Object.keys(record).every(key => allowed.includes(key));
+    if (
+      !value
+      || typeof value !== 'object'
+      || Array.isArray(value)
+      || !exactKeys(value as unknown as Record<string, unknown>, [
+        'query',
+        'hits',
+        'probed',
+        'retrievedAt',
+        'unsupportedReason',
+        'legacyPath',
+        'backgroundKnowledgeReferences',
+      ])
+      || typeof value.query !== 'string'
+      || !Array.isArray(value.hits)
+      || !Array.isArray(value.probed)
+      || !value.probed.every(entry => typeof entry === 'string')
+      || !Number.isFinite(value.retrievedAt)
+      || typeof value.legacyPath !== 'boolean'
+      || (
+        value.unsupportedReason !== undefined
+        && typeof value.unsupportedReason !== 'string'
+      )
+      || (
+        value.backgroundKnowledgeReferences !== undefined
+        && (
+          !Array.isArray(value.backgroundKnowledgeReferences)
+          || value.backgroundKnowledgeReferences.some(reference =>
+            !reference
+            || typeof reference !== 'object'
+            || Array.isArray(reference)
+            || Object.values(reference).some(field =>
+              typeof field !== 'string' && field !== undefined)
+          )
+        )
+      )
+    ) {
+      throw new Error('evaluation_knowledge_payload_invalid');
+    }
+    const hits = value.hits.flatMap(hit => {
+      if (
+        !hit
+        || typeof hit !== 'object'
+        || Array.isArray(hit)
+        || !exactKeys(hit as unknown as Record<string, unknown>, [
+          'chunkId',
+          'score',
+          'metadata',
+          'snippet',
+          'unsupportedReason',
+          'redactedCount',
+        ])
+        || typeof hit.chunkId !== 'string'
+        || !hit.chunkId.trim()
+        || !Number.isFinite(hit.score)
+        || (
+          hit.snippet !== undefined
+          && typeof hit.snippet !== 'string'
+        )
+        || (
+          hit.unsupportedReason !== undefined
+          && typeof hit.unsupportedReason !== 'string'
+        )
+        || (
+          hit.redactedCount !== undefined
+          && !Number.isSafeInteger(hit.redactedCount)
+        )
+        || (
+          hit.metadata !== undefined
+          && (
+            !hit.metadata
+            || typeof hit.metadata !== 'object'
+            || Array.isArray(hit.metadata)
+            || Object.values(hit.metadata).some(field =>
+              field !== undefined
+              && typeof field !== 'string'
+              && typeof field !== 'number'
+              && typeof field !== 'boolean'
+              && (
+                !field
+                || typeof field !== 'object'
+                || Array.isArray(field)
+                || !exactKeys(field as Record<string, unknown>, ['start', 'end'])
+                || Object.values(field).some(boundary =>
+                  !Number.isSafeInteger(boundary))
+              )
+            )
+          )
+        )
+      ) {
+        throw new Error('evaluation_knowledge_payload_invalid');
+      }
+      const normalizedHit = {
+        chunkId: hit.chunkId,
+        score: hit.score,
+        ...(hit.metadata === undefined ? {} : {metadata: hit.metadata}),
+        ...(hit.snippet === undefined ? {} : {snippet: hit.snippet}),
+        ...(hit.unsupportedReason === undefined
+          ? {}
+          : {unsupportedReason: hit.unsupportedReason}),
+        ...(hit.redactedCount === undefined
+          ? {}
+          : {redactedCount: hit.redactedCount}),
+      };
+      if (normalizedHit.snippet === undefined) return [normalizedHit];
+      const contentHash = canonicalContentHash(normalizedHit);
+      const decision = registerEvaluationInjection({
+        category: 'knowledgeDocs',
+        id: hit.chunkId,
+        contentHash,
+        placement: 'mcp:knowledge_lookup',
+      });
+      if (!decision.allowed) return [];
+      runManifestAttributionSink?.recordInjection(
+        'knowledgeDocs',
+        hit.chunkId,
+        contentHash,
+      );
+      return [normalizedHit];
+    });
+    return {...value, hits};
+  };
+  const knowledgeSourceCapabilityHint = knowledgeSourceIds.length > 0
+    ? ` Request-authorized knowledge source ids: ${knowledgeSourceIds.join(', ')}.`
+    : ' No private knowledge source is authorized for this request.';
+  const externalKnowledgeRegistry = options.externalKnowledgeRegistry ??
+    getDefaultExternalKnowledgeSourceRegistry();
+  const codebaseRegistry = options.codebaseRegistry ?? getDefaultCodebaseRegistry();
+  const ragStore = options.ragStore ?? getRagStore();
+  const androidInternalsPackStore = options.androidInternalsPackStore === undefined
+    ? getDefaultAndroidInternalsPackStore(options.androidInternalsPackPin)
+    : options.androidInternalsPackStore ?? undefined;
+  const analysisContextSelection = {codeAwareMode, codebaseIds, knowledgeSourceIds};
+  const privateAnalysisContext = analysisContextUsesPrivateKnowledge(analysisContextSelection);
+  const pinnedAnalysisContextFingerprint = options.analysisContextFingerprint ??
+    buildAnalysisContextAuthorizationFingerprint(analysisContextSelection, knowledgeScope ?? {}, {
+      codebaseRegistry,
+      knowledgeRegistry: externalKnowledgeRegistry,
+    });
+  const pinnedCodebaseGenerations = Object.fromEntries(codebaseIds.flatMap(codebaseId => {
+    const ref = codebaseRegistry.get(codebaseId, knowledgeScope);
+    return ref ? [[codebaseId, activeCodebaseGeneration(ref)]] : [];
+  }));
+  const pinnedKnowledgeSourceGenerations = Object.fromEntries(knowledgeSourceIds.flatMap(sourceId => {
+    const source = externalKnowledgeRegistry.get(sourceId, knowledgeScope ?? {});
+    return source?.activeGeneration ? [[sourceId, source.activeGeneration]] : [];
+  }));
+  const assertPrivateAnalysisContextCurrent = (): void => {
+    const currentFingerprint = buildAnalysisContextAuthorizationFingerprint(
+      analysisContextSelection,
+      knowledgeScope ?? {},
+      {codebaseRegistry, knowledgeRegistry: externalKnowledgeRegistry},
+    );
+    if (currentFingerprint !== pinnedAnalysisContextFingerprint) {
+      throw new Error('analysis_context_changed_restart_required');
+    }
+  };
+  const codeLookupLedger = options.codeLookupLedger ?? (
+    options.sessionId
+      ? CodeLookupLedger.restore(
+          options.sessionId,
+          12_000,
+          2,
+          undefined,
+          pinnedAnalysisContextFingerprint,
+        )
+      : undefined
+  );
+  const activeCodebaseGenerations = (ids: readonly string[]): Record<string, string> => {
+    assertPrivateAnalysisContextCurrent();
+    return Object.fromEntries(ids.flatMap(codebaseId => {
+      const generation = pinnedCodebaseGenerations[codebaseId];
+      return generation ? [[codebaseId, generation]] : [];
+    }));
+  };
   const toolRequestScope: ToolRequestScope = {
     sessionId: options.sessionId ?? traceId,
     hasCodebaseAccess: codeAwareMode !== 'off' && codebaseIds.length > 0,
   };
+  let skillRuntimeRegistryBound = false;
+  let directWorkspaceRegistryPromise:
+    | ReturnType<typeof getWorkspaceSkillRegistry>
+    | undefined;
+
+  function paneSideForTraceSide(traceSide: TraceProcessorTraceSide): TraceProcessorPaneSide | undefined {
+    return options.comparisonContext?.tracePairContext?.panes.find(pane => pane.traceSide === traceSide)?.side;
+  }
+
+  function toolNarrationOptions(): ToolNarrationOptions {
+    const tracePairContext = options.comparisonContext?.tracePairContext;
+    return tracePairContext ? { tracePairContext } : {};
+  }
+
+  function tracePaneDisplayLabel(paneSide: TraceProcessorPaneSide): string {
+    switch (paneSide) {
+      case 'left':
+        return localize(outputLanguage, '左侧', 'left pane');
+      case 'right':
+        return localize(outputLanguage, '右侧', 'right pane');
+      case 'top':
+        return localize(outputLanguage, '上方', 'top pane');
+      case 'bottom':
+        return localize(outputLanguage, '下方', 'bottom pane');
+    }
+  }
+
+  function traceRoleDisplayLabel(traceSide: TraceProcessorTraceSide): string {
+    return traceSide === 'reference'
+      ? localize(outputLanguage, '参考 Trace', 'reference trace')
+      : localize(outputLanguage, '当前 Trace', 'current trace');
+  }
+
+  function traceLocationDisplayLabel(traceSide: TraceProcessorTraceSide): string {
+    const paneSide = paneSideForTraceSide(traceSide);
+    const roleLabel = traceRoleDisplayLabel(traceSide);
+    return paneSide ? `${tracePaneDisplayLabel(paneSide)}/${roleLabel}` : roleLabel;
+  }
+
+  function comparisonSqlProducerReason(traceSide: TraceProcessorTraceSide): string {
+    const traceLabel = traceLocationDisplayLabel(traceSide);
+    return localize(
+      outputLanguage,
+      `执行${traceLabel} SQL，验证对比差异。`,
+      `Run SQL on the ${traceLabel} to verify comparison deltas.`,
+    );
+  }
+
+  function buildScopedTraceProvenance(
+    targetTraceId: string,
+    traceSide: TraceProcessorTraceSide,
+  ): TraceProcessorQueryProvenance {
+    return buildTraceProcessorQueryProvenance({
+      traceId: targetTraceId,
+      traceSide,
+      paneSide: paneSideForTraceSide(traceSide),
+    });
+  }
+
+  async function bindSkillRuntimeRegistry(): Promise<SkillRegistryView> {
+    if (!skillRuntimeRegistryBound) {
+      if (
+        !runtimeRegistrySnapshot
+        && knowledgeScope?.tenantId
+        && knowledgeScope.workspaceId
+      ) {
+        directWorkspaceRegistryPromise ??= getWorkspaceSkillRegistry({
+          tenantId: knowledgeScope.tenantId,
+          workspaceId: knowledgeScope.workspaceId,
+          userId: knowledgeScope.userId,
+        });
+        const handle = await directWorkspaceRegistryPromise;
+        pinnedSkillRegistry = handle.registry;
+        pinnedSkillRegistryFingerprint = handle.registryFingerprint;
+      }
+      // Production runs receive an executor that was initialized from the
+      // same frozen snapshot before MCP construction. Never replace that
+      // registry while a run is active. The fallback mutation is limited to
+      // legacy/direct MCP use that has no run snapshot.
+      if (!runtimeRegistrySnapshot) {
+        skillAdapter.setSkillRegistry(
+          pinnedSkillRegistry,
+          pinnedSkillRegistryFingerprint,
+        );
+        skillExecutor.replaceRegisteredSkills(
+          pinnedSkillRegistry.getAllSkills(),
+        );
+        skillExecutor.setFragmentRegistry(
+          typeof pinnedSkillRegistry.getFragmentCache === 'function'
+            ? pinnedSkillRegistry.getFragmentCache()
+            : new Map(),
+        );
+      }
+      skillRuntimeRegistryBound = true;
+    }
+    runManifestAttributionSink?.recordSkillRegistry(
+      buildSkillRegistryAttribution(pinnedSkillRegistry),
+    );
+    return pinnedSkillRegistry;
+  }
 
   function buildArchitectureTriggerContext(info: Partial<ArchitectureInfo> | undefined | null): string[] {
     if (!info) return [];
@@ -1090,6 +1555,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     missingAspectIds: string[];
     nonWaivableMissingAspectIds: string[];
     warnings: string[];
+    requirements: NonNullable<PlanValidationResult['missingAspectRequirements']>;
   } | null = null;
 
   function clearPendingPlanRevisionGate(plan = options.analysisPlan?.current): void {
@@ -1116,6 +1582,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       missingAspectIds: gate?.missingAspectIds ?? [],
       nonWaivableMissingAspectIds: gate?.nonWaivableMissingAspectIds ?? [],
       missingAspectSuggestions: gate?.warnings ?? [],
+      missingAspectRequirements: gate?.requirements ?? [],
     };
   }
 
@@ -1169,6 +1636,36 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     if (p.process_name && !p.package) p.package = p.process_name;
     if (p.package && !p.process_name) p.process_name = p.package;
     return p;
+  }
+
+  function referenceSharedParamsForComparison(
+    params: Record<string, any> | undefined,
+    currentDefaultPackage?: string,
+    referenceDefaultPackage?: string,
+  ): { params: Record<string, any>; identityRemapped: boolean } {
+    const p = { ...params };
+    const processName = typeof p.process_name === 'string' ? p.process_name : undefined;
+    const packageParam = typeof p.package === 'string' ? p.package : undefined;
+    const pointsAtCurrentPackage = Boolean(currentDefaultPackage && (
+      processName === currentDefaultPackage || packageParam === currentDefaultPackage
+    ));
+    const hasIdentityFilter = Boolean(processName || packageParam);
+
+    if (referenceDefaultPackage && (!hasIdentityFilter || pointsAtCurrentPackage)) {
+      if (processName !== referenceDefaultPackage || packageParam !== referenceDefaultPackage) {
+        p.process_name = referenceDefaultPackage;
+        p.package = referenceDefaultPackage;
+        return { params: p, identityRemapped: true };
+      }
+    }
+
+    if (!referenceDefaultPackage && pointsAtCurrentPackage) {
+      delete p.process_name;
+      delete p.package;
+      return { params: p, identityRemapped: true };
+    }
+
+    return { params: p, identityRemapped: false };
   }
 
   /**
@@ -1399,6 +1896,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     missingAspectIds: string[];
     nonWaivableMissingAspectIds: string[];
     planWarnings: string[];
+    missingAspectRequirements: NonNullable<PlanValidationResult['missingAspectRequirements']>;
     attempt: number;
     tooShortWaivers?: PlanAspectWaiver[];
     mode: 'submit_plan' | 'revise_plan';
@@ -1416,6 +1914,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ? input.nonWaivableMissingAspectIds
         : undefined,
       missingAspectSuggestions: input.planWarnings,
+      missingAspectRequirements: input.missingAspectRequirements,
       attempt: input.attempt,
       maxAttempts: MAX_PLAN_ATTEMPTS,
       tooShortWaivers: input.tooShortWaivers && input.tooShortWaivers.length > 0
@@ -1451,6 +1950,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         missingAspectIds,
         nonWaivableMissingAspectIds,
         warnings: planValidation.warnings,
+        requirements: planValidation.missingAspectRequirements ?? [],
       };
       plan.unresolvedAspects = Array.from(new Set([
         ...(plan.unresolvedAspects ?? []),
@@ -1465,6 +1965,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ? nonWaivableMissingAspectIds
         : undefined,
       missingAspectSuggestions: planValidation.warnings,
+      missingAspectRequirements: planValidation.missingAspectRequirements ?? [],
       action_required: 'revise_plan',
       note: localize(
         outputLanguage,
@@ -1723,7 +2224,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     phase.completedAt = undefined;
     phase.summary = undefined;
 
-    const narration = formatToolCallNarration(toolName, input, outputLanguage);
+    const narration = formatToolCallNarration(toolName, input, outputLanguage, toolNarrationOptions());
     const summary = localize(
       outputLanguage,
       `自动进入阶段：${narration}`,
@@ -1853,7 +2354,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
 
-      const narration = formatToolCallNarration(toolName, input, outputLanguage);
+      const narration = formatToolCallNarration(toolName, input, outputLanguage, toolNarrationOptions());
       const summary = localize(
         outputLanguage,
         `自动补记阶段：收到本阶段证据（${narration}），但当前已在后续阶段「${laterActive.name}」。该阶段直接标记完成，证据以推断方式绑定。`,
@@ -2178,7 +2679,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       planPhaseGoal: phaseOverride?.phaseGoal ?? phase?.goal ?? lightweightPhase?.goal,
       planPhaseAttribution: phaseOverride?.attribution ?? (lightweightPhase ? 'active' : phaseResolution?.attribution),
       planPhaseWarning: phaseOverride?.warning ?? phaseResolution?.warning,
-      toolNarration: formatToolCallNarration(toolName, input, outputLanguage),
+      toolNarration: formatToolCallNarration(toolName, input, outputLanguage, toolNarrationOptions()),
       producerReason,
     };
   }
@@ -2231,10 +2732,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     throwIfTraceProcessorQueryCancelled(signal);
     const normalized = normalizeRawSql(sql);
     const { sql: finalSql, injected } = injectStdlibIncludes(normalized.sql);
-    const traceProvenance = buildTraceProcessorQueryProvenance({
-      traceId: targetTraceId,
-      traceSide,
-    });
+    const traceProvenance = buildScopedTraceProvenance(targetTraceId, traceSide);
     if (emitUpdate && injected.length > 0) {
       emitUpdate({
         type: 'progress',
@@ -2339,7 +2837,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           });
         }
 
-        let emittedEvidence: { evidenceRefId: string; queryHash: string } | undefined;
+        let emittedEvidence: { evidenceRefId: string; queryHash: string; queryReview?: QueryReviewV1 } | undefined;
 
         if (emitUpdate && !success && result.error) {
           emitUpdate({
@@ -2382,10 +2880,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             return jaccard > 0.3; // At least 30% token overlap
           });
           if (matchingError) {
+            // Private source/RAG runs may learn within this in-memory turn, but
+            // raw SQL and provider errors must never cross the durable boundary.
+            if (!privateAnalysisContext) {
             await logSqlErrorFixPair(
               { ...matchingError, fixedSql: sql },
               knowledgeScope,
             );
+            }
             const idx = recentSqlErrors.indexOf(matchingError);
             if (idx >= 0) recentSqlErrors.splice(idx, 1);
           }
@@ -2406,7 +2908,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               producer,
               processIdentityWarning,
               sqlArtifact?.artifactId,
+              {
+                durationMs: result.durationMs,
+                truncated: false,
+                sqlRewrites,
+                toolName: 'execute_sql',
+              },
             );
+            updateSqlArtifactQueryReview(artifactStore, sqlArtifact, emittedEvidence.queryReview);
           }
           return {
             content: [{
@@ -2431,6 +2940,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 traceId: traceProvenance.traceId,
                 traceProvenance,
                 evidenceRefId: emittedEvidence?.evidenceRefId,
+                ...(emittedEvidence?.queryReview ? { queryReview: compactQueryReviewForToolResponse(emittedEvidence.queryReview) } : {}),
                 sourceToolCallId: producer.sourceToolCallId,
                 paramsHash: producer.paramsHash,
                 planPhaseId: producer.planPhaseId,
@@ -2444,7 +2954,24 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
 
         if (emitUpdate && success && result.columns.length > 0) {
-          emittedEvidence = emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected, traceProvenance, producer, processIdentityWarning);
+          emittedEvidence = emitSqlDataEnvelope(
+            emitUpdate,
+            result.columns,
+            rows,
+            finalSql,
+            injected,
+            traceProvenance,
+            producer,
+            processIdentityWarning,
+            undefined,
+            {
+              durationMs: result.durationMs,
+              truncated,
+              sqlRewrites,
+              toolName: 'execute_sql',
+              rowCount: result.rows.length,
+            },
+          );
         }
 
         return {
@@ -2461,6 +2988,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               traceId: traceProvenance.traceId,
               traceProvenance,
               evidenceRefId: emittedEvidence?.evidenceRefId,
+              ...(emittedEvidence?.queryReview ? { queryReview: compactQueryReviewForToolResponse(emittedEvidence.queryReview) } : {}),
               sourceToolCallId: producer.sourceToolCallId,
               paramsHash: producer.paramsHash,
               planPhaseId: producer.planPhaseId,
@@ -2488,10 +3016,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       } catch (err) {
         rethrowIfTraceProcessorQueryCancelled(err);
         const errMsg = (err as Error).message;
-        const traceProvenance = buildTraceProcessorQueryProvenance({
-          traceId,
-          traceSide: 'current',
-        });
+        const traceProvenance = buildScopedTraceProvenance(traceId, 'current');
         emitUpdate?.({
           type: 'progress',
           content: {
@@ -2612,34 +3137,31 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         }
       }
 
-      // Guard: metadata-only skills are not executable single-trace analysis skills
-      const skillDef = skillRegistry.getSkill(skillId);
-      if (skillDef?.type === 'pipeline_definition' || skillDef?.type === 'comparison') {
-        const useHint = skillDef.type === 'comparison'
-          ? 'It describes analysis result comparison. Use the multi-trace comparison API/tools instead.'
-          : 'Use `detect_architecture` to detect the rendering pipeline, or call a composite analysis skill like `scrolling_analysis`, `gpu_analysis`, etc.';
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Skill "${skillId}" is metadata-only and cannot be used for single-trace analysis. ${useHint}`,
-            }),
-          }],
-        };
-      }
-
       try {
+        const effectiveSkillRegistry = await bindSkillRuntimeRegistry();
+        const skillDef = effectiveSkillRegistry.getSkill(skillId);
+        if (skillDef?.type === 'pipeline_definition' || skillDef?.type === 'comparison') {
+          const useHint = skillDef.type === 'comparison'
+            ? 'It describes analysis result comparison. Use the multi-trace comparison API/tools instead.'
+            : 'Use `detect_architecture` to detect the rendering pipeline, or call a composite analysis skill like `scrolling_analysis`, `gpu_analysis`, etc.';
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Skill "${skillId}" is metadata-only and cannot be used for single-trace analysis. ${useHint}`,
+              }),
+            }],
+          };
+        }
+
         const effectiveParams = normalizeSkillParams(params, packageName);
         const producer = createEvidenceProducerContext(
           'invoke_skill',
           { skillId, params: effectiveParams },
           localize(outputLanguage, `调用 Skill ${skillId}，收集本阶段结构化证据。`, `Run Skill ${skillId} to collect structured evidence for this phase.`),
         );
-        const skillTraceProvenance = buildTraceProcessorQueryProvenance({
-          traceId,
-          traceSide: 'current',
-        });
+        const skillTraceProvenance = buildScopedTraceProvenance(traceId, 'current');
 
         emitUpdate?.({
           type: 'progress',
@@ -2651,7 +3173,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         });
 
         const skillStart = Date.now();
-        const result = await skillExecutor.execute(skillId, traceId, effectiveParams, { signal });
+        const currentPaneSide = paneSideForTraceSide('current');
+        const result = await skillExecutor.execute(skillId, traceId, effectiveParams, {
+          ...(currentPaneSide ? { __paneSide: currentPaneSide } : {}),
+          __outputLanguage: outputLanguage,
+          signal,
+        });
         const skillDuration = Date.now() - skillStart;
 
         emitUpdate?.({
@@ -2678,24 +3205,39 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           };
           recentSqlErrors.push(errorPair);
           if (recentSqlErrors.length > 10) recentSqlErrors.shift();
-          // Persist to disk (fire-and-forget) for cross-session learning
-          logSqlErrorFixPair(errorPair, knowledgeScope).catch(() => {});
+          // Persist only trace-public learning. Skill params/errors can contain
+          // private source text or provider echoes.
+          if (!privateAnalysisContext) {
+            logSqlErrorFixPair(errorPair, knowledgeScope).catch(() => {});
+          }
         }
 
         // Artifact mode stores displayResults before emitting DataEnvelopes so
         // evidence meta can carry the same artifact ids that the model sees.
-        let artifacts: NonNullable<ReturnType<ArtifactStore['generateCompactSummary']>>[] | undefined;
+        let artifacts: SkillArtifactSummaryForModel[] | undefined;
         let diagnosticsArtifactId: string | undefined;
         let synthesizeArtifacts: Array<{ artifactId: string; stepId: string; rowCount: number; columns: string[] }> | undefined;
-        const artifactIdsByStepId = new Map<string, string>();
+        const artifactIdsByDisplayIndex: Array<string | undefined> = [];
+        const queryReviewsByDisplayIndex: Array<QueryReviewV1 | undefined> = [];
         if (artifactStore && result.displayResults?.length) {
-          artifacts = result.displayResults.map(dr => {
+          artifacts = result.displayResults.map((dr, displayIndex) => {
+            const evidenceRefId = stableSkillEvidenceRefId(
+              result.skillId || skillId,
+              dr.stepId,
+              dr.title,
+              dr.data,
+              skillTraceProvenance,
+              producer,
+            );
             const artId = artifactStore.store({
               skillId: result.skillId || skillId,
               stepId: dr.stepId,
               layer: dr.layer,
               title: dr.title,
               data: dr.data,
+              executionStatus: dr.executionStatus,
+              executionMessage: dr.executionMessage,
+              executionError: dr.executionError,
               diagnostics: undefined,
               planPhaseId: producer.planPhaseId,
               planPhaseTitle: producer.planPhaseTitle,
@@ -2704,10 +3246,28 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               paramsHash: producer.paramsHash,
               identityResolution: result.identityResolution,
             });
-            if (dr.stepId) artifactIdsByStepId.set(dr.stepId, artId);
+            const queryReview = buildSkillQueryReview({
+              skillId: result.skillId || skillId,
+              displayResult: dr as SkillDisplayResult,
+              traceProvenance: skillTraceProvenance,
+              producer,
+              artifactId: artId,
+              evidenceRefId,
+            });
+            if (queryReview) {
+              artifactStore.updateQueryReview(artId, queryReview);
+              queryReviewsByDisplayIndex[displayIndex] = queryReview;
+            }
+            artifactIdsByDisplayIndex[displayIndex] = artId;
             const summary = artifactStore.generateCompactSummary(artId);
-            return summary;
-          }).filter((summary): summary is NonNullable<ReturnType<ArtifactStore['generateCompactSummary']>> => Boolean(summary));
+            const preview = summary?.preview ?? previewFromColumnarData(dr.data);
+            return summary ? {
+              ...summary,
+              ...(preview ? { preview } : {}),
+              evidenceRefId,
+              ...(producer.sourceToolCallId ? { sourceToolCallId: producer.sourceToolCallId } : {}),
+            } : undefined;
+          }).filter((summary): summary is SkillArtifactSummaryForModel => Boolean(summary));
         }
 
         // Store diagnostics as a separate artifact if present, even for
@@ -2758,20 +3318,62 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             });
         }
 
-        if (emitUpdate && result.displayResults?.length) {
+        const externalAuthored =
+          effectiveSkillRegistry.getSkillOrigin(skillId)?.origin ===
+          'external_pack';
+        const localizedDisplayResults = localizeSkillDisplayResults(
+          result.skillId || skillId,
+          result.displayResults,
+          outputLanguage,
+          {externalAuthored},
+        ) || [];
+        const localizedDiagnostics = localizeSkillDiagnostics(
+          result.diagnostics,
+          outputLanguage,
+          {externalAuthored},
+        ) || [];
+        const localizedSkillName = skillDef
+          ? localizeSkillDefinition(
+              skillDef,
+              outputLanguage,
+              {externalAuthored},
+            ).meta.display_name
+          : result.skillName;
+        if (artifacts?.length) {
+          const localizedTitleByArtifactId = new Map<string, string>();
+          artifactIdsByDisplayIndex.forEach((artifactId, displayIndex) => {
+            const localizedTitle = localizedDisplayResults[displayIndex]?.title;
+            if (artifactId && localizedTitle) {
+              localizedTitleByArtifactId.set(artifactId, localizedTitle);
+            }
+          });
+          artifacts = artifacts.map(artifact => ({
+            ...artifact,
+            ...(localizedTitleByArtifactId.has(artifact.id)
+              ? {title: localizedTitleByArtifactId.get(artifact.id)}
+              : {}),
+          }));
+        }
+
+        if (emitUpdate && localizedDisplayResults.length) {
           emitSkillDataEnvelopes(
-            result.displayResults as SkillDisplayResult[],
+            localizedDisplayResults as SkillDisplayResult[],
             result.skillId || skillId,
             emitUpdate,
             skillTraceProvenance,
             producer,
             result.identityResolution,
-            artifactIdsByStepId,
+            artifactIdsByDisplayIndex,
+            queryReviewsByDisplayIndex,
+            result.displayResults as SkillDisplayResult[],
           );
         }
 
-        if (onSkillResult && result.success && result.displayResults?.length) {
-          onSkillResult({ skillId: result.skillId || skillId, displayResults: result.displayResults });
+        if (onSkillResult && result.success && localizedDisplayResults.length) {
+          onSkillResult({
+            skillId: result.skillId || skillId,
+            displayResults: localizedDisplayResults,
+          });
         }
 
         // Prepend skill notes when the per-analysis budget allows. Notes
@@ -2795,7 +3397,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         let vendorOverrideHint: { vendor: string; displayName?: string; additionalStepIds: string[] } | undefined;
         const detectedVendor = options.cachedVendor;
         if (detectedVendor && detectedVendor !== 'aosp' && result.success) {
-          const vendorOverride = skillRegistry.getVendorOverride(skillId, detectedVendor);
+          const vendorOverride = effectiveSkillRegistry.getVendorOverride(skillId, detectedVendor);
           if (vendorOverride && vendorOverride.additionalSteps.length > 0) {
             vendorOverrideHint = {
               vendor: vendorOverride.vendor,
@@ -2810,22 +3412,47 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         // Artifact mode: return compact references whenever any fetchable
         // artifact was created.
         if (artifactStore && (artifacts?.length || diagnosticsArtifactId || synthesizeArtifacts?.length)) {
+          const lightweightArtifacts = options.lightweight
+            ? artifacts?.filter(summary => summary.rowCount > 0 || summary.preview).slice(0, 10)
+            : artifacts;
           return {
             content: [{
               type: 'text' as const,
               text: skillNotesPrefix + consumeWatchdogWarning(JSON.stringify({
                 success: result.success,
                 skillId: result.skillId,
-                skillName: result.skillName,
+                skillName: localizedSkillName,
                 ...(result.error ? { error: result.error } : {}),
-                ...(result.identityResolution ? { identityResolution: result.identityResolution } : {}),
-                artifacts,
+                ...(options.lightweight
+                  ? {
+                      quickMode: {
+                        answerNow: true,
+                        guidance: buildQuickArtifactGuidance(),
+                      },
+                    }
+                  : {}),
+                ...(result.identityResolution
+                  ? options.lightweight
+                    ? {
+                        identity: {
+                          identityRefId: result.identityResolution.identityRefId,
+                          status: result.identityResolution.status,
+                          packageName: result.identityResolution.target?.packageName,
+                          processName: result.identityResolution.target?.processName,
+                          warnings: result.identityResolution.warnings,
+                        },
+                      }
+                    : { identityResolution: result.identityResolution }
+                  : {}),
+                artifacts: lightweightArtifacts,
                 ...(diagnosticsArtifactId ? { diagnosticsArtifactId } : {}),
-                ...(synthesizeArtifacts && synthesizeArtifacts.length > 0
+                ...((!options.lightweight || !artifacts?.length) && synthesizeArtifacts && synthesizeArtifacts.length > 0
                   ? { synthesizeArtifacts }
                   : {}),
                 ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
-                hint: 'Use fetch_artifact(artifactId=<id>, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
+                hint: options.lightweight
+                  ? 'Quick mode: answer from previews/evidenceRefId now; fetch artifacts only for explicit row-level follow-up.'
+                  : 'Use fetch_artifact(artifactId=<id>, detail="rows", offset=0, limit=50) to page through large datasets. All data is accessible — use offset/limit to paginate.',
               })) + (result.success ? getReasoningNudge() : ''),
             }],
           };
@@ -2838,17 +3465,20 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             text: skillNotesPrefix + consumeWatchdogWarning(JSON.stringify({
               success: result.success,
               skillId: result.skillId,
-              skillName: result.skillName,
+              skillName: localizedSkillName,
               ...(result.error ? { error: result.error } : {}),
               ...(result.identityResolution ? { identityResolution: result.identityResolution } : {}),
               ...(vendorOverrideHint ? { vendorOverride: vendorOverrideHint } : {}),
-              displayResults: result.displayResults?.map(dr => ({
+              displayResults: localizedDisplayResults.map(dr => ({
                 stepId: dr.stepId,
                 title: dr.title,
                 layer: dr.layer,
                 data: dr.data,
+                executionStatus: dr.executionStatus,
+                executionMessage: dr.executionMessage,
+                executionError: dr.executionError,
               })),
-              diagnostics: result.diagnostics,
+              diagnostics: localizedDiagnostics,
               synthesizeData: result.synthesizeData,
             })) + (result.success ? getReasoningNudge() : ''),
           }],
@@ -2885,7 +3515,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     },
     async ({ category }) => {
       try {
-        const allSkills = await skillAdapter.listSkills();
+        await bindSkillRuntimeRegistry();
+        const allSkills = await skillAdapter.listSkills(outputLanguage);
         const filtered = category
           ? allSkills.filter(s =>
               s.keywords.some(k => k.toLowerCase().includes(category.toLowerCase())) ||
@@ -2903,6 +3534,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
                 description: s.description,
                 type: s.type,
                 keywords: s.keywords.slice(0, 5),
+                origin: s.origin,
+                localizationStatus: s.localizationStatus,
               }))
             ),
           }],
@@ -3344,6 +3977,30 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
+      const id = `knowledge-topic-${canonicalContentHash(topic).slice(0, 16)}`;
+      const contentHash = canonicalContentHash(content);
+      const decision = registerEvaluationInjection({
+        category: 'knowledgeDocs',
+        id,
+        contentHash,
+        placement: 'mcp:lookup_knowledge',
+      });
+      if (!decision.allowed) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              unsupportedReason: 'evaluation_injection_filtered',
+            }),
+          }],
+        };
+      }
+      runManifestAttributionSink?.recordInjection(
+        'knowledgeDocs',
+        id,
+        contentHash,
+      );
       return {
         content: [{ type: 'text' as const, text: content }],
       };
@@ -3351,31 +4008,148 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     { annotations: { readOnlyHint: true } },
   );
 
-  // lookup_blog_knowledge (Plan 55): retrieve indexed chunks from
-  // androidperformance.com (and, once Plan 44 lands, world memory).
+  // lookup_blog_knowledge (Plan 55): retrieve indexed public blog chunks or,
+  // only with an explicit request-scoped source capability, private Android
+  // Internals Wiki chunks.
   // Read-only — calls ragStore.search() which never writes. The index
   // is populated by the M2 admin route + ingester; until then the
   // search returns `unsupportedReason='index empty'` so the agent
   // never invents content.
   const lookupBlogKnowledge = tool(
     'lookup_blog_knowledge',
-    'Retrieve indexed knowledge chunks from androidperformance.com to ground analysis claims in published material. ' +
-    'Returns ranked snippets matching the query plus provenance (chunkId, uri, title, author) so the agent can cite. ' +
-    'When the result carries an `unsupportedReason` (e.g. "index empty", "all chunks blocked by unsupportedReason"), ' +
-    'the agent must say the source is unavailable and must NOT summarize, paraphrase, or invent content from this source.',
+    `Retrieve public blog, signed built-in Android Internals Pack, or authorized private Wiki background; knowledge hits are not trace evidence.${knowledgeSourceCapabilityHint} ` +
+    'On unsupportedReason, report unavailable without invention. ' +
+    retrievedContextToolBoundary,
     {
       query: z.string().describe('Search query — natural language is fine; tokens are lowercased and matched against snippet + title.'),
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
+      source: z.enum([
+        'androidperformance.com',
+        'android_internals_pack',
+        'android_internals_wiki',
+      ]).optional()
+        .describe('Knowledge source. Use android_internals_pack for bundled, signed Android system background; omission preserves the androidperformance.com default.'),
+      knowledge_source_id: z.string().optional()
+        .describe(`Request-whitelisted source id for Android Internals Wiki.${knowledgeSourceCapabilityHint}`),
     },
-    async ({ query, top_k }) => {
-      const store = getRagStore();
-      const result = store.search(query, {
+    async ({ query, top_k, source, knowledge_source_id }) => {
+      if (source === 'android_internals_pack') {
+        if (!androidInternalsPackStore) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                unsupportedReason: 'android_internals_pack_unavailable',
+              }),
+            }],
+          };
+        }
+        if (isAndroidInternalsPackRevoked(androidInternalsPackStore.handle)) {
+          throw new Error('analysis_context_changed_restart_required');
+        }
+        const raw = androidInternalsPackStore.search(query, {topK: top_k ?? 5});
+        const filtered = await filterRagLookup(raw, {
+          toolName: 'lookup_blog_knowledge',
+          turn: 0,
+          ledger: codeLookupLedger,
+          sessionId: options.sessionId,
+        });
+        await codeLookupLedger?.flush();
+        if (isAndroidInternalsPackRevoked(androidInternalsPackStore.handle)) {
+          throw new Error('analysis_context_changed_restart_required');
+        }
+        const evaluated = filterAndRecordKnowledgeDocuments(filtered);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify(retrievedData({success: true, result: evaluated})),
+          }],
+        };
+      }
+      if (source === 'android_internals_wiki') {
+        assertPrivateAnalysisContextCurrent();
+        const sourceId = normalizeOptionalToolString(knowledge_source_id) ??
+          (knowledgeSourceIds.length === 1 ? knowledgeSourceIds[0] : undefined);
+        if (!sourceId || !knowledgeSourceIds.includes(sourceId) || !knowledgeScope) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                unsupportedReason: 'private_knowledge_source_not_whitelisted',
+                authorizedKnowledgeSourceIds: knowledgeSourceIds,
+              }),
+            }],
+          };
+        }
+        const access = externalKnowledgeRegistry.evaluateAccess(
+          sourceId,
+          knowledgeScope,
+          knowledgeSourceIds,
+        );
+        if (!access.allowed || !access.source.activeGeneration) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                unsupportedReason: access.allowed
+                  ? 'private_knowledge_index_not_active'
+                  : access.reason,
+              }),
+            }],
+          };
+        }
+        const pinnedGeneration = pinnedKnowledgeSourceGenerations[sourceId];
+        if (!pinnedGeneration) {
+          throw new Error('analysis_context_changed_restart_required');
+        }
+        const raw = ragStore.search(query, {
+          topK: top_k ?? 5,
+          kinds: ['android_internals_wiki'],
+          knowledgeSourceIds: [sourceId],
+          activeSourceGenerations: {[sourceId]: pinnedGeneration},
+          scope: knowledgeScope,
+        });
+        const filtered = await filterRagLookup(raw, {
+          toolName: 'lookup_blog_knowledge',
+          turn: 0,
+          ledger: codeLookupLedger,
+          sessionId: options.sessionId,
+          externalKnowledgeRegistry,
+          knowledgeSourceIds,
+          knowledgeScope,
+        });
+        await codeLookupLedger?.flush();
+        assertPrivateAnalysisContextCurrent();
+        const evaluated = filterAndRecordKnowledgeDocuments(filtered);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify(retrievedData({success: true, result: evaluated})),
+          }],
+        };
+      }
+      const raw = ragStore.search(query, {
         topK: top_k ?? 5,
         kinds: ['androidperformance.com'],
         scope: knowledgeScope,
+        activeCodebaseGenerations: activeCodebaseGenerations(codebaseIds),
       });
+      const filtered = await filterRagLookup(raw, {
+        toolName: 'lookup_blog_knowledge',
+        turn: 0,
+        ledger: codeLookupLedger,
+        sessionId: options.sessionId,
+      });
+      await codeLookupLedger?.flush();
+      const evaluated = filterAndRecordKnowledgeDocuments(filtered);
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(retrievedData({...evaluated})),
+        }],
       };
     },
     { annotations: { readOnlyHint: true } },
@@ -3510,9 +4284,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   // NOT cite as evidence, say the source is unavailable.
   const lookupAospSource = tool(
     'lookup_aosp_source',
-    'Retrieve indexed AOSP source chunks (frameworks/base, system/, etc.) to ground analysis claims in the actual implementation. ' +
-    'Returns ranked snippets with license + commit-anchored chunkId. ' +
-    'When the result carries `unsupportedReason` (license_blocked, index empty), the agent must say the source is unavailable and must NOT summarize, paraphrase, or invent content.',
+    'Retrieve indexed AOSP source with license and commit provenance. On unsupportedReason, report unavailable without invention. ' +
+    retrievedContextToolBoundary,
     {
       query: z.string().describe('Search query — typically a function or class name, or a behavior description.'),
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
@@ -3532,22 +4305,31 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-      const store = getRagStore();
-      const result = store.search(query, {
+      const selectedAospIds = codebaseIds.filter(id =>
+        codebaseRegistry.get(id, knowledgeScope)?.kind === 'aosp');
+      const effectiveCodebaseIds = codebaseId ? [codebaseId] : selectedAospIds;
+      if (codebaseId && !selectedAospIds.includes(codebaseId)) {
+        return {
+          content: [{type: 'text' as const, text: JSON.stringify({success: false, error: 'Requested codebase is not a registered AOSP source'})}],
+          isError: true,
+        };
+      }
+      const result = ragStore.search(query, {
         topK: top_k ?? 5,
         kinds: ['aosp'],
-        ...(codebaseId ? {codebaseIds: [codebaseId]} : {}),
+        ...(effectiveCodebaseIds.length > 0 ? {codebaseIds: effectiveCodebaseIds} : {}),
         ...(buildId ? {buildId} : {}),
         ...(symbolExact ? {symbolExact} : {}),
         ...(pathPrefix ? {pathPrefix} : {}),
         scope: knowledgeScope,
+        activeCodebaseGenerations: activeCodebaseGenerations(effectiveCodebaseIds),
       });
       if (result.results.some(hit => hit.chunk?.registryOrigin === 'codebase_registry')) {
         const scopedResult = {
           ...result,
           results: result.results.filter(hit =>
             hit.chunk?.registryOrigin !== 'codebase_registry' ||
-            (hit.chunk.codebaseId && codebaseIds.includes(hit.chunk.codebaseId))),
+            (hit.chunk.codebaseId && effectiveCodebaseIds.includes(hit.chunk.codebaseId))),
         };
         const filtered = await filterRagLookup(scopedResult, {
           toolName: 'lookup_aosp_source',
@@ -3556,14 +4338,16 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           ledger: codeLookupLedger,
           allowProviderSend: codeAwareMode === 'provider_send',
           sessionId: options.sessionId,
+          knowledgeScope,
         });
         await codeLookupLedger?.flush();
+        assertPrivateAnalysisContextCurrent();
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({success: true, result: filtered}) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(retrievedData({success: true, result: filtered})) }],
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        content: [{ type: 'text' as const, text: JSON.stringify(retrievedData({...result})) }],
       };
     },
     { annotations: { readOnlyHint: true } },
@@ -3575,8 +4359,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   // results must NOT be paraphrased or fabricated.
   const lookupOemSdk = tool(
     'lookup_oem_sdk',
-    'Retrieve indexed OEM SDK / tuning documentation chunks. Optionally restrict by vendor via the URI prefix (`oem://<vendor>/...`). ' +
-    'Read-only over the RagStore. When the result carries `unsupportedReason` (license_blocked, index empty), the agent must say the source is unavailable and must NOT summarize or invent.',
+    'Retrieve indexed OEM SDK/tuning documentation, optionally by vendor. On unsupportedReason, report unavailable without invention. ' +
+    retrievedContextToolBoundary,
     {
       query: z.string().describe('Search query — typically a tuning concept or vendor-specific knob.'),
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
@@ -3592,20 +4376,29 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-      const store = getRagStore();
-      const result = store.search(query, {
+      const selectedOemIds = codebaseIds.filter(id =>
+        codebaseRegistry.get(id, knowledgeScope)?.kind === 'oem_sdk');
+      const effectiveCodebaseIds = codebaseId ? [codebaseId] : selectedOemIds;
+      if (codebaseId && !selectedOemIds.includes(codebaseId)) {
+        return {
+          content: [{type: 'text' as const, text: JSON.stringify({success: false, error: 'Requested codebase is not a registered OEM SDK source'})}],
+          isError: true,
+        };
+      }
+      const result = ragStore.search(query, {
         topK: top_k ?? 5,
         kinds: ['oem_sdk'],
-        ...(codebaseId ? {codebaseIds: [codebaseId]} : {}),
+        ...(effectiveCodebaseIds.length > 0 ? {codebaseIds: effectiveCodebaseIds} : {}),
         ...(vendorId ? {vendor: vendorId} : {}),
         scope: knowledgeScope,
+        activeCodebaseGenerations: activeCodebaseGenerations(effectiveCodebaseIds),
       });
       if (result.results.some(hit => hit.chunk?.registryOrigin === 'codebase_registry')) {
         const scopedResult = {
           ...result,
           results: result.results.filter(hit =>
             hit.chunk?.registryOrigin !== 'codebase_registry' ||
-            (hit.chunk.codebaseId && codebaseIds.includes(hit.chunk.codebaseId))),
+            (hit.chunk.codebaseId && effectiveCodebaseIds.includes(hit.chunk.codebaseId))),
         };
         const filtered = await filterRagLookup(scopedResult, {
           toolName: 'lookup_oem_sdk',
@@ -3614,14 +4407,16 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           ledger: codeLookupLedger,
           allowProviderSend: codeAwareMode === 'provider_send',
           sessionId: options.sessionId,
+          knowledgeScope,
         });
         await codeLookupLedger?.flush();
+        assertPrivateAnalysisContextCurrent();
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({success: true, result: filtered}) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(retrievedData({success: true, result: filtered})) }],
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        content: [{ type: 'text' as const, text: JSON.stringify(retrievedData({...result})) }],
       };
     },
     { annotations: { readOnlyHint: true } },
@@ -3633,17 +4428,24 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'Returns metadata only; it never exposes local root paths.',
     {},
     async () => {
+      assertPrivateAnalysisContextCurrent();
       const allowed = new Set(codebaseIds);
-      const codebases = codebaseRegistry.list()
+      const codebases = codebaseRegistry.list(knowledgeScope)
         .filter(ref => allowed.has(ref.codebaseId))
         .map(ref => ({
           codebaseId: ref.codebaseId,
           kind: ref.kind,
           displayName: ref.displayName,
           indexGeneration: ref.indexGeneration,
+          activeGeneration: ref.activeGeneration,
+          contentFingerprint: ref.contentFingerprint,
+          indexedRevision: ref.indexedRevision,
+          indexedDirty: ref.indexedDirty,
+          commitProvenance: ref.commitProvenance,
           chunkCount: ref.chunkCount,
           eligibleForSendToProvider: ref.eligibleForSendToProvider,
         }));
+      assertPrivateAnalysisContextCurrent();
       return {
         content: [{type: 'text' as const, text: JSON.stringify({success: true, codebases})}],
       };
@@ -3654,7 +4456,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const lookupAppSource = tool(
     'lookup_app_source',
     'Look up registered app source chunks for this analysis session. ' +
-    'Only whitelisted codebase IDs are accepted. In metadata_only mode the result carries file/symbol references without snippets.',
+    'Only whitelisted codebase IDs are accepted. In metadata_only mode the result carries file/symbol references without snippets. ' +
+    retrievedContextToolBoundary,
     {
       query: z.string().describe('Natural-language query, symbol, class, method, or file term.'),
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
@@ -3679,7 +4482,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-      const raw = getRagStore().search(query, {
+      const raw = ragStore.search(query, {
         topK: top_k ?? 5,
         kinds: ['app_source'],
         codebaseIds: allowed,
@@ -3687,6 +4490,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ...(filePath ? {filePathExact: filePath} : {}),
         ...(pathPrefix ? {pathPrefix} : {}),
         scope: knowledgeScope,
+        activeCodebaseGenerations: activeCodebaseGenerations(allowed),
       });
       const filtered = await filterRagLookup(raw, {
         toolName: 'lookup_app_source',
@@ -3695,10 +4499,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ledger: codeLookupLedger,
         allowProviderSend: codeAwareMode === 'provider_send',
         sessionId: options.sessionId,
+        knowledgeScope,
       });
       await codeLookupLedger?.flush();
+      assertPrivateAnalysisContextCurrent();
       return {
-        content: [{type: 'text' as const, text: JSON.stringify({success: true, result: filtered})}],
+        content: [{type: 'text' as const, text: JSON.stringify(retrievedData({success: true, result: filtered}))}],
       };
     },
     {annotations: {readOnlyHint: true}},
@@ -3706,9 +4512,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
   const lookupKernelSource = tool(
     'lookup_kernel_source',
-    'Use when kernel/vendor source evidence is needed after trace evidence points at binder, scheduler, mm, io, or a kernel symbol. ' +
-    'Do NOT use for app or AOSP framework code. Prerequisites: a whitelisted kernel_source codebase, vendor or codebase_id, and a path_prefix/subsys. ' +
-    'Budget: top_k is capped at 20 and metadata_only sessions return CodeRef metadata without snippets. Outcomes: source hits, metadata-only hits, or an explicit unsupportedReason.',
+    'Retrieve whitelisted kernel/vendor source after trace evidence points to a kernel subsystem or symbol. Requires codebase/vendor and path prefix; metadata_only omits snippets. ' +
+    retrievedContextToolBoundary,
     {
       query: z.string().describe('Kernel symbol, subsystem, or behavior query.'),
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum hits returned (1-20, default 5).'),
@@ -3734,7 +4539,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
       const kernelRefs = allowed
-        .map(id => codebaseRegistry.get(id))
+        .map(id => codebaseRegistry.get(id, knowledgeScope))
         .filter(ref => ref?.kind === 'kernel_source');
       const vendors = new Set(kernelRefs.map(ref => ref!.vendor).filter(Boolean));
       if (!codebaseId && !vendorId && vendors.size > 1) {
@@ -3747,7 +4552,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-      const raw = getRagStore().search(query, {
+      const raw = ragStore.search(query, {
         topK: top_k ?? 5,
         kinds: ['kernel_source'],
         codebaseIds: kernelRefs.map(ref => ref!.codebaseId),
@@ -3755,6 +4560,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ...(symbolExact ? {symbolExact} : {}),
         ...(pathPrefix ? {pathPrefix} : {}),
         scope: knowledgeScope,
+        activeCodebaseGenerations: activeCodebaseGenerations(kernelRefs.map(ref => ref!.codebaseId)),
       });
       const filtered = await filterRagLookup(raw, {
         toolName: 'lookup_kernel_source',
@@ -3763,10 +4569,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ledger: codeLookupLedger,
         allowProviderSend: codeAwareMode === 'provider_send',
         sessionId: options.sessionId,
+        knowledgeScope,
       });
       await codeLookupLedger?.flush();
+      assertPrivateAnalysisContextCurrent();
       return {
-        content: [{type: 'text' as const, text: JSON.stringify({success: true, result: filtered})}],
+        content: [{type: 'text' as const, text: JSON.stringify(retrievedData({success: true, result: filtered}))}],
       };
     },
     {annotations: {readOnlyHint: true}},
@@ -3787,6 +4595,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       top_k: z.number().int().min(1).max(20).optional().describe('Maximum candidates returned.'),
     },
     async ({symbol, kind, codebase_id, file_path, build_id, vendor, top_k}) => {
+      assertPrivateAnalysisContextCurrent();
       const codebaseId = normalizeOptionalToolString(codebase_id);
       const filePath = normalizeOptionalToolString(file_path);
       const buildId = normalizeOptionalToolString(build_id);
@@ -3802,9 +4611,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           isError: true,
         };
       }
-      const resolver = new SymbolResolver(getRagStore());
+      const resolver = new SymbolResolver(ragStore, knowledgeScope, codebaseRegistry);
       const results = allowed.map(id => {
-        const ref = codebaseRegistry.get(id);
+        const ref = codebaseRegistry.get(id, knowledgeScope);
         if (kind === 'kernel' || ref?.kind === 'kernel_source') {
           return resolver.resolveKernel({
             symbol,
@@ -3830,6 +4639,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           topK: top_k ?? 5,
         });
       });
+      assertPrivateAnalysisContextCurrent();
       return {
         content: [{type: 'text' as const, text: JSON.stringify({
           success: results.some(result => result.success),
@@ -3851,7 +4661,13 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       patch_sketch: z.string().optional().describe('Optional high-level sketch when no verified diff is available.'),
     },
     async ({context_chunk_ids, problem, proposed_diff, patch_sketch}) => {
-      const proposer = new PatchProposer(getRagStore(), codebaseRegistry, codeLookupLedger);
+      assertPrivateAnalysisContextCurrent();
+      const proposer = new PatchProposer(
+        ragStore,
+        codebaseRegistry,
+        codeLookupLedger,
+        knowledgeScope,
+      );
       const result = proposer.propose({
         contextChunkIds: context_chunk_ids,
         problem,
@@ -3860,6 +4676,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         turn: 0,
       });
       await codeLookupLedger?.flush();
+      assertPrivateAnalysisContextCurrent();
       return {
         content: [{type: 'text' as const, text: JSON.stringify({success: result.patchStatus !== 'unverified', result})}],
         ...(result.patchStatus === 'unverified' ? {isError: true} : {}),
@@ -3937,7 +4754,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       if (evidence_signatures && typeof evidence_signatures === 'object') {
         const retriever = createCaseRetriever({
           library,
-          ragStore: options.ragStore ?? getRagStore(),
+          ragStore,
           scope: knowledgeScope,
         });
         const effectiveScene = scene || options.sceneType || 'scrolling';
@@ -4012,6 +4829,90 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           text: JSON.stringify({success: true, hits, count: hits.length}),
         }],
       };
+    },
+    { annotations: { readOnlyHint: true } },
+  );
+
+  const recallSimilarResult = tool(
+    'recall_similar_result',
+    'Recall similar persisted analysis-result snapshots for navigation. Read-only. Returns navigation_hint_only hints; not diagnostic evidence.',
+    {
+      snapshot_id: z.string().describe('Current analysis result snapshot id.'),
+      include_cases: z.boolean().optional().describe('Also include published case-library hints when structured evidence is available (default false).'),
+      top_k: z.number().int().min(1).max(20).optional().describe('Maximum hints returned, default 5.'),
+    },
+    async ({ snapshot_id, include_cases, top_k }) => {
+      const snapshotId = snapshot_id.trim();
+      if (!snapshotId) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              allowedUse: 'navigation_hint_only',
+              error: 'snapshot_id is required',
+            }),
+          }],
+          isError: true,
+        };
+      }
+
+      const scope = {
+        tenantId: knowledgeScope?.tenantId || DEFAULT_TENANT_ID,
+        workspaceId: knowledgeScope?.workspaceId || DEFAULT_WORKSPACE_ID,
+        userId: knowledgeScope?.userId || DEFAULT_DEV_USER_ID,
+      };
+      let closeDb: (() => void) | undefined;
+      let snapshotRepository = options.analysisResultSnapshotRepository;
+      if (!snapshotRepository) {
+        const db = openEnterpriseDb();
+        closeDb = () => db.close();
+        snapshotRepository = createAnalysisResultSnapshotRepository(db);
+      }
+
+      try {
+        const service = createTraceSimilarityService({
+          snapshotRepository,
+          ...(include_cases
+            ? {
+              caseLibrary: options.caseLibrary ?? getCaseLibrary(),
+              ragStore,
+            }
+            : {}),
+        });
+        const result = service.findSimilarAnalysisResult({
+          scope,
+          knowledgeScope: scope,
+          snapshotId,
+          includeCases: include_cases ?? false,
+          limit: top_k,
+        });
+        if (!result) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                allowedUse: 'navigation_hint_only',
+                error: 'Analysis result snapshot not found',
+              }),
+            }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              allowedUse: 'navigation_hint_only',
+              ...result,
+            }),
+          }],
+        };
+      } finally {
+        closeDb?.();
+      }
     },
     { annotations: { readOnlyHint: true } },
   );
@@ -4299,6 +5200,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               missingAspectIds,
               nonWaivableMissingAspectIds,
               planWarnings,
+              missingAspectRequirements: validation.missingAspectRequirements ?? [],
               attempt: planSubmitAttempts,
               tooShortWaivers,
               mode: 'submit_plan',
@@ -4321,6 +5223,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ...(forcedAccept ? { unresolvedAspects: missingAspectIds } : {}),
       };
       analysisPlanRef.current = plan;
+      replayPrePlanToolCalls(analysisPlanRef);
       clearPendingPlanRevisionGate(plan);
       planReviseAttempts = 0;
       if (!forcedAccept) planSubmitAttempts = 0;
@@ -4462,6 +5365,33 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
 
+      if (normalizedStatus === 'skipped' && (phase.expectedCalls ?? []).length > 0) {
+        const missingExpectedCalls = findMissingExpectedCallsForPhase(
+          phase,
+          Array.isArray(plan.toolCallLog) ? plan.toolCallLog : [],
+        );
+        if (missingExpectedCalls.length > 0 && !skipSummaryExplainsEvidenceBoundary(trimmedSummary!)) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: localize(
+                  outputLanguage,
+                  `阶段 ${phaseId} 声明了关键证据调用，不能仅因已有初步根因或认为不再重要而跳过。请先执行缺失调用；只有条件未触发或 Trace/参数确实不可用时，才能以具体证据边界标记 skipped。`,
+                  `Phase ${phaseId} declares critical evidence calls and cannot be skipped merely because a preliminary root cause already looks likely. Run the missing calls first; only an unmet condition or genuinely unavailable trace data/parameters can justify skipped.`,
+                ),
+                action_required: 'run_expected_calls_or_explain_unavailability',
+                currentPhaseId: phase.id,
+                currentPhaseName: phase.name,
+                missingExpectedCalls,
+              }),
+            }],
+            isError: true,
+          };
+        }
+      }
+
       if (normalizedStatus === 'completed' && (phase.expectedCalls ?? []).length > 0) {
         const prospectivePlan: AnalysisPlanV3 = {
           ...plan,
@@ -4569,15 +5499,33 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         });
 
         if (matchedHint) {
-          response.next_phase_reminder = {
-            phaseId: nextPhase.id,
-            name: nextPhase.name,
-            constraints: matchedHint.constraints,
-            criticalTools: matchedHint.criticalTools,
-          };
-          console.log(`[MCP] Phase hint injected: ${matchedHint.id} for ${options.sceneType}`);
+          const contentHash =
+            evaluationPhaseHintInjectionContentHash(matchedHint);
+          const decision = registerEvaluationInjection({
+            category: 'phaseHints',
+            id: matchedHint.id,
+            contentHash,
+            placement: 'mcp:update_plan_phase',
+          });
+          if (decision.allowed) {
+            runManifestAttributionSink?.recordInjection(
+              'phaseHints',
+              matchedHint.id,
+              contentHash,
+            );
+            response.next_phase_reminder = {
+              phaseId: nextPhase.id,
+              name: nextPhase.name,
+              constraints: matchedHint.constraints,
+              criticalTools: matchedHint.criticalTools,
+            };
+            console.log(`[MCP] Phase hint injected: ${matchedHint.id} for ${options.sceneType}`);
+          }
         } else if (hints.length > 0) {
-          console.log(`[MCP] Phase hint not found for: "${nextPhase.name}" in ${options.sceneType}`);
+          console.log(
+            `[MCP] Phase hint not found for ${options.sceneType}: ` +
+            diagnosticLogIdentity(nextPhase.name),
+          );
         }
 
         // Always include basic next phase info for non-hint scenarios
@@ -4762,6 +5710,30 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
 
+      const newlyClosedPhases = normalizedUpdatedPhases.filter(up => {
+        if (up.status !== 'completed' && up.status !== 'skipped') return false;
+        const original = plan.phases.find(phase => phase.id === up.id);
+        return !original || (original.status !== 'completed' && original.status !== 'skipped');
+      });
+      if (newlyClosedPhases.length > 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: localize(
+                outputLanguage,
+                `revise_plan 只能修改计划结构，不能直接闭合未完成阶段: ${newlyClosedPhases.map(phase => phase.id).join(', ')}。请保留阶段状态，并用 update_plan_phase 提交摘要与证据门禁验证。`,
+                `revise_plan changes plan structure and cannot directly close unfinished phases: ${newlyClosedPhases.map(phase => phase.id).join(', ')}. Preserve their status and use update_plan_phase so summaries and evidence gates are validated.`,
+              ),
+              invalidPhaseIds: newlyClosedPhases.map(phase => phase.id),
+              action_required: 'update_plan_phase',
+            }),
+          }],
+          isError: true,
+        };
+      }
+
       const candidatePhases = normalizedUpdatedPhases.map((up): PlanPhase => {
         const original = plan.phases.find(p => p.id === up.id);
         if (original && (original.status === 'completed' || original.status === 'skipped')) {
@@ -4800,6 +5772,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               missingAspectIds,
               nonWaivableMissingAspectIds,
               planWarnings: revisedPlanWarnings,
+              missingAspectRequirements: validation.missingAspectRequirements ?? [],
               attempt: planReviseAttempts,
               tooShortWaivers,
               mode: 'revise_plan',
@@ -4809,6 +5782,39 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
       const forcedAccept = revisedPlanWarnings.length > 0;
+
+      const expectedCallKey = (call: NonNullable<PlanPhase['expectedCalls']>[number]): string =>
+        `${shortExpectedToolName(call.tool)}:${call.skillId ? shortExpectedToolName(call.skillId) : ''}`;
+      const updatedPhaseById = new Map(normalizedUpdatedPhases.map(phase => [phase.id, phase]));
+      const weakenedPhases = plan.phases.flatMap(original => {
+        if (original.status === 'completed' || original.status === 'skipped') return [];
+        const updated = updatedPhaseById.get(original.id);
+        const updatedCallKeys = new Set((updated?.expectedCalls ?? []).map(expectedCallKey));
+        const removedExpectedCalls = (original.expectedCalls ?? [])
+          .filter(call => !updatedCallKeys.has(expectedCallKey(call)));
+        return removedExpectedCalls.length > 0
+          ? [{ phaseId: original.id, removedExpectedCalls }]
+          : [];
+      });
+      if (weakenedPhases.length > 0) {
+        planReviseAttempts = 0;
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: localize(
+                outputLanguage,
+                `revise_plan 不能移除未完成阶段已声明的 expectedCalls: ${weakenedPhases.map(item => item.phaseId).join(', ')}。请保留证据要求；若触发条件未成立或 trace 证据不可用，请用 update_plan_phase 按边界跳过。`,
+                `revise_plan cannot remove declared expectedCalls from unfinished phases: ${weakenedPhases.map(item => item.phaseId).join(', ')}. Preserve the evidence requirements; if a trigger is not met or trace evidence is unavailable, skip through update_plan_phase with that boundary.`,
+              ),
+              weakenedPhases,
+              action_required: 'preserve_expected_calls',
+            }),
+          }],
+          isError: true,
+        };
+      }
 
       // Save revision history for audit trail
       const revision: PlanRevision = {
@@ -5178,6 +6184,17 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
       keywords: z.array(z.string()).optional().describe('Domain keywords (e.g., ["jank", "binder", "gpu"])'),
     },
     async ({ architectureType, sceneType: querySceneType, keywords }) => {
+      if (privateAnalysisContext) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            success: true,
+            disabled: 'private_analysis_context',
+            positivePatterns: [],
+            negativePatterns: [],
+            message: 'Cross-session pattern recall is disabled for private source and RAG analyses.',
+          }) }],
+        };
+      }
       const features = extractTraceFeatures({
         architectureType,
         sceneType: querySceneType,
@@ -5290,15 +6307,11 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         };
       }
       const targetTraceId = trace === 'reference' ? referenceTraceId : traceId;
-      const traceLabel = trace === 'reference'
-        ? localize(outputLanguage, '[参考 Trace]', '[reference trace]')
-        : localize(outputLanguage, '[当前 Trace]', '[current trace]');
+      const traceLabel = `[${traceLocationDisplayLabel(trace)}]`;
       const producer = createEvidenceProducerContext(
         'execute_sql_on',
         { trace, sql, summary },
-        trace === 'reference'
-          ? localize(outputLanguage, '执行参考 Trace SQL，验证对比差异。', 'Run SQL on the reference trace to verify comparison deltas.')
-          : localize(outputLanguage, '执行当前 Trace SQL，验证对比差异。', 'Run SQL on the current trace to verify comparison deltas.'),
+        comparisonSqlProducerReason(trace),
         trace,
       );
       try {
@@ -5325,7 +6338,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             })
           : undefined;
         const shouldReturnSqlSummary = success && result.rows.length > 0 && (summary || !!sqlArtifact);
-        let emittedEvidence: { evidenceRefId: string; queryHash: string } | undefined;
+        let emittedEvidence: { evidenceRefId: string; queryHash: string; queryReview?: QueryReviewV1 } | undefined;
 
         if (shouldReturnSqlSummary) {
           const summaryResult = summarizeSqlResult(result.columns, result.rows);
@@ -5340,7 +6353,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               producer,
               processIdentityWarning,
               sqlArtifact?.artifactId,
+              {
+                durationMs,
+                truncated: false,
+                sqlRewrites,
+                toolName: 'execute_sql_on',
+              },
             );
+            updateSqlArtifactQueryReview(artifactStore, sqlArtifact, emittedEvidence.queryReview);
           }
           const text = JSON.stringify({
             success: true,
@@ -5361,6 +6381,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             } : {}),
             durationMs,
             evidenceRefId: emittedEvidence?.evidenceRefId,
+            ...(emittedEvidence?.queryReview ? { queryReview: compactQueryReviewForToolResponse(emittedEvidence.queryReview) } : {}),
             sourceToolCallId: producer.sourceToolCallId,
             paramsHash: producer.paramsHash,
             planPhaseId: producer.planPhaseId,
@@ -5383,6 +6404,14 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             traceProvenance,
             producer,
             processIdentityWarning,
+            undefined,
+            {
+              durationMs,
+              truncated,
+              sqlRewrites,
+              toolName: 'execute_sql_on',
+              rowCount: result.rows.length,
+            },
           );
         }
 
@@ -5398,6 +6427,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           truncated,
           durationMs,
           evidenceRefId: emittedEvidence?.evidenceRefId,
+          ...(emittedEvidence?.queryReview ? { queryReview: compactQueryReviewForToolResponse(emittedEvidence.queryReview) } : {}),
           sourceToolCallId: producer.sourceToolCallId,
           paramsHash: producer.paramsHash,
           planPhaseId: producer.planPhaseId,
@@ -5424,10 +6454,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + getReasoningNudge() : text) }] };
       } catch (e: any) {
         rethrowIfTraceProcessorQueryCancelled(e);
-        const traceProvenance = buildTraceProcessorQueryProvenance({
-          traceId: targetTraceId,
-          traceSide: trace,
-        });
+        const traceProvenance = buildScopedTraceProvenance(targetTraceId, trace);
         return {
           content: [{
             type: 'text' as const,
@@ -5454,17 +6481,31 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'compare_skill',
     'Run the same skill on both current and reference traces in parallel, returning side-by-side results with schema alignment info.\n\n' +
     'Use when: you want to compare the same analysis dimension across both traces (e.g., scrolling_analysis, cpu_analysis).\n' +
+    'When the two traces need different package names, startup IDs, or time windows, use currentParams/referenceParams for side-specific values.\n' +
     'Don\'t use when: you need different skills on each trace, or ad-hoc SQL queries (use execute_sql_on instead).\n\n' +
     'Examples:\n' +
     '1. Compare scrolling: skillId="scrolling_analysis", params={process_name: "com.example.app"}\n' +
-    '2. Compare CPU: skillId="cpu_analysis"',
+    '2. Compare startup detail with different windows: skillId="startup_detail", currentParams={startup_id:1,start_ts:100,end_ts:200}, referenceParams={startup_id:1,start_ts:500,end_ts:650}\n' +
+    '3. Compare CPU: skillId="cpu_analysis"',
     {
       skillId: z.string().describe('Skill identifier to run on both traces'),
       params: z.record(z.string(), z.any()).optional().describe(
-        'Parameters passed to both skill executions. Common: { process_name, start_ts, end_ts }'
+        'Shared parameters passed to both skill executions. Common: { process_name, start_ts, end_ts }'
+      ),
+      currentParams: z.record(z.string(), z.any()).optional().describe(
+        'Parameters for the current trace only. Overrides shared params for the current side.'
+      ),
+      referenceParams: z.record(z.string(), z.any()).optional().describe(
+        'Parameters for the reference trace only. Overrides shared params for the reference side.'
+      ),
+      current_params: z.record(z.string(), z.any()).optional().describe(
+        'Alias for currentParams for OpenAI-compatible callers.'
+      ),
+      reference_params: z.record(z.string(), z.any()).optional().describe(
+        'Alias for referenceParams for OpenAI-compatible callers.'
       ),
     },
-    async ({ skillId, params }, extra) => {
+    async ({ skillId, params, currentParams, referenceParams, current_params, reference_params }, extra) => {
       const signal = getRuntimeToolSignal(extra);
       throwIfTraceProcessorQueryCancelled(signal);
       const planError = requirePlan('compare_skill');
@@ -5472,16 +6513,35 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         return { content: [{ type: 'text' as const, text: planError }] };
       }
       try {
-        const effectiveParams = normalizeSkillParams(params, packageName);
-        // For reference trace: use its own package name if detected, otherwise
-        // omit process_name filter entirely (safer than silently using current's package)
-        const refParams = comparisonContext?.referencePackageName
-          ? normalizeSkillParams(params, comparisonContext.referencePackageName)
-          : normalizeSkillParams(params); // No default package — skill runs unfiltered
+        const currentSideParams = currentParams ?? current_params;
+        const referenceSideParams = referenceParams ?? reference_params;
+        const referenceSharedParams = referenceSharedParamsForComparison(
+          params,
+          packageName,
+          comparisonContext?.referencePackageName,
+        );
+        const effectiveParams = normalizeSkillParams(
+          { ...(params ?? {}), ...(currentSideParams ?? {}) },
+          packageName,
+        );
+        const refParams = normalizeSkillParams(
+          { ...referenceSharedParams.params, ...(referenceSideParams ?? {}) },
+          comparisonContext?.referencePackageName,
+        );
+        const producerInput = {
+          skillId,
+          params,
+          currentParams: currentSideParams,
+          referenceParams: referenceSideParams,
+        };
         const baseProducer = createEvidenceProducerContext(
           'compare_skill',
-          { skillId, params },
-          localize(outputLanguage, `对比 Skill ${skillId}，在当前和参考 Trace 上收集同构证据。`, `Compare Skill ${skillId} to collect aligned evidence on current and reference traces.`),
+          producerInput,
+          localize(
+            outputLanguage,
+            `对比 Skill ${skillId}，在${traceLocationDisplayLabel('current')}和${traceLocationDisplayLabel('reference')}上收集同构证据。`,
+            `Compare Skill ${skillId} to collect aligned evidence on ${traceLocationDisplayLabel('current')} and ${traceLocationDisplayLabel('reference')}.`,
+          ),
         );
 
         emitUpdate?.({
@@ -5490,27 +6550,75 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             phase: 'analyzing',
             message: localize(
               outputLanguage,
-              `对比技能 ${skillId}：在两个 Trace 上并行执行...`,
-              `Comparing skill ${skillId}: running on both traces in parallel...`,
+              `对比技能 ${skillId}：在${traceLocationDisplayLabel('current')}和${traceLocationDisplayLabel('reference')}上并行执行...`,
+              `Comparing skill ${skillId}: running on ${traceLocationDisplayLabel('current')} and ${traceLocationDisplayLabel('reference')} in parallel...`,
             ),
           },
           timestamp: Date.now(),
         });
 
         const compareStart = Date.now();
-        const currentTraceProvenance = buildTraceProcessorQueryProvenance({
-          traceId,
-          traceSide: 'current',
-        });
-        const referenceTraceProvenance = buildTraceProcessorQueryProvenance({
-          traceId: referenceTraceId,
-          traceSide: 'reference',
-        });
-        const [currentResult, refResult] = await Promise.all([
-          skillExecutor.execute(skillId, traceId, effectiveParams, { __traceSide: 'current', signal }),
-          skillExecutor.execute(skillId, referenceTraceId, refParams, { __traceSide: 'reference', signal }),
+        const currentTraceProvenance = buildScopedTraceProvenance(traceId, 'current');
+        const referenceTraceProvenance = buildScopedTraceProvenance(referenceTraceId, 'reference');
+        const [currentSettled, referenceSettled] = await Promise.allSettled([
+          skillExecutor.execute(skillId, traceId, effectiveParams, {
+            __traceSide: 'current',
+            __outputLanguage: outputLanguage,
+            ...(currentTraceProvenance.paneSide ? { __paneSide: currentTraceProvenance.paneSide } : {}),
+            signal,
+          }),
+          skillExecutor.execute(skillId, referenceTraceId, refParams, {
+            __traceSide: 'reference',
+            __outputLanguage: outputLanguage,
+            ...(referenceTraceProvenance.paneSide ? { __paneSide: referenceTraceProvenance.paneSide } : {}),
+            signal,
+          }),
         ]);
+        if (currentSettled.status === 'rejected') {
+          rethrowIfTraceProcessorQueryCancelled(currentSettled.reason);
+        }
+        if (referenceSettled.status === 'rejected') {
+          rethrowIfTraceProcessorQueryCancelled(referenceSettled.reason);
+        }
+        const rejectedResult = (reason: unknown): SkillExecutionResult => ({
+          skillId,
+          skillName: skillId,
+          success: false,
+          displayResults: [],
+          diagnostics: [],
+          executionTimeMs: 0,
+          error: reason instanceof Error ? reason.message : String(reason),
+        });
+        const currentResult = currentSettled.status === 'fulfilled'
+          ? currentSettled.value
+          : rejectedResult(currentSettled.reason);
+        const refResult = referenceSettled.status === 'fulfilled'
+          ? referenceSettled.value
+          : rejectedResult(referenceSettled.reason);
+        const comparisonRegistry = await bindSkillRuntimeRegistry();
+        const comparisonExternalAuthored =
+          comparisonRegistry.getSkillOrigin(skillId)?.origin ===
+          'external_pack';
+        const localizedCurrentDisplayResults = localizeSkillDisplayResults(
+          skillId,
+          currentResult.displayResults,
+          outputLanguage,
+          {externalAuthored: comparisonExternalAuthored},
+        ) || [];
+        const localizedReferenceDisplayResults = localizeSkillDisplayResults(
+          skillId,
+          refResult.displayResults,
+          outputLanguage,
+          {externalAuthored: comparisonExternalAuthored},
+        ) || [];
         const compareDuration = Date.now() - compareStart;
+        const currentSuccess = currentResult.success === true;
+        const referenceSuccess = refResult.success === true;
+        const success = currentSuccess && referenceSuccess;
+        const failedSides = [
+          ...(!currentSuccess ? ['current' as const] : []),
+          ...(!referenceSuccess ? ['reference' as const] : []),
+        ];
 
         // Schema alignment: check which steps are comparable
         const currentStepIds = new Set((currentResult.displayResults || []).map(r => r.stepId));
@@ -5526,32 +6634,46 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
         ];
 
         // Emit data envelopes for both sides (labeled)
-        if (emitUpdate && currentResult.displayResults?.length) {
+        if (emitUpdate && localizedCurrentDisplayResults.length) {
           emitSkillDataEnvelopes(
-            currentResult.displayResults as SkillDisplayResult[],
+            localizedCurrentDisplayResults as SkillDisplayResult[],
             skillId,
             emitUpdate,
             currentTraceProvenance,
             {
               ...baseProducer,
               sourceToolCallId: `${baseProducer.sourceToolCallId}:current`,
-              producerReason: localize(outputLanguage, `当前 Trace 对比 Skill ${skillId} 结果。`, `Current trace result for comparison Skill ${skillId}.`),
+              producerReason: localize(
+                outputLanguage,
+                `${traceLocationDisplayLabel('current')}对比 Skill ${skillId} 结果。`,
+                `${traceLocationDisplayLabel('current')} result for comparison Skill ${skillId}.`,
+              ),
             },
             currentResult.identityResolution,
+            undefined,
+            undefined,
+            currentResult.displayResults as SkillDisplayResult[],
           );
         }
-        if (emitUpdate && refResult.displayResults?.length) {
+        if (emitUpdate && localizedReferenceDisplayResults.length) {
           emitSkillDataEnvelopes(
-            refResult.displayResults as SkillDisplayResult[],
+            localizedReferenceDisplayResults as SkillDisplayResult[],
             skillId,
             emitUpdate,
             referenceTraceProvenance,
             {
               ...baseProducer,
               sourceToolCallId: `${baseProducer.sourceToolCallId}:reference`,
-              producerReason: localize(outputLanguage, `参考 Trace 对比 Skill ${skillId} 结果。`, `Reference trace result for comparison Skill ${skillId}.`),
+              producerReason: localize(
+                outputLanguage,
+                `${traceLocationDisplayLabel('reference')}对比 Skill ${skillId} 结果。`,
+                `${traceLocationDisplayLabel('reference')} result for comparison Skill ${skillId}.`,
+              ),
             },
             refResult.identityResolution,
+            undefined,
+            undefined,
+            refResult.displayResults as SkillDisplayResult[],
           );
         }
 
@@ -5565,26 +6687,45 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           }));
 
         const text = JSON.stringify({
-          success: true,
+          success,
+          ...(!success ? {
+            partial: currentSuccess !== referenceSuccess,
+            failedSides,
+            error: localize(
+              outputLanguage,
+              `双 Trace 对比未完成：${failedSides.map(side => side === 'current' ? '当前侧' : '参考侧').join('、')}执行失败。`,
+              `Dual-trace comparison did not complete: ${failedSides.join(' and ')} side execution failed.`,
+            ),
+            action_required: 'retry_compare_skill_with_valid_side_params',
+          } : {}),
           durationMs: compareDuration,
+          parameterMapping: {
+            referenceIdentityRemapped: referenceSharedParams.identityRemapped,
+            currentOverrideKeys: Object.keys(currentSideParams ?? {}),
+            referenceOverrideKeys: Object.keys(referenceSideParams ?? {}),
+          },
           current: {
             traceSide: 'current',
+            paneSide: currentTraceProvenance.paneSide,
             traceId,
             traceProvenance: currentTraceProvenance,
+            effectiveParams,
             success: currentResult.success,
-            stepCount: currentResult.displayResults?.length || 0,
-            steps: buildStepSummary(currentResult.displayResults || []),
+            stepCount: localizedCurrentDisplayResults.length,
+            steps: buildStepSummary(localizedCurrentDisplayResults),
             diagnosticCount: currentResult.diagnostics?.length || 0,
             identityResolution: currentResult.identityResolution,
             error: currentResult.error,
           },
           reference: {
             traceSide: 'reference',
+            paneSide: referenceTraceProvenance.paneSide,
             traceId: referenceTraceId,
             traceProvenance: referenceTraceProvenance,
+            effectiveParams: refParams,
             success: refResult.success,
-            stepCount: refResult.displayResults?.length || 0,
-            steps: buildStepSummary(refResult.displayResults || []),
+            stepCount: localizedReferenceDisplayResults.length,
+            steps: buildStepSummary(localizedReferenceDisplayResults),
             diagnosticCount: refResult.diagnostics?.length || 0,
             identityResolution: refResult.identityResolution,
             error: refResult.error,
@@ -5593,17 +6734,38 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             comparableSteps,
             incompatibleSteps: incompatibleSteps.length > 0 ? incompatibleSteps : undefined,
           },
-          hint: localize(
-            outputLanguage,
-            '使用 execute_sql_on 深钻具体差异指标，或使用 fetch_artifact 获取详细数据。',
-            'Use execute_sql_on to drill into specific delta metrics, or fetch_artifact for detailed data.',
-          ),
+          hint: success
+            ? localize(
+                outputLanguage,
+                '使用 execute_sql_on 深钻具体差异指标，或使用 fetch_artifact 获取详细数据。',
+                'Use execute_sql_on to drill into specific delta metrics, or fetch_artifact for detailed data.',
+              )
+            : localize(
+                outputLanguage,
+                '修正失败侧的参数后重试 compare_skill；如果两侧分析窗口不同，请同时提供 currentParams 和 referenceParams。',
+                'Fix the failed-side parameters and retry compare_skill; provide both currentParams and referenceParams when the analysis windows differ.',
+              ),
         });
 
-        return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }] };
+        return {
+          content: [{ type: 'text' as const, text: consumeWatchdogWarning(text + getReasoningNudge()) }],
+          ...(!success ? { isError: true } : {}),
+        };
       } catch (e: any) {
         rethrowIfTraceProcessorQueryCancelled(e);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: e.message }) }] };
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              partial: false,
+              failedSides: ['current', 'reference'],
+              error: e.message,
+              action_required: 'retry_compare_skill_after_runtime_error',
+            }),
+          }],
+          isError: true,
+        };
       }
     },
   ) : null;
@@ -5611,25 +6773,34 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
   const getComparisonContext = (referenceTraceId && comparisonContext) ? tool(
     'get_comparison_context',
     'Get metadata comparison between the current trace and the reference trace. ' +
-    'Returns device info, focus app, architecture, and capability alignment for both traces.\n\n' +
+    'Returns device info, focus app, architecture, capability alignment, and any UI pane mapping for both traces.\n\n' +
     'ALWAYS call this first in comparison mode to understand what you are comparing ' +
     'and confirm the traces are comparable (same app, compatible capabilities).',
     {},
     async () => {
       const ctx = comparisonContext!;
+      const currentPane = ctx.tracePairContext?.panes.find(pane => pane.traceSide === 'current');
+      const referencePane = ctx.tracePairContext?.panes.find(pane => pane.traceSide === 'reference');
       const text = JSON.stringify({
         success: true,
         current: {
           traceId,
+          paneSide: currentPane?.side,
+          visualState: currentPane?.visualState,
+          traceName: currentPane?.traceName,
           packageName: packageName || 'unknown',
           architecture: options.cachedArchitecture?.type || 'unknown',
           focusApps: options.cachedArchitecture ? undefined : 'detect with detect_architecture',
         },
         reference: {
           traceId: referenceTraceId,
+          paneSide: referencePane?.side,
+          visualState: referencePane?.visualState,
+          traceName: referencePane?.traceName,
           packageName: ctx.referencePackageName || 'unknown',
           architecture: ctx.referenceArchitecture?.type || 'unknown',
         },
+        tracePairContext: ctx.tracePairContext,
         packageAlignment: packageName && ctx.referencePackageName
           ? (packageName === ctx.referencePackageName ? 'same' : 'different')
           : 'unknown',
@@ -5681,6 +6852,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     registry.registerSdk(compareBaselines, 'compare_baselines', 'public');
     registry.registerSdk(recallProjectMemory, 'recall_project_memory', 'public');
     registry.registerSdk(recallSimilarCase, 'recall_similar_case', 'public');
+    registry.registerSdk(recallSimilarResult, 'recall_similar_result', 'public');
     if (writeAnalysisNote) registry.registerSdk(writeAnalysisNote, 'write_analysis_note', 'internal');
     if (fetchArtifact) registry.registerSdk(fetchArtifact, 'fetch_artifact', 'public');
     if (submitPlan) registry.registerSdk(submitPlan, 'submit_plan', 'internal');
@@ -5703,10 +6875,15 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     if (getComparisonContext) registry.registerSdk(getComparisonContext, 'get_comparison_context', 'internal');
   }
 
+  const allowedTools = registry.buildAllowedTools(toolRequestScope);
+  const toolDefinitions = registry.listForRequest(toolRequestScope);
+  runManifestAttributionSink?.recordToolAllowlist(
+    toolDefinitions.map(definition => definition.name),
+  );
   return {
     server: registry.buildSdkServer({scope: toolRequestScope}),
-    allowedTools: registry.buildAllowedTools(toolRequestScope),
-    toolDefinitions: registry.listForRequest(toolRequestScope),
+    allowedTools,
+    toolDefinitions,
   };
 }
 
@@ -5783,6 +6960,16 @@ function storeSqlResultArtifact(
     artifactId,
     artifactSummary: artifactStore.generateCompactSummary(artifactId),
   };
+}
+
+function updateSqlArtifactQueryReview(
+  artifactStore: ArtifactStore | undefined,
+  sqlArtifact: { artifactId: string; artifactSummary?: CompactArtifactSummary | undefined } | undefined,
+  queryReview: QueryReviewV1 | undefined,
+): void {
+  if (!artifactStore || !sqlArtifact || !queryReview) return;
+  artifactStore.updateQueryReview(sqlArtifact.artifactId, queryReview);
+  sqlArtifact.artifactSummary = artifactStore.generateCompactSummary(sqlArtifact.artifactId);
 }
 
 function stableSqlEvidenceRefId(
@@ -5884,13 +7071,37 @@ function emitSqlDataEnvelope(
   producer?: EvidenceProducerContext,
   processIdentityWarning?: string,
   artifactId?: string,
-): { evidenceRefId: string; queryHash: string } {
+  options?: {
+    durationMs?: number;
+    truncated?: boolean;
+    sqlRewrites?: string[];
+    toolName?: 'execute_sql' | 'execute_sql_on';
+    rowCount?: number;
+  },
+): { evidenceRefId: string; queryHash: string; queryReview?: QueryReviewV1 } {
   const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(sql, columns, rows, traceProvenance, producer);
+  const toolName = options?.toolName ?? 'execute_sql';
+  const queryReview = buildSqlQueryReview({
+    producerKind: toolName,
+    executableSql: sql,
+    outputColumns: columns.map((col: string) => ({ name: col, type: inferSqlColumnType(col) })),
+    traceProvenance,
+    producer,
+    evidenceRefId,
+    queryHash,
+    artifactId,
+    durationMs: options?.durationMs,
+    rowCount: options?.rowCount ?? rows.length,
+    truncated: options?.truncated,
+    sqlRewrites: options?.sqlRewrites,
+    stdlibInjectedModules,
+    processIdentityWarning,
+  });
   const envelope = createDataEnvelope(
     { columns, rows },
     {
       type: 'sql_result',
-      source: 'execute_sql',
+      source: toolName,
       title: `SQL Query (${rows.length} rows)`,
       layer: 'list',
       format: 'table',
@@ -5900,8 +7111,10 @@ function emitSqlDataEnvelope(
       })),
       evidenceRefId,
       traceSide: traceProvenance?.traceSide,
+      paneSide: traceProvenance?.paneSide,
       traceId: traceProvenance?.traceId,
       queryHash,
+      queryReview,
       ...producerEnvelopeOptions(producer),
       artifactId,
       sourceArtifactId: artifactId,
@@ -5918,13 +7131,14 @@ function emitSqlDataEnvelope(
       ...(stdlibInjectedModules?.length ? { stdlibInjectedModules } : {}),
       ...(traceProvenance ? {
         traceSide: traceProvenance.traceSide,
+        paneSide: traceProvenance.paneSide,
         traceId: traceProvenance.traceId,
         traceProvenance,
       } : {}),
     }],
     timestamp: Date.now(),
   });
-  return { evidenceRefId, queryHash };
+  return { evidenceRefId, queryHash, queryReview };
 }
 
 /** Emit a DataEnvelope for SQL summary-mode results. */
@@ -5937,7 +7151,13 @@ function emitSqlSummaryDataEnvelope(
   producer?: EvidenceProducerContext,
   processIdentityWarning?: string,
   artifactId?: string,
-): { evidenceRefId: string; queryHash: string } {
+  options?: {
+    durationMs?: number;
+    truncated?: boolean;
+    sqlRewrites?: string[];
+    toolName?: 'execute_sql' | 'execute_sql_on';
+  },
+): { evidenceRefId: string; queryHash: string; queryReview?: QueryReviewV1 } {
   const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(
     sql,
     summary.columns,
@@ -5946,6 +7166,24 @@ function emitSqlSummaryDataEnvelope(
     producer,
     'summary',
   );
+  const toolName = options?.toolName ?? 'execute_sql';
+  const queryReview = buildSqlQueryReview({
+    producerKind: toolName,
+    executableSql: sql,
+    outputColumns: summary.columns,
+    traceProvenance,
+    producer,
+    evidenceRefId,
+    queryHash,
+    artifactId,
+    durationMs: options?.durationMs,
+    rowCount: summary.totalRows,
+    truncated: options?.truncated,
+    sqlRewrites: options?.sqlRewrites,
+    stdlibInjectedModules,
+    processIdentityWarning,
+    title: `SQL Summary Review (${summary.totalRows} rows)`,
+  });
   const envelope = createDataEnvelope(
     {
       summary: {
@@ -5956,14 +7194,16 @@ function emitSqlSummaryDataEnvelope(
     },
     {
       type: 'sql_result',
-      source: 'execute_sql',
+      source: toolName,
       title: `SQL Summary (${summary.totalRows} rows)`,
       layer: 'overview',
       format: 'summary',
       evidenceRefId,
       traceSide: traceProvenance?.traceSide,
+      paneSide: traceProvenance?.paneSide,
       traceId: traceProvenance?.traceId,
       queryHash,
+      queryReview,
       ...producerEnvelopeOptions(producer),
       artifactId,
       sourceArtifactId: artifactId,
@@ -5980,19 +7220,21 @@ function emitSqlSummaryDataEnvelope(
       ...(stdlibInjectedModules?.length ? { stdlibInjectedModules } : {}),
       ...(traceProvenance ? {
         traceSide: traceProvenance.traceSide,
+        paneSide: traceProvenance.paneSide,
         traceId: traceProvenance.traceId,
         traceProvenance,
       } : {}),
     }],
     timestamp: Date.now(),
   });
-  return { evidenceRefId, queryHash };
+  return { evidenceRefId, queryHash, queryReview };
 }
 
 interface SqlFailureToolPayloadInput {
   error: string;
   trace?: string;
   traceSide?: TraceProcessorTraceSide;
+  paneSide?: TraceProcessorPaneSide;
   traceId?: string;
   traceProvenance: TraceProcessorQueryProvenance;
   sourceToolCallId?: string;
@@ -6008,10 +7250,32 @@ interface SqlFailureToolPayloadInput {
 
 function buildSqlFailureToolPayload(input: SqlFailureToolPayloadInput): Record<string, unknown> {
   const outputLanguage = input.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+  const queryReview = input.executableSql
+    ? buildSqlQueryReview({
+        producerKind: input.sourceToolCallId?.startsWith('execute_sql_on') ? 'execute_sql_on' : 'execute_sql',
+        executableSql: input.executableSql,
+        outputColumns: [],
+        traceProvenance: input.traceProvenance,
+        producer: {
+          sourceToolCallId: input.sourceToolCallId,
+          paramsHash: input.paramsHash,
+          planPhaseId: input.planPhaseId,
+        },
+        durationMs: input.durationMs,
+        rowCount: 0,
+        truncated: false,
+        sqlRewrites: input.sqlRewrites,
+        stdlibInjectedModules: input.stdlibInjectedModules,
+        processIdentityWarning: input.processIdentityWarning,
+        title: 'Failed SQL review',
+        purpose: `Review attempted SQL after execution failure: ${input.error}`,
+      })
+    : undefined;
   return {
     success: false,
     ...(input.trace ? { trace: input.trace } : {}),
     traceSide: input.traceSide,
+    paneSide: input.paneSide ?? input.traceProvenance.paneSide,
     traceId: input.traceId,
     traceProvenance: input.traceProvenance,
     columns: [],
@@ -6023,6 +7287,7 @@ function buildSqlFailureToolPayload(input: SqlFailureToolPayloadInput): Record<s
     paramsHash: input.paramsHash,
     planPhaseId: input.planPhaseId,
     executableSql: input.executableSql,
+    ...(queryReview ? { queryReview: compactQueryReviewForToolResponse(queryReview) } : {}),
     ...(input.sqlRewrites && input.sqlRewrites.length > 0 ? { sqlRewrites: input.sqlRewrites } : {}),
     stdlibInjectedModules: input.stdlibInjectedModules || [],
     ...(input.processIdentityWarning ? { processIdentityWarning: input.processIdentityWarning } : {}),
@@ -6062,11 +7327,18 @@ function emitSkillDataEnvelopes(
   traceProvenance?: TraceProcessorQueryProvenance,
   producer?: EvidenceProducerContext,
   identityResolution?: IdentityResolutionV1,
-  artifactIdsByStepId?: Map<string, string>,
+  artifactIdsByDisplayIndex?: ReadonlyArray<string | undefined>,
+  queryReviewsByDisplayIndex?: ReadonlyArray<QueryReviewV1 | undefined>,
+  evidenceSourceDisplayResults?: SkillDisplayResult[],
 ): void {
   const envelopes = displayResults
-    .filter(dr => Boolean(dr.data))
-    .map(dr => {
+    .map((dr, index) => ({
+      displayIndex: index,
+      displayResult: dr,
+      evidenceSource: evidenceSourceDisplayResults?.[index] ?? dr,
+    }))
+    .filter(({displayResult}) => Boolean(displayResult.data))
+    .map(({displayIndex, displayResult: dr, evidenceSource}) => {
       const explicitColumns = (dr as any).columnDefinitions;
       const drForEnvelope = {
         ...(dr as any),
@@ -6078,13 +7350,21 @@ function emitSkillDataEnvelopes(
       const evidenceRefId = stableSkillEvidenceRefId(
         skillId,
         envelope.meta.stepId,
-        envelope.display.title,
-        envelope.data,
+        evidenceSource.title,
+        evidenceSource.data,
         traceProvenance,
         producer,
       );
-      const artifactId = envelope.meta.stepId
-        ? artifactIdsByStepId?.get(envelope.meta.stepId)
+      const artifactId = artifactIdsByDisplayIndex?.[displayIndex];
+      const queryReview = envelope.meta.stepId
+        ? queryReviewsByDisplayIndex?.[displayIndex] ?? buildSkillQueryReview({
+            skillId,
+            displayResult: evidenceSource,
+            traceProvenance,
+            producer,
+            artifactId,
+            evidenceRefId,
+          })
         : undefined;
       const withEvidence = {
         ...envelope,
@@ -6092,8 +7372,10 @@ function emitSkillDataEnvelopes(
           ...envelope.meta,
           evidenceRefId,
           traceSide: traceProvenance?.traceSide,
+          paneSide: traceProvenance?.paneSide,
           traceId: traceProvenance?.traceId,
           ...(artifactId ? { artifactId, sourceArtifactId: artifactId } : {}),
+          ...(queryReview ? { queryReview } : {}),
           ...(identityResolution ? {
             identityRefId: identityResolution.identityRefId,
             identityStatus: identityResolution.status,
@@ -6108,6 +7390,7 @@ function emitSkillDataEnvelopes(
         ? {
           ...withEvidence,
           traceSide: traceProvenance.traceSide,
+          paneSide: traceProvenance.paneSide,
           traceId: traceProvenance.traceId,
           traceProvenance,
         }

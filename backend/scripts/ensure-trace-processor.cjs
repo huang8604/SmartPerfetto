@@ -163,19 +163,19 @@ function runVersionSmoke(filePath) {
   });
 }
 
-function resolveDownloadUrl(pins, platform) {
+function resolveDownloadUrl(pins, platform, env = process.env) {
   const version = pins.PERFETTO_VERSION;
   const defaultUrlBase = pins.PERFETTO_LUCI_URL_BASE;
   if (!version || !defaultUrlBase) {
     throw new Error(`Missing PERFETTO_VERSION or PERFETTO_LUCI_URL_BASE in ${pinFile}`);
   }
 
-  const exactUrl = process.env.TRACE_PROCESSOR_DOWNLOAD_URL;
+  const exactUrl = env.TRACE_PROCESSOR_DOWNLOAD_URL;
   if (exactUrl) {
     return { version, url: exactUrl };
   }
 
-  const urlBase = process.env.TRACE_PROCESSOR_DOWNLOAD_BASE || defaultUrlBase;
+  const urlBase = env.TRACE_PROCESSOR_DOWNLOAD_BASE || defaultUrlBase;
   const executableName = platform.startsWith('windows-') ? 'trace_processor_shell.exe' : 'trace_processor_shell';
   return { version, url: `${urlBase.replace(/\/+$/, '')}/${version}/${platform}/${executableName}` };
 }
@@ -195,26 +195,42 @@ function formatDownloadHelp(url) {
   ].join('\n');
 }
 
-async function main() {
+async function main(env = process.env) {
+  const configuredPath = env.TRACE_PROCESSOR_PATH?.trim();
+  if (configuredPath) {
+    const customPath = path.resolve(configuredPath);
+    if (!fs.existsSync(customPath)) {
+      throw new Error(`TRACE_PROCESSOR_PATH does not exist: ${customPath}`);
+    }
+    if (!isExecutable(customPath)) {
+      throw new Error(
+        `TRACE_PROCESSOR_PATH is not executable: ${customPath}. ` +
+        'Fix its permissions explicitly; SmartPerfetto will not modify a custom binary.'
+      );
+    }
+    // TRACE_PROCESSOR_PATH is a user-owned runtime override. It is intentionally
+    // not compared with the SmartPerfetto pin and is never a download target.
+    await runVersionSmoke(customPath);
+    return { path: customPath, source: 'custom' };
+  }
+
   const pins = parsePinFile(pinFile);
   const { platform, sha256, prebuiltKey } = getPlatformAndSha(pins);
   const prebuiltPath = getPrebuiltPath(prebuiltKey);
-  const outputPath = process.env.TRACE_PROCESSOR_PATH
-    ? path.resolve(process.env.TRACE_PROCESSOR_PATH)
-    : prebuiltPath && fs.existsSync(prebuiltPath)
-      ? prebuiltPath
-      : defaultOutput;
+  const outputPath = prebuiltPath && fs.existsSync(prebuiltPath)
+    ? prebuiltPath
+    : defaultOutput;
 
   if (fs.existsSync(outputPath)) {
     const actual = sha256File(outputPath);
     if (actual === sha256 && isExecutable(outputPath)) {
       await runVersionSmoke(outputPath);
-      return;
+      return { path: outputPath, source: 'pinned' };
     }
     console.log('Existing trace_processor_shell does not match the pinned binary; replacing it.');
   }
 
-  const { version, url } = resolveDownloadUrl(pins, platform);
+  const { version, url } = resolveDownloadUrl(pins, platform, env);
   const tmpSuffix = platform.startsWith('windows-') ? '.exe' : '';
   const tmpPath = path.join(os.tmpdir(), `smartperfetto-trace_processor_shell-${process.pid}-${Date.now()}${tmpSuffix}`);
 
@@ -236,9 +252,21 @@ async function main() {
   fs.renameSync(tmpPath, outputPath);
   fs.chmodSync(outputPath, 0o755);
   await runVersionSmoke(outputPath);
+  return { path: outputPath, source: 'downloaded' };
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  getPlatformAndSha,
+  isExecutable,
+  main,
+  parsePinFile,
+  resolveDownloadUrl,
+  sha256File,
+};

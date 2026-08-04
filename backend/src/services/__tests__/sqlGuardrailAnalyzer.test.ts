@@ -169,6 +169,82 @@ describe('sqlGuardrailAnalyzer', () => {
     expect(issues.filter(issue => issue.ruleId === 'span-join-safety').length).toBeGreaterThanOrEqual(1);
   });
 
+  it('detects mismatched SPAN_JOIN partition keys', () => {
+    const issues = analyzeSqlGuardrails(`
+      DROP TABLE IF EXISTS joined;
+      -- perfetto-span-join-non-overlap-proof: assertion inputs-are-disjoint
+      CREATE VIRTUAL TABLE joined
+      USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED upid);
+    `);
+
+    expect(issues.filter(issue => issue.ruleId === 'span-join-safety')).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining('same partition key'),
+      }),
+    ]);
+  });
+
+  it('requires an explicit non-overlap proof for an otherwise safe SPAN_JOIN setup', () => {
+    const issues = analyzeSqlGuardrails(`
+      DROP TABLE IF EXISTS joined;
+      CREATE VIRTUAL TABLE joined
+      USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED utid);
+    `);
+
+    expect(issues.filter(issue => issue.ruleId === 'span-join-non-overlap')).toEqual([
+      expect.objectContaining({
+        snippet: 'USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED utid);',
+      }),
+    ]);
+  });
+
+  it('accepts a non-empty adjacent SPAN_JOIN proof reference', () => {
+    const issues = analyzeSqlGuardrails(`
+      DROP TABLE IF EXISTS joined;
+      -- perfetto-span-join-non-overlap-proof: fixture span-join-inputs-no-overlap
+      CREATE VIRTUAL TABLE joined
+      USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED utid);
+    `);
+
+    expect(issues.some(issue => issue.ruleId === 'span-join-non-overlap')).toBe(false);
+  });
+
+  it('does not treat empty, non-adjacent, or literal proof markers as evidence', () => {
+    const issues = analyzeSqlGuardrails(`
+      SELECT 'perfetto-span-join-non-overlap-proof: literal' AS note;
+      -- perfetto-span-join-non-overlap-proof:
+      -- unrelated comment breaks adjacency
+      DROP TABLE IF EXISTS joined;
+      CREATE VIRTUAL TABLE joined
+      USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED utid);
+    `);
+
+    expect(issues.some(issue => issue.ruleId === 'span-join-non-overlap')).toBe(true);
+  });
+
+  it('requires a proof reference for every SPAN_JOIN statement', () => {
+    const issues = analyzeSqlGuardrails(`
+      DROP TABLE IF EXISTS first_join;
+      -- perfetto-span-join-non-overlap-proof: assertion first-inputs
+      CREATE VIRTUAL TABLE first_join
+      USING SPAN_JOIN(a PARTITIONED utid, b PARTITIONED utid);
+
+      DROP TABLE IF EXISTS second_join;
+      CREATE VIRTUAL TABLE second_join
+      USING SPAN_JOIN(c PARTITIONED upid, d PARTITIONED upid);
+    `);
+
+    expect(issues.filter(issue => issue.ruleId === 'span-join-non-overlap')).toEqual([
+      expect.objectContaining({
+        snippet: 'USING SPAN_JOIN(c PARTITIONED upid, d PARTITIONED upid);',
+      }),
+    ]);
+  });
+
+  it('includes SPAN_JOIN non-overlap proof in default validation', () => {
+    expect(DEFAULT_VALIDATE_SQL_GUARDRAIL_RULES).toContain('span-join-non-overlap');
+  });
+
   it('detects non-idempotent create statements but accepts IF NOT EXISTS', () => {
     const unsafe = analyzeSqlGuardrails('CREATE VIEW _gc_events AS SELECT * FROM slice;');
     const safe = analyzeSqlGuardrails('CREATE VIEW IF NOT EXISTS _gc_events AS SELECT * FROM slice;');

@@ -26,6 +26,37 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 
 智能模式会先返回“场景盘点”，按时间顺序列出 trace 中识别到的启动、滑动、点击、导航、设备状态、ANR 等场景，并显示可深钻的范围按钮。选择“全部”或某一类场景后，才会进入对应的启动/滑动/点击等深钻分析。
 
+## Agent 辅助外部反馈
+
+如果完成结果下方出现“可能值得反馈或贡献”的提示：
+
+1. 点击 **让 Agent 帮我判断是否应反馈**。
+2. 查看 Agent 的判断、影响面、贡献类型和缺失证据。
+3. 回答必答问题，并人工检查待公开内容。
+4. 勾选敏感信息复核后生成 GitHub 草稿。
+5. 在草稿预览中再次检查，最后手动打开并提交 GitHub Issue。
+
+系统不会自动提交，也不会把这次操作自动变成勾/叉 feedback 或 Self-Evolution
+提案。private/code-aware 结果不开放公开反馈；安全问题只走 private advisory。
+详见 [Agent 辅助 GitHub 反馈](agent-assisted-feedback.md)。
+
+## Self-Evolution 管理流程
+
+Self-Evolution 默认关闭，不影响上面的分析步骤。完成公开分析后，普通用户可以使用
+勾/叉反馈；有权限的管理员可进入 **AI Assistant Settings → 自进化 / Evolution**
+查看状态并显式启动策展。
+
+控制台中的标准顺序是：
+
+```text
+策展 -> gate -> 检查 before/after 与证据 -> accept/reject
+     -> 可选 export -> apply -> 新分析验证 -> revert
+```
+
+没有足够有效公开反馈时，“无提案”是正常结果。private feedback 不会进入策展；
+apply/revert 还要求部署者启用专用开关和包外持久化目录。完整权限、故障与验收步骤见
+[Self-Evolution 使用与验收](self-evolution.md)。
+
 ## 常见问题模板
 
 ```text
@@ -38,6 +69,23 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 对比一下另外一份
 对比 AR-1234abcd
 ```
+
+## Raw Trace 实时对比
+
+如果要在同一个对话里直接查询两条 raw trace，点击 AI Assistant 顶部的
+`compare_arrows`，打开 current + reference 双窗并选择一条 workspace 历史 Trace。
+之后可以说“对比当前 trace 和参考 trace”或按当前布局说“左边/右边、上面/下面”。
+
+双窗只支持当前页面 current trace 加一条历史 reference，不支持任意两个历史 Trace。
+退出视觉双窗后可以保留 current/reference AI 上下文；“退出对比”才会清空 reference。
+CLI 的等价入口是：
+
+```bash
+smp compare current.pftrace reference.pftrace \
+  --query "对比启动和滑动差异" --mode full
+```
+
+完整交互状态见 [双 Trace 工作区](../architecture/dual-trace-workspace.md)。
 
 ## 多 Trace 分析结果对比
 
@@ -57,7 +105,8 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 | 完整 | 启动、滑动、ANR、复杂渲染根因 | 只问一个简单事实时成本偏高 |
 | 智能 | 混合脚本 trace、需要先看场景再决定深钻范围 | 明确只想直接分析单一场景时不如选择完整模式加具体问题 |
 
-fast 模式默认 50 turns。重型 Skill 可能返回较大的 JSON，仍可能耗尽 turns；复杂性能分析建议直接使用 full。
+fast 模式默认 50 turns，可由 runtime-specific quick-turn 配置覆盖。重型 Skill
+仍可能耗尽 turns；复杂性能分析建议直接使用 full。
 
 ## 选区与追问
 
@@ -69,6 +118,41 @@ fast 模式默认 50 turns。重型 Skill 可能返回较大的 JSON，仍可能
 ```
 
 多轮追问会复用 session。切换 fast/full/auto 模式会开启新的 SDK session，避免轻量上下文和完整上下文混用。
+
+## 源码与 Android Internals 背景
+
+- 要把 trace 结论映射到本机源码，先在 UI `Codebases` 或 CLI
+  `smp codebase preview/register/reindex` 注册，再在本次分析显式选择 codebase。
+- 内置 Android Internals Knowledge Pack 随产品分发；用
+  `smp knowledge-pack status` 查看版本，用 `update --check` 只检查更新。
+- 私有 Android Internals checkout 与内置 Pack 不同，必须配置路径 allowlist、
+  权利确认、provider 同意，并在请求中选择 source id。
+
+源码和知识背景都不能替代当前 trace 的 SQL/Skill 证据。Code-Aware 默认只给模型
+`CodeRef`；完整边界见 [Code-Aware](code-aware-analysis.md) 和
+[Android Internals 知识](android-internals-knowledge.md)。
+
+## CLI Batch 与 Android Capture
+
+确定性批处理不需要 LLM：
+
+```bash
+smp batch skill startup_analysis launch-a.pftrace launch-b.pftrace \
+  --json-out batch.json --out batch.html
+```
+
+Android 采集先生成无副作用建议/配置，再连接设备抓取：
+
+```bash
+smp capture suggest "分析 Camera 打开到首帧预览延迟" \
+  --app com.example.camera
+smp capture config --preset camera --app com.example.camera \
+  --duration 20 --out camera.pbtxt
+smp capture android --config camera.pbtxt --out camera.perfetto-trace
+```
+
+`suggest` / `config` 不会访问设备；只有 `capture android` 会通过 adb/tracebox
+实际采集。命令、平台和 `--analyze` 边界见 [CLI 参考](../reference/cli.md)。
 
 ## 输出怎么看
 

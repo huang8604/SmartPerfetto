@@ -90,6 +90,76 @@ describe('toolNarration', () => {
     expect(text).toContain('实际帧时间线');
   });
 
+  it('describes comparison tools with pane labels when trace pair context exists', () => {
+    const tracePairContext = {
+      schemaVersion: 1 as const,
+      layout: 'horizontal' as const,
+      primarySide: 'left' as const,
+      referenceSide: 'right' as const,
+      panes: [
+        {side: 'left' as const, traceSide: 'current' as const, traceId: 'trace-a'},
+        {side: 'right' as const, traceSide: 'reference' as const, traceId: 'trace-b'},
+      ],
+    };
+    const sqlText = formatToolCallNarration(
+      'execute_sql_on',
+      {
+        trace: 'reference',
+        sql: 'SELECT COUNT(*) FROM actual_frame_timeline_slice',
+      },
+      'zh-CN',
+      {tracePairContext},
+    );
+    const skillText = formatToolCallNarration(
+      'compare_skill',
+      {
+        skillId: 'scrolling_analysis',
+        params: {process_name: 'com.example'},
+      },
+      'zh-CN',
+      {tracePairContext},
+    );
+
+    expect(sqlText).toContain('右侧/参考 Trace');
+    expect(skillText).toContain('左侧/当前 Trace 和 右侧/参考 Trace');
+  });
+
+  it('describes comparison tools with English pane labels when requested', () => {
+    const tracePairContext = {
+      schemaVersion: 1 as const,
+      layout: 'vertical' as const,
+      primarySide: 'top' as const,
+      referenceSide: 'bottom' as const,
+      panes: [
+        {side: 'top' as const, traceSide: 'current' as const, traceId: 'trace-a'},
+        {side: 'bottom' as const, traceSide: 'reference' as const, traceId: 'trace-b'},
+      ],
+    };
+    const sqlText = formatToolCallNarration(
+      'execute_sql_on',
+      {
+        trace: 'reference',
+        sql: 'SELECT COUNT(*) FROM actual_frame_timeline_slice',
+      },
+      'en',
+      {tracePairContext},
+    );
+    const skillText = formatToolCallNarration(
+      'compare_skill',
+      {
+        skillId: 'startup_analysis',
+        params: {process_name: 'com.example'},
+      },
+      'en',
+      {tracePairContext},
+    );
+
+    expect(sqlText).toContain('bottom pane/reference trace');
+    expect(sqlText).toContain('actual frame timeline');
+    expect(skillText).toContain('top pane/current trace and bottom pane/reference trace');
+    expect(skillText).toContain('params: process_name=com.example');
+  });
+
   it('describes SQL intent from comments and query shape', () => {
     const comment = formatToolCallNarration('execute_sql', {
       sql: `
@@ -112,7 +182,8 @@ describe('toolNarration', () => {
     });
 
     expect(text).toContain('对比 Skill scrolling_analysis');
-    expect(text).toContain('当前 Trace 和参考 Trace');
+    expect(text).toContain('当前 Trace');
+    expect(text).toContain('参考 Trace');
     expect(text).toContain('统计滑动会话');
     expect(text).toContain('process_name=com.example');
   });

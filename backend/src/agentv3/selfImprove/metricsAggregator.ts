@@ -13,18 +13,39 @@
  * so a single corrupt file doesn't take the dashboard down. The endpoint is
  * intentionally read-only — no side effects, no implicit migrations.
  *
- * See docs/architecture/self-improving-design.md §16 (testing strategy) — these counts
+ * See docs/architecture/self-improving-design.md "运维入口" — these counts
  * power both the dashboard and the trend regression suite.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { openReviewOutbox } from './reviewOutbox';
-import { openSupersedeStore, type SupersedeState } from './supersedeStore';
+import { openReviewOutboxReadOnly } from './reviewOutbox';
+import {
+  openSupersedeStoreReadOnly,
+  type SupersedeState,
+} from './supersedeStore';
 import { runSnapshots } from './strategyFingerprint';
 import type { JobState } from './reviewOutbox';
 import type { AnalysisPatternEntry, NegativePatternEntry, PatternStatus } from '../types';
 import { backendLogPath } from '../../runtimePaths';
+import {
+  getSelfEvolutionLifecycleSnapshot,
+} from '../../services/selfEvolution/selfEvolutionLifecycle';
+import {
+  collectSelfEvolutionAdminOperationalMetrics,
+} from '../../services/selfEvolution/selfEvolutionAdminRuntime';
+import type {
+  SelfEvolutionLifecycleSnapshot,
+  SelfEvolutionMetrics,
+} from '../../types/selfEvolution';
+import {
+  FeedbackEventStore,
+  publicFeedbackIndexPath,
+} from '../../services/selfEvolution/feedbackEventStore';
+import {
+  resolveKnowledgeScope,
+  type KnowledgeScope,
+} from '../../services/scopedKnowledgeStore';
 
 const PATTERNS_FILE = backendLogPath('analysis_patterns.json');
 const NEGATIVE_PATTERNS_FILE = backendLogPath('analysis_negative_patterns.json');
@@ -51,6 +72,10 @@ export interface FeedbackMetrics {
   negative: number;
 }
 
+export type SelfEvolutionOperationalMetrics = ReturnType<
+  typeof collectSelfEvolutionAdminOperationalMetrics
+>;
+
 export interface SelfImproveMetrics {
   collectedAt: number;
   patterns: {
@@ -67,6 +92,9 @@ export interface SelfImproveMetrics {
   feedback: FeedbackMetrics;
   /** Active analyze() snapshots — surfaced so memory leaks are visible. */
   activeRunSnapshots: number;
+  selfEvolution: SelfEvolutionMetrics & {
+    operational: SelfEvolutionOperationalMetrics | null;
+  };
   /** Errors that happened during aggregation. Empty array on a clean run. */
   warnings: string[];
 }
@@ -76,8 +104,15 @@ export function collectSelfImproveMetrics(opts: {
   negativePatternsFile?: string;
   quickPatternsFile?: string;
   feedbackFile?: string;
+  feedbackStore?: Pick<FeedbackEventStore, 'effectiveStats' | 'close'>;
+  knowledgeScope?: KnowledgeScope;
   skillNotesDir?: string;
   curatedSkillNotesDir?: string;
+  reviewOutboxDbPath?: string;
+  supersedeDbPath?: string;
+  selfEvolutionSnapshot?: SelfEvolutionLifecycleSnapshot;
+  selfEvolutionOperationalMetrics?:
+    () => SelfEvolutionOperationalMetrics;
 } = {}): SelfImproveMetrics {
   const warnings: string[] = [];
 
@@ -85,24 +120,43 @@ export function collectSelfImproveMetrics(opts: {
   const negatives = readJson<NegativePatternEntry>(opts.negativePatternsFile ?? NEGATIVE_PATTERNS_FILE, warnings);
   const quicks = readJson<AnalysisPatternEntry>(opts.quickPatternsFile ?? QUICK_PATTERNS_FILE, warnings);
 
-  const outbox = safeOpen(() => openReviewOutbox(), warnings, 'outbox');
-  const outboxByState = outbox?.countByState() ?? { pending: 0, leased: 0, done: 0, failed: 0 };
-  const outboxDaily = outbox?.dailyJobCount() ?? 0;
-  outbox?.close();
+  const outboxMetrics = readStore(
+    () => openReviewOutboxReadOnly({dbPath: opts.reviewOutboxDbPath}),
+    (outbox) => ({
+      byState: outbox.countByState(),
+      dailyJobs: outbox.dailyJobCount(),
+    }),
+    {
+      byState: {pending: 0, leased: 0, done: 0, failed: 0},
+      dailyJobs: 0,
+    },
+    warnings,
+    'outbox',
+  );
 
-  const supersede = safeOpen(() => openSupersedeStore(), warnings, 'supersede');
-  const supersedeCounts = supersede?.countByState() ?? {
-    pending_review: 0, active_canary: 0, active: 0,
-    failed: 0, rejected: 0, drifted: 0, reverted: 0,
-  };
-  supersede?.close();
+  const supersedeCounts = readStore(
+    () => openSupersedeStoreReadOnly({dbPath: opts.supersedeDbPath}),
+    (supersede) => supersede.countByState(),
+    {
+      pending_review: 0, active_canary: 0, active: 0,
+      failed: 0, rejected: 0, drifted: 0, reverted: 0,
+    },
+    warnings,
+    'supersede',
+  );
 
   const skillNotes = countSkillNotes(
     opts.skillNotesDir ?? SKILL_NOTES_DIR,
     opts.curatedSkillNotesDir ?? CURATED_SKILL_NOTES_DIR,
     warnings,
   );
-  const feedback = countFeedback(opts.feedbackFile ?? FEEDBACK_FILE, warnings);
+  const feedback = opts.feedbackFile
+    ? countFeedback(opts.feedbackFile, warnings)
+    : countEffectiveFeedback(
+        opts.feedbackStore,
+        opts.knowledgeScope,
+        warnings,
+      );
 
   return {
     collectedAt: Date.now(),
@@ -111,12 +165,103 @@ export function collectSelfImproveMetrics(opts: {
       negative: bucketByStatus(negatives),
       quick: bucketByStatus(quicks),
     },
-    outbox: { byState: outboxByState, dailyJobs: outboxDaily },
+    outbox: outboxMetrics,
     supersede: supersedeCounts,
     skillNotes,
     feedback,
     activeRunSnapshots: runSnapshots.size(),
+    selfEvolution: {
+      ...selfEvolutionMetrics(
+        opts.selfEvolutionSnapshot ?? getSelfEvolutionLifecycleSnapshot(),
+      ),
+      operational: readSelfEvolutionOperationalMetrics(
+        opts.selfEvolutionOperationalMetrics,
+        opts.knowledgeScope,
+        warnings,
+      ),
+    },
     warnings,
+  };
+}
+
+function readSelfEvolutionOperationalMetrics(
+  injected: (() => SelfEvolutionOperationalMetrics) | undefined,
+  knowledgeScope: KnowledgeScope | undefined,
+  warnings: string[],
+): SelfEvolutionOperationalMetrics | null {
+  try {
+    if (injected) return injected();
+    const scope = resolveKnowledgeScope(knowledgeScope);
+    return collectSelfEvolutionAdminOperationalMetrics({
+      tenantId: scope.tenantId,
+      workspaceId: scope.workspaceId,
+    });
+  } catch (error) {
+    warnings.push(
+      `failed to read self-evolution operations: ${
+        (error as Error).message
+      }`,
+    );
+    return null;
+  }
+}
+
+function countEffectiveFeedback(
+  injectedStore: Pick<FeedbackEventStore, 'effectiveStats' | 'close'> | undefined,
+  knowledgeScope: KnowledgeScope | undefined,
+  warnings: string[],
+): FeedbackMetrics {
+  if (!injectedStore && !fs.existsSync(publicFeedbackIndexPath())) {
+    return countFeedback(FEEDBACK_FILE, warnings);
+  }
+  let store = injectedStore;
+  const close = !store;
+  try {
+    if (!store) {
+      const scope = resolveKnowledgeScope(knowledgeScope);
+      store = new FeedbackEventStore({
+        scope: {
+          tenantId: scope.tenantId,
+          workspaceId: scope.workspaceId,
+        },
+      });
+    }
+    const stats = store.effectiveStats();
+    return {
+      total: stats.totalPositive + stats.totalNegative,
+      positive: stats.totalPositive,
+      negative: stats.totalNegative,
+    };
+  } catch (err) {
+    warnings.push(`failed to read effective feedback: ${(err as Error).message}`);
+    return {total: 0, positive: 0, negative: 0};
+  } finally {
+    if (close) {
+      try { store?.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+function selfEvolutionMetrics(
+  snapshot: SelfEvolutionLifecycleSnapshot,
+): SelfEvolutionMetrics {
+  return {
+    requested: {...snapshot.requestedConfig},
+    effective: {...snapshot.effectiveConfig},
+    persistence: snapshot.persistence.persistence,
+    ...(snapshot.persistence.reason
+      ? {persistenceReason: snapshot.persistence.reason}
+      : {}),
+    migration: snapshot.migration.status,
+    ...(snapshot.migration.errorCode
+      ? {migrationErrorCode: snapshot.migration.errorCode}
+      : {}),
+    buildIdentityState: snapshot.buildIdentityState.status,
+    currentBuildIdentity: snapshot.currentBuildIdentity,
+    lastReconciledBuildIdentity:
+      snapshot.buildIdentityState.record?.lastReconciledBuildIdentity ?? null,
+    warnings: [...snapshot.warnings],
+    errors: [...snapshot.errors],
   };
 }
 
@@ -131,12 +276,26 @@ function readJson<T>(file: string, warnings: string[]): T[] {
   }
 }
 
-function safeOpen<T>(fn: () => T, warnings: string[], label: string): T | null {
+function readStore<TStore extends {close(): void}, TResult>(
+  open: () => TStore | null,
+  read: (store: TStore) => TResult,
+  fallback: TResult,
+  warnings: string[],
+  label: string,
+): TResult {
+  let store: TStore | null = null;
   try {
-    return fn();
+    store = open();
+    return store ? read(store) : fallback;
   } catch (err) {
-    warnings.push(`failed to open ${label}: ${(err as Error).message}`);
-    return null;
+    warnings.push(`failed to read ${label}: ${(err as Error).message}`);
+    return fallback;
+  } finally {
+    try {
+      store?.close();
+    } catch (err) {
+      warnings.push(`failed to close ${label}: ${(err as Error).message}`);
+    }
   }
 }
 

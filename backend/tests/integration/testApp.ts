@@ -24,6 +24,11 @@ import {
 
 // Import services
 import { TraceProcessorService, getTraceProcessorService } from '../../src/services/traceProcessorService';
+import { resolveTraceCase } from '../../src/utils/traceCorpus';
+import {
+  deleteTraceMetadata,
+  writeTraceMetadata,
+} from '../../src/services/traceMetadataStore';
 
 // =============================================================================
 // Test App Factory
@@ -82,7 +87,7 @@ export function createTestApp() {
  * Load a test trace file and return its traceId
  */
 export async function loadTestTrace(traceName: string): Promise<string> {
-  const tracePath = path.resolve(process.cwd(), '..', 'test-traces', traceName);
+  const tracePath = resolveTraceCase(traceName);
 
   if (!fs.existsSync(tracePath)) {
     throw new Error(`Test trace not found: ${tracePath}`);
@@ -90,6 +95,18 @@ export async function loadTestTrace(traceName: string): Promise<string> {
 
   const traceProcessorService = getTraceProcessorService();
   const traceId = await traceProcessorService.loadTraceFromFilePath(tracePath);
+  const stat = fs.statSync(tracePath);
+  await writeTraceMetadata({
+    id: traceId,
+    filename: path.basename(tracePath),
+    size: stat.size,
+    uploadedAt: new Date().toISOString(),
+    status: 'ready',
+    path: tracePath,
+    tenantId: 'default-dev-tenant',
+    workspaceId: 'default-workspace',
+    userId: 'dev-user-123',
+  });
 
   console.log(`[TestApp] Loaded trace ${traceName} with ID: ${traceId}`);
   return traceId;
@@ -102,6 +119,7 @@ export async function cleanupTrace(traceId: string): Promise<void> {
   try {
     const traceProcessorService = getTraceProcessorService();
     await traceProcessorService.deleteTrace(traceId);
+    await deleteTraceMetadata(traceId);
     console.log(`[TestApp] Cleaned up trace: ${traceId}`);
   } catch (e) {
     // Ignore cleanup errors
@@ -112,7 +130,7 @@ export async function cleanupTrace(traceId: string): Promise<void> {
  * Get test trace path
  */
 export function getTestTracePath(traceName: string): string {
-  return path.resolve(process.cwd(), '..', 'test-traces', traceName);
+  return resolveTraceCase(traceName);
 }
 
 /**

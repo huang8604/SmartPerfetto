@@ -14,6 +14,7 @@
 import { TraceProcessorService } from './traceProcessorService';
 import { SqlKnowledgeBase, createKnowledgeBase, getExtendedKnowledgeBase, ExtendedSqlKnowledgeBase } from './sqlKnowledgeBase';
 import { EnhancedSQLTemplateEngine, getEnhancedSQLTemplateEngine } from './sqlTemplateEngine';
+import logger from '../utils/logger';
 import {
   PerfettoSkillType,
   type DetectedIntent,
@@ -1164,7 +1165,7 @@ ORDER BY s.ts ASC;
       ORDER BY s.ts ASC
     `;
 
-    console.log('[PerfettoSqlSkill] analyzeStartupFromSlices SQL (truncated):', sql.substring(0, 400));
+    logger.sql('PerfettoSqlSkill.analyzeStartupFromSlices', sql);
     const queryResult = await this.traceProcessor.query(traceId, sql);
 
     if (queryResult.error) {

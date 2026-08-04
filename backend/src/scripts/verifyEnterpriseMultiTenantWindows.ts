@@ -85,17 +85,17 @@ export interface EnterpriseWindowRegressionReport {
 }
 
 const DEFAULT_TRACE_CANDIDATES = [
-  '../test-traces/launch_light.pftrace',
-  'test-traces/launch_light.pftrace',
-  '../test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
-  'test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
+  '../Trace/real/android-startup-light/trace.pftrace',
+  'Trace/real/android-startup-light/trace.pftrace',
+  '../Trace/real/android-scroll-standard/trace.pftrace',
+  'Trace/real/android-scroll-standard/trace.pftrace',
 ];
 
 function printUsage(): void {
   console.log('Usage: npx tsx src/scripts/verifyEnterpriseMultiTenantWindows.ts [options]');
   console.log('');
   console.log('Options:');
-  console.log('  --trace <path>         Fixture trace path. Defaults to launch_light from test-traces.');
+  console.log('  --trace <path>         Fixture trace path. Defaults to the cataloged android-startup-light case.');
   console.log('  --upload-root <path>   Temporary upload root. Defaults to an OS temp dir.');
   console.log('  --output <path>        JSON report path. Defaults to backend/test-output.');
   console.log('  --long-sql-ms <ms>     Simulated long SQL window for D2 (default: 100).');

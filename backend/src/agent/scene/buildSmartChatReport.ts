@@ -14,41 +14,31 @@ import type {
   SceneReport,
 } from './types';
 import { selectAnalysisEligibleScenes } from './sceneIntervalBuilder';
-
-const SCENE_LABELS: Record<string, string> = {
-  cold_start: '冷启动',
-  warm_start: '温启动',
-  hot_start: '热启动',
-  scroll: '滑动',
-  scroll_start: '滑动开始',
-  inertial_scroll: '惯性滑动',
-  tap: '点击',
-  long_press: '长按',
-  screen_unlock: '解锁',
-  back_key: 'Back',
-  home_key: 'Home',
-  recents_key: 'Recents',
-  navigation: '导航',
-  window_transition: '窗口切换',
-  anr: 'ANR',
-  jank_region: '严重卡顿',
-  screen_on: '亮屏',
-  screen_off: '熄屏',
-  screen_sleep: '息屏',
-  idle: '空闲',
-};
+import {
+  DEFAULT_OUTPUT_LANGUAGE,
+  localize,
+  type OutputLanguage,
+} from '../../agentv3/outputLanguage';
+import {
+  displaySceneType,
+  projectDisplayedScene,
+  projectSceneVerification,
+} from './scenePresentation';
+import {renderRequiredLocalizedStrategyTemplate} from '../../agentv3/localizedStrategyTemplate';
 
 export function buildSmartChatReport(input: {
   sessionId: string;
   report: SceneReport;
   totalDurationMs?: number;
+  outputLanguage?: OutputLanguage;
 }): AgentRuntimeAnalysisResult {
   const { sessionId, report } = input;
+  const outputLanguage = input.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
   const completedJobs = report.jobs.filter(job => job.state === 'completed');
   const failedJobs = report.jobs.filter(job => job.state === 'failed');
   const analyzedSceneIds = new Set(completedJobs.map(job => job.interval.displayedSceneId));
-  const conclusion = buildConclusionMarkdown(report, completedJobs, failedJobs);
-  const findings = buildFindings(report, completedJobs, failedJobs);
+  const conclusion = buildConclusionMarkdown(report, completedJobs, failedJobs, outputLanguage);
+  const findings = buildFindings(report, completedJobs, failedJobs, outputLanguage);
   const confidence = report.partialReport ? 0.68 : Math.min(0.9, 0.72 + completedJobs.length * 0.02);
 
   return {
@@ -57,14 +47,23 @@ export function buildSmartChatReport(input: {
     findings,
     hypotheses: [],
     conclusion,
-    conclusionContract: buildConclusionContract(report, completedJobs, analyzedSceneIds),
+    conclusionContract: buildConclusionContract(
+      report,
+      completedJobs,
+      analyzedSceneIds,
+      outputLanguage,
+    ),
     confidence,
     rounds: 1,
     totalDurationMs: input.totalDurationMs ?? report.totalDurationMs,
     partial: report.partialReport || failedJobs.length > 0 ? true : undefined,
     terminationReason: report.partialReport ? 'execution_error' : undefined,
     terminationMessage: report.partialReport
-      ? '智能分析已生成可用报告，但部分场景深钻失败或被取消。'
+      ? localize(
+          outputLanguage,
+          '智能分析已生成可用报告，但部分场景深钻失败或被取消。',
+          'Smart analysis produced a usable report, but some scene deep dives failed or were cancelled.',
+        )
       : undefined,
   };
 }
@@ -73,29 +72,55 @@ export function buildSmartSceneSelectionReport(input: {
   sessionId: string;
   report: SceneReport;
   totalDurationMs?: number;
+  outputLanguage?: OutputLanguage;
 }): AgentRuntimeAnalysisResult {
   const { sessionId, report } = input;
-  const sceneCounts = countBy(report.displayedScenes.map(scene => displaySceneType(scene.sceneType)));
+  const outputLanguage = input.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+  const sceneCounts = countBy(
+    report.displayedScenes.map(scene => displaySceneType(scene.sceneType, outputLanguage)),
+  );
   const eligibleScenes = selectAnalysisEligibleScenes(report.displayedScenes, { scope: 'all' });
   const orderedCounts = Object.entries(sceneCounts)
-    .map(([label, count]) => `${label} ${count} 次`)
-    .join('、') || '未检测到可展示场景';
-  const conclusion = [
-    '# 智能分析报告：场景盘点',
-    '',
-    `本次 trace 已先完成轻量场景盘点，共识别 ${report.displayedScenes.length} 个场景，覆盖 ${orderedCounts}。`,
-    `其中 ${eligibleScenes.length} 个场景可进入深钻；marker/context 仅作为时间线证据展示。`,
-    report.sceneVerification?.summary ? `场景还原复核：${report.sceneVerification.summary}` : '',
-    '',
-    '## 场景时间线',
-    report.displayedScenes.slice(0, 40).map((scene, index) =>
-      `${index + 1}. ${displaySceneType(scene.sceneType)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}，时长 ${formatMs(scene.durationMs)}。`,
-    ).join('\n') || '- 未检测到场景时间线。',
-    report.displayedScenes.length > 40 ? `\n- 另有 ${report.displayedScenes.length - 40} 个场景未在聊天摘要中展开，可在 Story Sidebar 查看。` : '',
-    '',
-    '## 下一步',
-    '请选择要深钻的范围：分析全部场景，或只分析启动、滑动、点击、导航、设备状态、ANR 等其中一类。选择后才会进入高成本的 per-scene 深钻分析。',
-  ].filter(Boolean).join('\n');
+    .map(([label, count]) => localize(outputLanguage, `${label} ${count} 次`, `${label}: ${count}`))
+    .join(localize(outputLanguage, '、', ', '))
+    || localize(outputLanguage, '未检测到可展示场景', 'no displayable scenes');
+  const conclusion = renderRequiredLocalizedStrategyTemplate(
+    'report-smart-scene-inventory',
+    outputLanguage,
+    {
+      inventorySummary: localize(
+      outputLanguage,
+      `本次 trace 已先完成轻量场景盘点，共识别 ${report.displayedScenes.length} 个场景，覆盖 ${orderedCounts}。`,
+      `A lightweight scene inventory identified ${report.displayedScenes.length} scenes in this trace, covering ${orderedCounts}.`,
+      ),
+      eligibilitySummary: localize(
+      outputLanguage,
+      `其中 ${eligibleScenes.length} 个场景可进入深钻；marker/context 仅作为时间线证据展示。`,
+      `${eligibleScenes.length} scenes are eligible for deep-dive analysis; marker/context events are shown only as timeline evidence.`,
+      ),
+      verificationSummary: report.sceneVerification
+        ? formatSceneVerificationSummary(
+            report.sceneVerification,
+            eligibleScenes.length,
+            outputLanguage,
+          )
+        : '',
+      timeline: report.displayedScenes.slice(0, 40).map((scene, index) =>
+        localize(
+          outputLanguage,
+          `${index + 1}. ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}，时长 ${formatMs(scene.durationMs)}。`,
+          `${index + 1}. ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}; duration ${formatMs(scene.durationMs)}.`,
+        ),
+      ).join('\n') || localize(outputLanguage, '- 未检测到场景时间线。', '- No scene timeline was detected.'),
+      timelineOverflow: report.displayedScenes.length > 40
+        ? localize(
+            outputLanguage,
+            `- 另有 ${report.displayedScenes.length - 40} 个场景未在聊天摘要中展开，可在 Story Sidebar 查看。`,
+            `- ${report.displayedScenes.length - 40} additional scenes are available in the Story Sidebar.`,
+          )
+        : '',
+    },
+  );
 
   return {
     sessionId,
@@ -103,11 +128,15 @@ export function buildSmartSceneSelectionReport(input: {
     findings: [],
     hypotheses: [],
     conclusion,
-    conclusionContract: buildSelectionConclusionContract(report),
+    conclusionContract: buildSelectionConclusionContract(report, outputLanguage),
     smartScenePreview: {
       reportId: report.reportId,
-      scenes: report.displayedScenes,
-      sceneVerification: report.sceneVerification,
+      scenes: report.displayedScenes.map(scene =>
+        projectDisplayedScene(scene, outputLanguage)),
+      sceneVerification: projectSceneVerification(
+        report.sceneVerification,
+        outputLanguage,
+      ),
       eligibleSceneCount: eligibleScenes.length,
       sceneTypeCounts: countBy(report.displayedScenes.map(scene => scene.sceneType)),
     },
@@ -121,75 +150,154 @@ function buildConclusionMarkdown(
   report: SceneReport,
   completedJobs: SceneAnalysisJob[],
   failedJobs: SceneAnalysisJob[],
+  outputLanguage: OutputLanguage,
 ): string {
   const detectedScenes = report.displayedScenes;
   const analyzedScenes = completedJobs
     .map(job => sceneById(report, job.interval.displayedSceneId))
     .filter((scene): scene is DisplayedScene => !!scene);
-  const sceneCounts = countBy(detectedScenes.map(scene => displaySceneType(scene.sceneType)));
+  const sceneCounts = countBy(
+    detectedScenes.map(scene => displaySceneType(scene.sceneType, outputLanguage)),
+  );
   const orderedCounts = Object.entries(sceneCounts)
-    .map(([label, count]) => `${label} ${count} 次`)
-    .join('、') || '未检测到可展示场景';
-  const topBottlenecks = buildBottleneckRows(report, completedJobs).slice(0, 5);
+    .map(([label, count]) => localize(outputLanguage, `${label} ${count} 次`, `${label}: ${count}`))
+    .join(localize(outputLanguage, '、', ', '))
+    || localize(outputLanguage, '未检测到可展示场景', 'no displayable scenes');
+  const topBottlenecks = buildBottleneckRows(report, completedJobs, outputLanguage).slice(0, 5);
+  const localizedNarrative = report.summaries?.[outputLanguage]?.trim();
+  const legacyChineseNarrative = outputLanguage === 'zh-CN'
+    ? report.summary?.trim()
+    : undefined;
   const completionSummary = failedJobs.length > 0
-    ? `其中 ${completedJobs.length} 个场景完成深钻，${failedJobs.length} 个场景深钻失败或被取消。`
-    : `其中 ${completedJobs.length} 个场景完成深钻，计划内深钻均已完成。`;
+    ? localize(
+        outputLanguage,
+        `其中 ${completedJobs.length} 个场景完成深钻，${failedJobs.length} 个场景深钻失败或被取消。`,
+        `${completedJobs.length} scene deep dives completed; ${failedJobs.length} failed or were cancelled.`,
+      )
+    : localize(
+        outputLanguage,
+        `其中 ${completedJobs.length} 个场景完成深钻，计划内深钻均已完成。`,
+        `${completedJobs.length} scene deep dives completed, covering the full planned scope.`,
+      );
 
-  const sections = [
-    '# 智能分析报告',
-    '',
-    `本次 trace 还原出 ${detectedScenes.length} 个场景，覆盖 ${orderedCounts}。${completionSummary}`,
-    '',
-    '## 场景时间线',
-    detectedScenes.slice(0, 30).map((scene, index) =>
-      `${index + 1}. ${displaySceneType(scene.sceneType)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}，时长 ${formatMs(scene.durationMs)}，状态 ${scene.analysisState}`,
-    ).join('\n') || '- 未检测到场景时间线。',
-    detectedScenes.length > 30 ? `\n- 另有 ${detectedScenes.length - 30} 个场景未在聊天摘要中展开，可在 Story Sidebar 查看。` : '',
-    '',
-    '## 分场景摘要',
-    analyzedScenes.map(scene => {
-      const job = completedJobs.find(item => item.interval.displayedSceneId === scene.id);
-      const resultCount = job?.result?.projection?.metrics.display_result_count ?? 0;
-      return `- ${displaySceneType(scene.sceneType)} ${formatRange(scene)}：执行 ${job?.interval.skillId || 'unknown'}，产出 ${resultCount} 组证据，耗时 ${formatMs(job?.result?.durationMs ?? 0)}。`;
-    }).join('\n') || '- 没有场景进入深钻，建议检查 trace 是否包含可识别的启动、滑动、点击、导航、ANR 或设备状态事件。',
-    '',
-    '## 跨场景叙事',
-    report.summary?.trim()
-      || buildFallbackNarrative(detectedScenes, completedJobs),
-    '',
-    '## 瓶颈排序',
-    topBottlenecks.map((row, index) =>
-      `${index + 1}. ${row.title}：${row.reason}。证据 ${row.evidenceRef}。`,
-    ).join('\n') || '- 未发现足够证据形成瓶颈排序。',
-    '',
-    '## 关键证据链',
-    completedJobs.slice(0, 10).map(job =>
-      `- ${job.interval.skillId} / ${job.interval.displayedSceneId}: data:scene_job:${job.jobId}`,
-    ).join('\n') || '- 当前没有完成的深钻证据。',
-  ];
-
-  return sections.filter(Boolean).join('\n');
+  return renderRequiredLocalizedStrategyTemplate(
+    'report-smart-analysis',
+    outputLanguage,
+    {
+      overview: localize(
+      outputLanguage,
+      `本次 trace 还原出 ${detectedScenes.length} 个场景，覆盖 ${orderedCounts}。${completionSummary}`,
+      `This trace contains ${detectedScenes.length} reconstructed scenes, covering ${orderedCounts}. ${completionSummary}`,
+      ),
+      timeline: detectedScenes.slice(0, 30).map((scene, index) =>
+        localize(
+          outputLanguage,
+          `${index + 1}. ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}，时长 ${formatMs(scene.durationMs)}，状态 ${scene.analysisState}`,
+          `${index + 1}. ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)} ${scene.processName ? `(${scene.processName})` : ''}; duration ${formatMs(scene.durationMs)}; state ${scene.analysisState}`,
+        ),
+      ).join('\n') || localize(outputLanguage, '- 未检测到场景时间线。', '- No scene timeline was detected.'),
+      timelineOverflow: detectedScenes.length > 30
+        ? localize(
+            outputLanguage,
+            `- 另有 ${detectedScenes.length - 30} 个场景未在聊天摘要中展开，可在 Story Sidebar 查看。`,
+            `- ${detectedScenes.length - 30} additional scenes are available in the Story Sidebar.`,
+          )
+        : '',
+      sceneSummaries: analyzedScenes.map(scene => {
+        const job = completedJobs.find(item => item.interval.displayedSceneId === scene.id);
+        const resultCount = job?.result?.projection?.metrics.display_result_count ?? 0;
+        return localize(
+          outputLanguage,
+          `- ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)}：执行 ${job?.interval.skillId || 'unknown'}，产出 ${resultCount} 组证据，耗时 ${formatMs(job?.result?.durationMs ?? 0)}。`,
+          `- ${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)}: ran ${job?.interval.skillId || 'unknown'}, produced ${resultCount} evidence groups in ${formatMs(job?.result?.durationMs ?? 0)}.`,
+        );
+      }).join('\n') || localize(
+        outputLanguage,
+        '- 没有场景进入深钻，建议检查 trace 是否包含可识别的启动、滑动、点击、导航、ANR 或设备状态事件。',
+        '- No scenes entered deep-dive analysis. Check whether the trace contains recognizable startup, scrolling, tap, navigation, ANR, or device-state events.',
+      ),
+      narrative: localizedNarrative || legacyChineseNarrative ||
+        buildFallbackNarrative(detectedScenes, completedJobs, outputLanguage),
+      bottlenecks: topBottlenecks.map((row, index) =>
+        localize(
+          outputLanguage,
+          `${index + 1}. ${row.title}：${row.reason}。证据 ${row.evidenceRef}。`,
+          `${index + 1}. ${row.title}: ${row.reason}. Evidence: ${row.evidenceRef}.`,
+        ),
+      ).join('\n') || localize(
+        outputLanguage,
+        '- 未发现足够证据形成瓶颈排序。',
+        '- There is not enough evidence to rank bottlenecks.',
+      ),
+      evidenceChain: completedJobs.slice(0, 10).map(job =>
+        `- ${job.interval.skillId} / ${job.interval.displayedSceneId}: data:scene_job:${job.jobId}`,
+      ).join('\n') || localize(
+        outputLanguage,
+        '- 当前没有完成的深钻证据。',
+        '- No completed deep-dive evidence is available.',
+      ),
+    },
+  );
 }
 
-function buildFallbackNarrative(scenes: DisplayedScene[], jobs: SceneAnalysisJob[]): string {
+function buildFallbackNarrative(
+  scenes: DisplayedScene[],
+  jobs: SceneAnalysisJob[],
+  outputLanguage: OutputLanguage,
+): string {
   const first = scenes[0];
   const last = scenes[scenes.length - 1];
   if (!first || !last) {
-    return '跨场景层面未检测到足够事件；本次报告以可用深钻证据为准。';
+    return localize(
+      outputLanguage,
+      '跨场景层面未检测到足够事件；本次报告以可用深钻证据为准。',
+      'There are not enough cross-scene events; this report is limited to the available deep-dive evidence.',
+    );
   }
   return [
-    `脚本从 ${displaySceneType(first.sceneType)} 开始，到 ${displaySceneType(last.sceneType)} 结束，中间穿插 ${jobs.length} 个已深钻阶段。`,
-    '优先关注瓶颈排序中的高耗时或异常场景，再回到 Story Sidebar 对齐具体时间窗。',
+    localize(
+      outputLanguage,
+      `脚本从 ${displaySceneType(first.sceneType, outputLanguage)} 开始，到 ${displaySceneType(last.sceneType, outputLanguage)} 结束，中间穿插 ${jobs.length} 个已深钻阶段。`,
+      `The flow starts with ${displaySceneType(first.sceneType, outputLanguage)} and ends with ${displaySceneType(last.sceneType, outputLanguage)}, with ${jobs.length} deep-dived stages in between.`,
+    ),
+    localize(
+      outputLanguage,
+      '优先关注瓶颈排序中的高耗时或异常场景，再回到 Story Sidebar 对齐具体时间窗。',
+      'Start with high-duration or anomalous scenes in the bottleneck ranking, then use the Story Sidebar to align the exact time windows.',
+    ),
   ].join('\n\n');
+}
+
+function formatSceneVerificationSummary(
+  verification: NonNullable<SceneReport['sceneVerification']>,
+  eligibleSceneCount: number,
+  outputLanguage: OutputLanguage,
+): string {
+  if (outputLanguage === 'zh-CN') {
+    return `场景还原复核：${verification.summary}`;
+  }
+  const warningCount = verification.issues.filter(issue => issue.severity === 'warning').length;
+  const badCount = verification.issues.filter(issue => issue.severity === 'bad').length;
+  if (verification.status === 'passed') {
+    return `Scene reconstruction verification passed: ${verification.checkedSceneCount} scenes checked; ${eligibleSceneCount} eligible for deep dive.`;
+  }
+  if (verification.status === 'needs_review') {
+    return `Scene reconstruction needs review: ${warningCount} warnings, ${badCount} critical conflicts, and ${eligibleSceneCount} scenes eligible for deep dive.`;
+  }
+  if (verification.status === 'failed') {
+    return `Scene reconstruction verification failed after checking ${verification.checkedSceneCount} scenes.`;
+  }
+  return `Scene reconstruction verification was skipped; ${eligibleSceneCount} scenes remain eligible for deep dive.`;
 }
 
 function buildFindings(
   report: SceneReport,
   completedJobs: SceneAnalysisJob[],
   failedJobs: SceneAnalysisJob[],
+  outputLanguage: OutputLanguage,
 ): Finding[] {
   const findings: Finding[] = [];
-  for (const row of buildBottleneckRows(report, completedJobs).slice(0, 8)) {
+  for (const row of buildBottleneckRows(report, completedJobs, outputLanguage).slice(0, 8)) {
     findings.push({
       id: `smart-${row.scene.id}`,
       category: row.scene.sceneType,
@@ -209,8 +317,12 @@ function buildFindings(
       category: 'smart',
       type: 'partial_analysis',
       severity: 'warning',
-      title: '部分场景深钻未完成',
-      description: `${failedJobs.length} 个场景深钻失败，报告已保留可用场景证据。`,
+      title: localize(outputLanguage, '部分场景深钻未完成', 'Some scene deep dives did not complete'),
+      description: localize(
+        outputLanguage,
+        `${failedJobs.length} 个场景深钻失败，报告已保留可用场景证据。`,
+        `${failedJobs.length} scene deep dives failed; the report retains the available scene evidence.`,
+      ),
       source: 'smart_analysis',
       confidence: 0.8,
     });
@@ -222,6 +334,7 @@ function buildConclusionContract(
   report: SceneReport,
   completedJobs: SceneAnalysisJob[],
   analyzedSceneIds: Set<string>,
+  outputLanguage: OutputLanguage,
 ): ConclusionContract {
   const evidenceChain = completedJobs.slice(0, 20).map(job => ({
     conclusionId: `smart-${job.interval.displayedSceneId}`,
@@ -233,13 +346,20 @@ function buildConclusionContract(
     conclusions: [
       {
         rank: 1,
-        statement: `智能分析检测到 ${report.displayedScenes.length} 个脚本阶段，并完成 ${completedJobs.length} 个场景深钻。`,
+        statement: localize(
+          outputLanguage,
+          `智能分析检测到 ${report.displayedScenes.length} 个脚本阶段，并完成 ${completedJobs.length} 个场景深钻。`,
+          `Smart analysis detected ${report.displayedScenes.length} flow stages and completed ${completedJobs.length} scene deep dives.`,
+        ),
         confidencePercent: report.partialReport ? 68 : 82,
       },
     ],
     clusters: Array.from(analyzedSceneIds).slice(0, 20).map(sceneId => ({
       cluster: sceneId,
-      description: sceneById(report, sceneId)?.label,
+      description: displaySceneType(
+        sceneById(report, sceneId)?.sceneType || 'scene',
+        outputLanguage,
+      ),
     })),
     evidenceChain,
     claims: completedJobs.slice(0, 20).map(job => {
@@ -247,16 +367,28 @@ function buildConclusionContract(
       const ref = buildSceneClaimReference(scene);
       return {
         conclusionId: `smart-${job.interval.displayedSceneId}`,
-        text: `${displaySceneType(scene?.sceneType || 'scene')} ${job.interval.skillId} 深钻结果来自 ${ref.sourceRef} 场景窗口。`,
+        text: localize(
+          outputLanguage,
+          `${displaySceneType(scene?.sceneType || 'scene', outputLanguage)} ${job.interval.skillId} 深钻结果来自 ${ref.sourceRef} 场景窗口。`,
+          `${displaySceneType(scene?.sceneType || 'scene', outputLanguage)} ${job.interval.skillId} deep-dive results come from the ${ref.sourceRef} scene window.`,
+        ),
         kind: 'categorical',
         references: [ref],
         supportLevel: 'verified',
       };
     }),
     uncertainties: report.partialReport
-      ? ['部分场景深钻失败或被取消，结论以已完成证据为准。']
+      ? [localize(
+          outputLanguage,
+          '部分场景深钻失败或被取消，结论以已完成证据为准。',
+          'Some scene deep dives failed or were cancelled; conclusions are limited to completed evidence.',
+        )]
       : [],
-    nextSteps: ['在 Story Sidebar 中查看对应时间窗，并优先处理瓶颈排序靠前的场景。'],
+    nextSteps: [localize(
+      outputLanguage,
+      '在 Story Sidebar 中查看对应时间窗，并优先处理瓶颈排序靠前的场景。',
+      'Inspect the corresponding windows in the Story Sidebar and prioritize the highest-ranked bottleneck scenes.',
+    )],
     metadata: {
       sceneId: 'smart',
       confidencePercent: report.partialReport ? 68 : 82,
@@ -267,14 +399,21 @@ function buildConclusionContract(
   };
 }
 
-function buildSelectionConclusionContract(report: SceneReport): ConclusionContract {
+function buildSelectionConclusionContract(
+  report: SceneReport,
+  outputLanguage: OutputLanguage,
+): ConclusionContract {
   return {
     schemaVersion: 'conclusion_contract_v1',
     mode: 'initial_report',
     conclusions: [
       {
         rank: 1,
-        statement: `智能分析已完成场景盘点，识别到 ${report.displayedScenes.length} 个候选场景，等待用户选择深钻范围。`,
+        statement: localize(
+          outputLanguage,
+          `智能分析已完成场景盘点，识别到 ${report.displayedScenes.length} 个候选场景，等待用户选择深钻范围。`,
+          `Smart analysis completed the scene inventory and found ${report.displayedScenes.length} candidate scenes; select a deep-dive scope to continue.`,
+        ),
         confidencePercent: report.displayedScenes.length > 0 ? 82 : 60,
       },
     ],
@@ -286,8 +425,16 @@ function buildSelectionConclusionContract(report: SceneReport): ConclusionContra
     claims: [],
     uncertainties: report.displayedScenes.length > 0
       ? []
-      : ['当前 trace 未识别出可展示的启动、滑动、点击、导航、ANR 或设备状态场景。'],
-    nextSteps: ['在智能分析选择条中选择“全部”或某一类场景后再开始深钻。'],
+      : [localize(
+          outputLanguage,
+          '当前 trace 未识别出可展示的启动、滑动、点击、导航、ANR 或设备状态场景。',
+          'No displayable startup, scrolling, tap, navigation, ANR, or device-state scenes were identified in this trace.',
+        )],
+    nextSteps: [localize(
+      outputLanguage,
+      '在智能分析选择条中选择“全部”或某一类场景后再开始深钻。',
+      'Choose “All” or a scene category in the smart-analysis selector to start the deep dive.',
+    )],
     metadata: {
       sceneId: 'smart',
       confidencePercent: report.displayedScenes.length > 0 ? 82 : 60,
@@ -328,7 +475,11 @@ function isClaimScalar(value: unknown): value is string | number | boolean {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
 }
 
-function buildBottleneckRows(report: SceneReport, jobs: SceneAnalysisJob[]): Array<{
+function buildBottleneckRows(
+  report: SceneReport,
+  jobs: SceneAnalysisJob[],
+  outputLanguage: OutputLanguage,
+): Array<{
   scene: DisplayedScene;
   job: SceneAnalysisJob;
   title: string;
@@ -345,8 +496,12 @@ function buildBottleneckRows(report: SceneReport, jobs: SceneAnalysisJob[]): Arr
       return {
         scene,
         job,
-        title: `${displaySceneType(scene.sceneType)} ${formatRange(scene)}`,
-        reason: `场景时长 ${formatMs(scene.durationMs)}，深钻技能 ${job.interval.skillId} 产出 ${resultCount} 组结果${omitted > 0 ? `，聊天摘要截断 ${omitted} 组` : ''}`,
+        title: `${displaySceneType(scene.sceneType, outputLanguage)} ${formatRange(scene)}`,
+        reason: localize(
+          outputLanguage,
+          `场景时长 ${formatMs(scene.durationMs)}，深钻技能 ${job.interval.skillId} 产出 ${resultCount} 组结果${omitted > 0 ? `，聊天摘要截断 ${omitted} 组` : ''}`,
+          `Scene duration ${formatMs(scene.durationMs)}; deep-dive skill ${job.interval.skillId} produced ${resultCount} result groups${omitted > 0 ? `, with ${omitted} omitted from the chat summary` : ''}`,
+        ),
         evidenceRef: projection?.evidenceRefs[0] || `data:scene_job:${job.jobId}`,
       };
     })
@@ -356,10 +511,6 @@ function buildBottleneckRows(report: SceneReport, jobs: SceneAnalysisJob[]): Arr
 
 function sceneById(report: SceneReport, sceneId: string): DisplayedScene | undefined {
   return report.displayedScenes.find(scene => scene.id === sceneId);
-}
-
-function displaySceneType(sceneType: string): string {
-  return SCENE_LABELS[sceneType] || sceneType;
 }
 
 function formatRange(scene: DisplayedScene): string {

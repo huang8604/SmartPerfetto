@@ -41,6 +41,15 @@ import { estimateSceneStoryCost, type CostEstimate } from './sceneCostEstimator'
 import type { SceneRouteProfile } from '../config/domainManifest';
 import type { SmartCancelToken } from './smartCancelBridge';
 import {
+  DEFAULT_OUTPUT_LANGUAGE,
+  localize,
+  type OutputLanguage,
+} from '../../agentv3/outputLanguage';
+import {
+  projectDisplayedScene,
+  projectSceneVerification,
+} from './scenePresentation';
+import {
   buildAnalysisIntervals,
   selectAnalysisEligibleScenes,
 } from './sceneIntervalBuilder';
@@ -50,7 +59,10 @@ import {
 } from './sceneAnalysisJobRunner';
 import { SceneStage1Runner } from './sceneStage1Runner';
 import { runSceneStage1Verifier } from './sceneStage1Verifier';
-import { runStage3Summary } from './sceneStage3Summarizer';
+import {
+  runStage3Summary,
+  type Stage3LocalizedSummaries,
+} from './sceneStage3Summarizer';
 import type { SceneReportStore } from '../../services/sceneReport/sceneReportStore';
 import type { SceneReportMemoryCache } from '../../services/sceneReport/sceneReportMemoryCache';
 import {
@@ -63,6 +75,56 @@ import {
   SceneInsight,
   SceneReport,
 } from './types';
+
+const LEGACY_SMART_SELECTION_PREVIEW_SUMMARY =
+  '场景盘点已完成，等待用户选择智能分析深钻范围。';
+
+function isSelectionPreviewReport(report: SceneReport): boolean {
+  return report.phase === 'selection_preview' || (
+    report.jobs.length === 0 &&
+    report.summary === LEGACY_SMART_SELECTION_PREVIEW_SUMMARY
+  );
+}
+
+function projectedReportSummary(
+  report: SceneReport,
+  outputLanguage: OutputLanguage,
+): string | null {
+  if (isSelectionPreviewReport(report)) {
+    return localize(
+      outputLanguage,
+      LEGACY_SMART_SELECTION_PREVIEW_SUMMARY,
+      'Scene inventory complete; awaiting a deep-dive selection.',
+    );
+  }
+  const localizedSummary = report.summaries?.[outputLanguage];
+  if (localizedSummary) return localizedSummary;
+  if (!report.summary) return null;
+  return outputLanguage === 'zh-CN'
+    ? report.summary
+    : `Scene analysis completed for ${report.displayedScenes.length} ${report.displayedScenes.length === 1 ? 'scene' : 'scenes'}.`;
+}
+
+/** Locale-specific presentation copy over a language-neutral cached report. */
+export function projectSceneReport(
+  report: SceneReport,
+  outputLanguage: OutputLanguage,
+): SceneReport {
+  return {
+    ...report,
+    summary: projectedReportSummary(report, outputLanguage),
+    insights: report.insights.map(insight =>
+      insight.title === 'scene_story_summary'
+        ? {...insight, body: projectedReportSummary(report, outputLanguage) ?? insight.body}
+        : insight),
+    displayedScenes: report.displayedScenes.map(scene =>
+      projectDisplayedScene(scene, outputLanguage)),
+    sceneVerification: projectSceneVerification(
+      report.sceneVerification,
+      outputLanguage,
+    ),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,6 +191,8 @@ export interface SceneStoryStartArgs {
 }
 
 export interface SceneStoryStartOptions {
+  /** Presentation language for SSE projection; never stored in cache identity. */
+  outputLanguage?: OutputLanguage;
   /** Override the analysis cap; defaults to a heuristic based on trace length. */
   analysisCap?: number;
   /** Skip cache lookup and run a fresh pipeline. */
@@ -209,6 +273,7 @@ export class SceneStoryService {
     const routeProfile = options?.routeProfile ?? 'legacy';
     const previewOnly = options?.previewOnly === true;
     const selection = options?.selection ?? { scope: 'all' as const };
+    const outputLanguage = options?.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
     const cacheableByHash = !previewOnly && selection.scope === 'all';
     const session = this.deps.getSession(sessionId);
     if (!session) {
@@ -247,7 +312,7 @@ export class SceneStoryService {
         // Disk (by hash) or memory (by traceId) cache lookup.
         const cached = await this.lookupCachedReport(traceHash, traceId, routeProfile, args.owner);
         if (cached) {
-          this.emitCachedReport(sessionId, session, cached, runId);
+          this.emitCachedReport(sessionId, session, cached, runId, outputLanguage);
           return cached;
         }
       }
@@ -261,7 +326,7 @@ export class SceneStoryService {
         const inFlight = this.pendingByHash.get(pendingKey);
         if (inFlight) {
           const shared = await inFlight;
-          this.emitCachedReport(sessionId, session, shared, runId);
+          this.emitCachedReport(sessionId, session, shared, runId, outputLanguage);
           return shared;
         }
         // Register a deferred promise so peer requests can wait on us.
@@ -278,7 +343,10 @@ export class SceneStoryService {
 
       this.broadcast(sessionId, {
         type: 'progress',
-        content: { phase: 'detecting', message: '场景检测中' },
+        content: {
+          phase: 'detecting',
+          message: localize(outputLanguage, '场景检测中', 'Detecting scenes'),
+        },
         timestamp: Date.now(),
       }, runId);
 
@@ -343,18 +411,23 @@ export class SceneStoryService {
 
       // Sync to legacy session.scenes / session.trackEvents so the legacy
       // frontend that listens to `track_data` keeps working until C5 lands.
+      const presentedScenes = scenes.map(scene =>
+        projectDisplayedScene(scene, outputLanguage));
       if (this.shouldApply(sessionId, runId)) {
-        session.scenes = scenes.map(toLegacySceneShape);
-        session.trackEvents = scenes.map(toLegacyTrackEventShape);
+        session.scenes = presentedScenes.map(toLegacySceneShape);
+        session.trackEvents = presentedScenes.map(toLegacyTrackEventShape);
       }
 
       this.broadcast(sessionId, {
         type: 'scene_story_detected',
         content: {
-          scenes,
+          scenes: presentedScenes,
           analysisIntervals: intervals.length,
           candidateIntervals: candidateIntervals.length,
-          sceneVerification,
+          sceneVerification: projectSceneVerification(
+            sceneVerification,
+            outputLanguage,
+          ),
           previewOnly,
         },
         timestamp: Date.now(),
@@ -380,6 +453,7 @@ export class SceneStoryService {
           routeProfile,
           candidateIntervalCount: candidateIntervals.length,
           sceneVerification,
+          outputLanguage,
         });
         return previewReport;
       }
@@ -402,6 +476,7 @@ export class SceneStoryService {
           routeProfile,
           cacheableByHash,
           sceneVerification,
+          outputLanguage,
         });
         resolvePending?.(emptyReport);
         return emptyReport;
@@ -434,14 +509,23 @@ export class SceneStoryService {
 
       // ── Stage 3: cross-scene narrative summary ──────────────────────────
       let summary: string | null = null;
+      let summaries: Stage3LocalizedSummaries | undefined;
       if (!cancelled) {
         this.broadcast(sessionId, {
           type: 'progress',
-          content: { phase: 'summarizing', message: '生成整体叙述' },
+          content: {
+            phase: 'summarizing',
+            message: localize(
+              outputLanguage,
+              '生成整体叙述',
+              'Building the overall narrative',
+            ),
+          },
           timestamp: Date.now(),
         }, runId);
         options?.cancelToken?.throwIfAborted();
-        summary = await runStage3Summary({ scenes, jobs });
+        summaries = await runStage3Summary({ scenes, jobs }) ?? undefined;
+        summary = summaries?.['zh-CN'] ?? null;
       }
 
       // ── Stage 4: finalise + persist ──────────────────────────────────────
@@ -454,6 +538,7 @@ export class SceneStoryService {
         scenes,
         jobs,
         summary,
+        summaries,
         cancelled,
         traceDurationSec,
         traceHash,
@@ -461,6 +546,7 @@ export class SceneStoryService {
         routeProfile,
         cacheableByHash,
         sceneVerification,
+        outputLanguage,
       });
       resolvePending?.(finalReport);
       return finalReport;
@@ -569,6 +655,7 @@ export class SceneStoryService {
     scenes: DisplayedScene[];
     jobs: SceneAnalysisJob[];
     summary: string | null;
+    summaries?: Stage3LocalizedSummaries;
     cancelled: boolean;
     traceDurationSec: number;
     /** sha256 of trace content; null for external RPC traces. */
@@ -578,6 +665,7 @@ export class SceneStoryService {
     routeProfile: SceneRouteProfile;
     cacheableByHash: boolean;
     sceneVerification?: SceneReconstructionVerification;
+    outputLanguage: OutputLanguage;
   }): Promise<SceneReport> {
     const jobs = args.routeProfile === 'smart'
       ? await attachSmartJobArtifactRefs({
@@ -597,12 +685,14 @@ export class SceneStoryService {
       scenes: args.scenes,
       jobs,
       summary: args.summary,
+      summaries: args.summaries,
       cancelled: args.cancelled,
       traceDurationSec: args.traceDurationSec,
       traceHash: args.traceHash,
       stage1Envelopes: args.stage1Envelopes,
       routeProfile: args.routeProfile,
       sceneVerification: args.sceneVerification,
+      phase: 'analyzed',
     });
 
     if (!this.shouldApply(args.sessionId, args.runId)) {
@@ -627,7 +717,7 @@ export class SceneStoryService {
       content: {
         reportId: report.reportId,
         partial: report.partialReport,
-        summary: report.summary,
+        summary: projectedReportSummary(report, args.outputLanguage),
         sceneCount: report.displayedScenes.length,
         jobCount: report.jobs.length,
       },
@@ -639,7 +729,9 @@ export class SceneStoryService {
       type: 'progress',
       content: {
         phase: args.cancelled ? 'cancelled' : 'completed',
-        message: args.cancelled ? '场景还原已取消' : '场景还原完成',
+        message: args.cancelled
+          ? localize(args.outputLanguage, '场景还原已取消', 'Scene reconstruction cancelled')
+          : localize(args.outputLanguage, '场景还原完成', 'Scene reconstruction completed'),
       },
       timestamp: Date.now(),
     }, args.runId);
@@ -659,6 +751,7 @@ export class SceneStoryService {
     routeProfile: SceneRouteProfile;
     candidateIntervalCount: number;
     sceneVerification?: SceneReconstructionVerification;
+    outputLanguage: OutputLanguage;
   }): SceneReport {
     const report = buildSceneReport({
       analysisId: args.sessionId,
@@ -669,13 +762,14 @@ export class SceneStoryService {
       createdAt: args.session.createdAt,
       scenes: args.scenes,
       jobs: [],
-      summary: '场景盘点已完成，等待用户选择智能分析深钻范围。',
+      summary: null,
       cancelled: false,
       traceDurationSec: args.traceDurationSec,
       traceHash: args.traceHash,
       stage1Envelopes: args.stage1Envelopes,
       routeProfile: args.routeProfile,
       sceneVerification: args.sceneVerification,
+      phase: 'selection_preview',
     });
 
     if (!this.shouldApply(args.sessionId, args.runId)) {
@@ -696,7 +790,10 @@ export class SceneStoryService {
         candidateIntervalCount: args.candidateIntervalCount,
         sceneTypeCounts: countSceneTypes(report.displayedScenes),
         reportId: report.reportId,
-        sceneVerification: report.sceneVerification,
+        sceneVerification: projectSceneVerification(
+          report.sceneVerification,
+          args.outputLanguage,
+        ),
       },
       timestamp: Date.now(),
     }, args.runId);
@@ -705,7 +802,11 @@ export class SceneStoryService {
       type: 'progress',
       content: {
         phase: 'selection_ready',
-        message: '场景盘点完成,请选择智能分析范围',
+        message: localize(
+          args.outputLanguage,
+          '场景盘点完成，请选择智能分析范围',
+          'Scene inventory complete. Choose a deep-dive scope.',
+        ),
       },
       timestamp: Date.now(),
     }, args.runId);
@@ -765,19 +866,29 @@ export class SceneStoryService {
     session: SceneStorySession,
     report: SceneReport,
     runId?: string,
+    outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
   ): void {
     const now = Date.now();
+    const presentedScenes = report.displayedScenes.map(scene =>
+      projectDisplayedScene(scene, outputLanguage));
     if (this.shouldApply(sessionId, runId)) {
       session.sceneStoryReport = report;
-      session.scenes = report.displayedScenes.map(toLegacySceneShape);
-      session.trackEvents = report.displayedScenes.map(toLegacyTrackEventShape);
+      session.scenes = presentedScenes.map(toLegacySceneShape);
+      session.trackEvents = presentedScenes.map(toLegacyTrackEventShape);
       session.status = 'completed';
       session.lastActivityAt = now;
     }
 
     this.broadcast(sessionId, {
       type: 'progress',
-      content: { phase: 'cached', message: '已命中缓存,加载历史报告' },
+      content: {
+        phase: 'cached',
+        message: localize(
+          outputLanguage,
+          '已命中缓存，加载历史报告',
+          'Loading the cached scene report',
+        ),
+      },
       timestamp: now,
     }, runId);
 
@@ -795,10 +906,13 @@ export class SceneStoryService {
     this.broadcast(sessionId, {
       type: 'scene_story_detected',
       content: {
-        scenes: report.displayedScenes,
+        scenes: presentedScenes,
         analysisIntervals: report.jobs.length,
-        sceneVerification: report.sceneVerification,
-        previewOnly: report.jobs.length === 0 && report.summary === '场景盘点已完成，等待用户选择智能分析深钻范围。',
+        sceneVerification: projectSceneVerification(
+          report.sceneVerification,
+          outputLanguage,
+        ),
+        previewOnly: isSelectionPreviewReport(report),
       },
       timestamp: now,
     }, runId);
@@ -816,7 +930,7 @@ export class SceneStoryService {
       content: {
         reportId: report.reportId,
         partial: report.partialReport,
-        summary: report.summary,
+        summary: projectedReportSummary(report, outputLanguage),
         sceneCount: report.displayedScenes.length,
         jobCount: report.jobs.length,
         cached: true,
@@ -826,7 +940,14 @@ export class SceneStoryService {
 
     this.broadcast(sessionId, {
       type: 'progress',
-      content: { phase: 'completed', message: '场景还原完成 (缓存)' },
+      content: {
+        phase: 'completed',
+        message: localize(
+          outputLanguage,
+          '场景还原完成（缓存）',
+          'Scene reconstruction completed (cached)',
+        ),
+      },
       timestamp: now,
     }, runId);
   }
@@ -1020,6 +1141,7 @@ function buildSceneReport(args: {
   scenes: DisplayedScene[];
   jobs: SceneAnalysisJob[];
   summary: string | null;
+  summaries?: Stage3LocalizedSummaries;
   cancelled: boolean;
   traceDurationSec: number;
   /** sha256 of trace content; null for external RPC traces. */
@@ -1028,6 +1150,7 @@ function buildSceneReport(args: {
   stage1Envelopes: DataEnvelope[];
   routeProfile: SceneRouteProfile;
   sceneVerification?: SceneReconstructionVerification;
+  phase?: SceneReport['phase'];
 }): SceneReport {
   const failedCount = args.jobs.filter((j) => j.state === 'failed').length;
   const partial = args.cancelled || failedCount > 0;
@@ -1036,7 +1159,7 @@ function buildSceneReport(args: {
   const insights: SceneInsight[] = [];
   if (args.summary && args.scenes.length > 0) {
     insights.push({
-      title: '整体叙述',
+      title: 'scene_story_summary',
       body: args.summary,
       relatedDisplayedSceneIds: args.scenes.map((s) => s.id),
     });
@@ -1066,6 +1189,7 @@ function buildSceneReport(args: {
     cachePolicy,
     expiresAt,
     createdAt: args.createdAt,
+    phase: args.phase,
     traceMeta: { durationSec: args.traceDurationSec },
     displayedScenes: args.scenes,
     sceneVerification: args.sceneVerification,
@@ -1074,6 +1198,7 @@ function buildSceneReport(args: {
       ? args.jobs.map(sanitizeSmartReportJob)
       : args.jobs,
     summary: args.summary,
+    summaries: args.summaries,
     insights,
     partialReport: partial,
     totalDurationMs,

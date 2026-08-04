@@ -14,6 +14,10 @@ import {
   projectScrollingCandidateClusters,
   type CaseCandidateCluster,
 } from './scrollingCandidateProjector';
+import {
+  resolveKnowledgeScope,
+  type KnowledgeScope,
+} from '../scopedKnowledgeStore';
 
 export { projectScrollingCandidateClusters };
 export type { CaseCandidateCluster };
@@ -42,6 +46,12 @@ export function buildCaseCandidatesFromRun(
   if (input.result.rounds <= 1) return [];
   if (!input.provenance.traceContentHash) return [];
 
+  const resolvedScope = resolveKnowledgeScope(input.knowledgeScope);
+  const originScope = {
+    tenantId: resolvedScope.tenantId,
+    workspaceId: resolvedScope.workspaceId,
+  };
+
   const clusters = projectScrollingCandidateClusters(input.dataEnvelopes);
   const candidates: CaseCandidate[] = [];
   clusters.forEach((cluster, clusterIndex) => {
@@ -49,6 +59,7 @@ export function buildCaseCandidatesFromRun(
       input.provenance.traceContentHash!,
       input.sceneType,
       cluster.rootCause,
+      originScope,
     );
     if (deps.existingPublishedCaseKeys?.has(dedupeKey)) return;
     // Scene+rootCause dedupe against the live published library. This is the
@@ -56,7 +67,13 @@ export function buildCaseCandidatesFromRun(
     // published cases, so existingPublishedCaseKeys alone cannot match them).
     if (deps.existingPublishedSceneRootCauses?.has(`${cluster.scene}::${cluster.rootCause}`)) return;
     candidates.push({
-      candidateId: buildCandidateId(input.provenance.traceContentHash!, input.sceneType, cluster.rootCause, input.provenance.runId),
+      candidateId: buildCandidateId(
+        input.provenance.traceContentHash!,
+        input.sceneType,
+        cluster.rootCause,
+        input.provenance.runId,
+        originScope,
+      ),
       schemaVersion: CASE_CANDIDATE_SCHEMA_VERSION,
       provenance: {
         sourceSessionId: input.provenance.sessionId,
@@ -67,6 +84,7 @@ export function buildCaseCandidatesFromRun(
         engine: input.provenance.engine,
         sceneType: input.sceneType,
         architectureType: input.architectureType || 'unknown',
+        originScope,
       },
       cluster: {
         scene: cluster.scene,
@@ -104,6 +122,7 @@ export function caseCandidateDedupeKey(candidate: CaseCandidate): string {
     candidate.provenance.traceContentHash,
     candidate.provenance.sceneType,
     candidate.cluster.rootCause,
+    candidate.provenance.originScope,
   );
 }
 
@@ -111,8 +130,37 @@ export function caseCandidateDedupeKeyFromParts(
   traceContentHash: string,
   sceneType: string,
   primaryRootCause: string,
+  scope?: Pick<KnowledgeScope, 'tenantId' | 'workspaceId'>,
 ): string {
-  return `${traceContentHash}::${sceneType}::${primaryRootCause}`;
+  const resolved = resolveKnowledgeScope(scope);
+  return `${resolved.tenantId}::${resolved.workspaceId}::${traceContentHash}::${sceneType}::${primaryRootCause}`;
+}
+
+export function caseCandidateKnowledgeScope(candidate: CaseCandidate): KnowledgeScope | null {
+  const raw = (candidate.provenance as CaseCandidate['provenance'] & {
+    originScope?: {tenantId?: unknown; workspaceId?: unknown};
+  }).originScope;
+  if (
+    !raw ||
+    typeof raw.tenantId !== 'string' ||
+    !raw.tenantId.trim() ||
+    typeof raw.workspaceId !== 'string' ||
+    !raw.workspaceId.trim()
+  ) {
+    return null;
+  }
+  try {
+    const resolved = resolveKnowledgeScope({
+      tenantId: raw.tenantId,
+      workspaceId: raw.workspaceId,
+    });
+    return {
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function buildCandidateId(
@@ -120,9 +168,11 @@ function buildCandidateId(
   sceneType: string,
   primaryRootCause: string,
   runId: string,
+  scope: Pick<KnowledgeScope, 'tenantId' | 'workspaceId'>,
 ): string {
+  const resolved = resolveKnowledgeScope(scope);
   const digest = crypto.createHash('sha256')
-    .update(`${traceContentHash}:${sceneType}:${primaryRootCause}:${runId}`)
+    .update(`${resolved.tenantId}:${resolved.workspaceId}:${traceContentHash}:${sceneType}:${primaryRootCause}:${runId}`)
     .digest('hex')
     .slice(0, 16);
   return `casecand-${sanitizeIdPart(runId)}-${digest}`;

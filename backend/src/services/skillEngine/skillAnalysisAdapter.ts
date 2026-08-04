@@ -11,11 +11,25 @@
 
 import { TraceProcessorService } from '../traceProcessorService';
 import { SkillExecutor, createSkillExecutor, LayeredResult } from './skillExecutor';
-import { skillRegistry, ensureSkillRegistryInitialized, getSkillsDir } from './skillLoader';
+import { skillRegistry, ensureSkillRegistryInitialized, type SkillRegistry } from './skillLoader';
 import { SkillDefinition, SkillEvent, DisplayLevel, DisplayLayer, StepResult } from './types';
 import { smartSummaryGenerator } from './smartSummaryGenerator';
 import { answerGenerator, GeneratedAnswer } from './answerGenerator';
 import { SkillEventCollector, createEventCollector, EventSummary, ProgressInfo } from './eventCollector';
+import type { SkillOriginMetadata } from '../skillPacks/skillPackTypes';
+import {
+  localizeSkillDefinition,
+  localizeSkillDiagnostics,
+  localizeSkillDisplayResults,
+  localizeSkillLayeredResult,
+  localizeSkillListItem,
+  localizeSkillNarrative,
+} from '../skillLocalization';
+import {
+  DEFAULT_OUTPUT_LANGUAGE,
+  localize,
+  type OutputLanguage,
+} from '../../agentv3/outputLanguage';
 
 // =============================================================================
 // Types
@@ -27,6 +41,7 @@ export interface SkillAnalysisRequest {
   question?: string;
   packageName?: string;
   params?: Record<string, any>;  // Custom skill parameters
+  outputLanguage?: OutputLanguage;
 }
 
 export interface SkillAnalysisResponse {
@@ -79,6 +94,8 @@ export interface SkillListItem {
   type: string;
   keywords: string[];
   tags?: string[];
+  origin?: SkillOriginMetadata;
+  localizationStatus: 'catalog' | 'external_authored';
 }
 
 export interface AdaptedResult {
@@ -86,6 +103,21 @@ export interface AdaptedResult {
   layers: LayeredResult['layers'];
   defaultExpanded: DisplayLayer[];
   metadata: LayeredResult['metadata'];
+}
+
+export interface SkillAnalysisAdapterOptions {
+  registry?: SkillRegistryView;
+  registryFingerprint?: string;
+}
+
+export interface SkillRegistryView {
+  isInitialized(): boolean;
+  getSkill(name: string): SkillDefinition | undefined;
+  getAllSkills(): SkillDefinition[];
+  getFragmentCache(): Map<string, string>;
+  findMatchingSkill(question: string): SkillDefinition | undefined;
+  getSkillOrigin(name: string): SkillOriginMetadata | undefined;
+  getVendorOverride(skillId: string, vendor: string): import('./skillLoader').VendorOverride | undefined;
 }
 
 // =============================================================================
@@ -98,13 +130,19 @@ export class SkillAnalysisAdapter {
   private initialized = false;
   private eventHandler?: (event: SkillEvent) => void;
   private currentEventCollector?: SkillEventCollector;
+  private registry: SkillRegistryView;
+  private registryFingerprint?: string;
+  private registeredFingerprint?: string;
 
   constructor(
     traceProcessor: TraceProcessorService,
-    eventHandler?: (event: SkillEvent) => void
+    eventHandler?: (event: SkillEvent) => void,
+    options: SkillAnalysisAdapterOptions = {},
   ) {
     this.traceProcessor = traceProcessor;
     this.eventHandler = eventHandler;
+    this.registry = options.registry ?? skillRegistry;
+    this.registryFingerprint = options.registryFingerprint;
 
     // 创建 executor，传入事件处理器
     this.executor = createSkillExecutor(
@@ -114,9 +152,19 @@ export class SkillAnalysisAdapter {
     );
 
     // Wire fragment cache from the skill registry (if loaded)
-    if (skillRegistry.isInitialized()) {
-      this.executor.setFragmentRegistry(skillRegistry.getFragmentCache());
+    if (this.registry.isInitialized()) {
+      this.executor.setFragmentRegistry(this.registry.getFragmentCache());
     }
+  }
+
+  setSkillRegistry(
+    registry: SkillRegistryView,
+    registryFingerprint?: string,
+  ): void {
+    if (this.registry === registry && this.registryFingerprint === registryFingerprint) return;
+    this.registry = registry;
+    this.registryFingerprint = registryFingerprint;
+    this.initialized = false;
   }
 
   /**
@@ -139,15 +187,22 @@ export class SkillAnalysisAdapter {
    * 确保 skill registry 已初始化
    */
   async ensureInitialized(): Promise<void> {
-    if (this.initialized) return;
+    const fingerprint = this.registryFingerprint ?? (this.registry === skillRegistry ? 'built_in' : 'injected');
+    if (this.initialized && this.registeredFingerprint === fingerprint) return;
 
-    await ensureSkillRegistryInitialized();
+    if (this.registry === skillRegistry) {
+      await ensureSkillRegistryInitialized();
+    } else if (!this.registry.isInitialized()) {
+      throw new Error('skill_registry_not_initialized');
+    }
 
     // 将所有 skills 注册到 executor
-    const skills = skillRegistry.getAllSkills();
-    this.executor.registerSkills(skills);
+    const skills = this.registry.getAllSkills();
+    this.executor.replaceRegisteredSkills(skills);
+    this.executor.setFragmentRegistry(this.registry.getFragmentCache());
 
     this.initialized = true;
+    this.registeredFingerprint = fingerprint;
     console.log(`[SkillAnalysisAdapter] Initialized with ${skills.length} skills`);
   }
 
@@ -156,7 +211,7 @@ export class SkillAnalysisAdapter {
    * 返回匹配的 skill ID 或 null
    */
   detectIntent(question: string): string | null {
-    const skill = skillRegistry.findMatchingSkill(question);
+    const skill = this.registry.findMatchingSkill(question);
     return skill ? skill.name : null;
   }
 
@@ -282,6 +337,7 @@ export class SkillAnalysisAdapter {
     await this.ensureInitialized();
 
     const { traceId, skillId, question, packageName } = request;
+    const outputLanguage = request.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
 
     // 确定使用哪个 skill
     let targetSkillId = skillId;
@@ -292,25 +348,41 @@ export class SkillAnalysisAdapter {
     if (!targetSkillId) {
       return {
         skillId: 'unknown',
-        skillName: 'Unknown',
+        skillName: localize(outputLanguage, '未知', 'Unknown'),
         success: false,
         sections: {},
         diagnostics: [{
           id: 'no_skill_match',
           severity: 'warning',
-          message: '无法匹配到合适的分析技能',
+          message: localize(
+            outputLanguage,
+            '无法匹配到合适的分析技能',
+            'No suitable analysis Skill matched the request.',
+          ),
           suggestions: [
-            '尝试使用关键词：启动、滑动、卡顿、内存、CPU、Binder',
-            '使用 skillId 参数指定具体的技能',
+            localize(
+              outputLanguage,
+              '尝试使用关键词：启动、滑动、卡顿、内存、CPU、Binder',
+              'Try keywords such as startup, scrolling, jank, memory, CPU, or Binder.',
+            ),
+            localize(
+              outputLanguage,
+              '使用 skillId 参数指定具体的技能',
+              'Pass skillId to select a specific Skill.',
+            ),
           ],
         }],
-        summary: '无法确定使用哪个分析技能',
+        summary: localize(
+          outputLanguage,
+          '无法确定使用哪个分析技能',
+          'No analysis Skill could be selected.',
+        ),
         executionTimeMs: 0,
       };
     }
 
     // 获取 skill 信息
-    const skill = skillRegistry.getSkill(targetSkillId);
+    const skill = this.registry.getSkill(targetSkillId);
     if (!skill) {
       return {
         skillId: targetSkillId,
@@ -320,12 +392,27 @@ export class SkillAnalysisAdapter {
         diagnostics: [{
           id: 'skill_not_found',
           severity: 'critical',
-          message: `技能未找到: ${targetSkillId}`,
+          message: localize(
+            outputLanguage,
+            `技能未找到：${targetSkillId}`,
+            `Skill not found: ${targetSkillId}`,
+          ),
         }],
-        summary: `技能未找到: ${targetSkillId}`,
+        summary: localize(
+          outputLanguage,
+          `技能未找到：${targetSkillId}`,
+          `Skill not found: ${targetSkillId}`,
+        ),
         executionTimeMs: 0,
       };
     }
+    const externalAuthored =
+      this.registry.getSkillOrigin(targetSkillId)?.origin === 'external_pack';
+    const localizedSkill = localizeSkillDefinition(
+      skill,
+      outputLanguage,
+      {externalAuthored},
+    );
 
     // 检测厂商
     const vendorResult = await this.detectVendor(traceId);
@@ -366,7 +453,7 @@ export class SkillAnalysisAdapter {
         layeredResult = await (this.executor as any).executeCompositeSkill(
           skill,
           params,
-          { traceId, vendor: vendorResult.vendor }
+          { traceId, vendor: vendorResult.vendor, __outputLanguage: outputLanguage }
         );
         console.log('[SkillAnalysisAdapter] executeCompositeSkill completed. layeredResult:', JSON.stringify({
           hasLayers: !!layeredResult?.layers,
@@ -391,7 +478,11 @@ export class SkillAnalysisAdapter {
             id: `step_failed_${step.stepId}`,
             severity: 'critical',
             diagnosis: `Step ${step.stepId} failed: ${step.error || 'unknown error'}`,
-            suggestions: ['检查输入参数、SQL 语义和 trace schema 兼容性'],
+            suggestions: [localize(
+              outputLanguage,
+              '检查输入参数、SQL 语义和 Trace Schema 兼容性',
+              'Check input parameters, SQL semantics, and Trace Schema compatibility.',
+            )],
           })),
           executionTimeMs: 0,
           error: failedSteps.length > 0
@@ -407,7 +498,11 @@ export class SkillAnalysisAdapter {
             id: 'skill_execution_failed',
             severity: 'critical',
             diagnosis: error?.message || 'Skill execution failed',
-            suggestions: ['检查输入参数、SQL 语义和 trace schema 兼容性'],
+            suggestions: [localize(
+              outputLanguage,
+              '检查输入参数、SQL 语义和 Trace Schema 兼容性',
+              'Check input parameters, SQL semantics, and Trace Schema compatibility.',
+            )],
           }],
           executionTimeMs: 0,
           error: error?.message || 'Skill execution failed',
@@ -420,9 +515,27 @@ export class SkillAnalysisAdapter {
         targetSkillId,
         traceId,
         params,
-        { vendor: vendorResult.vendor }
+        { vendor: vendorResult.vendor, __outputLanguage: outputLanguage }
       );
     }
+
+    result.displayResults = localizeSkillDisplayResults(
+      targetSkillId,
+      result.displayResults,
+      outputLanguage,
+      {externalAuthored},
+    ) || [];
+    result.diagnostics = localizeSkillDiagnostics(
+      result.diagnostics,
+      outputLanguage,
+      {externalAuthored},
+    ) || [];
+    layeredResult = localizeSkillLayeredResult(
+      targetSkillId,
+      layeredResult,
+      outputLanguage,
+      {externalAuthored},
+    );
 
     // 收集事件信息
     const executionEvents = eventCollector.getEvents();
@@ -453,23 +566,33 @@ export class SkillAnalysisAdapter {
     // 生成智能摘要（优先使用 AI 摘要，否则使用规则生成）
     let summary: string;
     if (result.aiSummary) {
-      summary = result.aiSummary;
+      summary = localizeSkillNarrative(
+        result.aiSummary,
+        outputLanguage,
+        'summary',
+        {externalAuthored},
+      ) || '';
     } else {
       const generatedSummary = smartSummaryGenerator.generate({
         skillId: targetSkillId,
-        skillName: skill.meta.display_name,
+        skillName: localizedSkill.meta.display_name,
         displayResults: result.displayResults,
         diagnostics: result.diagnostics,
         executionTimeMs: result.executionTimeMs,
       });
-      summary = generatedSummary.text;
+      summary = localizeSkillNarrative(
+        generatedSummary.text,
+        outputLanguage,
+        'summary',
+        {externalAuthored},
+      ) || '';
     }
 
     // 生成直接回答
     const answer = answerGenerator.generateAnswer({
       originalQuestion: question || '',
       skillId: targetSkillId,
-      skillName: skill.meta.display_name,
+      skillName: localizedSkill.meta.display_name,
       success: result.success,
       diagnostics,
       sections,
@@ -478,7 +601,7 @@ export class SkillAnalysisAdapter {
 
     return {
       skillId: targetSkillId,
-      skillName: skill.meta.display_name,
+      skillName: localizedSkill.meta.display_name,
       success: result.success,
       sections,
       diagnostics,
@@ -487,7 +610,12 @@ export class SkillAnalysisAdapter {
       vendor: vendorResult.vendor !== 'aosp' ? vendorResult.vendor : undefined,
       displayResults: result.displayResults,
       aiSummary: result.aiSummary,
-      directAnswer: answer.answer,
+      directAnswer: localizeSkillNarrative(
+        answer.answer,
+        outputLanguage,
+        'summary',
+        {externalAuthored},
+      ),
       questionType: answer.questionType,
       answerConfidence: answer.confidence,
       // Include layeredResult for frontend display
@@ -874,10 +1002,12 @@ export class SkillAnalysisAdapter {
   /**
    * 获取所有可用的 skills 列表
    */
-  async listSkills(): Promise<SkillListItem[]> {
+  async listSkills(
+    outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
+  ): Promise<SkillListItem[]> {
     await this.ensureInitialized();
 
-    const skills = skillRegistry.getAllSkills();
+    const skills = this.registry.getAllSkills();
 
     return skills.map((skill: SkillDefinition) => {
       const triggers = skill.triggers;
@@ -891,7 +1021,7 @@ export class SkillAnalysisAdapter {
         }
       }
 
-      return {
+      return localizeSkillListItem({
         id: skill.name,
         name: skill.name,
         displayName: skill.meta?.display_name || skill.name,
@@ -899,7 +1029,8 @@ export class SkillAnalysisAdapter {
         type: skill.type,
         keywords,
         tags: skill.meta?.tags,
-      };
+        origin: this.registry.getSkillOrigin(skill.name),
+      }, outputLanguage);
     });
   }
 
@@ -908,7 +1039,12 @@ export class SkillAnalysisAdapter {
    */
   async getSkillDetail(skillId: string): Promise<SkillDefinition | null> {
     await this.ensureInitialized();
-    return skillRegistry.getSkill(skillId) || null;
+    return this.registry.getSkill(skillId) || null;
+  }
+
+  async getSkillOrigin(skillId: string): Promise<SkillOriginMetadata | undefined> {
+    await this.ensureInitialized();
+    return this.registry.getSkillOrigin(skillId);
   }
 
   /**
@@ -944,7 +1080,8 @@ export function getSkillAnalysisAdapter(
 
 export function createSkillAnalysisAdapter(
   traceProcessor: TraceProcessorService,
-  eventHandler?: (event: SkillEvent) => void
+  eventHandler?: (event: SkillEvent) => void,
+  options: SkillAnalysisAdapterOptions = {},
 ): SkillAnalysisAdapter {
-  return new SkillAnalysisAdapter(traceProcessor, eventHandler);
+  return new SkillAnalysisAdapter(traceProcessor, eventHandler, options);
 }

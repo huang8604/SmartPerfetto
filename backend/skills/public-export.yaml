@@ -1,0 +1,1654 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# Explicit public Agent Skill projection policy. New source files must be classified.
+
+version: 2
+public_skill: perfetto-performance-analysis
+excluded_runtime_paths:
+- backend/skills/_template/
+- backend/skills/pipelines/_base.skill.yaml
+fixture_manifest_source: backend/skills/public-fixtures.yaml
+official_perfetto:
+  repository: https://github.com/google/perfetto
+  tag: v57.2
+  commit: da1d152cff27890903d158fe96751de3aab883cc
+  rpc_api_version: 14
+  stdlib_tree: 7f0459ca3eed8372a8762ae052ed7fdb48eb3d88
+  official_skill_reference: ai/skills/perfetto/SKILL-template.md
+  official_skill_role: gap_check_only
+sql_fragments:
+  backend/skills/fragments/target_threads.sql:
+    disposition: exported
+    destination: references/generated/runtime/fragments/target_threads.sql
+  backend/skills/fragments/thread_states_quadrant.sql:
+    disposition: exported
+    destination: references/generated/runtime/fragments/thread_states_quadrant.sql
+  backend/skills/fragments/vsync_config.sql:
+    disposition: exported
+    destination: references/generated/runtime/fragments/vsync_config.sql
+vendor_overrides:
+  backend/skills/vendors/honor/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/honor-startup.json
+  backend/skills/vendors/mtk/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/mtk-startup.json
+  backend/skills/vendors/oppo/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/oppo-startup.json
+  backend/skills/vendors/pixel/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/pixel-startup.json
+  backend/skills/vendors/qualcomm/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/qualcomm-startup.json
+  backend/skills/vendors/samsung/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/samsung-startup.json
+  backend/skills/vendors/vivo/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/vivo-startup.json
+  backend/skills/vendors/xiaomi/startup.override.yaml:
+    disposition: exported
+    application_mode: advisory_only
+    destination: references/generated/runtime/vendor-overrides/xiaomi-startup.json
+skills:
+  android_bitmap_memory_per_process:
+    source: backend/skills/atomic/android_bitmap_memory_per_process.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/android_bitmap_memory_per_process.md
+  android_dvfs_counter_stats:
+    source: backend/skills/atomic/android_dvfs_counter_stats.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/android_dvfs_counter_stats.md
+  android_gpu_work_period_track:
+    source: backend/skills/atomic/android_gpu_work_period_track.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/android_gpu_work_period_track.md
+  android_heap_graph_leak_candidates:
+    source: backend/skills/atomic/android_heap_graph_leak_candidates.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/android_heap_graph_leak_candidates.md
+  android_heap_graph_summary:
+    source: backend/skills/atomic/android_heap_graph_summary.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/android_heap_graph_summary.md
+  android_job_scheduler_events:
+    source: backend/skills/atomic/android_job_scheduler_events.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/android_job_scheduler_events.md
+  android_kernel_wakelock_summary:
+    source: backend/skills/atomic/android_kernel_wakelock_summary.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/android_kernel_wakelock_summary.md
+  anr_context_in_range:
+    source: backend/skills/atomic/anr_context_in_range.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/anr_context_in_range.md
+  anr_main_thread_blocking:
+    source: backend/skills/atomic/anr_main_thread_blocking.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/anr_main_thread_blocking.md
+  app_frame_production:
+    source: backend/skills/atomic/app_frame_production.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/app_frame_production.md
+  app_lifecycle_in_range:
+    source: backend/skills/atomic/app_lifecycle_in_range.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/app_lifecycle_in_range.md
+  app_process_starts_summary:
+    source: backend/skills/atomic/app_process_starts_summary.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/app_process_starts_summary.md
+  battery_charge_timeline:
+    source: backend/skills/atomic/battery_charge_timeline.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/battery_charge_timeline.md
+  battery_doze_state_timeline:
+    source: backend/skills/atomic/battery_doze_state_timeline.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/battery_doze_state_timeline.md
+  battery_drain_rate_summary:
+    source: backend/skills/atomic/battery_drain_rate_summary.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/battery_drain_rate_summary.md
+  binder_blocking_in_range:
+    source: backend/skills/atomic/binder_blocking_in_range.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_blocking_in_range.md
+  binder_in_range:
+    source: backend/skills/atomic/binder_in_range.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_in_range.md
+  binder_root_cause:
+    source: backend/skills/atomic/binder_root_cause.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_root_cause.md
+  binder_storm_detection:
+    source: backend/skills/atomic/binder_storm_detection.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_storm_detection.md
+  blocking_chain_analysis:
+    source: backend/skills/atomic/blocking_chain_analysis.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/blocking_chain_analysis.md
+  buffer_transaction_lifecycle:
+    source: backend/skills/atomic/buffer_transaction_lifecycle.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/buffer_transaction_lifecycle.md
+  cache_miss_impact:
+    source: backend/skills/atomic/cache_miss_impact.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cache_miss_impact.md
+  chrome_scroll_jank_frame_timeline:
+    source: backend/skills/atomic/chrome_scroll_jank_frame_timeline.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/chrome_scroll_jank_frame_timeline.md
+  compose_recomposition_hotspot:
+    source: backend/skills/atomic/compose_recomposition_hotspot.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/compose_recomposition_hotspot.md
+  consumer_jank_detection:
+    source: backend/skills/atomic/consumer_jank_detection.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/consumer_jank_detection.md
+  cpu_cluster_load_in_range:
+    source: backend/skills/atomic/cpu_cluster_load_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_cluster_load_in_range.md
+  cpu_cluster_mapping_view:
+    source: backend/skills/atomic/cpu_cluster_mapping_view.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_cluster_mapping_view.md
+  cpu_freq_residency_summary:
+    source: backend/skills/atomic/cpu_freq_residency_summary.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_freq_residency_summary.md
+  cpu_freq_timeline:
+    source: backend/skills/atomic/cpu_freq_timeline.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_freq_timeline.md
+  cpu_idle_analysis:
+    source: backend/skills/atomic/cpu_idle_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_idle_analysis.md
+  cpu_idle_state_residency:
+    source: backend/skills/atomic/cpu_idle_state_residency.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_idle_state_residency.md
+  cpu_load_in_range:
+    source: backend/skills/atomic/cpu_load_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_load_in_range.md
+  cpu_process_utilization_period:
+    source: backend/skills/atomic/cpu_process_utilization_period.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_process_utilization_period.md
+  cpu_slice_analysis:
+    source: backend/skills/atomic/cpu_slice_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_slice_analysis.md
+  cpu_thread_utilization_period:
+    source: backend/skills/atomic/cpu_thread_utilization_period.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_thread_utilization_period.md
+  cpu_throttling_in_range:
+    source: backend/skills/atomic/cpu_throttling_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_throttling_in_range.md
+  cpu_time_per_frame:
+    source: backend/skills/atomic/cpu_time_per_frame.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_time_per_frame.md
+  cpu_topology_detection:
+    source: backend/skills/atomic/cpu_topology_detection.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_topology_detection.md
+  cpu_topology_view:
+    source: backend/skills/atomic/cpu_topology_view.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_topology_view.md
+  cpu_utilization_per_period:
+    source: backend/skills/atomic/cpu_utilization_per_period.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_utilization_per_period.md
+  device_state_timeline:
+    source: backend/skills/atomic/device_state_timeline.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/device_state_timeline.md
+  fence_wait_decomposition:
+    source: backend/skills/atomic/fence_wait_decomposition.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/fence_wait_decomposition.md
+  fpsgo_analysis:
+    source: backend/skills/atomic/fpsgo_analysis.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/fpsgo_analysis.md
+  frame_blocking_calls:
+    source: backend/skills/atomic/frame_blocking_calls.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/frame_blocking_calls.md
+  frame_overrun_summary:
+    source: backend/skills/atomic/frame_overrun_summary.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/frame_overrun_summary.md
+  frame_pipeline_variance:
+    source: backend/skills/atomic/frame_pipeline_variance.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/frame_pipeline_variance.md
+  frame_production_gap:
+    source: backend/skills/atomic/frame_production_gap.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/frame_production_gap.md
+  frame_ui_time_breakdown:
+    source: backend/skills/atomic/frame_ui_time_breakdown.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/frame_ui_time_breakdown.md
+  futex_wait_distribution:
+    source: backend/skills/atomic/futex_wait_distribution.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/futex_wait_distribution.md
+  game_fps_analysis:
+    source: backend/skills/atomic/game_fps_analysis.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/game_fps_analysis.md
+  game_main_loop_jank:
+    source: backend/skills/atomic/game_main_loop_jank.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/game_main_loop_jank.md
+  gc_events_in_range:
+    source: backend/skills/atomic/gc_events_in_range.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/gc_events_in_range.md
+  gl_standalone_swap_jank:
+    source: backend/skills/atomic/gl_standalone_swap_jank.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/gl_standalone_swap_jank.md
+  gpu_freq_in_range:
+    source: backend/skills/atomic/gpu_freq_in_range.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_freq_in_range.md
+  gpu_frequency_analysis:
+    source: backend/skills/atomic/gpu_frequency_analysis.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_frequency_analysis.md
+  gpu_metrics:
+    source: backend/skills/atomic/gpu_metrics.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_metrics.md
+  gpu_power_state_analysis:
+    source: backend/skills/atomic/gpu_power_state_analysis.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/gpu_power_state_analysis.md
+  gpu_render_in_range:
+    source: backend/skills/atomic/gpu_render_in_range.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_render_in_range.md
+  input_events_in_range:
+    source: backend/skills/atomic/input_events_in_range.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/input_events_in_range.md
+  input_to_frame_latency:
+    source: backend/skills/atomic/input_to_frame_latency.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/input_to_frame_latency.md
+  linux_irq_summary:
+    source: backend/skills/atomic/linux_irq_summary.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/linux_irq_summary.md
+  linux_perf_counter_hotspots:
+    source: backend/skills/atomic/linux_perf_counter_hotspots.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/linux_perf_counter_hotspots.md
+  linux_process_rss_swap_timeline:
+    source: backend/skills/atomic/linux_process_rss_swap_timeline.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/linux_process_rss_swap_timeline.md
+  linux_runqueue_depth_timeline:
+    source: backend/skills/atomic/linux_runqueue_depth_timeline.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/linux_runqueue_depth_timeline.md
+  linux_sched_latency_distribution:
+    source: backend/skills/atomic/linux_sched_latency_distribution.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/linux_sched_latency_distribution.md
+  linux_systemd_journald_analysis:
+    source: backend/skills/atomic/linux_systemd_journald_analysis.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/linux_systemd_journald_analysis.md
+  lmk_kill_attribution:
+    source: backend/skills/atomic/lmk_kill_attribution.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/lmk_kill_attribution.md
+  lock_contention_in_range:
+    source: backend/skills/atomic/lock_contention_in_range.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/lock_contention_in_range.md
+  logcat_analysis:
+    source: backend/skills/atomic/logcat_analysis.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/logcat_analysis.md
+  longest_process_slices:
+    source: backend/skills/atomic/longest_process_slices.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/longest_process_slices.md
+  main_thread_file_io_in_range:
+    source: backend/skills/atomic/main_thread_file_io_in_range.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/main_thread_file_io_in_range.md
+  main_thread_handler_callback_slices:
+    source: backend/skills/atomic/main_thread_handler_callback_slices.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/main_thread_handler_callback_slices.md
+  main_thread_sched_latency_in_range:
+    source: backend/skills/atomic/main_thread_sched_latency_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/main_thread_sched_latency_in_range.md
+  main_thread_slices_in_range:
+    source: backend/skills/atomic/main_thread_slices_in_range.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/main_thread_slices_in_range.md
+  main_thread_states_in_range:
+    source: backend/skills/atomic/main_thread_states_in_range.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/main_thread_states_in_range.md
+  mali_gpu_power_state:
+    source: backend/skills/atomic/mali_gpu_power_state.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/mali_gpu_power_state.md
+  media_codec_activity:
+    source: backend/skills/atomic/media_codec_activity.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/media_codec_activity.md
+  memory_growth_detector:
+    source: backend/skills/atomic/memory_growth_detector.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/memory_growth_detector.md
+  memory_pressure_in_range:
+    source: backend/skills/atomic/memory_pressure_in_range.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/memory_pressure_in_range.md
+  memory_rss_high_watermark:
+    source: backend/skills/atomic/memory_rss_high_watermark.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/memory_rss_high_watermark.md
+  modem_network_correlation_summary:
+    source: backend/skills/atomic/modem_network_correlation_summary.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/modem_network_correlation_summary.md
+  native_heap_breakdown:
+    source: backend/skills/atomic/native_heap_breakdown.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/native_heap_breakdown.md
+  oom_adjuster_score_timeline:
+    source: backend/skills/atomic/oom_adjuster_score_timeline.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/oom_adjuster_score_timeline.md
+  page_fault_in_range:
+    source: backend/skills/atomic/page_fault_in_range.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/page_fault_in_range.md
+  pipeline_4feature_scoring:
+    source: backend/skills/atomic/pipeline_4feature_scoring.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_4feature_scoring.md
+  pipeline_key_slices_overlay:
+    source: backend/skills/atomic/pipeline_key_slices_overlay.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_key_slices_overlay.md
+  power_rails_energy_breakdown:
+    source: backend/skills/atomic/power_rails_energy_breakdown.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/power_rails_energy_breakdown.md
+  present_fence_timing:
+    source: backend/skills/atomic/present_fence_timing.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/present_fence_timing.md
+  process_identity_resolver:
+    source: backend/skills/atomic/process_identity_resolver.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/process_identity_resolver.md
+  process_slice_cpu_hotspots:
+    source: backend/skills/atomic/process_slice_cpu_hotspots.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/process_slice_cpu_hotspots.md
+  render_pipeline_latency:
+    source: backend/skills/atomic/render_pipeline_latency.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/render_pipeline_latency.md
+  render_thread_slices:
+    source: backend/skills/atomic/render_thread_slices.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/render_thread_slices.md
+  rendering_pipeline_detection:
+    source: backend/skills/atomic/rendering_pipeline_detection.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/rendering_pipeline_detection.md
+  rn_bridge_to_frame_jank:
+    source: backend/skills/atomic/rn_bridge_to_frame_jank.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/rn_bridge_to_frame_jank.md
+  rn_fabric_render_jank:
+    source: backend/skills/atomic/rn_fabric_render_jank.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/rn_fabric_render_jank.md
+  sched_latency_in_range:
+    source: backend/skills/atomic/sched_latency_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/sched_latency_in_range.md
+  scheduling_analysis:
+    source: backend/skills/atomic/scheduling_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/scheduling_analysis.md
+  screen_off_background_cpu_attribution:
+    source: backend/skills/atomic/screen_off_background_cpu_attribution.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/screen_off_background_cpu_attribution.md
+  scroll_response_latency:
+    source: backend/skills/atomic/scroll_response_latency.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/scroll_response_latency.md
+  sf_composition_in_range:
+    source: backend/skills/atomic/sf_composition_in_range.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/sf_composition_in_range.md
+  sf_frame_consumption:
+    source: backend/skills/atomic/sf_frame_consumption.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/sf_frame_consumption.md
+  sf_layer_count_in_range:
+    source: backend/skills/atomic/sf_layer_count_in_range.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/sf_layer_count_in_range.md
+  startup_binder_in_range:
+    source: backend/skills/atomic/startup_binder_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_binder_in_range.md
+  startup_binder_pool_analysis:
+    source: backend/skills/atomic/startup_binder_pool_analysis.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_binder_pool_analysis.md
+  startup_breakdown_in_range:
+    source: backend/skills/atomic/startup_breakdown_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_breakdown_in_range.md
+  startup_class_loading_in_range:
+    source: backend/skills/atomic/startup_class_loading_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_class_loading_in_range.md
+  startup_cpu_placement_timeline:
+    source: backend/skills/atomic/startup_cpu_placement_timeline.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_cpu_placement_timeline.md
+  startup_critical_tasks:
+    source: backend/skills/atomic/startup_critical_tasks.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_critical_tasks.md
+  startup_events_in_range:
+    source: backend/skills/atomic/startup_events_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_events_in_range.md
+  startup_freq_rampup:
+    source: backend/skills/atomic/startup_freq_rampup.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_freq_rampup.md
+  startup_gc_in_range:
+    source: backend/skills/atomic/startup_gc_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_gc_in_range.md
+  startup_hot_slice_states:
+    source: backend/skills/atomic/startup_hot_slice_states.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_hot_slice_states.md
+  startup_jit_analysis:
+    source: backend/skills/atomic/startup_jit_analysis.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_jit_analysis.md
+  startup_main_thread_binder_blocking_in_range:
+    source: backend/skills/atomic/startup_main_thread_binder_blocking_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_main_thread_binder_blocking_in_range.md
+  startup_main_thread_file_io_in_range:
+    source: backend/skills/atomic/startup_main_thread_file_io_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_main_thread_file_io_in_range.md
+  startup_main_thread_slices_in_range:
+    source: backend/skills/atomic/startup_main_thread_slices_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_main_thread_slices_in_range.md
+  startup_main_thread_states_in_range:
+    source: backend/skills/atomic/startup_main_thread_states_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_main_thread_states_in_range.md
+  startup_main_thread_sync_binder_in_range:
+    source: backend/skills/atomic/startup_main_thread_sync_binder_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_main_thread_sync_binder_in_range.md
+  startup_sched_latency_in_range:
+    source: backend/skills/atomic/startup_sched_latency_in_range.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_sched_latency_in_range.md
+  startup_slow_reasons:
+    source: backend/skills/atomic/startup_slow_reasons.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_slow_reasons.md
+  startup_thread_blocking_graph:
+    source: backend/skills/atomic/startup_thread_blocking_graph.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_thread_blocking_graph.md
+  system_load_in_range:
+    source: backend/skills/atomic/system_load_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/system_load_in_range.md
+  task_migration_in_range:
+    source: backend/skills/atomic/task_migration_in_range.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/task_migration_in_range.md
+  textureview_producer_frame_timing:
+    source: backend/skills/atomic/textureview_producer_frame_timing.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/textureview_producer_frame_timing.md
+  thermal_predictor:
+    source: backend/skills/atomic/thermal_predictor.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/thermal_predictor.md
+  thread_affinity_violation:
+    source: backend/skills/atomic/thread_affinity_violation.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/thread_affinity_violation.md
+  touch_to_display_latency:
+    source: backend/skills/atomic/touch_to_display_latency.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/touch_to_display_latency.md
+  trace_state_track_summary:
+    source: backend/skills/atomic/trace_state_track_summary.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/trace_state_track_summary.md
+  util_tracking_analysis:
+    source: backend/skills/atomic/util_tracking_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/util_tracking_analysis.md
+  vrr_detection:
+    source: backend/skills/atomic/vrr_detection.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/vrr_detection.md
+  vsync_alignment_in_range:
+    source: backend/skills/atomic/vsync_alignment_in_range.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/vsync_alignment_in_range.md
+  vsync_config:
+    source: backend/skills/atomic/vsync_config.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/vsync_config.md
+  vsync_period_detection:
+    source: backend/skills/atomic/vsync_period_detection.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/vsync_period_detection.md
+  vsync_phase_alignment:
+    source: backend/skills/atomic/vsync_phase_alignment.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/vsync_phase_alignment.md
+  wakelock_tracking:
+    source: backend/skills/atomic/wakelock_tracking.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/wakelock_tracking.md
+  wakeup_frequency_summary:
+    source: backend/skills/atomic/wakeup_frequency_summary.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/wakeup_frequency_summary.md
+  wattson_app_startup_power:
+    source: backend/skills/atomic/wattson_app_startup_power.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/wattson_app_startup_power.md
+  wattson_rails_power_breakdown:
+    source: backend/skills/atomic/wattson_rails_power_breakdown.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/wattson_rails_power_breakdown.md
+  wattson_thread_power_attribution:
+    source: backend/skills/atomic/wattson_thread_power_attribution.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/wattson_thread_power_attribution.md
+  webview_v8_analysis:
+    source: backend/skills/atomic/webview_v8_analysis.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/webview_v8_analysis.md
+  multi_trace_result_comparison:
+    source: backend/skills/comparison/multi_trace_result_comparison.skill.yaml
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/skills/multi_trace_result_comparison.md
+  android_heap_dominator_path_extract:
+    source: backend/skills/composite/android_heap_dominator_path_extract.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/android_heap_dominator_path_extract.md
+  android_memory_v57_ai_diagnostics:
+    source: backend/skills/composite/android_memory_v57_ai_diagnostics.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/android_memory_v57_ai_diagnostics.md
+  anr_analysis:
+    source: backend/skills/composite/anr_analysis.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/anr_analysis.md
+  anr_detail:
+    source: backend/skills/composite/anr_detail.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/anr_detail.md
+  battery_drain_attribution:
+    source: backend/skills/composite/battery_drain_attribution.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/battery_drain_attribution.md
+  binder_analysis:
+    source: backend/skills/composite/binder_analysis.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_analysis.md
+  binder_detail:
+    source: backend/skills/composite/binder_detail.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_detail.md
+  block_io_analysis:
+    source: backend/skills/composite/block_io_analysis.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/block_io_analysis.md
+  click_response_analysis:
+    source: backend/skills/composite/click_response_analysis.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/click_response_analysis.md
+  click_response_detail:
+    source: backend/skills/composite/click_response_detail.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/click_response_detail.md
+  code_pinpoint:
+    source: backend/skills/composite/code_pinpoint.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/code_pinpoint.md
+  cpu_analysis:
+    source: backend/skills/composite/cpu_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_analysis.md
+  device_state_snapshot:
+    source: backend/skills/composite/device_state_snapshot.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/device_state_snapshot.md
+  dmabuf_analysis:
+    source: backend/skills/composite/dmabuf_analysis.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/dmabuf_analysis.md
+  flutter_scrolling_analysis:
+    source: backend/skills/composite/flutter_scrolling_analysis.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/flutter_scrolling_analysis.md
+  gc_analysis:
+    source: backend/skills/composite/gc_analysis.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/gc_analysis.md
+  global_trace_sanity_check:
+    source: backend/skills/composite/global_trace_sanity_check.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/global_trace_sanity_check.md
+  gpu_analysis:
+    source: backend/skills/composite/gpu_analysis.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_analysis.md
+  gpu_compute_kernel_analysis:
+    source: backend/skills/composite/gpu_compute_kernel_analysis.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_compute_kernel_analysis.md
+  gpu_v57_ai_diagnostics:
+    source: backend/skills/composite/gpu_v57_ai_diagnostics.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_v57_ai_diagnostics.md
+  io_pressure:
+    source: backend/skills/composite/io_pressure.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/io_pressure.md
+  irq_analysis:
+    source: backend/skills/composite/irq_analysis.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/irq_analysis.md
+  jank_frame_detail:
+    source: backend/skills/composite/jank_frame_detail.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/jank_frame_detail.md
+  lmk_analysis:
+    source: backend/skills/composite/lmk_analysis.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/lmk_analysis.md
+  lock_binder_wait:
+    source: backend/skills/composite/lock_binder_wait.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/lock_binder_wait.md
+  lock_contention_analysis:
+    source: backend/skills/composite/lock_contention_analysis.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/lock_contention_analysis.md
+  memory_analysis:
+    source: backend/skills/composite/memory_analysis.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/memory_analysis.md
+  navigation_analysis:
+    source: backend/skills/composite/navigation_analysis.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/navigation_analysis.md
+  network_analysis:
+    source: backend/skills/composite/network_analysis.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/network_analysis.md
+  power_consumption_overview:
+    source: backend/skills/composite/power_consumption_overview.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/power_consumption_overview.md
+  scene_reconstruction:
+    source: backend/skills/composite/scene_reconstruction.skill.yaml
+    workflow: scene-reconstruction
+    disposition: exported
+    destination: references/generated/skills/scene_reconstruction.md
+  scroll_session_analysis:
+    source: backend/skills/composite/scroll_session_analysis.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/scroll_session_analysis.md
+  scrolling_analysis:
+    source: backend/skills/composite/scrolling_analysis.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/scrolling_analysis.md
+  selection_range_cpu_sched_summary:
+    source: backend/skills/composite/selection_range_cpu_sched_summary.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/selection_range_cpu_sched_summary.md
+  startup_analysis:
+    source: backend/skills/composite/startup_analysis.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_analysis.md
+  startup_detail:
+    source: backend/skills/composite/startup_detail.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/startup_detail.md
+  state_timeline:
+    source: backend/skills/composite/state_timeline.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/state_timeline.md
+  surfaceflinger_analysis:
+    source: backend/skills/composite/surfaceflinger_analysis.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/surfaceflinger_analysis.md
+  suspend_wakeup_analysis:
+    source: backend/skills/composite/suspend_wakeup_analysis.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/suspend_wakeup_analysis.md
+  thermal_throttling:
+    source: backend/skills/composite/thermal_throttling.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/thermal_throttling.md
+  thermal_throttling_chain:
+    source: backend/skills/composite/thermal_throttling_chain.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/thermal_throttling_chain.md
+  webview_drawfunctor_jank_chain:
+    source: backend/skills/composite/webview_drawfunctor_jank_chain.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/webview_drawfunctor_jank_chain.md
+  callstack_analysis:
+    source: backend/skills/deep/callstack_analysis.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/callstack_analysis.md
+  cpu_profiling:
+    source: backend/skills/deep/cpu_profiling.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_profiling.md
+  launcher_module:
+    source: backend/skills/modules/app/launcher_module.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/launcher_module.md
+  systemui_module:
+    source: backend/skills/modules/app/systemui_module.skill.yaml
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/skills/systemui_module.md
+  third_party_module:
+    source: backend/skills/modules/app/third_party_module.skill.yaml
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/skills/third_party_module.md
+  ams_module:
+    source: backend/skills/modules/framework/ams_module.skill.yaml
+    workflow: startup
+    disposition: exported
+    destination: references/generated/skills/ams_module.md
+  art_module:
+    source: backend/skills/modules/framework/art_module.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/art_module.md
+  choreographer_module:
+    source: backend/skills/modules/framework/choreographer_module.skill.yaml
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/skills/choreographer_module.md
+  input_module:
+    source: backend/skills/modules/framework/input_module.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/input_module.md
+  surfaceflinger_module:
+    source: backend/skills/modules/framework/surfaceflinger_module.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/surfaceflinger_module.md
+  wms_module:
+    source: backend/skills/modules/framework/wms_module.skill.yaml
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/skills/wms_module.md
+  cpu_module:
+    source: backend/skills/modules/hardware/cpu_module.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/cpu_module.md
+  gpu_module:
+    source: backend/skills/modules/hardware/gpu_module.skill.yaml
+    workflow: gpu-rendering
+    disposition: exported
+    destination: references/generated/skills/gpu_module.md
+  memory_module:
+    source: backend/skills/modules/hardware/memory_module.skill.yaml
+    workflow: memory
+    disposition: exported
+    destination: references/generated/skills/memory_module.md
+  power_module:
+    source: backend/skills/modules/hardware/power_module.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/power_module.md
+  thermal_module:
+    source: backend/skills/modules/hardware/thermal_module.skill.yaml
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/skills/thermal_module.md
+  binder_module:
+    source: backend/skills/modules/kernel/binder_module.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/binder_module.md
+  filesystem_module:
+    source: backend/skills/modules/kernel/filesystem_module.skill.yaml
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/skills/filesystem_module.md
+  lock_contention_module:
+    source: backend/skills/modules/kernel/lock_contention_module.skill.yaml
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/skills/lock_contention_module.md
+  scheduler_module:
+    source: backend/skills/modules/kernel/scheduler_module.skill.yaml
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/skills/scheduler_module.md
+  pipeline_android_pip_freeform:
+    source: backend/skills/pipelines/android_pip_freeform.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_pip_freeform.md
+  pipeline_android_view_mixed:
+    source: backend/skills/pipelines/android_view_mixed.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_view_mixed.md
+  pipeline_android_view_multi_window:
+    source: backend/skills/pipelines/android_view_multi_window.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_view_multi_window.md
+  pipeline_android_view_software:
+    source: backend/skills/pipelines/android_view_software.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_view_software.md
+  pipeline_android_view_standard_blast:
+    source: backend/skills/pipelines/android_view_standard_blast.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_view_standard_blast.md
+  pipeline_android_view_standard_legacy:
+    source: backend/skills/pipelines/android_view_standard_legacy.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_android_view_standard_legacy.md
+  pipeline_angle_gles_vulkan:
+    source: backend/skills/pipelines/angle_gles_vulkan.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_angle_gles_vulkan.md
+  camera_trace_evidence:
+    source: backend/skills/composite/camera_trace_evidence.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/camera_trace_evidence.md
+  pipeline_camera_pipeline:
+    source: backend/skills/pipelines/camera_pipeline.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_camera_pipeline.md
+  pipeline_chrome_browser_viz:
+    source: backend/skills/pipelines/chrome_browser_viz.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_chrome_browser_viz.md
+  pipeline_compose_standard:
+    source: backend/skills/pipelines/compose_standard.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_compose_standard.md
+  pipeline_flutter_surfaceview_impeller:
+    source: backend/skills/pipelines/flutter_surfaceview_impeller.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_flutter_surfaceview_impeller.md
+  pipeline_flutter_surfaceview_skia:
+    source: backend/skills/pipelines/flutter_surfaceview_skia.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_flutter_surfaceview_skia.md
+  pipeline_flutter_textureview:
+    source: backend/skills/pipelines/flutter_textureview.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_flutter_textureview.md
+  pipeline_game_engine:
+    source: backend/skills/pipelines/game_engine.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_game_engine.md
+  pipeline_hardware_buffer_renderer:
+    source: backend/skills/pipelines/hardware_buffer_renderer.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_hardware_buffer_renderer.md
+  pipeline_imagereader_pipeline:
+    source: backend/skills/pipelines/imagereader_pipeline.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_imagereader_pipeline.md
+  pipeline_opengl_es:
+    source: backend/skills/pipelines/opengl_es.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_opengl_es.md
+  pipeline_rn_new_arch:
+    source: backend/skills/pipelines/rn_new_arch.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_rn_new_arch.md
+  pipeline_rn_old_arch:
+    source: backend/skills/pipelines/rn_old_arch.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_rn_old_arch.md
+  pipeline_rn_skia:
+    source: backend/skills/pipelines/rn_skia.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_rn_skia.md
+  pipeline_software_compositing:
+    source: backend/skills/pipelines/software_compositing.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_software_compositing.md
+  pipeline_surface_control_api:
+    source: backend/skills/pipelines/surface_control_api.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_surface_control_api.md
+  pipeline_surfaceview_blast:
+    source: backend/skills/pipelines/surfaceview_blast.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_surfaceview_blast.md
+  pipeline_textureview_standard:
+    source: backend/skills/pipelines/textureview_standard.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_textureview_standard.md
+  pipeline_variable_refresh_rate:
+    source: backend/skills/pipelines/variable_refresh_rate.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_variable_refresh_rate.md
+  pipeline_video_overlay_hwc:
+    source: backend/skills/pipelines/video_overlay_hwc.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_video_overlay_hwc.md
+  pipeline_vulkan_native:
+    source: backend/skills/pipelines/vulkan_native.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_vulkan_native.md
+  pipeline_webview_gl_functor:
+    source: backend/skills/pipelines/webview_gl_functor.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_webview_gl_functor.md
+  pipeline_webview_surface_control:
+    source: backend/skills/pipelines/webview_surface_control.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_webview_surface_control.md
+  pipeline_webview_surfaceview_wrapper:
+    source: backend/skills/pipelines/webview_surfaceview_wrapper.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_webview_surfaceview_wrapper.md
+  pipeline_webview_textureview_custom:
+    source: backend/skills/pipelines/webview_textureview_custom.skill.yaml
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/skills/pipeline_webview_textureview_custom.md
+strategies:
+  backend/strategies/anr.strategy.md:
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/strategies/anr.strategy.md
+  backend/strategies/arch-compose.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/strategies/arch-compose.template.md
+  backend/strategies/arch-flutter.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/strategies/arch-flutter.template.md
+  backend/strategies/arch-standard.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/strategies/arch-standard.template.md
+  backend/strategies/arch-webview.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/strategies/arch-webview.template.md
+  backend/strategies/case-background-case-line-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Case Library retrieval and runtime localization
+  backend/strategies/case-background-case-line.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Case Library retrieval and runtime localization
+  backend/strategies/case-background-context-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Case Library retrieval and runtime localization
+  backend/strategies/case-background-context.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/case-candidate-review.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/code-aware.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/comparison-conclusion.template.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/comparison-conclusion.template.md
+  backend/strategies/comparison-context-en.template.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/comparison-context-en.template.md
+  backend/strategies/comparison-context.template.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/comparison-context.template.md
+  backend/strategies/comparison-methodology.template.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/comparison-methodology.template.md
+  backend/strategies/comparison-result-methodology.template.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/comparison-result-methodology.template.md
+  backend/strategies/external-issue-triage.template.md:
+    disposition: product-only
+    reason: SmartPerfetto feedback sessions, provider pinning, review attestation, and draft-only GitHub handoff
+  backend/strategies/game.strategy.md:
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/strategies/game.strategy.md
+  backend/strategies/general.strategy.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/general.strategy.md
+  backend/strategies/interaction.strategy.md:
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/strategies/interaction.strategy.md
+  backend/strategies/io.strategy.md:
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/strategies/io.strategy.md
+  backend/strategies/knowledge-binder-ipc.template.md:
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-binder-ipc.template.md
+  backend/strategies/knowledge-cpu-scheduler.template.md:
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-cpu-scheduler.template.md
+  backend/strategies/knowledge-data-sources.template.md:
+    workflow: memory
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-data-sources.template.md
+  backend/strategies/knowledge-evidence-provenance.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-evidence-provenance.template.md
+  backend/strategies/knowledge-gc-dynamics.template.md:
+    workflow: memory
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-gc-dynamics.template.md
+  backend/strategies/knowledge-harmonyos-rendering.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-harmonyos-rendering.template.md
+  backend/strategies/knowledge-harmonyos-tools.template.md:
+    workflow: frameworks-games
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-harmonyos-tools.template.md
+  backend/strategies/knowledge-lock-contention.template.md:
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-lock-contention.template.md
+  backend/strategies/knowledge-network-evidence.template.md:
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-network-evidence.template.md
+  backend/strategies/knowledge-observability-diagnostics.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-observability-diagnostics.template.md
+  backend/strategies/knowledge-pipeline-anchors.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-pipeline-anchors.template.md
+  backend/strategies/knowledge-pipeline-fences.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-pipeline-fences.template.md
+  backend/strategies/knowledge-rendering-pipeline.template.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-rendering-pipeline.template.md
+  backend/strategies/knowledge-startup-root-causes.template.md:
+    workflow: startup
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-startup-root-causes.template.md
+  backend/strategies/knowledge-thermal-throttling.template.md:
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-thermal-throttling.template.md
+  backend/strategies/knowledge-thread-state-blocked-reason.template.md:
+    workflow: anr-blocking
+    disposition: exported
+    destination: references/generated/knowledge/knowledge-thread-state-blocked-reason.template.md
+  backend/strategies/linux.strategy.md:
+    workflow: cpu-scheduling
+    disposition: exported
+    destination: references/generated/strategies/linux.strategy.md
+  backend/strategies/media.strategy.md:
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/strategies/media.strategy.md
+  backend/strategies/memory.strategy.md:
+    workflow: memory
+    disposition: exported
+    destination: references/generated/strategies/memory.strategy.md
+  backend/strategies/multi-trace-result-comparison.strategy.md:
+    workflow: trace-comparison
+    disposition: exported
+    destination: references/generated/strategies/multi-trace-result-comparison.strategy.md
+  backend/strategies/network.strategy.md:
+    workflow: io-network-media
+    disposition: exported
+    destination: references/generated/strategies/network.strategy.md
+  backend/strategies/overview.strategy.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/overview.strategy.md
+  backend/strategies/phase_hint_templates/misdiagnosis_vsync_vrr.template.yaml:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/misdiagnosis_vsync_vrr.template.yaml.md
+  backend/strategies/pipeline.strategy.md:
+    workflow: rendering-pipeline
+    disposition: exported
+    destination: references/generated/strategies/pipeline.strategy.md
+  backend/strategies/power.strategy.md:
+    workflow: power-thermal
+    disposition: exported
+    destination: references/generated/strategies/power.strategy.md
+  backend/strategies/prompt-complexity-classifier.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-code-reference-contract-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto source lookup tools and codebase-aware report orchestration
+  backend/strategies/prompt-code-reference-contract-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto source lookup tools and codebase-aware report orchestration
+  backend/strategies/prompt-final-report-correction-system-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto final-report runtime orchestration
+  backend/strategies/prompt-final-report-correction-system-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto final-report runtime orchestration
+  backend/strategies/prompt-final-report-missing-sections-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-final-report-missing-sections-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-language-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-language-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-methodology.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/prompt-methodology.template.md
+  backend/strategies/prompt-openai-final-report-continuation-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-openai-final-report-continuation-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-output-format.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/prompt-output-format.template.md
+  backend/strategies/prompt-quick.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-recent-sql-results.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-role.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-runtime-conversation-context-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and conversation orchestration
+  backend/strategies/prompt-runtime-conversation-context-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and conversation orchestration
+  backend/strategies/prompt-runtime-conversation-turn-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and conversation orchestration
+  backend/strategies/prompt-runtime-conversation-turn-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and conversation orchestration
+  backend/strategies/prompt-runtime-fast-memory-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and memory orchestration
+  backend/strategies/prompt-runtime-fast-memory-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and memory orchestration
+  backend/strategies/prompt-runtime-sql-pitfalls-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime memory and SQL retry orchestration
+  backend/strategies/prompt-runtime-sql-pitfalls-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime memory and SQL retry orchestration
+  backend/strategies/prompt-runtime-trace-context-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto frontend pre-query and evidence-reference orchestration
+  backend/strategies/prompt-runtime-trace-context-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto frontend pre-query and evidence-reference orchestration
+  backend/strategies/prompt-scene-stage3-summary.template.md:
+    workflow: scene-reconstruction
+    disposition: exported
+    destination: references/generated/strategies/prompt-scene-stage3-summary.template.md
+  backend/strategies/prompt-session-continuity-break.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/report-runtime-recovery-contract-section-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-contract-section-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-hypothesis-empty-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-hypothesis-empty-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-missing-contract-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-missing-contract-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-phase-empty-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-phase-empty-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-section-evidence-empty-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-section-evidence-empty-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-truncation-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-runtime-recovery-truncation-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto report rendering and runtime recovery surface
+  backend/strategies/report-smart-analysis-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Smart Analysis report rendering surface
+  backend/strategies/report-smart-analysis-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Smart Analysis report rendering surface
+  backend/strategies/report-smart-scene-inventory-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Smart Analysis report rendering surface
+  backend/strategies/report-smart-scene-inventory-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto Smart Analysis report rendering surface
+  backend/strategies/retrieved-context-safety.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/retrieved-context-safety.template.md
+  backend/strategies/retrieved-context-tool-safety.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/retrieved-context-tool-safety.template.md
+  backend/strategies/runtime-correctness.strategy.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/scene-presentation.registry.yaml:
+    workflow: scene-reconstruction
+    disposition: exported
+    destination: references/generated/strategies/scene-presentation.registry.yaml.md
+  backend/strategies/scene-reconstruction-verifier.template.md:
+    workflow: scene-reconstruction
+    disposition: exported
+    destination: references/generated/strategies/scene-reconstruction-verifier.template.md
+  backend/strategies/scroll-response.strategy.md:
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/strategies/scroll-response.strategy.md
+  backend/strategies/scrolling.strategy.md:
+    workflow: scrolling
+    disposition: exported
+    destination: references/generated/strategies/scrolling.strategy.md
+  backend/strategies/selfevolve-proposal.template.md:
+    disposition: product-only
+    reason: SmartPerfetto self-evolution proposal generation, persistence, and gated overlay lifecycle
+  backend/strategies/selfevolve-synthetic-eval-seeds.registry.yaml:
+    disposition: product-only
+    reason: SmartPerfetto self-evolution evaluation corpus and gated overlay lifecycle
+  backend/strategies/selection-area.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/selection-area.template.md
+  backend/strategies/selection-slice.template.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/selection-slice.template.md
+  backend/strategies/smart.strategy.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/smart.strategy.md
+  backend/strategies/startup.strategy.md:
+    workflow: startup
+    disposition: exported
+    destination: references/generated/strategies/startup.strategy.md
+  backend/strategies/teaching.strategy.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/teaching.strategy.md
+  backend/strategies/touch-tracking.strategy.md:
+    workflow: interaction
+    disposition: exported
+    destination: references/generated/strategies/touch-tracking.strategy.md
+  backend/strategies/verifier-misdiagnosis.strategy.md:
+    workflow: trace-overview
+    disposition: exported
+    destination: references/generated/strategies/verifier-misdiagnosis.strategy.md
+pipeline_docs:
+  docs/rendering_pipelines/S01_rendering_types_overview.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S01_rendering_types_overview.md
+  docs/rendering_pipelines/S02_aosp_standard_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S02_aosp_standard_type.md
+  docs/rendering_pipelines/S03_surfaceview_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S03_surfaceview_type.md
+  docs/rendering_pipelines/S04_textureview_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S04_textureview_type.md
+  docs/rendering_pipelines/S05_mixed_rendering_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S05_mixed_rendering_type.md
+  docs/rendering_pipelines/S06_multi_window_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S06_multi_window_type.md
+  docs/rendering_pipelines/S07_software_offscreen_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S07_software_offscreen_type.md
+  docs/rendering_pipelines/S08_native_graphics_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S08_native_graphics_type.md
+  docs/rendering_pipelines/S09_webview_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S09_webview_type.md
+  docs/rendering_pipelines/S10_flutter_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S10_flutter_type.md
+  docs/rendering_pipelines/S11_camera_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S11_camera_type.md
+  docs/rendering_pipelines/S12_video_overlay_hwc_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S12_video_overlay_hwc_type.md
+  docs/rendering_pipelines/S13_game_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S13_game_type.md
+  docs/rendering_pipelines/S14_react_native_type.md:
+    disposition: exported
+    destination: references/generated/pipelines/docs/S14_react_native_type.md

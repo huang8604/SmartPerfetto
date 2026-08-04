@@ -434,9 +434,9 @@ steps:
               AND present_ts - prev_present_ts <= (SELECT vsync_period_ns FROM timing_config) * 6 THEN 1
             ELSE 0
           END) as consumer_jank_frames,
-          -- App 侧掉帧（BS 帧的 jank_type 不可能是 Self Jank/App Deadline Missed，无需双信号）
+          -- App 侧掉帧（BS 帧的 jank_type 不可能是 Self Jank/App Deadline Missed/App Resynced Jitter，无需双信号）
           SUM(CASE WHEN present_type IN ('Late Present', 'Dropped Frame')
-            AND jank_type IN ('Self Jank', 'App Deadline Missed') THEN 1 ELSE 0 END) as app_jank_frames,
+            AND jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 1 ELSE 0 END) as app_jank_frames,
           -- Buffer Stuffing 总帧数（管线背压，含正常 BS 和异常 BS）
           SUM(CASE WHEN jank_type = 'Buffer Stuffing' THEN 1 ELSE 0 END) as buffer_stuffing_frames,
           -- vsync missed：双信号门控
@@ -1465,7 +1465,7 @@ steps:
               AND sr.present_ts - sr.prev_present_ts <= (SELECT vsync_period_ns FROM vsync_config_for_session) * 6 THEN 1
             ELSE 0 END) as consumer_jank_count,
           SUM(CASE WHEN sr.present_type IN ('Late Present', 'Dropped Frame')
-            AND sr.jank_type IN ('Self Jank', 'App Deadline Missed') THEN 1 ELSE 0 END) as app_jank_count,
+            AND sr.jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 1 ELSE 0 END) as app_jank_count,
           -- Buffer Stuffing 总帧数（管线背压，含正常 BS 和异常 BS）
           SUM(CASE WHEN sr.jank_type = 'Buffer Stuffing' THEN 1 ELSE 0 END) as buffer_stuffing_count,
           MAX(CASE
@@ -1619,7 +1619,7 @@ steps:
           END as vsync_missed,
           -- 责任归属
           CASE
-            WHEN sm.jank_type IN ('Self Jank', 'App Deadline Missed') THEN 'APP'
+            WHEN sm.jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 'APP'
             WHEN sm.jank_type GLOB '*SurfaceFlinger*' THEN 'SF'
             WHEN sm.jank_type = 'Buffer Stuffing' THEN 'BUFFER_STUFFING'
             WHEN sm.jank_type = 'None' OR sm.jank_type IS NULL THEN 'HIDDEN'
@@ -2240,7 +2240,7 @@ steps:
           p.name as process_name,
           ROUND(sm.frame_dur / 1e6, 2) as dur_ms,
           CASE
-            WHEN sm.jank_type IN ('Self Jank', 'App Deadline Missed') THEN 'APP'
+            WHEN sm.jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 'APP'
             WHEN sm.jank_type GLOB '*SurfaceFlinger*' THEN 'SF'
             WHEN sm.jank_type = 'Buffer Stuffing' THEN 'BUFFER_STUFFING'
             WHEN sm.jank_type = 'None' OR sm.jank_type IS NULL THEN 'HIDDEN'
@@ -2316,6 +2316,8 @@ steps:
           OR t.name GLOB '[0-9]*.raster'
       ),
       -- ========== 4. Per-frame: 最耗时 producer 线程 slice ==========
+      -- Choreographer#doFrame - resynced... is a child marker showing
+      -- frame-timeline resynchronization; exclude it from workload ranking.
       frame_slices AS (
         SELECT
           fl.frame_start,
@@ -2332,6 +2334,7 @@ steps:
           AND s.ts >= fl.frame_start - 5000000
           AND s.ts < fl.frame_end
           AND s.dur >= 1000000
+          AND s.name NOT GLOB '*resynced*'
       ),
       top_slices AS (
         SELECT * FROM frame_slices WHERE rn = 1
@@ -2595,6 +2598,7 @@ steps:
         GROUP BY frame_start
       ),
       -- 10c. 主线程 Top 8 耗时 Slice
+      -- Keep resync markers out of generic main-thread workload slices.
       per_frame_main_top_slices AS (
         SELECT frame_start,
           json_group_array(json_object(
@@ -2620,6 +2624,7 @@ steps:
             AND s.ts >= fl.frame_start - 5000000
             AND s.ts < fl.frame_end
             AND s.dur >= 500000
+            AND s.name NOT GLOB '*resynced*'
           GROUP BY fl.frame_start, s.name
           HAVING dur_ms > 0.5
         )
@@ -3519,7 +3524,7 @@ steps:
           a.ts - LAG(a.ts + a.dur)
             OVER (PARTITION BY a.layer_name ORDER BY a.ts) as time_gap_ns,
           CASE
-            WHEN a.jank_type IN ('Self Jank', 'App Deadline Missed') THEN 'APP'
+            WHEN a.jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 'APP'
             WHEN a.jank_type GLOB '*SurfaceFlinger*' THEN 'SF'
             WHEN a.jank_type = 'Buffer Stuffing' THEN 'BUFFER_STUFFING'
             WHEN a.jank_type = 'None' OR a.jank_type IS NULL THEN 'HIDDEN'
@@ -3545,9 +3550,9 @@ steps:
               AND present_ts - prev_present_ts <= (SELECT vsync_period_ns FROM vsync_config) * 6
               AND (time_gap_ns IS NULL OR time_gap_ns <= (SELECT vsync_period_ns FROM vsync_config) * 6) THEN 1
             ELSE 0 END) as total_jank_count,
-          -- App 侧掉帧（BS 帧的 jank_type 不可能是 Self Jank/App Deadline Missed）
+          -- App 侧掉帧（BS 帧的 jank_type 不可能是 Self Jank/App Deadline Missed/App Resynced Jitter）
           SUM(CASE WHEN present_type IN ('Late Present', 'Dropped Frame')
-            AND jank_type IN ('Self Jank', 'App Deadline Missed') THEN 1 ELSE 0 END) as app_jank_count,
+            AND jank_type IN ('Self Jank', 'App Deadline Missed', 'App Resynced Jitter') THEN 1 ELSE 0 END) as app_jank_count,
           SUM(CASE WHEN present_type IN ('Late Present', 'Dropped Frame')
             AND jank_type GLOB '*SurfaceFlinger*' THEN 1 ELSE 0 END) as sf_jank_count
         FROM frame_jank_data

@@ -18,6 +18,13 @@
 
 import type { TraceProcessorQueryProvenance } from '../services/traceProcessorConnectionModel';
 import type { IdentityResolutionV1 } from '../types/identityContract';
+import type { DataEnvelopeMeta } from '../types/dataContract';
+import {
+  compactQueryReviewForToolResponse,
+  sanitizeQueryReview,
+  type CompactQueryReviewForToolResponse,
+  type QueryReviewV1,
+} from '../types/queryReviewContract';
 
 export interface StoredArtifact {
   id: string;
@@ -41,6 +48,10 @@ export interface StoredArtifact {
   sourceTrace?: import('./types').TraceSource;
   /** Trace processor provenance for SQL/artifact-backed evidence. */
   traceProvenance?: TraceProcessorQueryProvenance;
+  queryReview?: QueryReviewV1;
+  executionStatus?: DataEnvelopeMeta['executionStatus'];
+  executionMessage?: string;
+  executionError?: string;
 }
 
 export interface ArtifactSummary {
@@ -58,6 +69,13 @@ export interface ArtifactSummary {
   planPhaseGoal?: string;
   sourceToolCallId?: string;
   identityResolution?: IdentityResolutionV1;
+  queryReview?: CompactQueryReviewForToolResponse;
+  traceSide?: TraceProcessorQueryProvenance['traceSide'];
+  paneSide?: TraceProcessorQueryProvenance['paneSide'];
+  traceId?: string;
+  executionStatus?: DataEnvelopeMeta['executionStatus'];
+  executionMessage?: string;
+  executionError?: string;
 }
 
 /**
@@ -78,7 +96,12 @@ export interface CompactArtifactSummary {
   planPhaseId?: string;
   planPhaseTitle?: string;
   traceSide?: TraceProcessorQueryProvenance['traceSide'];
+  paneSide?: TraceProcessorQueryProvenance['paneSide'];
   traceId?: string;
+  queryReview?: CompactQueryReviewForToolResponse;
+  executionStatus?: DataEnvelopeMeta['executionStatus'];
+  executionMessage?: string;
+  executionError?: string;
 }
 
 export class ArtifactStore {
@@ -109,12 +132,18 @@ export class ArtifactStore {
     paramsHash?: string;
     identityResolution?: IdentityResolutionV1;
     traceProvenance?: TraceProcessorQueryProvenance;
+    queryReview?: QueryReviewV1;
+    executionStatus?: DataEnvelopeMeta['executionStatus'];
+    executionMessage?: string;
+    executionError?: string;
   }): string {
     const id = `art-${++this.counter}`;
     const now = Date.now();
+    const queryReview = sanitizeQueryReview(entry.queryReview);
     this.artifacts.set(id, {
       id,
       ...entry,
+      queryReview,
       storedAt: now,
       lastAccessedAt: now,
     });
@@ -134,6 +163,15 @@ export class ArtifactStore {
     }
 
     return id;
+  }
+
+  updateQueryReview(id: string, queryReview: QueryReviewV1 | undefined): boolean {
+    const artifact = this.artifacts.get(id);
+    if (!artifact) return false;
+    const sanitized = sanitizeQueryReview(queryReview);
+    if (!sanitized) return false;
+    artifact.queryReview = sanitized;
+    return true;
   }
 
   /**
@@ -171,6 +209,13 @@ export class ArtifactStore {
       planPhaseGoal: artifact.planPhaseGoal,
       sourceToolCallId: artifact.sourceToolCallId,
       identityResolution: artifact.identityResolution,
+      ...(artifact.traceProvenance?.traceSide ? { traceSide: artifact.traceProvenance.traceSide } : {}),
+      ...(artifact.traceProvenance?.paneSide ? { paneSide: artifact.traceProvenance.paneSide } : {}),
+      ...(artifact.traceProvenance?.traceId ? { traceId: artifact.traceProvenance.traceId } : {}),
+      ...(artifact.queryReview ? { queryReview: compactQueryReviewForToolResponse(artifact.queryReview) } : {}),
+      ...(artifact.executionStatus ? { executionStatus: artifact.executionStatus } : {}),
+      ...(artifact.executionMessage ? { executionMessage: artifact.executionMessage } : {}),
+      ...(artifact.executionError ? { executionError: artifact.executionError } : {}),
     };
   }
 
@@ -204,7 +249,12 @@ export class ArtifactStore {
       ...(full.planPhaseId ? { planPhaseId: full.planPhaseId } : {}),
       ...(full.planPhaseTitle ? { planPhaseTitle: full.planPhaseTitle } : {}),
       ...(artifact?.traceProvenance?.traceSide ? { traceSide: artifact.traceProvenance.traceSide } : {}),
+      ...(artifact?.traceProvenance?.paneSide ? { paneSide: artifact.traceProvenance.paneSide } : {}),
       ...(artifact?.traceProvenance?.traceId ? { traceId: artifact.traceProvenance.traceId } : {}),
+      ...(artifact?.queryReview ? { queryReview: compactQueryReviewForToolResponse(artifact.queryReview) } : {}),
+      ...(artifact?.executionStatus ? { executionStatus: artifact.executionStatus } : {}),
+      ...(artifact?.executionMessage ? { executionMessage: artifact.executionMessage } : {}),
+      ...(artifact?.executionError ? { executionError: artifact.executionError } : {}),
     };
   }
 
@@ -244,8 +294,13 @@ export class ArtifactStore {
           paramsHash: artifact.paramsHash,
           identityResolution: artifact.identityResolution,
           traceSide: artifact.traceProvenance?.traceSide,
+          paneSide: artifact.traceProvenance?.paneSide,
           traceId: artifact.traceProvenance?.traceId,
           traceProvenance: artifact.traceProvenance,
+          executionStatus: artifact.executionStatus,
+          executionMessage: artifact.executionMessage,
+          executionError: artifact.executionError,
+          ...(artifact.queryReview ? { queryReview: compactQueryReviewForToolResponse(artifact.queryReview) } : {}),
         };
       }
       case 'full': {
@@ -271,8 +326,13 @@ export class ArtifactStore {
           paramsHash: artifact.paramsHash,
           identityResolution: artifact.identityResolution,
           traceSide: artifact.traceProvenance?.traceSide,
+          paneSide: artifact.traceProvenance?.paneSide,
           traceId: artifact.traceProvenance?.traceId,
           traceProvenance: artifact.traceProvenance,
+          queryReview: artifact.queryReview,
+          executionStatus: artifact.executionStatus,
+          executionMessage: artifact.executionMessage,
+          executionError: artifact.executionError,
           ...(truncatedFull ? { truncated: true, totalRows: fullRows.length, hint: 'Use detail="rows" with offset/limit for complete data' } : {}),
         };
       }

@@ -5,11 +5,11 @@
  * and does not rank launcher/system context above the traced app by default.
  */
 
-import path from 'node:path';
 import { describe, expect, it, beforeAll } from '@jest/globals';
 import { ensureSkillRegistryInitialized, skillRegistry } from '../../src/services/skillEngine/skillLoader';
 import { createSkillExecutor, SkillExecutor } from '../../src/services/skillEngine/skillExecutor';
 import { getTraceProcessorService, TraceProcessorService } from '../../src/services/traceProcessorService';
+import { resolveTraceCase } from '../../src/utils/traceCorpus';
 
 const TRACE_CASES = [
   { file: 'lacunh_heavy.pftrace', expectedTop: /^com\.example\./ },
@@ -24,7 +24,6 @@ const IDX_CONFIDENCE = 1;
 const IDX_STATUS = 2;
 const IDX_CANONICAL = 3;
 const IDX_PROCESS_PARAM = 4;
-const IDX_WARNING = 20;
 
 function getRows(result: any): any[][] {
   return result.displayResults?.[0]?.data?.rows || [];
@@ -35,7 +34,7 @@ async function withTrace<T>(
   traceFile: string,
   callback: (traceId: string) => Promise<T>,
 ): Promise<T> {
-  const tracePath = path.resolve(process.cwd(), '..', 'test-traces', traceFile);
+  const tracePath = resolveTraceCase(traceFile);
   const traceId = await traceProcessor.loadTraceFromFilePath(tracePath);
   try {
     return await callback(traceId);
@@ -93,7 +92,10 @@ describe('process_identity_resolver skill', () => {
       expect(first[IDX_STATUS]).toBe('confirmed');
       expect(first[IDX_CANONICAL]).toBe('com.example.wechatfriendforcustomscroller');
       expect(first[IDX_PROCESS_PARAM]).toBe('com.example.wechatfriendforcustomscroller');
-      expect(first[IDX_WARNING]).toBe('ok');
+      const columns = result.displayResults?.[0]?.data?.columns || [];
+      const warningIndex = columns.indexOf('identity_warning');
+      expect(warningIndex).toBeGreaterThanOrEqual(0);
+      expect(first[warningIndex]).toBe('ok');
     });
   }, 60000);
 

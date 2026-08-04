@@ -1,42 +1,18 @@
-import dotenv from 'dotenv';
-
-const SERVICE_PORT_ENV_KEYS = [
-  'PORT',
-  'SMARTPERFETTO_BACKEND_PORT',
-  'SMARTPERFETTO_FRONTEND_PORT',
-  'SMARTPERFETTO_BACKEND_PUBLIC_PORT',
-  'SMARTPERFETTO_BACKEND_PUBLIC_URL',
-  'SMARTPERFETTO_BACKEND_URL',
-  'FRONTEND_URL',
-];
-const lockedServiceEnv = process.env.SMARTPERFETTO_LOCK_SERVICE_PORTS === '1'
-  ? Object.fromEntries(
-    SERVICE_PORT_ENV_KEYS
-      .filter((key) => process.env[key] !== undefined)
-      .map((key) => [key, process.env[key] as string]),
-  )
-  : null;
+import {configureRuntimeEnvironment} from './runtimeEnvironment';
 
 // Load environment variables FIRST before importing routes
-dotenv.config(
-  process.env.SMARTPERFETTO_ENV_FILE
-    ? { path: process.env.SMARTPERFETTO_ENV_FILE, override: true }
-    : { override: true },
-);
-if (lockedServiceEnv) {
-  for (const [key, value] of Object.entries(lockedServiceEnv)) {
-    process.env[key] = value;
-  }
-}
+configureRuntimeEnvironment();
 
 import { installEpipeGuard } from './utils/epipeGuard';
 
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import type { Server } from 'http';
+import type { Duplex } from 'stream';
 
 // Import configuration
-import { resolveFeatureConfig, serverConfig } from './config';
+import { resolveAuthConfig, resolveFeatureConfig, serverConfig } from './config';
 
 // Import routes (now after dotenv.config())
 import sqlRoutes from './routes/sql';
@@ -49,6 +25,7 @@ import templateAnalysisRoutes from './routes/templateAnalysisRoutes';
 import skillRoutes from './routes/skillRoutes';
 import skillAdminRoutes from './routes/skillAdminRoutes';
 import strategyAdminRoutes from './routes/strategyAdminRoutes';
+import selfEvolutionAdminRoutes from './routes/selfEvolutionAdminRoutes';
 import reportRoutes from './routes/reportRoutes';
 import agentRoutes from './routes/agentRoutes';
 import providerRoutes from './routes/providerRoutes';
@@ -66,8 +43,12 @@ import enterpriseRuntimeDashboardRoutes from './routes/enterpriseRuntimeDashboar
 import analysisResultRoutes from './routes/analysisResultRoutes';
 import workspaceWindowRoutes from './routes/workspaceWindowRoutes';
 import comparisonRoutes from './routes/comparisonRoutes';
+import traceConfigProposalRoutes from './routes/traceConfigProposalRoutes';
+import skillPackRoutes from './routes/skillPackRoutes';
+import batchTraceRoutes from './routes/batchTraceRoutes';
 import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
-import {authenticate} from './middleware/auth';
+import applicationUpdateRoutes from './routes/applicationUpdateRoutes';
+import {authenticate, requireRequestContext} from './middleware/auth';
 import { collectEnvCredentialSources } from './agentRuntime/envCredentialSources';
 import { buildRuntimeHealthPayload } from './agentRuntime/runtimeHealth';
 import {
@@ -83,57 +64,138 @@ import {
   bindWorkspaceRouteContext,
   requireWorkspaceRouteContext,
 } from './middleware/workspaceRouteContext';
+import {
+  isCorsOriginAllowed,
+  isLoopbackRequestHostname,
+  isSsoCookieMutationOriginAllowed,
+  normalizeCorsOrigins,
+} from './security/requestOriginPolicy';
+import {rejectEnterpriseUnscopedApi} from './middleware/enterpriseRouteBoundary';
+import {hasRbacPermission, sendForbidden} from './services/rbac';
+import {getSmartPerfettoVersion} from './version';
 
 // Import cleanup utilities
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
+import { shouldCleanOrphanProcessorsOnStartup } from './services/startupCleanupPolicy';
 import { getPortPool, resetPortPool } from './services/portPool';
 import { failInterruptedAnalysisRunsOnStartup } from './services/analysisRunStore';
 import { startCaseEvolutionWorker } from './services/caseEvolution/caseEvolutionWorkerBootstrap';
 import { startPatternMemoryAutoConfirmSweep } from './agentv3/analysisPatternMemory';
+import {
+  startAndroidInternalsPackUpdateWorker,
+} from './services/androidInternalsPack/knowledgePackUpdateWorker';
+import {startApplicationUpdateWorker} from './services/applicationUpdate/applicationUpdateWorker';
+import {installRuntimeShutdownControl} from './services/runtimeShutdownControl';
+import {createActiveHttpResponseTracker} from './services/activeHttpResponseTracker';
+import {startTraceProcessorLeaseSupervisor} from './services/traceProcessorLeaseSupervisor';
+import {
+  initializeSelfEvolutionLifecycle,
+} from './services/selfEvolution/selfEvolutionLifecycle';
+import {
+  closeSelfEvolutionAdminService,
+} from './services/selfEvolution/selfEvolutionAdminRuntime';
+import {
+  reconcileSelfEvolutionOnStartup,
+} from './services/selfEvolution/selfEvolutionStartup';
 
 const app = express();
+const activeHttpResponses = createActiveHttpResponseTracker();
+app.use(activeHttpResponses.middleware);
 const PORT = serverConfig.port;
 const NODE_ENV = serverConfig.nodeEnv;
-const corsAllowedOrigins = new Set(
-  serverConfig.corsOrigins.map((origin) => origin.replace(/\/+$/, '')),
-);
+const corsAllowedOrigins = normalizeCorsOrigins(serverConfig.corsOrigins);
 const workspaceRouteContextMiddleware: express.RequestHandler[] = [
   bindWorkspaceRouteContext,
   authenticate,
   requireWorkspaceRouteContext,
 ];
 
-function isCorsOriginAllowed(requestOrigin: string): boolean {
-  try {
-    const url = new URL(requestOrigin);
-    const normalized = `${url.protocol}//${url.host}`;
-    return corsAllowedOrigins.has(normalized) || url.port === String(serverConfig.frontendPort);
-  } catch {
-    return false;
-  }
-}
-
-// Middleware — dynamic CORS: allow configured origins and the active Perfetto frontend port.
+// Middleware — exact-origin CORS. Port-only matching permits DNS rebinding.
 app.use(cors({
   origin: (requestOrigin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) => {
     // No Origin header (server-to-server, curl, etc.) → allow
     if (!requestOrigin) return callback(null, true);
-    if (isCorsOriginAllowed(requestOrigin)) return callback(null, true);
+    if (isCorsOriginAllowed(requestOrigin, corsAllowedOrigins)) return callback(null, true);
     callback(new Error(`CORS blocked: ${requestOrigin}`));
   },
   credentials: true,
 }));
 
+// A browser session cookie may authenticate every API surface. CORS controls
+// response visibility, but it does not stop a cross-site form from sending a
+// mutation, so reject cookie-authenticated unsafe methods unless their Origin
+// is an exact configured frontend origin (or the backend's own origin).
+app.use('/api', (req, res, next) => {
+  if (!isSsoCookieMutationOriginAllowed({
+    method: req.method,
+    cookieHeader: req.headers.cookie,
+    authorizationHeader: req.headers.authorization,
+    apiKeyHeader: typeof req.headers['x-api-key'] === 'string'
+      ? req.headers['x-api-key']
+      : undefined,
+    requestOrigin: req.headers.origin,
+    requestProtocol: req.protocol,
+    requestHost: req.get('host') || '',
+    allowedOrigins: corsAllowedOrigins,
+  })) {
+    res.status(403).json({
+      success: false,
+      error: 'Cookie-authenticated mutations require an allowed Origin',
+    });
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: serverConfig.bodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: serverConfig.bodyLimit }));
 
+// In keyless local mode, reject Host-header DNS rebinding even though the
+// process itself listens only on loopback by default.
+app.use('/api', (req, res, next) => {
+  const keylessLocalMode = !process.env.SMARTPERFETTO_API_KEY && !resolveFeatureConfig(process.env).enterprise;
+  if (keylessLocalMode && !isLoopbackRequestHostname(req.hostname)) {
+    res.status(403).json({success: false, error: 'Untrusted Host in local keyless mode'});
+    return;
+  }
+  next();
+});
+
+// Authentication is the default for the complete API surface. OIDC/session
+// bootstrap endpoints own their public-vs-authenticated decisions internally.
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth' || req.path.startsWith('/auth/')) {
+    next();
+    return;
+  }
+  authenticate(req, res, next);
+});
+
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
+  res.json({status: 'OK', version: getSmartPerfettoVersion()});
+});
+
+function requireRuntimeDiagnosticsPermission(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): void {
+  const context = requireRequestContext(req);
+  if (!hasRbacPermission(context, 'runtime:manage')) {
+    sendForbidden(res, 'Runtime diagnostics require runtime:manage permission');
+    return;
+  }
+  next();
+}
+
+// Detailed runtime and caller telemetry stays behind the authenticated API
+// boundary and an explicit runtime-management permission.
+app.get('/api/runtime-health', requireRuntimeDiagnosticsPermission, (_req, res) => {
   res.json(buildRuntimeHealthPayload());
 });
 
-// Debug endpoint to check env vars
-app.get('/debug', (req, res) => {
+app.get('/api/debug', requireRuntimeDiagnosticsPermission, (_req, res) => {
   const legacyUsage = getLegacyApiUsageSnapshot(10);
   res.json({
     aiCredentialSources: collectEnvCredentialSources(process.env, 'health'),
@@ -141,6 +203,7 @@ app.get('/debug', (req, res) => {
     legacyAgentApiUsage: legacyUsage,
   });
 });
+app.use('/api/application-update', applicationUpdateRoutes);
 
 // API routes
 app.use('/api/sql', sqlRoutes);
@@ -183,6 +246,21 @@ app.use(
   comparisonRoutes,
 );
 app.use(
+  '/api/workspaces/:workspaceId/trace-config',
+  ...workspaceRouteContextMiddleware,
+  traceConfigProposalRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/skill-packs',
+  ...workspaceRouteContextMiddleware,
+  skillPackRoutes,
+);
+app.use(
+  '/api/workspaces/:workspaceId/batch-traces',
+  ...workspaceRouteContextMiddleware,
+  batchTraceRoutes,
+);
+app.use(
   '/api/traces',
   markLegacyApi(
     '/api/workspaces/:workspaceId/traces',
@@ -190,15 +268,16 @@ app.use(
   ),
   simpleTraceRoutes,
 );
-app.use('/api/perfetto', perfettoLocalRoutes);
-app.use('/api/sessions', sessionRoutes);
-app.use('/api/perfetto-sql', perfettoSqlRoutes);
+app.use('/api/perfetto', rejectEnterpriseUnscopedApi, perfettoLocalRoutes);
+app.use('/api/sessions', rejectEnterpriseUnscopedApi, sessionRoutes);
+app.use('/api/perfetto-sql', rejectEnterpriseUnscopedApi, perfettoSqlRoutes);
 app.use('/api/export', exportRoutes);
-app.use('/api/template-analysis', templateAnalysisRoutes);
-app.use('/api/skills', skillRoutes);
+app.use('/api/template-analysis', rejectEnterpriseUnscopedApi, templateAnalysisRoutes);
+app.use('/api/skills', rejectEnterpriseUnscopedApi, skillRoutes);
 app.use('/api/admin/runtime', enterpriseRuntimeDashboardRoutes);
 app.use('/api/admin', skillAdminRoutes);
 app.use('/api/admin', strategyAdminRoutes);
+app.use('/api/admin/self-evolution', selfEvolutionAdminRoutes);
 app.use(
   '/api/reports',
   markLegacyApi(
@@ -223,8 +302,8 @@ app.use(
   ),
   providerRoutes,
 );
-app.use('/api/flamegraph', flamegraphRoutes);
-app.use('/api/critical-path', criticalPathRoutes);
+app.use('/api/flamegraph', rejectEnterpriseUnscopedApi, flamegraphRoutes);
+app.use('/api/critical-path', rejectEnterpriseUnscopedApi, criticalPathRoutes);
 app.use('/api/baselines', baselineRoutes);
 app.use('/api/ci', authenticate, ciGateRoutes);
 app.use('/api/tp', traceProcessorProxyRoutes);
@@ -286,14 +365,43 @@ function recoverInterruptedEnterpriseRuns(): void {
 
 recoverInterruptedEnterpriseRuns();
 
-const caseEvolutionWorkerHandle = startCaseEvolutionWorker();
-const patternMemorySweepHandle = startPatternMemoryAutoConfirmSweep();
+const selfEvolutionLifecycle = initializeSelfEvolutionLifecycle();
+if (selfEvolutionLifecycle.persistence.persistence === 'unavailable') {
+  console.warn(
+    `[SelfEvolution] Persistent apply unavailable: ${selfEvolutionLifecycle.persistence.reason}`,
+  );
+}
+if (selfEvolutionLifecycle.migration.status === 'failed') {
+  console.error(
+    '[SelfEvolution] Legacy data migration failed: ' +
+    `${selfEvolutionLifecycle.migration.errorCode ?? 'unknown_error'}`,
+  );
+}
+for (const warning of selfEvolutionLifecycle.warnings) {
+  console.warn(`[SelfEvolution] ${warning.message}`);
+}
+for (const error of selfEvolutionLifecycle.errors) {
+  console.error(`[SelfEvolution] ${error.message}`);
+}
 
-// Kill orphan trace_processor processes from previous runs
-killOrphanProcessors();
+let caseEvolutionWorkerHandle:
+  ReturnType<typeof startCaseEvolutionWorker> | undefined;
+let patternMemorySweepHandle:
+  ReturnType<typeof startPatternMemoryAutoConfirmSweep> | undefined;
+let androidInternalsPackUpdateWorkerHandle:
+  ReturnType<typeof startAndroidInternalsPackUpdateWorker> | undefined;
+let applicationUpdateWorkerHandle:
+  ReturnType<typeof startApplicationUpdateWorker> | undefined;
+let traceProcessorLeaseSupervisorHandle:
+  ReturnType<typeof startTraceProcessorLeaseSupervisor> | undefined;
 
 // Graceful shutdown handler
+let shutdownStarted = false;
+let server: Server | undefined;
+const upgradedSockets = new Set<Duplex>();
 function gracefulShutdown(signal: string) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   console.log(`\n📴 Received ${signal}, shutting down gracefully...`);
 
   // Cleanup all trace processors (this will also release ports)
@@ -305,18 +413,59 @@ function gracefulShutdown(signal: string) {
   resetPortPool();
 
   console.log('🧠 Stopping case evolution worker...');
-  caseEvolutionWorkerHandle.stop();
+  caseEvolutionWorkerHandle?.stop();
 
   console.log('🧠 Stopping pattern memory sweep...');
-  patternMemorySweepHandle.stop();
+  patternMemorySweepHandle?.stop();
 
-  console.log('✅ Cleanup complete, exiting...');
-  process.exit(0);
+  console.log('📚 Stopping Android Internals Knowledge Pack updater...');
+  androidInternalsPackUpdateWorkerHandle?.stop();
+
+  console.log('⬆️ Stopping application update checker...');
+  applicationUpdateWorkerHandle?.stop();
+
+  console.log('🧹 Stopping trace processor lease supervisor...');
+  traceProcessorLeaseSupervisorHandle?.stop();
+
+  console.log('🧬 Closing self-evolution admin control plane...');
+  closeSelfEvolutionAdminService();
+  const closedEventStreams = activeHttpResponses.closeEventStreams();
+  if (closedEventStreams > 0) {
+    console.log(`📡 Closed ${closedEventStreams} active SSE connection(s).`);
+  }
+
+  if (!server) {
+    console.log('✅ Cleanup complete before listener startup, exiting...');
+    process.exit(0);
+  }
+
+  for (const socket of upgradedSockets) {
+    socket.end();
+  }
+  const forcedExit = setTimeout(() => {
+    for (const socket of upgradedSockets) {
+      socket.destroy();
+    }
+    server?.closeAllConnections();
+    console.error('❌ Backend connections did not close within the shutdown deadline.');
+    process.exit(1);
+  }, 5_000);
+  forcedExit.unref();
+  server.close((error) => {
+    clearTimeout(forcedExit);
+    if (error) {
+      console.error('❌ Backend listener shutdown failed:', error);
+      process.exit(1);
+    }
+    console.log('✅ Cleanup complete, exiting...');
+    process.exit(0);
+  });
 }
 
 // Register signal handlers
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+installRuntimeShutdownControl(gracefulShutdown);
 
 // EPIPE guard: prevent stdout/stderr/uncaughtException EPIPE from crashing the server.
 // Non-EPIPE uncaught exceptions still trigger graceful shutdown.
@@ -329,21 +478,74 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Start server
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Environment: ${NODE_ENV}`);
-  console.log(`🔗 API URL: http://localhost:${PORT}/api`);
-  console.log(`❤️  Health check: http://localhost:${PORT}/health`);
-  console.log(`📈 Stats: http://localhost:${PORT}/api/traces/stats`);
-});
+async function startBackend(): Promise<void> {
+  // Validate the selected browser authentication contract before starting any
+  // workers or opening the listener. Partial OIDC configuration must fail
+  // closed instead of silently becoming a development identity.
+  resolveAuthConfig(process.env);
 
-server.on('upgrade', (req, socket, head) => {
-  if (handleTraceProcessorProxyUpgrade(req, socket, head)) return;
-  socket.destroy();
-});
+  const startup = await reconcileSelfEvolutionOnStartup({
+    lifecycle: selfEvolutionLifecycle,
+    traceProcessorVersion:
+      process.env.SMARTPERFETTO_TRACE_PROCESSOR_VERSION,
+  });
+  if (startup.status === 'reconciled') {
+    console.log(
+      `[SelfEvolution] Reconciled ${startup.reconciliations.length} scope(s) before startup`,
+    );
+  } else if (startup.status === 'identity_unavailable') {
+    console.warn(
+      '[SelfEvolution] Overlay reconciliation skipped because the current build identity is not comparable; persisted overlays remain unpublished',
+    );
+  }
 
-// Handle server close
-server.on('close', () => {
-  console.log('🔒 Server closed');
+  caseEvolutionWorkerHandle = startCaseEvolutionWorker();
+  patternMemorySweepHandle = startPatternMemoryAutoConfirmSweep();
+  androidInternalsPackUpdateWorkerHandle =
+    startAndroidInternalsPackUpdateWorker();
+  applicationUpdateWorkerHandle = startApplicationUpdateWorker();
+  traceProcessorLeaseSupervisorHandle =
+    startTraceProcessorLeaseSupervisor();
+
+  if (shouldCleanOrphanProcessorsOnStartup()) {
+    killOrphanProcessors();
+  } else {
+    console.log(
+      '[TraceProcessor] Skipping global orphan cleanup for isolated process ownership',
+    );
+  }
+
+  server = app.listen(PORT, serverConfig.bindHost, () => {
+    const advertisedHost = serverConfig.bindHost === '0.0.0.0'
+      ? '127.0.0.1'
+      : serverConfig.bindHost === '::'
+        ? '[::1]'
+        : serverConfig.bindHost.includes(':')
+          ? `[${serverConfig.bindHost}]`
+          : serverConfig.bindHost;
+    console.log(`🚀 Server running on ${serverConfig.bindHost}:${PORT}`);
+    console.log(`📊 Environment: ${NODE_ENV}`);
+    console.log(`🔗 API URL: http://${advertisedHost}:${PORT}/api`);
+    console.log(`❤️  Health check: http://${advertisedHost}:${PORT}/health`);
+    console.log(`📈 Stats: http://${advertisedHost}:${PORT}/api/traces/stats`);
+  });
+
+  server.on('upgrade', (req, socket, head) => {
+    upgradedSockets.add(socket);
+    socket.once('close', () => upgradedSockets.delete(socket));
+    if (handleTraceProcessorProxyUpgrade(req, socket, head)) return;
+    socket.destroy();
+  });
+
+  server.on('close', () => {
+    console.log('🔒 Server closed');
+  });
+}
+
+void startBackend().catch(error => {
+  console.error(
+    '[SelfEvolution] Startup reconciliation failed; backend listener remains closed:',
+    error,
+  );
+  process.exitCode = 1;
 });

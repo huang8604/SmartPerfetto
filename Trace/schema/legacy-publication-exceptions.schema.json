@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartperfetto.dev/schemas/legacy-publication-exceptions-v1.json",
+  "title": "SmartPerfetto Legacy Trace Publication Exceptions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "exceptions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["case_id", "owner", "reason", "review_by", "disposition"],
+        "properties": {
+          "case_id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+          "owner": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "review_by": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "disposition": {"enum": ["complete-review", "quarantine", "remove"]}
+        }
+      }
+    }
+  }
+}

@@ -22,7 +22,7 @@
  * Feature flag: env SELF_IMPROVE_REVIEW_ENABLED defaults to false. When the
  * flag is unset, `start()` is a no-op so deploys are safe by default.
  *
- * See docs/architecture/self-improving-design.md §10 (Worker Resource Limits).
+ * See docs/architecture/self-improving-design.md "组件级 Review 与 Patch 边界".
  */
 
 import type { ReviewOutboxHandle, ReviewJob } from './reviewOutbox';

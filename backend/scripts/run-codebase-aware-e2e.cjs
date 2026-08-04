@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {spawnSync} = require('child_process');
+const {resolveCaseTrace} = require('../../Trace/tools/lib/catalog.cjs');
 
 const backendRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(backendRoot, '..');
@@ -364,12 +365,12 @@ function resolveCli(selectedMode) {
 
 function resolveHeavyTrace() {
   return process.env.SMARTPERFETTO_E2E_HEAVY_TRACE ||
-    path.join(repoRoot, 'test-traces', 'lacunh_heavy.pftrace');
+    resolveCaseTrace(repoRoot, 'lacunh_heavy.pftrace');
 }
 
 function resolveLightTrace() {
   return process.env.SMARTPERFETTO_E2E_LIGHT_TRACE ||
-    path.join(repoRoot, 'test-traces', 'launch_light.pftrace');
+    resolveCaseTrace(repoRoot, 'launch_light.pftrace');
 }
 
 function resolveHighPerformanceRoot() {

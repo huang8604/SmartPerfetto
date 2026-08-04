@@ -6,6 +6,7 @@ import { describe, expect, it } from '@jest/globals';
 import {
   DEFAULT_AGENT_MAX_TURNS,
   DEFAULT_AGENT_QUICK_MAX_TURNS,
+  DEFAULT_AGENT_QUICK_TARGET_TURNS,
   DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
   DEFAULT_AGENT_SESSION_MAX_IDLE_MS,
   resolveAgentRuntimeBudgetConfig,
@@ -17,6 +18,7 @@ describe('agent runtime budget config', () => {
     expect(resolveAgentRuntimeBudgetConfig({})).toEqual({
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       quickMaxTurns: DEFAULT_AGENT_QUICK_MAX_TURNS,
+      quickTargetTurns: DEFAULT_AGENT_QUICK_TARGET_TURNS,
     });
   });
 
@@ -24,9 +26,22 @@ describe('agent runtime budget config', () => {
     expect(resolveAgentRuntimeBudgetConfig({
       AGENT_MAX_TURNS: '90',
       AGENT_QUICK_MAX_TURNS: '15',
+      AGENT_QUICK_TARGET_TURNS: '4',
     })).toEqual({
       maxTurns: 90,
       quickMaxTurns: 15,
+      quickTargetTurns: 4,
+    });
+  });
+
+  it('clamps the quick target to the quick hard cap', () => {
+    expect(resolveAgentRuntimeBudgetConfig({
+      AGENT_QUICK_MAX_TURNS: '6',
+      AGENT_QUICK_TARGET_TURNS: '12',
+    })).toEqual({
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      quickMaxTurns: 6,
+      quickTargetTurns: 6,
     });
   });
 
@@ -37,6 +52,7 @@ describe('agent runtime budget config', () => {
     })).toEqual({
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       quickMaxTurns: DEFAULT_AGENT_QUICK_MAX_TURNS,
+      quickTargetTurns: DEFAULT_AGENT_QUICK_TARGET_TURNS,
     });
   });
 });

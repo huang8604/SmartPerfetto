@@ -12,10 +12,12 @@ NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
 
 OUT_ROOT="${SMARTPERFETTO_PORTABLE_OUT_DIR:-$PROJECT_ROOT/dist/portable}"
 CACHE_DIR="${SMARTPERFETTO_PORTABLE_CACHE_DIR:-$PROJECT_ROOT/.cache/smartperfetto-portable}"
-NODE_MAJOR="${SMARTPERFETTO_PORTABLE_NODE_MAJOR:-24}"
+NODE_RUNTIME_PIN_FILE="$PROJECT_ROOT/scripts/node-runtime-pin.env"
+LINUX_GLIBC_MINIMUM_VERSION="2.34"
+MACOS_MINIMUM_SYSTEM_VERSION="13.5"
+WINDOWS_MINIMUM_SYSTEM_VERSION="10.0"
 DEFAULT_TARGETS=("windows-x64" "macos-arm64" "linux-x64")
 TARGETS=()
-SKIP_BACKEND_BUILD=false
 
 usage() {
   cat <<'USAGE'
@@ -25,7 +27,6 @@ Usage:
 Options:
   --targets LIST       Comma-separated targets. Default: windows-x64,macos-arm64,linux-x64.
   --target TARGET      Add one target. May be repeated.
-  --skip-backend-build Reuse backend/dist instead of running backend build.
 
 Supported targets:
   windows-x64
@@ -67,6 +68,23 @@ copy_dir() {
   local dest="$2"
   mkdir -p "$dest"
   rsync -a --delete "$src"/ "$dest"/
+}
+
+copy_tracked_tree() {
+  local relative_root="$1"
+  local destination_root="$2"
+  rm -rf "${destination_root:?}/$relative_root"
+  mkdir -p "$destination_root/$relative_root"
+  (
+    cd "$PROJECT_ROOT"
+    git ls-files -z "$relative_root" |
+      rsync -a --from0 --files-from=- ./ "$destination_root"/
+  )
+}
+
+assert_staging_tree_safe() {
+  local package_dir="$1"
+  node "$PROJECT_ROOT/scripts/verify-portable-staging-tree.cjs" "$package_dir"
 }
 
 copy_backend_data_payload() {
@@ -131,7 +149,10 @@ target_field() {
     windows-x64:asset_ext) echo "zip" ;;
     windows-x64:launcher_name) echo "SmartPerfetto.exe" ;;
     windows-x64:claude_pkg) echo "@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe" ;;
+    windows-x64:opencode_pkg) echo "opencode-windows-x64-baseline" ;;
+    windows-x64:opencode_bin) echo "bin/opencode.exe" ;;
     windows-x64:binary_kind) echo "pe" ;;
+    windows-x64:prebuild_dir) echo "win32-x64" ;;
 
     macos-arm64:os_name) echo "macos" ;;
     macos-arm64:arch_name) echo "arm64" ;;
@@ -148,7 +169,10 @@ target_field() {
     macos-arm64:asset_ext) echo "zip" ;;
     macos-arm64:launcher_name) echo "SmartPerfetto" ;;
     macos-arm64:claude_pkg) echo "@anthropic-ai/claude-agent-sdk-darwin-arm64/claude" ;;
+    macos-arm64:opencode_pkg) echo "opencode-darwin-arm64" ;;
+    macos-arm64:opencode_bin) echo "bin/opencode" ;;
     macos-arm64:binary_kind) echo "macho" ;;
+    macos-arm64:prebuild_dir) echo "darwin-arm64" ;;
 
     linux-x64:os_name) echo "linux" ;;
     linux-x64:arch_name) echo "x64" ;;
@@ -165,7 +189,10 @@ target_field() {
     linux-x64:asset_ext) echo "tar.gz" ;;
     linux-x64:launcher_name) echo "SmartPerfetto" ;;
     linux-x64:claude_pkg) echo "@anthropic-ai/claude-agent-sdk-linux-x64/claude" ;;
+    linux-x64:opencode_pkg) echo "opencode-linux-x64-baseline" ;;
+    linux-x64:opencode_bin) echo "bin/opencode" ;;
     linux-x64:binary_kind) echo "elf" ;;
+    linux-x64:prebuild_dir) echo "linux-x64" ;;
     *)
       echo "ERROR: unsupported target or field: $target $field" >&2
       exit 2
@@ -187,19 +214,24 @@ append_targets_csv() {
 
 resolve_node_release() {
   local target="$1"
-  local pattern
-  pattern="$(target_field "$target" node_pattern)"
-  local shasums="$CACHE_DIR/node-latest-v${NODE_MAJOR}.x-SHASUMS256.txt"
-  mkdir -p "$CACHE_DIR"
-  curl -fsSL --connect-timeout 15 --max-time 60 "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" -o "$shasums"
-
-  local entry
-  entry="$(awk -v pattern="$pattern" '$2 ~ pattern "$" {print $1, $2; exit}' "$shasums")"
-  if [ -z "$entry" ]; then
-    echo "ERROR: could not resolve latest Node ${NODE_MAJOR} runtime for $target." >&2
+  local version sha_key sha file
+  version="$(sed -n 's/^NODE_RUNTIME_VERSION=//p' "$NODE_RUNTIME_PIN_FILE" | head -n 1)"
+  case "$target" in
+    windows-x64) sha_key="NODE_RUNTIME_SHA256_WINDOWS_X64" ;;
+    macos-arm64) sha_key="NODE_RUNTIME_SHA256_MACOS_ARM64" ;;
+    linux-x64) sha_key="NODE_RUNTIME_SHA256_LINUX_X64" ;;
+    *)
+      echo "ERROR: unsupported Node runtime target: $target" >&2
+      exit 2
+      ;;
+  esac
+  sha="$(sed -n "s/^${sha_key}=//p" "$NODE_RUNTIME_PIN_FILE" | head -n 1)"
+  file="node-v${version}-$(target_field "$target" node_pattern)"
+  if ! [[ "$version" =~ ^24\.[0-9]+\.[0-9]+$ ]] || ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: invalid Node runtime pin for $target in $NODE_RUNTIME_PIN_FILE." >&2
     exit 1
   fi
-  echo "$entry"
+  echo "$sha $file"
 }
 
 extract_node_runtime() {
@@ -243,15 +275,16 @@ NODE
 
 copy_backend_payload() {
   local resources_dir="$1"
-  copy_dir "$PROJECT_ROOT/frontend" "$resources_dir/frontend"
+  copy_tracked_tree "frontend" "$resources_dir"
 
   mkdir -p "$resources_dir/backend"
   copy_dir "$PROJECT_ROOT/backend/dist" "$resources_dir/backend/dist"
   copy_backend_data_payload "$resources_dir"
-  copy_dir "$PROJECT_ROOT/backend/public" "$resources_dir/backend/public"
-  copy_dir "$PROJECT_ROOT/backend/skills" "$resources_dir/backend/skills"
-  copy_dir "$PROJECT_ROOT/backend/strategies" "$resources_dir/backend/strategies"
-  copy_dir "$PROJECT_ROOT/backend/sql" "$resources_dir/backend/sql"
+  copy_tracked_tree "backend/public" "$resources_dir"
+  copy_tracked_tree "backend/skills" "$resources_dir"
+  copy_tracked_tree "backend/strategies" "$resources_dir"
+  copy_tracked_tree "backend/knowledge" "$resources_dir"
+  copy_tracked_tree "backend/sql" "$resources_dir"
   cp "$PROJECT_ROOT/backend/package.json" "$resources_dir/backend/package.json"
   cp "$PROJECT_ROOT/backend/package-lock.json" "$resources_dir/backend/package-lock.json"
   cp "$PROJECT_ROOT/backend/.env.example" "$resources_dir/backend/.env.example"
@@ -328,11 +361,14 @@ install_target_dependencies() {
   local backend_dir="$2"
   local node_runtime_version="$3"
   local npm_os npm_cpu binary_kind claude_rel claude_bin claude_pkg_name better_sqlite3_node
+  local opencode_pkg_name opencode_pkg_bin opencode_source opencode_dest
   npm_os="$(target_field "$target" npm_os)"
   npm_cpu="$(target_field "$target" npm_cpu)"
   binary_kind="$(target_field "$target" binary_kind)"
   claude_rel="$(target_field "$target" claude_pkg)"
   claude_pkg_name="$(node -e "const rel=process.argv[1]; console.log(rel.startsWith('@') ? rel.split('/').slice(0, 2).join('/') : rel.split('/')[0]);" "$claude_rel")"
+  opencode_pkg_name="$(target_field "$target" opencode_pkg)"
+  opencode_pkg_bin="$(target_field "$target" opencode_bin)"
 
   echo "Installing $target production dependencies..."
   (
@@ -394,6 +430,115 @@ install_target_dependencies() {
   if [ "$(target_field "$target" os_name)" != "windows" ]; then
     chmod +x "$claude_bin"
   fi
+
+  # npm ci uses --ignore-scripts for cross-target safety, so opencode-ai's
+  # postinstall cannot replace its error stub. Copy the target-native optional
+  # package explicitly; x64 uses the baseline build for wider CPU support.
+  opencode_source="$backend_dir/node_modules/$opencode_pkg_name/$opencode_pkg_bin"
+  if [ ! -f "$opencode_source" ]; then
+    echo "Installing $target OpenCode native package explicitly..."
+    (
+      cd "$backend_dir"
+      local opencode_version pack_dir pack_json pack_file pkg_dest
+      opencode_version="$(node -e "console.log(require('./node_modules/opencode-ai/package.json').version)")"
+      pack_dir="$(mktemp -d)"
+      pack_json="$pack_dir/pack.json"
+      npm pack "$opencode_pkg_name@$opencode_version" --json --pack-destination "$pack_dir" > "$pack_json"
+      pack_file="$(node -e "const path=require('path'); const items=require(process.argv[1]); console.log(path.join(process.argv[2], items[0].filename));" "$pack_json" "$pack_dir")"
+      pkg_dest="node_modules/$opencode_pkg_name"
+      rm -rf "$pkg_dest"
+      mkdir -p "$pkg_dest"
+      tar -xzf "$pack_file" -C "$pkg_dest" --strip-components=1
+      rm -rf "$pack_dir"
+    )
+  fi
+  if [ ! -f "$opencode_source" ]; then
+    echo "ERROR: OpenCode native binary was not installed for $target: $opencode_source" >&2
+    exit 1
+  fi
+  opencode_dest="$backend_dir/node_modules/opencode-ai/bin/opencode.exe"
+  mkdir -p "$(dirname "$opencode_dest")"
+  cp "$opencode_source" "$opencode_dest"
+  assert_binary_kind "$opencode_dest" "OpenCode native binary" "$binary_kind"
+  if [ "$(target_field "$target" os_name)" != "windows" ]; then
+    chmod +x "$opencode_dest"
+  fi
+
+  # Some dependencies publish every platform prebuild inside one npm package.
+  # Retain only the directory matching this archive so foreign iOS, Android,
+  # Windows, macOS, or Linux binaries cannot masquerade as target payload.
+  node - "$backend_dir/node_modules" "$(target_field "$target" prebuild_dir)" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = path.resolve(process.argv[2]);
+const expected = process.argv[3];
+const pending = [root];
+while (pending.length > 0) {
+  const current = pending.pop();
+  for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(current, entry.name);
+    if (entry.name === 'prebuilds') {
+      for (const prebuild of fs.readdirSync(candidate, {withFileTypes: true})) {
+        if (prebuild.isDirectory() && prebuild.name !== expected) {
+          fs.rmSync(path.join(candidate, prebuild.name), {recursive: true});
+        }
+      }
+      continue;
+    }
+    pending.push(candidate);
+  }
+}
+NODE
+
+  # npm's command shims are install-time conveniences, not portable runtime
+  # inputs. Removing them keeps final archives link-free on every target so the
+  # verifier can reject symlink/hardlink extraction attacks without exceptions.
+  find "$backend_dir/node_modules" -type d -name .bin -prune -exec rm -rf {} +
+  local remaining_link
+  remaining_link="$(find "$backend_dir/node_modules" -type l -print -quit)"
+  if [ -n "$remaining_link" ]; then
+    echo "ERROR: portable dependency tree contains an unexpected symlink: $remaining_link" >&2
+    exit 1
+  fi
+}
+
+materialize_portable_links() {
+  local root="$1"
+  local canonical_root link_path link_target resolved_target materialized_path
+  canonical_root="$(cd "$root" && pwd -P)"
+
+  while IFS= read -r link_path; do
+    link_target="$(readlink "$link_path")"
+    resolved_target="$(
+      node -e '
+        const path = require("path");
+        console.log(path.resolve(path.dirname(process.argv[1]), process.argv[2]));
+      ' "$link_path" "$link_target"
+    )"
+    case "$resolved_target" in
+      "$canonical_root"/*) ;;
+      *)
+        echo "ERROR: portable symlink escapes its payload root: $link_path -> $link_target" >&2
+        exit 1
+        ;;
+    esac
+    if [ ! -f "$resolved_target" ] || [ -L "$resolved_target" ]; then
+      echo "ERROR: portable symlink does not resolve directly to a regular file: $link_path -> $link_target" >&2
+      exit 1
+    fi
+
+    materialized_path="${link_path}.smartperfetto-materialized"
+    cp "$resolved_target" "$materialized_path"
+    rm "$link_path"
+    mv "$materialized_path" "$link_path"
+  done < <(find "$root" -type l -print)
+
+  link_path="$(find "$root" -type l -print -quit)"
+  if [ -n "$link_path" ]; then
+    echo "ERROR: portable payload still contains an unexpected symlink: $link_path" >&2
+    exit 1
+  fi
 }
 
 write_manifest() {
@@ -407,17 +552,22 @@ write_manifest() {
   local node_file="$8"
   local node_sha="$9"
   local perfetto_version="${10}"
-  local trace_processor_sha="${11}"
-  local signed="${12}"
-  local notarized="${13}"
+  local trace_processor_source_sha="${11}"
+  local trace_processor_sha="${12}"
+  local signed="${13}"
+  local notarized="${14}"
+  local signing_mode="${15}"
+  local macos_minimum_system_version="${16}"
   local os_name arch_name
   os_name="$(target_field "$target" os_name)"
   arch_name="$(target_field "$target" arch_name)"
 
   node - "$manifest_path" \
     "$version" "$package_name" "$os_name" "$arch_name" "$target" "$git_commit" "$git_dirty" \
-    "$node_runtime_version" "$node_file" "$node_sha" "$perfetto_version" "$trace_processor_sha" \
-    "$signed" "$notarized" <<'NODE'
+    "$node_runtime_version" "$node_file" "$node_sha" "$perfetto_version" \
+    "$trace_processor_source_sha" "$trace_processor_sha" "$signed" "$notarized" \
+    "$signing_mode" "$WINDOWS_MINIMUM_SYSTEM_VERSION" \
+    "$LINUX_GLIBC_MINIMUM_VERSION" "$macos_minimum_system_version" <<'NODE'
 const fs = require('fs');
 const [
   manifestPath,
@@ -432,16 +582,38 @@ const [
   nodeRuntimeFile,
   nodeRuntimeSha256,
   perfettoVersion,
+  traceProcessorSourceSha256,
   traceProcessorSha256,
   signed,
   notarized,
+  signingMode,
+  windowsMinimumSystemVersion,
+  linuxGlibcMinimumVersion,
+  macosMinimumSystemVersion,
 ] = process.argv.slice(2);
 
 const manifest = {
+  schemaVersion: 3,
   name: 'smartperfetto',
   version,
   packageName,
-  target: { os, arch, id: targetId },
+  distribution: 'portable',
+  channel: 'stable',
+  signingMode,
+  target: {
+    os,
+    arch,
+    id: targetId,
+    ...(targetId === 'windows-x64'
+      ? {minimumSystemVersion: windowsMinimumSystemVersion}
+      : {}),
+    ...(targetId === 'linux-x64'
+      ? {libc: {family: 'glibc', minimumVersion: linuxGlibcMinimumVersion}}
+      : {}),
+    ...(targetId === 'macos-arm64'
+      ? {minimumSystemVersion: macosMinimumSystemVersion}
+      : {}),
+  },
   gitCommit,
   gitDirty: gitDirty === 'true',
   builtAt: new Date().toISOString(),
@@ -452,6 +624,7 @@ const manifest = {
   },
   traceProcessor: {
     version: perfettoVersion,
+    sourceSha256: traceProcessorSourceSha256,
     sha256: traceProcessorSha256,
   },
   macos: {
@@ -468,38 +641,61 @@ write_readme() {
   local package_dir="$1"
   local target="$2"
   local version="$3"
+  local notarized="${4:-false}"
+  local macos_minimum_system_version="${5:-}"
   case "$target" in
     windows-x64)
       cat > "$package_dir/README-WINDOWS.txt" <<README
 SmartPerfetto Windows x64 package
 Version: $version
+Minimum OS: Windows 10 or Windows Server 2016
 
 Run:
   1. Extract the zip to a normal local path, for example C:\\SmartPerfetto.
   2. Double-click SmartPerfetto.exe.
-  3. Open http://localhost:10000 if the browser does not open automatically.
+  3. Open http://127.0.0.1:10000 if the browser does not open automatically.
+
+User data and logs:
+  %LOCALAPPDATA%\\SmartPerfetto
+  %LOCALAPPDATA%\\SmartPerfetto\\logs
+
+On first launch, SmartPerfetto migrates data from an older package's data
+directory when it is in the current or a sibling extracted package. To choose
+the old package explicitly:
+  SmartPerfetto.exe --migrate-from "C:\\path\\to\\old-package"
+
+The old data is preserved. To keep data beside the executable instead, set
+SMARTPERFETTO_PORTABLE_MODE=1 before launching; automatic migration is disabled.
 
 AI analysis needs either a Provider profile configured in the UI or env credentials.
-To use env credentials, create data\\env with provider settings, then restart SmartPerfetto.exe.
+To use env credentials, create %LOCALAPPDATA%\\SmartPerfetto\\env with provider
+settings, then restart SmartPerfetto.exe.
 
 Logs:
-  logs\\backend.log
-  logs\\frontend.log
+  %LOCALAPPDATA%\\SmartPerfetto\\logs\\backend.log
+  %LOCALAPPDATA%\\SmartPerfetto\\logs\\frontend.log
 README
       ;;
     macos-arm64)
+      local gatekeeper_guidance
+      if [ "$notarized" = true ]; then
+        gatekeeper_guidance="This package is Developer ID signed and notarized by Apple."
+      else
+        gatekeeper_guidance="If macOS blocks this non-notarized build, Control-click SmartPerfetto.app and
+choose Open. For a package you trust, you can also remove quarantine with:
+  xattr -dr com.apple.quarantine SmartPerfetto.app"
+      fi
       cat > "$package_dir/README-MACOS.txt" <<README
 SmartPerfetto macOS arm64 package
 Version: $version
+System requirement: macOS $macos_minimum_system_version or newer on Apple silicon.
 
 Run:
   1. Extract the zip.
   2. Double-click SmartPerfetto.app.
-  3. Open http://localhost:10000 if the browser does not open automatically.
+  3. Open http://127.0.0.1:10000 if the browser does not open automatically.
 
-If macOS blocks this non-notarized build, Control-click SmartPerfetto.app and
-choose Open. For a package you trust, you can also remove quarantine with:
-  xattr -dr com.apple.quarantine SmartPerfetto.app
+$gatekeeper_guidance
 
 User data:
   ~/Library/Application Support/SmartPerfetto
@@ -516,11 +712,13 @@ README
       cat > "$package_dir/README-LINUX.txt" <<README
 SmartPerfetto Linux x64 package
 Version: $version
+System requirement: glibc 2.34 or newer. musl-based distributions such as
+Alpine Linux are not supported by this archive.
 
 Run:
   1. Extract the tar.gz.
   2. Run ./SmartPerfetto.
-  3. Open http://localhost:10000 if the browser does not open automatically.
+  3. Open http://127.0.0.1:10000 if the browser does not open automatically.
 
 User data:
   \${XDG_DATA_HOME:-~/.local/share}/smartperfetto
@@ -563,7 +761,7 @@ create_macos_app_bundle() {
   <key>CFBundleVersion</key>
   <string>__VERSION__</string>
   <key>LSMinimumSystemVersion</key>
-  <string>12.0</string>
+  <string>13.5</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -573,38 +771,115 @@ PLIST
   printf 'APPL????' > "$app_dir/Contents/PkgInfo"
 }
 
-sign_macos_app() {
+sign_macos_payloads() {
   local app_dir="$1"
   local identity="${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}"
+  local sign_args=(--force --options runtime)
   require_command codesign
   if [ -n "$identity" ]; then
     echo "Signing macOS app with identity: $identity"
-    while IFS= read -r -d '' file; do
-      codesign --force --timestamp --options runtime --sign "$identity" "$file"
-    done < <(find "$app_dir/Contents" -type f \( -perm -111 -o -name '*.node' -o -name '*.dylib' \) -print0)
-    codesign --force --timestamp --options runtime --sign "$identity" "$app_dir"
+    sign_args+=(--timestamp --sign "$identity")
   else
     echo "Ad-hoc signing macOS app bundle..."
-    codesign --force --deep --options runtime --sign - "$app_dir"
+    sign_args+=(--sign -)
   fi
+  while IFS= read -r -d '' file; do
+    if codesign --display "$file" >/dev/null 2>&1; then
+      codesign "${sign_args[@]}" \
+        --preserve-metadata=identifier,entitlements \
+        "$file"
+    else
+      codesign "${sign_args[@]}" "$file"
+    fi
+  done < <(node "$PROJECT_ROOT/scripts/find-macho-files.cjs" --null "$app_dir/Contents")
+}
+
+sign_macos_container() {
+  local app_dir="$1"
+  local identity="${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}"
+  local sign_args=(--force --options runtime)
+  require_command codesign
+  if [ -n "$identity" ]; then
+    sign_args+=(--timestamp --sign "$identity")
+  else
+    sign_args+=(--sign -)
+  fi
+  codesign "${sign_args[@]}" "$app_dir"
   codesign --verify --deep --strict "$app_dir"
 }
 
 notarize_macos_zip() {
   local zip_path="$1"
   local app_dir="$2"
+  local receipt_path="$3"
   local profile="${SMARTPERFETTO_MACOS_NOTARY_PROFILE:-}"
+  local submit_result="${zip_path}.submit-result.json"
+  local info_result="${zip_path}.info-result.json"
+  local submission_id=""
   if [ -z "$profile" ]; then
     return 0
   fi
   if [ -z "${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}" ]; then
     echo "ERROR: SMARTPERFETTO_MACOS_NOTARY_PROFILE requires SMARTPERFETTO_MACOS_SIGN_IDENTITY." >&2
-    exit 1
+    return 1
   fi
-  require_command xcrun
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo "ERROR: required command 'xcrun' is not installed." >&2
+    return 1
+  fi
   echo "Submitting macOS package for notarization..."
-  xcrun notarytool submit "$zip_path" --keychain-profile "$profile" --wait
-  xcrun stapler staple "$app_dir"
+  rm -f "$submit_result" "$info_result" "$receipt_path"
+  if ! xcrun notarytool submit \
+    "$zip_path" \
+    --keychain-profile "$profile" \
+    --wait \
+    --output-format json > "$submit_result"; then
+    rm -f "$submit_result" "$info_result" "$receipt_path"
+    return 1
+  fi
+  if ! submission_id="$(
+    node - "$submit_result" <<'NODE'
+const fs = require('fs');
+const response = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (
+  response.status !== 'Accepted' ||
+  typeof response.id !== 'string' ||
+  !/^[0-9a-f-]{36}$/i.test(response.id)
+) {
+  throw new Error(`notarytool submit did not return Accepted: ${JSON.stringify(response)}`);
+}
+process.stdout.write(response.id);
+NODE
+  )"; then
+    rm -f "$submit_result" "$info_result" "$receipt_path"
+    return 1
+  fi
+  if ! xcrun notarytool info \
+    "$submission_id" \
+    --keychain-profile "$profile" \
+    --output-format json > "$info_result"; then
+    rm -f "$submit_result" "$info_result" "$receipt_path"
+    return 1
+  fi
+  if ! node - "$info_result" "$receipt_path" "$submission_id" <<'NODE'
+const fs = require('fs');
+const [infoPath, receiptPath, expectedId] = process.argv.slice(2);
+const response = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+if (response.status !== 'Accepted' || response.id !== expectedId) {
+  throw new Error(`notarytool info did not confirm Accepted: ${JSON.stringify(response)}`);
+}
+fs.writeFileSync(receiptPath, `${JSON.stringify({
+  schemaVersion: 1,
+  submissionId: response.id,
+  status: response.status,
+}, null, 2)}\n`, {mode: 0o600});
+NODE
+  then
+    rm -f "$submit_result" "$info_result" "$receipt_path"
+    return 1
+  fi
+  rm -f "$submit_result" "$info_result"
+  xcrun stapler staple "$app_dir" || return 1
 }
 
 archive_package() {
@@ -620,10 +895,10 @@ archive_package() {
       )
       ;;
     tar.gz)
-      (
-        cd "$OUT_ROOT"
-        tar -czf "$asset_path" "$package_name"
-      )
+      "$PROJECT_ROOT/scripts/create-portable-tar.sh" \
+        "$OUT_ROOT" \
+        "$package_name" \
+        "$asset_path"
       ;;
     *)
       echo "ERROR: unsupported archive extension for $target" >&2
@@ -632,13 +907,30 @@ archive_package() {
   esac
 }
 
+archive_package_atomically() {
+  local package_dir="$1"
+  local package_name="$2"
+  local target="$3"
+  local asset_path="$4"
+  local partial_path="${asset_path}.partial"
+  assert_staging_tree_safe "$package_dir"
+  rm -f "$partial_path"
+  if ! archive_package "$package_dir" "$package_name" "$target" "$partial_path"; then
+    rm -f "$partial_path"
+    return 1
+  fi
+  mv "$partial_path" "$asset_path"
+}
+
 package_target() {
   local target="$1"
   local os_name arch_name package_name package_dir resources_dir asset_ext asset_path
   local node_sha node_file node_dir node_runtime_version node_archive node_dir_suffix
   local perfetto_version tp_sha_key tp_sha trace_name trace_prebuilt_key tp_prebuilt tp_actual_sha
-  local signed=false notarized=false
-  local macos_resources_dir
+  local packaged_tp_sha
+  local signed=false notarized=false signing_mode=unsigned
+  local macos_resources_dir notary_submission_path=""
+  local macos_minimum_system_version=""
 
   os_name="$(target_field "$target" os_name)"
   arch_name="$(target_field "$target" arch_name)"
@@ -646,18 +938,30 @@ package_target() {
   package_dir="$OUT_ROOT/$package_name"
   asset_ext="$(target_field "$target" asset_ext)"
   asset_path="$OUT_ROOT/$package_name.$asset_ext"
+  if [ "$target" = "macos-arm64" ]; then
+    notary_submission_path="$OUT_ROOT/$package_name.notary-submission.$asset_ext"
+  fi
 
   echo ""
   echo "Packaging $target..."
-  rm -rf "$package_dir" "$asset_path"
+  rm -rf "$package_dir"
+  rm -f "$asset_path"
+  if [ -n "$notary_submission_path" ]; then
+    rm -f "$notary_submission_path"
+  fi
   mkdir -p "$package_dir"
 
   resources_dir="$package_dir"
   if [ "$target" = "macos-arm64" ]; then
     resources_dir="$package_dir/.staging-resources"
     signed=true
+    signing_mode=macos-adhoc
+    if [ -n "${SMARTPERFETTO_MACOS_SIGN_IDENTITY:-}" ]; then
+      signing_mode=macos-developer-id
+    fi
     if [ -n "${SMARTPERFETTO_MACOS_NOTARY_PROFILE:-}" ]; then
       notarized=true
+      signing_mode=macos-developer-id-notarized
     fi
   fi
 
@@ -674,10 +978,11 @@ package_target() {
 
   echo "Downloading Node.js runtime for $target..."
   node_archive="$CACHE_DIR/$node_file"
-  download_checked "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/$node_file" "$node_archive" "$node_sha"
+  download_checked "https://nodejs.org/dist/v${node_runtime_version}/$node_file" "$node_archive" "$node_sha"
   extract_node_runtime "$node_archive" "$node_dir" "$target"
   mkdir -p "$resources_dir/runtime"
   copy_dir "$CACHE_DIR/$node_dir" "$resources_dir/runtime/node"
+  materialize_portable_links "$resources_dir/runtime/node"
 
   echo "Copying bundled trace_processor_shell for $target..."
   perfetto_version="$(pin_value PERFETTO_VERSION)"
@@ -722,41 +1027,80 @@ package_target() {
     (
       cd "$PROJECT_ROOT/scripts/portable-launcher"
       GO111MODULE=off GOOS="$(target_field "$target" goos)" GOARCH="$(target_field "$target" goarch)" \
-        go build -trimpath -ldflags="-s -w -X main.version=$PACKAGE_VERSION" \
+        go build -trimpath -ldflags="-s -w -X main.version=$PACKAGE_VERSION -X main.gitCommit=$GIT_COMMIT -X main.packageTarget=$target -X main.signingMode=$signing_mode" \
         -o "$package_dir/SmartPerfetto.app/Contents/MacOS/SmartPerfetto" .
     )
   else
     (
       cd "$PROJECT_ROOT/scripts/portable-launcher"
       GO111MODULE=off GOOS="$(target_field "$target" goos)" GOARCH="$(target_field "$target" goarch)" \
-        go build -trimpath -ldflags="-s -w -X main.version=$PACKAGE_VERSION" \
+        go build -trimpath -ldflags="-s -w -X main.version=$PACKAGE_VERSION -X main.gitCommit=$GIT_COMMIT -X main.packageTarget=$target -X main.signingMode=$signing_mode" \
         -o "$package_dir/$(target_field "$target" launcher_name)" .
     )
   fi
 
-  write_readme "$package_dir" "$target" "$PACKAGE_VERSION"
+  if [ "$target" = "macos-arm64" ]; then
+    macos_minimum_system_version="$(
+      node "$PROJECT_ROOT/scripts/native-runtime-compat.cjs" \
+        --update-macos-info \
+        "$package_dir/SmartPerfetto.app" \
+        "$MACOS_MINIMUM_SYSTEM_VERSION"
+    )"
+    echo "macOS minimum system version: $macos_minimum_system_version"
+    sign_macos_payloads "$package_dir/SmartPerfetto.app"
+  fi
+  write_readme \
+    "$package_dir" \
+    "$target" \
+    "$PACKAGE_VERSION" \
+    "$notarized" \
+    "$macos_minimum_system_version"
+  packaged_tp_sha="$(sha256_file "$resources_dir/bin/$trace_name")"
   write_manifest "$package_dir/PACKAGE-MANIFEST.json" \
     "$PACKAGE_VERSION" "$package_name" "$target" "$GIT_COMMIT" "$GIT_DIRTY" \
     "$node_runtime_version" "$node_file" "$node_sha" "$perfetto_version" "$tp_sha" \
-    "$signed" "$notarized"
+    "$packaged_tp_sha" "$signed" "$notarized" "$signing_mode" \
+    "$macos_minimum_system_version"
   if [ "$target" = "macos-arm64" ]; then
     cp "$package_dir/PACKAGE-MANIFEST.json" "$resources_dir/PACKAGE-MANIFEST.json"
-    sign_macos_app "$package_dir/SmartPerfetto.app"
+    sign_macos_container "$package_dir/SmartPerfetto.app"
   fi
 
   echo "Creating archive for $target..."
-  archive_package "$package_dir" "$package_name" "$target" "$asset_path"
   if [ "$target" = "macos-arm64" ] && [ -n "${SMARTPERFETTO_MACOS_NOTARY_PROFILE:-}" ]; then
-    notarize_macos_zip "$asset_path" "$package_dir/SmartPerfetto.app"
-    rm -f "$asset_path"
-    archive_package "$package_dir" "$package_name" "$target" "$asset_path"
+    if ! archive_package_atomically \
+      "$package_dir" "$package_name" "$target" "$notary_submission_path"; then
+      rm -f "$notary_submission_path" "$asset_path"
+      return 1
+    fi
+    if ! notarize_macos_zip \
+      "$notary_submission_path" \
+      "$package_dir/SmartPerfetto.app" \
+      "$package_dir/NOTARIZATION-RECEIPT.json"; then
+      rm -f "$notary_submission_path" "$asset_path"
+      echo "ERROR: macOS notarization failed; no final release archive was created." >&2
+      return 1
+    fi
+    rm -f "$notary_submission_path"
+    archive_package_atomically "$package_dir" "$package_name" "$target" "$asset_path"
+  else
+    archive_package_atomically "$package_dir" "$package_name" "$target" "$asset_path"
   fi
 
-  node "$PROJECT_ROOT/scripts/verify-portable-package.cjs" \
-    --asset "$asset_path" \
-    --target "$target" \
-    --version "$PACKAGE_VERSION" \
-    --commit "$GIT_COMMIT"
+  if [ "$target" = "macos-arm64" ] && [ "$notarized" = true ]; then
+    node "$PROJECT_ROOT/scripts/verify-portable-package.cjs" \
+      --asset "$asset_path" \
+      --target "$target" \
+      --version "$PACKAGE_VERSION" \
+      --commit "$GIT_COMMIT" \
+      --public-release
+  else
+    node "$PROJECT_ROOT/scripts/verify-portable-package.cjs" \
+      --asset "$asset_path" \
+      --target "$target" \
+      --version "$PACKAGE_VERSION" \
+      --commit "$GIT_COMMIT"
+  fi
 
   echo "Portable package ready:"
   echo "  $asset_path"
@@ -779,10 +1123,6 @@ while [ "$#" -gt 0 ]; do
       fi
       TARGETS+=("$2")
       shift 2
-      ;;
-    --skip-backend-build)
-      SKIP_BACKEND_BUILD=true
-      shift
       ;;
     --help|-h)
       usage
@@ -823,10 +1163,11 @@ fi
 echo "Checking frontend prebuild..."
 node "$PROJECT_ROOT/scripts/check-frontend-prebuild.cjs"
 
-if [ "$SKIP_BACKEND_BUILD" = false ]; then
-  echo "Building backend runtime..."
-  (cd "$PROJECT_ROOT/backend" && npm run build)
-fi
+echo "Verifying bundled Android Internals Knowledge Pack..."
+(cd "$PROJECT_ROOT/backend" && npm run knowledge-pack:fetch)
+
+echo "Building backend runtime from a clean output directory..."
+(cd "$PROJECT_ROOT/backend" && npm run build)
 echo "Checking backend runtime..."
 assert_backend_runtime_clean
 

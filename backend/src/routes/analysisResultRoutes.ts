@@ -4,13 +4,18 @@
 
 import express from 'express';
 import { requireRequestContext } from '../middleware/auth';
+import { backendLogPath } from '../runtimePaths';
 import { openEnterpriseDb } from '../services/enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from '../services/analysisResultSnapshotStore';
+import { CaseLibrary } from '../services/caseLibrary';
+import { getDefaultRagStore } from '../services/ragStore';
 import {
   canShareAnalysisResultResource,
   hasRbacPermission,
   sendForbidden,
 } from '../services/rbac';
+import { knowledgeScopeFromRequestContext } from '../services/scopedKnowledgeStore';
+import { createTraceSimilarityService } from '../services/similarity/similarityService';
 import type {
   AnalysisResultSceneType,
   AnalysisResultVisibility,
@@ -38,6 +43,23 @@ function parseLimit(value: unknown): number | undefined {
     throw new Error('limit must be an integer between 1 and 500');
   }
   return parsed;
+}
+
+function parseSimilarityLimit(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 20) {
+    throw new Error('limit must be an integer between 1 and 20');
+  }
+  return parsed;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error('includeCases must be a boolean');
 }
 
 const router = express.Router();
@@ -105,6 +127,81 @@ router.get('/', (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to list analysis results',
+    });
+  } finally {
+    db.close();
+  }
+});
+
+router.post('/:snapshotId/similarity', (req, res) => {
+  const context = requireRequestContext(req);
+  if (!hasRbacPermission(context, 'analysis_result:read')) {
+    sendForbidden(res, 'analysis_result:read permission is required');
+    return;
+  }
+
+  const snapshotId = optionalString(req.params.snapshotId);
+  if (!snapshotId) {
+    res.status(400).json({
+      success: false,
+      error: 'snapshotId is required',
+    });
+    return;
+  }
+
+  let limit: number | undefined;
+  let includeCases = false;
+  try {
+    limit = parseSimilarityLimit(req.body?.limit ?? req.query.limit);
+    includeCases = optionalBoolean(req.body?.includeCases ?? req.query.includeCases) ?? false;
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Invalid similarity request',
+    });
+    return;
+  }
+
+  const db = openEnterpriseDb();
+  try {
+    const repository = createAnalysisResultSnapshotRepository(db);
+    const service = createTraceSimilarityService({
+      snapshotRepository: repository,
+      ...(includeCases
+        ? {
+          caseLibrary: new CaseLibrary(backendLogPath('case_library.json')),
+          ragStore: getDefaultRagStore(),
+        }
+        : {}),
+    });
+    const result = service.findSimilarAnalysisResult({
+      scope: {
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+      },
+      knowledgeScope: knowledgeScopeFromRequestContext(context),
+      snapshotId,
+      includeCases,
+      limit,
+    });
+    if (!result) {
+      res.status(404).json({
+        success: false,
+        error: 'Analysis result snapshot not found',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[AnalysisResultRoutes] Failed to find similar analysis results:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to find similar analysis results',
     });
   } finally {
     db.close();

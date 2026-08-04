@@ -20,7 +20,7 @@ meta:
   description: "RN + Skia 自绘渲染，绕过 HWUI 直接用 Skia 在 GPU 上画"
   icon: "react"
   family: webview
-  doc_path: "rendering_pipelines/rn_skia.md"
+  doc_path: rendering_pipelines/S14_react_native_type.md
   # ----- Article-grounded signature (S14) -----
   s_article_ref: "S14"
   four_features:
@@ -68,24 +68,7 @@ detection:
     - slice_pattern: "*EntityPass*"   # 排除 Flutter Impeller
 
 teaching:
-  title: "React Native Skia 渲染管线"
-  summary: |
-    @shopify/react-native-skia 提供 RN 直接调用 Skia 自绘的能力：
-    - JS 通过 JSI 调用 Skia C++ API
-    - Skia 自己有渲染线程，绕过 HWUI RenderThread
-    - 输出到独立 Surface 或 TextureView
-    - 适用于复杂动画、shader、路径效果
-
-    与 NATIVE_GRAPHICS (S08) 代价模型相似：应用自绘 + GPU fence + Surface BufferQueue。
-
-  key_slices:
-    - name: "SkiaRenderer / SkiaPicture"
-      thread: any
-      description: "Skia 渲染相关 slice"
-    - name: "react-native-skia"
-      thread: any
-      description: "react-native-skia 库相关调用"
-
+  source: "rendering_pipelines/S14_react_native_type.md"
 analysis:
   common_issues:
     - id: skia_draw_overhead

@@ -332,7 +332,7 @@ steps:
     name: "WebView V8 长任务"
     skill: webview_v8_analysis
     params:
-      package: "${package|${process_name|}}"
+      package: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:

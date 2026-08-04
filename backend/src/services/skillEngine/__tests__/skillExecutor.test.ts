@@ -26,6 +26,7 @@ import {
   SkillExecutionResult,
   StepResult,
   DisplayConfig,
+  SkillEvent,
 } from '../types';
 import {
   SkillExecutor,
@@ -67,6 +68,16 @@ const createMockContext = (): SkillExecutionContext => ({
 const createMeta = (displayName: string): { display_name: string; description: string } => ({
   display_name: displayName,
   description: `Test skill: ${displayName}`,
+});
+
+const originalAiEnabled = process.env.SMARTPERFETTO_AI_ENABLED;
+
+afterEach(() => {
+  if (originalAiEnabled === undefined) {
+    delete process.env.SMARTPERFETTO_AI_ENABLED;
+  } else {
+    process.env.SMARTPERFETTO_AI_ENABLED = originalAiEnabled;
+  }
 });
 
 // =============================================================================
@@ -1007,8 +1018,15 @@ describe('Iterator Step 执行', () => {
     expect((dr as any).data.columns).toEqual(['primary_cause', 'deep_reason', 'confidence']);
     expect((dr as any).data.rows).toEqual([['主线程耗时过长', 'RecyclerView 绑定耗时', '高']]);
 
-    const envelopes = SkillExecutor.toDataEnvelopes(result);
+    const envelopes = SkillExecutor.toDataEnvelopes(result, undefined, {
+      traceId: 'trace-reference',
+      traceSide: 'reference',
+      paneSide: 'right',
+    });
     expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].meta.traceId).toBe('trace-reference');
+    expect(envelopes[0].meta.traceSide).toBe('reference');
+    expect(envelopes[0].meta.paneSide).toBe('right');
     expect(envelopes[0].display.columns?.map(c => c.name)).toEqual([
       'primary_cause',
       'deep_reason',
@@ -1326,6 +1344,66 @@ describe('Diagnostic Step 执行', () => {
     const result = await executor.execute('no_match', 'trace-1');
     expect(result.success).toBe(true);
     expect(result.diagnostics.length).toBe(0);
+  });
+
+  it('AI disabled 时不会调用 diagnostic fallback AI 服务', async () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    const mockAiService = {
+      chat: jest.fn<() => Promise<string>>().mockResolvedValue('AI fallback diagnosis'),
+    };
+    const emitted: SkillEvent[] = [];
+    const localExecutor = createSkillExecutor(
+      mockTraceProcessor,
+      mockAiService,
+      event => emitted.push(event),
+    );
+    mockTraceProcessor.query.mockResolvedValue({
+      columns: ['jank_rate'],
+      rows: [[1]],
+    });
+    const fallbackSkill: SkillDefinition = {
+      name: 'diagnostic_fallback_disabled',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Diagnostic Fallback Disabled'),
+      steps: [
+        {
+          id: 'data',
+          type: 'atomic',
+          sql: 'SELECT jank_rate FROM stats',
+          save_as: 'stats',
+        },
+        {
+          id: 'diagnose',
+          type: 'diagnostic',
+          inputs: ['stats'],
+          rules: [
+            {
+              condition: 'stats.data[0]?.jank_rate > 50',
+              confidence: 0.9,
+              diagnosis: 'Very high jank',
+              suggestions: [],
+            },
+          ],
+          ai_assist: true,
+          fallback: {
+            type: 'ai_decision',
+            prompt: 'Diagnose fallback',
+          },
+        },
+      ],
+    };
+    localExecutor.registerSkill(fallbackSkill);
+
+    const result = await localExecutor.execute('diagnostic_fallback_disabled', 'trace-1');
+    const completedEvent = emitted.find(e => e.type === 'step_completed' && e.stepId === 'diagnose');
+
+    expect(result.success).toBe(true);
+    expect(mockAiService.chat).not.toHaveBeenCalled();
+    expect(completedEvent?.data).toMatchObject({
+      success: false,
+      code: 'AI_DISABLED',
+    });
   });
 });
 
@@ -1706,6 +1784,34 @@ describe('AI Decision Step 执行', () => {
     // The overall skill still succeeds because failed steps are silently skipped
     // This allows partial execution of composite skills
   });
+
+  it('AI disabled 时不会调用 ai_decision 服务，并发出 AI_DISABLED step code', async () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    const skill: SkillDefinition = {
+      name: 'ai_decision_disabled_test',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('AI Decision Disabled Test'),
+      steps: [
+        {
+          id: 'decide',
+          type: 'ai_decision',
+          prompt: 'Test',
+        },
+      ],
+    };
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('ai_decision_disabled_test', 'trace-1');
+    const completedEvent = emittedEvents.find(e => e.type === 'step_completed' && e.stepId === 'decide');
+
+    expect(result.success).toBe(true);
+    expect(mockAiService.chat).not.toHaveBeenCalled();
+    expect(completedEvent?.data).toMatchObject({
+      success: false,
+      code: 'AI_DISABLED',
+    });
+  });
 });
 
 // =============================================================================
@@ -1787,6 +1893,52 @@ describe('AI Summary Step 执行', () => {
     await executor.execute('var_summary', 'trace-1');
     // 验证 AI 服务被调用时 prompt 中的变量已被替换
     expect(mockAiService.chat).toHaveBeenCalled();
+  });
+
+  it('AI disabled 时不会调用 ai_summary 服务', async () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    const emitted: SkillEvent[] = [];
+    const localExecutor = createSkillExecutor(
+      mockTraceProcessor,
+      mockAiService,
+      event => emitted.push(event),
+    );
+    mockTraceProcessor.query.mockResolvedValue({
+      columns: ['metric', 'value'],
+      rows: [['fps', 60]],
+    });
+    const skill: SkillDefinition = {
+      name: 'ai_summary_disabled_test',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('AI Summary Disabled Test'),
+      steps: [
+        {
+          id: 'get_data',
+          type: 'atomic',
+          sql: 'SELECT metric, value FROM stats',
+          save_as: 'stats',
+        },
+        {
+          id: 'summarize',
+          type: 'ai_summary',
+          prompt: '总结 ${stats}',
+        },
+      ],
+    };
+    localExecutor.registerSkill(skill);
+
+    const result = await localExecutor.execute('ai_summary_disabled_test', 'trace-1');
+    const completedEvent = emitted.find(e => e.type === 'step_completed' && e.stepId === 'summarize');
+
+    expect(result.success).toBe(true);
+    expect(result.aiSummary).toBeUndefined();
+    expect(mockAiService.chat).not.toHaveBeenCalled();
+    expect(result.rawResults?.get_data?.success).toBe(true);
+    expect(completedEvent?.data).toMatchObject({
+      success: false,
+      code: 'AI_DISABLED',
+    });
   });
 });
 
@@ -3892,17 +4044,23 @@ describe('SkillExecutor - Pipeline Step', () => {
       .mockResolvedValueOnce({
         columns: [
           'primary_pipeline_id',
+          'primary_rendering_type_id',
           'primary_confidence',
           'candidates_list',
+          'rendering_type_candidates_list',
+          'related_rendering_type_candidates_list',
           'features_list',
           'doc_path',
         ],
         rows: [[
           'ANDROID_VIEW_STANDARD_BLAST',
+          'S02_AOSP_STANDARD',
           0.91,
           'ANDROID_VIEW_STANDARD_BLAST:0.91,ANDROID_VIEW_STANDARD_LEGACY:0.42',
+          'S02_AOSP_STANDARD:0.91',
+          'S06_MULTI_WINDOW:0.8',
           'SURFACE_CONTROL_API:0.8',
-          'rendering_pipelines/android_view_standard.md',
+          'rendering_pipelines/S02_aosp_standard_type.md',
         ]],
       })
       .mockResolvedValueOnce({
@@ -3958,6 +4116,12 @@ describe('SkillExecutor - Pipeline Step', () => {
     const bundle = result.rawResults?.pipeline_bundle?.data as any;
     expect(bundle).toBeDefined();
     expect(bundle.detection.primaryPipelineId).toBe('ANDROID_VIEW_STANDARD_BLAST');
+    expect(bundle.detection.primaryRenderingTypeId).toBe('S02_AOSP_STANDARD');
+    expect(bundle.detection.relatedRenderingTypes).toEqual([{
+      id: 'S06_MULTI_WINDOW',
+      confidence: 0.8,
+      docPath: 'rendering_pipelines/S06_multi_window_type.md',
+    }]);
     expect(bundle.detection.primaryConfidence).toBeGreaterThan(0.8);
     expect(bundle.detection.traceRequirementsMissing).toEqual(
       expect.arrayContaining(['gfx missing'])
@@ -3966,5 +4130,102 @@ describe('SkillExecutor - Pipeline Step', () => {
     expect(bundle.pinInstructions.length).toBeGreaterThan(0);
     expect(Array.isArray(bundle.activeRenderingProcesses)).toBe(true);
     expect(bundle.activeRenderingProcesses[0]?.processName).toBe('com.demo.app');
+  });
+});
+
+describe('SkillExecutor - authored deep and empty/error semantics', () => {
+  let executor: SkillExecutor;
+  let mockTraceProcessor: any;
+
+  beforeEach(() => {
+    mockTraceProcessor = createMockTraceProcessorService();
+    executor = createSkillExecutor(mockTraceProcessor);
+  });
+
+  it('executes deep Skills with the same ordered-step semantics as composite Skills', async () => {
+    const skill = {
+      name: 'deep_runtime_contract',
+      type: 'deep',
+      version: '1.0',
+      meta: createMeta('Deep runtime contract'),
+      steps: [{ id: 'query', type: 'atomic', sql: 'SELECT 1' }],
+    } as SkillDefinition;
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('deep_runtime_contract', 'trace-1');
+
+    expect(result.success).toBe(true);
+    expect(result.rawResults?.query?.success).toBe(true);
+  });
+
+  it('fails a deep Skill when a required atomic step fails', async () => {
+    mockTraceProcessor.query.mockResolvedValueOnce({ error: 'required query failed' });
+    const skill = {
+      name: 'deep_required_failure_contract',
+      type: 'deep',
+      version: '1.0',
+      meta: createMeta('Deep required failure contract'),
+      steps: [{ id: 'query', type: 'atomic', sql: 'SELECT missing_column' }],
+    } as SkillDefinition;
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('deep_required_failure_contract', 'trace-1');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('required query failed');
+    expect(result.rawResults?.query?.success).toBe(false);
+  });
+
+  it('preserves on_empty messages and optional query errors as distinct states', async () => {
+    mockTraceProcessor.query
+      .mockResolvedValueOnce({ columns: ['value'], rows: [] })
+      .mockResolvedValueOnce({ error: 'missing optional table' });
+    const skill: SkillDefinition = {
+      name: 'empty_error_contract',
+      type: 'composite',
+      version: '1.0',
+      meta: createMeta('Empty/error contract'),
+      steps: [
+        {
+          id: 'empty',
+          type: 'atomic',
+          sql: 'SELECT value FROM empty_table',
+          on_empty: 'nothing observed',
+          display: { show: true, level: 'summary' },
+        },
+        {
+          id: 'optional_error',
+          type: 'atomic',
+          sql: 'SELECT value FROM optional_table',
+          optional: true,
+          display: { show: true, level: 'summary' },
+        },
+      ],
+    };
+    executor.registerSkill(skill);
+
+    const result = await executor.execute('empty_error_contract', 'trace-1');
+
+    expect(result.rawResults?.empty?.emptyMessage).toBe('nothing observed');
+    expect(result.rawResults?.optional_error?.success).toBe(true);
+    expect(result.rawResults?.optional_error?.error).toBe('missing optional table');
+    expect(result.rawResults?.optional_error?.code).toBe('optional_query_error');
+    expect(result.displayResults.find(item => item.stepId === 'empty')).toMatchObject({
+      executionStatus: 'empty',
+      executionMessage: 'nothing observed',
+    });
+    expect(result.displayResults.find(item => item.stepId === 'optional_error')).toMatchObject({
+      executionStatus: 'optional_error',
+      executionError: 'missing optional table',
+    });
+    const envelopes = SkillExecutor.toDataEnvelopes(result);
+    expect(envelopes.find(item => item.meta.stepId === 'empty')?.meta).toMatchObject({
+      executionStatus: 'empty',
+      executionMessage: 'nothing observed',
+    });
+    expect(envelopes.find(item => item.meta.stepId === 'optional_error')?.meta).toMatchObject({
+      executionStatus: 'optional_error',
+      executionError: 'missing optional table',
+    });
   });
 });

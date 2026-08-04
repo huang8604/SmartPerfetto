@@ -1,0 +1,787 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: camera_trace_evidence
+version: "1.0"
+type: composite
+category: rendering
+tier: B
+
+meta:
+  display_name: "Camera Trace 证据"
+  description: "枚举 Camera 相关 identity、slice、Binder、系统上下文、DMA-BUF/legacy ION 与可选 Pixel stage 证据"
+  icon: "photo_camera"
+  tags: [camera, rendering, evidence, binder, dmabuf, ion, pixel]
+
+triggers:
+  keywords:
+    zh: [Camera, 相机, 打开相机, 相机内存]
+    en: [camera, camera open, camera memory]
+  patterns:
+    - ".*(camera|Camera|相机).*(open|preview|capture|打开|预览|拍照|DMA|dmabuf).*"
+    - ".*(open|preview|capture|打开|预览|拍照).*(camera|Camera|相机).*"
+
+prerequisites:
+  required_tables: [slice, thread, process]
+  modules:
+    - slices.with_context
+    - android.binder
+    - android.frames.timeline
+    - android.memory.dmabuf
+    - linux.cpu.frequency
+    - pixel.camera
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "分析起始时间戳(ns)，默认 trace_start()"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "分析结束时间戳(ns)，默认 trace_end()"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 20
+    description: "每个明细步骤最大返回行数，限制为 1-100"
+
+steps:
+  - id: evidence_coverage
+    type: atomic
+    name: "Camera 证据覆盖"
+    display:
+      layer: overview
+      level: summary
+      title: "Camera 证据覆盖"
+      columns:
+        - name: evidence_family
+          label: "证据族"
+          type: string
+        - name: status
+          label: "状态"
+          type: string
+        - name: row_count
+          label: "行数"
+          type: number
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      identity_count AS (
+        SELECT
+          (SELECT COUNT(*)
+           FROM process
+           WHERE lower(COALESCE(name, '')) GLOB '*camera*'
+              OR lower(COALESCE(name, '')) GLOB '*camx*'
+              OR lower(COALESCE(name, '')) GLOB '*mtkcam*')
+          +
+          (SELECT COUNT(*)
+           FROM thread
+           WHERE lower(COALESCE(name, '')) GLOB '*camera*'
+              OR lower(COALESCE(name, '')) GLOB '*camx*'
+              OR lower(COALESCE(name, '')) GLOB '*mtkcam*') AS candidate_count
+      ),
+      slice_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM thread_slice, input
+        WHERE ts < input.end_ts
+          AND ts + IIF(dur = -1, trace_end() - ts, dur) > input.start_ts
+          AND (
+            lower(COALESCE(name, '')) GLOB '*camera*'
+            OR lower(COALESCE(name, '')) GLOB '*camx*'
+            OR lower(COALESCE(name, '')) GLOB '*mtkcam*'
+            OR lower(COALESCE(name, '')) GLOB '*capture*'
+            OR lower(COALESCE(name, '')) GLOB '*preview*'
+          )
+      ),
+      binder_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM android_binder_txns, input
+        WHERE client_ts >= input.start_ts
+          AND client_ts < input.end_ts
+          AND (
+            lower(COALESCE(client_process, '')) GLOB '*camera*'
+            OR lower(COALESCE(server_process, '')) GLOB '*camera*'
+            OR lower(COALESCE(client_process, '')) GLOB '*camx*'
+            OR lower(COALESCE(server_process, '')) GLOB '*camx*'
+            OR lower(COALESCE(client_process, '')) GLOB '*mtkcam*'
+            OR lower(COALESCE(server_process, '')) GLOB '*mtkcam*'
+          )
+      ),
+      scheduler_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM sched_slice, input
+        WHERE ts < input.end_ts
+          AND ts + IIF(dur = -1, trace_end() - ts, dur) > input.start_ts
+      ),
+      frequency_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM cpu_frequency_counters, input
+        WHERE ts < input.end_ts
+          AND ts + IIF(dur = -1, trace_end() - ts, dur) > input.start_ts
+      ),
+      frame_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM actual_frame_timeline_slice, input
+        WHERE ts < input.end_ts
+          AND ts + IIF(dur = -1, trace_end() - ts, dur) > input.start_ts
+      ),
+      buffer_memory_count AS (
+        SELECT
+          (SELECT COUNT(*)
+           FROM android_dmabuf_allocs, input
+           WHERE ts >= input.start_ts
+             AND ts < input.end_ts)
+          +
+          (SELECT COUNT(*)
+           FROM counter AS c
+           JOIN thread_counter_track AS tct ON c.track_id = tct.id
+           CROSS JOIN input
+           WHERE tct.name GLOB 'mem.ion_change*'
+             AND c.ts >= input.start_ts
+             AND c.ts < input.end_ts) AS candidate_count
+      ),
+      pixel_count AS (
+        SELECT COUNT(*) AS candidate_count
+        FROM pixel_camera_frames, input
+        WHERE ts >= input.start_ts AND ts < input.end_ts
+      )
+      SELECT
+        'camera_process_thread_identity' AS evidence_family,
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END AS status,
+        candidate_count AS row_count,
+        'process,thread' AS source,
+        'Name-based identity candidates are not proof of a specific Camera milestone.' AS limitation
+      FROM identity_count
+      UNION ALL
+      SELECT
+        'camera_slice_candidates',
+        CASE WHEN candidate_count > 0 THEN 'vendor_specific' ELSE 'missing' END,
+        candidate_count,
+        'thread_slice',
+        'Slice names are implementation-specific candidates and require identity/anchor verification.'
+      FROM slice_count
+      UNION ALL
+      SELECT
+        'binder_transactions',
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END,
+        candidate_count,
+        'android_binder_txns',
+        'Binder rows provide cross-process correlation; interface names and endpoints must still be verified.'
+      FROM binder_count
+      UNION ALL
+      SELECT
+        'scheduler_context',
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END,
+        candidate_count,
+        'sched_slice',
+        'Scheduler rows provide execution context only after Camera thread identity is established.'
+      FROM scheduler_count
+      UNION ALL
+      SELECT
+        'cpu_frequency_context',
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END,
+        candidate_count,
+        'cpu_frequency_counters',
+        'CPU-frequency rows provide system context and do not by themselves attribute Camera latency.'
+      FROM frequency_count
+      UNION ALL
+      SELECT
+        'frame_timeline',
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END,
+        candidate_count,
+        'actual_frame_timeline_slice',
+        'FrameTimeline can support presentation correlation only after preview surface identity is established.'
+      FROM frame_count
+      UNION ALL
+      SELECT
+        'dmabuf_allocations',
+        CASE WHEN candidate_count > 0 THEN 'available' ELSE 'missing' END,
+        candidate_count,
+        'android_dmabuf_allocs; counter + thread_counter_track (mem.ion_change*)',
+        'DMA-BUF and legacy ION signed deltas cover only observed events; they are not retained memory or leak proof.'
+      FROM buffer_memory_count
+      UNION ALL
+      SELECT
+        'pixel_camera_frames',
+        CASE WHEN candidate_count > 0 THEN 'vendor_specific' ELSE 'missing' END,
+        candidate_count,
+        'pixel_camera_frames',
+        'pixel.camera is an optional Pixel slice parser, not a portable Android Camera contract.'
+      FROM pixel_count
+    save_as: evidence_coverage
+    synthesize:
+      role: overview
+      fields:
+        - key: evidence_family
+          label: 证据族
+        - key: status
+          label: 可用性
+        - key: row_count
+          label: 行数
+        - key: limitation
+          label: 限制
+
+  - id: camera_process_candidates
+    type: atomic
+    name: "Camera 进程/线程候选"
+    display:
+      layer: list
+      level: detail
+      title: "Camera identity 候选"
+      columns:
+        - name: identity_kind
+          label: "类型"
+          type: string
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: upid
+          label: "UPID"
+          type: number
+        - name: pid
+          label: "PID"
+          type: number
+        - name: utid
+          label: "UTID"
+          type: number
+        - name: tid
+          label: "TID"
+          type: number
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      candidates AS (
+        SELECT
+          'process' AS identity_kind,
+          COALESCE(p.name, '<unnamed process>') AS process_name,
+          CAST(NULL AS TEXT) AS thread_name,
+          p.upid,
+          p.pid,
+          CAST(NULL AS INTEGER) AS utid,
+          CAST(NULL AS INTEGER) AS tid,
+          'process' AS source
+        FROM process p
+        WHERE lower(COALESCE(p.name, '')) GLOB '*camera*'
+           OR lower(COALESCE(p.name, '')) GLOB '*camx*'
+           OR lower(COALESCE(p.name, '')) GLOB '*mtkcam*'
+        UNION ALL
+        SELECT
+          'thread',
+          COALESCE(p.name, '<unnamed process>'),
+          COALESCE(t.name, '<unnamed thread>'),
+          t.upid,
+          p.pid,
+          t.utid,
+          t.tid,
+          'thread'
+        FROM thread t
+        LEFT JOIN process p ON p.upid = t.upid
+        WHERE lower(COALESCE(t.name, '')) GLOB '*camera*'
+           OR lower(COALESCE(t.name, '')) GLOB '*camx*'
+           OR lower(COALESCE(t.name, '')) GLOB '*mtkcam*'
+      )
+      SELECT
+        identity_kind,
+        process_name,
+        thread_name,
+        upid,
+        pid,
+        utid,
+        tid,
+        source,
+        'Name matches are identity candidates; verify process/thread ownership before attributing Camera work.' AS limitation
+      FROM candidates, input
+      ORDER BY identity_kind, process_name, thread_name
+      LIMIT (SELECT max_rows FROM input)
+    save_as: camera_process_candidates
+    synthesize:
+      role: list
+      fields:
+        - key: identity_kind
+          label: Identity 类型
+        - key: process_name
+          label: 进程
+        - key: thread_name
+          label: 线程
+        - key: source
+          label: 来源
+
+  - id: camera_slice_candidates
+    type: atomic
+    name: "Camera Slice 候选"
+    display:
+      layer: list
+      level: detail
+      title: "Camera slice 候选"
+      columns:
+        - name: ts
+          label: "开始"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur_ns
+        - name: dur_ns
+          label: "时长"
+          type: duration
+          unit: ns
+          format: duration_ms
+        - name: slice_name
+          label: "Slice"
+          type: string
+          format: truncate
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: thread_name
+          label: "线程"
+          type: string
+        - name: upid
+          label: "UPID"
+          type: number
+        - name: utid
+          label: "UTID"
+          type: number
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      candidates AS (
+        SELECT
+          MAX(ts, input.start_ts) AS overlap_ts,
+          MIN(ts + IIF(dur = -1, trace_end() - ts, dur), input.end_ts)
+            - MAX(ts, input.start_ts) AS overlap_dur,
+          COALESCE(name, '<unnamed slice>') AS slice_name,
+          COALESCE(process_name, '<unnamed process>') AS process_name,
+          COALESCE(thread_name, '<unnamed thread>') AS thread_name,
+          upid,
+          utid
+        FROM thread_slice, input
+        WHERE ts < input.end_ts
+          AND ts + IIF(dur = -1, trace_end() - ts, dur) > input.start_ts
+          AND (
+            lower(COALESCE(name, '')) GLOB '*camera*'
+            OR lower(COALESCE(name, '')) GLOB '*camx*'
+            OR lower(COALESCE(name, '')) GLOB '*mtkcam*'
+            OR lower(COALESCE(name, '')) GLOB '*capture*'
+            OR lower(COALESCE(name, '')) GLOB '*preview*'
+          )
+      )
+      SELECT
+        printf('%d', overlap_ts) AS ts,
+        printf('%d', overlap_dur) AS dur_ns,
+        slice_name,
+        process_name,
+        thread_name,
+        upid,
+        utid,
+        'thread_slice' AS source,
+        'Slice names are implementation-specific candidates and require identity/anchor verification.' AS limitation
+      FROM candidates, input
+      WHERE overlap_dur > 0
+      ORDER BY overlap_dur DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: camera_slice_candidates
+    synthesize:
+      role: list
+      fields:
+        - key: slice_name
+          label: Slice 候选
+        - key: process_name
+          label: 进程
+        - key: thread_name
+          label: 线程
+        - key: source
+          label: 来源
+
+  - id: camera_binder_summary
+    type: atomic
+    name: "Camera Binder 事务"
+    display:
+      layer: list
+      level: detail
+      title: "Camera 相关 Binder 事务"
+      columns:
+        - name: ts
+          label: "开始"
+          type: timestamp
+          unit: ns
+          clickAction: navigate_range
+          durationColumn: dur_ns
+        - name: dur_ns
+          label: "耗时"
+          type: duration
+          unit: ns
+          format: duration_ms
+        - name: aidl_name
+          label: "AIDL"
+          type: string
+          format: truncate
+        - name: client_process
+          label: "Client 进程"
+          type: string
+        - name: client_thread
+          label: "Client 线程"
+          type: string
+        - name: server_process
+          label: "Server 进程"
+          type: string
+        - name: server_thread
+          label: "Server 线程"
+          type: string
+        - name: client_upid
+          label: "Client UPID"
+          type: number
+        - name: client_utid
+          label: "Client UTID"
+          type: number
+        - name: server_upid
+          label: "Server UPID"
+          type: number
+        - name: server_utid
+          label: "Server UTID"
+          type: number
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      )
+      SELECT
+        printf('%d', client_ts) AS ts,
+        printf('%d', MAX(client_dur, 0)) AS dur_ns,
+        COALESCE(aidl_name, interface, method_name, '<unknown interface>') AS aidl_name,
+        COALESCE(client_process, '<unnamed process>') AS client_process,
+        COALESCE(client_thread, '<unnamed thread>') AS client_thread,
+        COALESCE(server_process, '<unnamed process>') AS server_process,
+        COALESCE(server_thread, '<unnamed thread>') AS server_thread,
+        client_upid,
+        client_utid,
+        server_upid,
+        server_utid,
+        'android_binder_txns' AS source,
+        'Binder rows provide cross-process correlation; interface names and endpoints must still be verified.' AS limitation
+      FROM android_binder_txns, input
+      WHERE client_ts >= input.start_ts
+        AND client_ts < input.end_ts
+        AND (
+          lower(COALESCE(client_process, '')) GLOB '*camera*'
+          OR lower(COALESCE(server_process, '')) GLOB '*camera*'
+          OR lower(COALESCE(client_process, '')) GLOB '*camx*'
+          OR lower(COALESCE(server_process, '')) GLOB '*camx*'
+          OR lower(COALESCE(client_process, '')) GLOB '*mtkcam*'
+          OR lower(COALESCE(server_process, '')) GLOB '*mtkcam*'
+        )
+      ORDER BY client_dur DESC, client_ts
+      LIMIT (SELECT max_rows FROM input)
+    save_as: camera_binder_summary
+    synthesize:
+      role: list
+      fields:
+        - key: aidl_name
+          label: Binder 接口
+        - key: client_process
+          label: Client
+        - key: server_process
+          label: Server
+        - key: source
+          label: 来源
+
+  - id: camera_dmabuf_summary
+    type: atomic
+    name: "Camera DMA-BUF/legacy ION window evidence"
+    display:
+      layer: list
+      level: detail
+      title: "Camera DMA-BUF/legacy ION window evidence"
+      columns:
+        - name: process_name
+          label: "进程"
+          type: string
+        - name: upid
+          label: "UPID"
+          type: number
+        - name: pid
+          label: "PID"
+          type: number
+        - name: memory_source
+          label: "内存来源"
+          type: string
+        - name: allocation_count
+          label: "分配次数"
+          type: number
+        - name: allocation_bytes
+          label: "分配量"
+          type: bytes
+        - name: release_bytes
+          label: "释放量"
+          type: bytes
+        - name: observed_net_delta_bytes
+          label: "窗口内观测净变化"
+          type: bytes
+        - name: peak_event_bytes
+          label: "最大单事件"
+          type: bytes
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      ),
+      events AS (
+        SELECT
+          alloc.ts,
+          alloc.buf_size AS signed_bytes,
+          COALESCE(alloc.process_name, '<unnamed process>') AS process_name,
+          alloc.upid,
+          alloc.pid,
+          'dmabuf' AS memory_source
+        FROM android_dmabuf_allocs AS alloc
+        CROSS JOIN input
+        WHERE alloc.ts >= input.start_ts
+          AND alloc.ts < input.end_ts
+          AND (
+            lower(COALESCE(alloc.process_name, '')) GLOB '*camera*'
+            OR lower(COALESCE(alloc.process_name, '')) GLOB '*camx*'
+            OR lower(COALESCE(alloc.process_name, '')) GLOB '*mtkcam*'
+            OR lower(COALESCE(alloc.thread_name, '')) GLOB '*camera*'
+            OR lower(COALESCE(alloc.thread_name, '')) GLOB '*camx*'
+            OR lower(COALESCE(alloc.thread_name, '')) GLOB '*mtkcam*'
+          )
+        UNION ALL
+        SELECT
+          c.ts,
+          CAST(c.value AS INTEGER) AS signed_bytes,
+          COALESCE(p.name, '<unnamed process>') AS process_name,
+          p.upid,
+          p.pid,
+          'legacy_ion' AS memory_source
+        FROM counter AS c
+        JOIN thread_counter_track AS tct ON c.track_id = tct.id
+        JOIN thread AS th ON th.utid = tct.utid
+        LEFT JOIN process AS p ON p.upid = th.upid
+        CROSS JOIN input
+        WHERE tct.name GLOB 'mem.ion_change*'
+          AND c.ts >= input.start_ts
+          AND c.ts < input.end_ts
+          AND (
+            lower(COALESCE(p.name, '')) GLOB '*camera*'
+            OR lower(COALESCE(p.name, '')) GLOB '*camx*'
+            OR lower(COALESCE(p.name, '')) GLOB '*mtkcam*'
+            OR lower(COALESCE(th.name, '')) GLOB '*camera*'
+            OR lower(COALESCE(th.name, '')) GLOB '*camx*'
+            OR lower(COALESCE(th.name, '')) GLOB '*mtkcam*'
+          )
+      )
+      SELECT
+        process_name,
+        upid,
+        pid,
+        memory_source,
+        SUM(CASE WHEN signed_bytes > 0 THEN 1 ELSE 0 END) AS allocation_count,
+        SUM(CASE WHEN signed_bytes > 0 THEN signed_bytes ELSE 0 END) AS allocation_bytes,
+        -SUM(CASE WHEN signed_bytes < 0 THEN signed_bytes ELSE 0 END) AS release_bytes,
+        SUM(signed_bytes) AS observed_net_delta_bytes,
+        MAX(ABS(signed_bytes)) AS peak_event_bytes,
+        CASE memory_source
+          WHEN 'dmabuf' THEN 'android_dmabuf_allocs'
+          ELSE 'counter + thread_counter_track (mem.ion_change*)'
+        END AS source,
+        'DMA-BUF (android_dmabuf_allocs) and legacy ION (counter + thread_counter_track mem.ion_change*) signed deltas cover only events inside this selected window; allocations may predate it and releases may occur later, so this is not retained memory or leak proof.' AS limitation
+      FROM events
+      GROUP BY process_name, upid, pid, memory_source
+      ORDER BY ABS(SUM(signed_bytes)) DESC, allocation_bytes DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: camera_dmabuf_summary
+    synthesize:
+      role: list
+      fields:
+        - key: process_name
+          label: 进程
+        - key: memory_source
+          label: 内存来源
+        - key: allocation_bytes
+          label: 窗口内分配量
+        - key: release_bytes
+          label: 窗口内释放量
+        - key: observed_net_delta_bytes
+          label: 窗口内观测净变化
+        - key: limitation
+          label: 限制
+
+  - id: pixel_camera_stage_summary
+    type: atomic
+    name: "Pixel Camera Stage 摘要"
+    display:
+      layer: list
+      level: detail
+      title: "可选 Pixel Camera stage"
+      columns:
+        - name: cam_id
+          label: "Camera ID"
+          type: number
+        - name: node
+          label: "Node"
+          type: string
+        - name: port_group
+          label: "Port group"
+          type: string
+        - name: frame_count
+          label: "帧数"
+          type: number
+        - name: avg_duration_ns
+          label: "平均时长"
+          type: duration
+          unit: ns
+          format: duration_ms
+        - name: max_duration_ns
+          label: "最大时长"
+          type: duration
+          unit: ns
+          format: duration_ms
+        - name: source
+          label: "来源"
+          type: string
+        - name: limitation
+          label: "限制"
+          type: string
+          format: truncate
+    sql: |
+      WITH
+      raw_input AS (
+        SELECT
+          COALESCE(${start_ts}, trace_start()) AS raw_start_ts,
+          COALESCE(${end_ts}, trace_end()) AS raw_end_ts,
+          MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 100) AS max_rows
+      ),
+      input AS (
+        SELECT
+          MIN(raw_start_ts, raw_end_ts) AS start_ts,
+          MAX(raw_start_ts, raw_end_ts) AS end_ts,
+          max_rows
+        FROM raw_input
+      )
+      SELECT
+        cam_id,
+        COALESCE(node, '<unknown node>') AS node,
+        COALESCE(port_group, '<unknown port group>') AS port_group,
+        COUNT(*) AS frame_count,
+        CAST(ROUND(AVG(dur)) AS INTEGER) AS avg_duration_ns,
+        MAX(dur) AS max_duration_ns,
+        'pixel_camera_frames' AS source,
+        'pixel.camera is an optional Pixel slice parser; stage rows require vendor-specific interpretation and portable identity checks.' AS limitation
+      FROM pixel_camera_frames, input
+      WHERE ts >= input.start_ts
+        AND ts < input.end_ts
+      GROUP BY cam_id, node, port_group
+      ORDER BY max_duration_ns DESC, frame_count DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: pixel_camera_stage_summary
+    synthesize:
+      role: list
+      fields:
+        - key: cam_id
+          label: Camera ID
+        - key: node
+          label: Node
+        - key: port_group
+          label: Port group
+        - key: frame_count
+          label: 帧数
+        - key: source
+          label: 来源
+
+output:
+  format: structured

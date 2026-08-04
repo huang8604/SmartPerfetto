@@ -82,6 +82,20 @@ describe('CaseGraph — basic CRUD', () => {
     g.addEdge(makeEdge({edgeId: 'e2', relation: 'before_after_fix'}));
     expect(g.size()).toBe(2);
   });
+
+  it('preserves writes from graph instances created before either mutation', () => {
+    const first = new CaseGraph(storagePath);
+    const second = new CaseGraph(storagePath);
+
+    first.addEdge(makeEdge({edgeId: 'e1'}));
+    second.addEdge(makeEdge({
+      edgeId: 'e2',
+      fromCaseId: 'b',
+      toCaseId: 'c',
+    }));
+
+    expect(new CaseGraph(storagePath).listEdges().map(edge => edge.edgeId)).toEqual(['e1', 'e2']);
+  });
 });
 
 describe('CaseGraph — findRelated', () => {
@@ -183,10 +197,12 @@ describe('CaseGraph — persistence', () => {
     expect(g2.size()).toBe(1);
   });
 
-  it('survives corrupted JSON without losing the file', () => {
+  it('preserves corrupted JSON and refuses to overwrite it', () => {
     fs.writeFileSync(storagePath, 'not-json{', 'utf-8');
     const g = new CaseGraph(storagePath);
     expect(g.size()).toBe(0);
     expect(fs.existsSync(storagePath)).toBe(true);
+    expect(() => g.addEdge(makeEdge({edgeId: 'e1'}))).toThrow(/unreadable/);
+    expect(fs.readFileSync(storagePath, 'utf-8')).toBe('not-json{');
   });
 });

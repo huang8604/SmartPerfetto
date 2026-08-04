@@ -17,6 +17,8 @@ import {
   detectArchitectureViaSkill,
   DetectorContext,
 } from '../agent/detectors';
+import { resolvePipelineArchitectureType } from '../agent/detectors/architectureDetector';
+import { ensurePipelineSkillsInitialized, pipelineSkillLoader } from '../services/pipelineSkillLoader';
 
 // Mock the skill engine dependencies
 jest.mock('../services/skillEngine/skillLoader', () => ({
@@ -267,6 +269,14 @@ describe('ArchitectureDetector (YAML skill-backed)', () => {
   });
 
   describe('Other pipeline types', () => {
+    it('resolves every architecture type from catalog metadata', async () => {
+      await ensurePipelineSkillsInitialized();
+      for (const [pipelineId, entry] of Object.entries(pipelineSkillLoader.getCatalog().pipelines)) {
+        expect(resolvePipelineArchitectureType(pipelineId)).toBe(entry.architecture_type);
+      }
+      expect(resolvePipelineArchitectureType('NOT_IN_CATALOG')).toBe('STANDARD');
+    });
+
     it('should detect CAMERA for CAMERA_PIPELINE', async () => {
       mockExecute.mockResolvedValue(
         buildSkillResult({ pipelineId: 'CAMERA_PIPELINE', confidence: 0.70 }),
@@ -319,6 +329,34 @@ describe('ArchitectureDetector (YAML skill-backed)', () => {
   });
 
   describe('Error handling', () => {
+    it('uses the catalog default when successful detection has no pipeline row', async () => {
+      mockExecute.mockResolvedValue({
+        success: true,
+        displayResults: [],
+        diagnostics: [],
+        rawResults: {},
+        executionTimeMs: 0,
+      });
+      const defaultSpy = jest.spyOn(pipelineSkillLoader, 'getDefaultSelection')
+        .mockReturnValue({
+          pipelineId: 'FLUTTER_SURFACEVIEW_IMPELLER',
+          renderingTypeId: 'S10_FLUTTER',
+          docPath: 'rendering_pipelines/S10_flutter_type.md',
+        });
+
+      try {
+        const result = await detectArchitectureViaSkill(
+          context.traceProcessorService,
+          context.traceId,
+        );
+
+        expect(result.type).toBe('FLUTTER');
+        expect(result.additionalInfo?.pipelineId).toBe('FLUTTER_SURFACEVIEW_IMPELLER');
+      } finally {
+        defaultSpy.mockRestore();
+      }
+    });
+
     it('should return STANDARD on skill execution failure', async () => {
       mockExecute.mockResolvedValue({
         success: false,

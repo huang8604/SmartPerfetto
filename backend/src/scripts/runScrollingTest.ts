@@ -24,7 +24,7 @@ async function runScrollingSkillTest() {
   // Test trace path
   const testTracePath = path.join(
     process.cwd(),
-    '../test-traces/scroll-demo-customer-scroll.pftrace'
+    '../Trace/real/android-scroll-customer/trace.pftrace'
   );
 
   if (!fs.existsSync(testTracePath)) {

@@ -895,14 +895,14 @@ describe('Plan 18 — DomainSkillEvalContract', () => {
       cases: [
         {
           caseId: 'scrolling/jank/heavy_mixed',
-          tracePath: 'test-traces/scroll-demo-customer-scroll.pftrace',
+          tracePath: 'Trace/real/android-scroll-customer/trace.pftrace',
           skillId: 'scrolling_analysis',
           description: 'Customer scrolling, mixed jank',
           groundTruthSource: 'manual annotation 2026-04-02',
         },
         {
           caseId: 'startup/heavy/lacunh',
-          tracePath: 'test-traces/lacunh_heavy.pftrace',
+          tracePath: 'Trace/real/android-startup-heavy/trace.pftrace',
           skillId: 'startup_analysis',
           description: 'Heavy app startup',
         },
@@ -980,8 +980,9 @@ describe('First-tier shared base types', () => {
       'case_library',
       'app_source',
       'kernel_source',
+      'android_internals_wiki',
     ];
-    expect(sources).toHaveLength(8);
+    expect(sources).toHaveLength(9);
     // Compile-time check: each value is assignable to RagSourceKind.
     sources.forEach(s => expect(typeof s).toBe('string'));
   });
@@ -1167,6 +1168,7 @@ describe('Plan 55 — AndroidperformanceAospRagContract', () => {
         case_library: {chunkCount: 12},
         app_source: {chunkCount: 0},
         kernel_source: {chunkCount: 0},
+        android_internals_wiki: {chunkCount: 0},
       },
       coverage: [
         {sparkId: 181, planId: '55', status: 'scaffolded'},

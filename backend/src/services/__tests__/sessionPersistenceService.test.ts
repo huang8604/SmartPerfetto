@@ -548,5 +548,53 @@ describe('SessionPersistenceService - Phase 3 Features', () => {
 
       service.deleteSession(sessionId);
     });
+
+    test('clearPrivateContext overwrites legacy model-authored SQLite metadata', () => {
+      const sessionId = `${testSessionId}_private_clear`;
+      const canary = 'PRIVATE_SQLITE_METADATA_CANARY';
+      service.saveSession({
+        ...createTestSession(sessionId),
+        metadata: {
+          sessionStateSnapshot: {conversationSteps: [{content: canary}]},
+          runtimeArraysSnapshot: {analysisNotes: [{content: canary}]},
+          sessionContextSnapshot: {summary: canary},
+          entityStoreSnapshot: {entities: [{value: canary}]},
+          focusStoreSnapshot: {items: [{description: canary}]},
+          traceAgentStateSnapshot: {notes: canary},
+          architectureSnapshot: {framework: canary},
+          lineage: {reason: canary},
+        } as any,
+      });
+
+      service.saveSessionStateSnapshot(sessionId, {
+        version: 1,
+        snapshotTimestamp: Date.now(),
+        sessionId,
+        traceId: `trace_${sessionId}`,
+        conversationSteps: [],
+        queryHistory: [],
+        conclusionHistory: [],
+        agentDialogue: [],
+        agentResponses: [],
+        dataEnvelopes: [],
+        hypotheses: [],
+        analysisNotes: [],
+        analysisPlan: null,
+        planHistory: [],
+        uncertaintyFlags: [],
+        runSequence: 1,
+        conversationOrdinal: 0,
+      }, {clearPrivateContext: true});
+
+      const metadata = service.getSession(sessionId)?.metadata;
+      expect(JSON.stringify(metadata)).not.toContain(canary);
+      expect(metadata?.runtimeArraysSnapshot).toEqual(expect.objectContaining({
+        conversationSteps: [],
+        queryHistory: [],
+        conclusionHistory: [],
+        analysisNotes: [],
+      }));
+      service.deleteSession(sessionId);
+    });
   });
 });

@@ -35,6 +35,8 @@ import {
 } from '../../services/comparisonAppendixService';
 import type {CodeAwareMode} from '../../services/codebase/codeAwareFeature';
 import type {CliAnalysisMode, TraceCaptureResult} from '../types';
+import {localize, parseOutputLanguage} from '../../agentv3/outputLanguage';
+import {privateAnalysisQueryMessage} from '../../services/security/privateAnalysisProjection';
 
 const RESUME_CONTEXT_MAX_CHARS = 4000;
 const RESUME_TURN_MAX_CHARS = 1200;
@@ -71,6 +73,7 @@ export async function startSession(
     analysisMode?: CliAnalysisMode;
     codeAwareMode?: CodeAwareMode;
     codebaseIds?: string[];
+    knowledgeSourceIds?: string[];
     capture?: TraceCaptureResult;
   },
 ): Promise<TurnResult> {
@@ -92,17 +95,22 @@ export async function startSession(
     logText(ctx, `Loading reference trace: ${referenceTracePath}`);
     referenceTraceId = await ctx.service.loadTrace(referenceTracePath);
     logText(ctx, `Reference trace loaded (traceId=${referenceTraceId.slice(0, 8)}…)`);
+    const outputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
     reportAppendix = await buildComparisonAppendix(ctx.service, {
       currentTraceId: traceId,
       referenceTraceId,
     }).catch((err) => ({
       markdown: [
-        '## SmartPerfetto 确定性对比附录',
+        localize(outputLanguage, '## SmartPerfetto 确定性对比附录', '## SmartPerfetto Deterministic Comparison Appendix'),
         '',
-        `- 固定 SQL 附录生成失败：${(err as Error).message}`,
+        localize(
+          outputLanguage,
+          `- 固定 SQL 附录生成失败：${(err as Error).message}`,
+          `- Deterministic SQL appendix generation failed: ${(err as Error).message}`,
+        ),
         '',
       ].join('\n'),
-      html: `<section><h2>SmartPerfetto 确定性对比附录</h2><p>固定 SQL 附录生成失败：${escapeHtml((err as Error).message)}</p></section>`,
+      html: `<section><h2>${localize(outputLanguage, 'SmartPerfetto 确定性对比附录', 'SmartPerfetto Deterministic Comparison Appendix')}</h2><p>${localize(outputLanguage, '固定 SQL 附录生成失败：', 'Deterministic SQL appendix generation failed: ')}${escapeHtml((err as Error).message)}</p></section>`,
     }));
   }
 
@@ -118,6 +126,12 @@ export async function startSession(
     analysisMode: input.analysisMode,
     codeAwareMode: input.codeAwareMode,
     codebaseIds: input.codebaseIds,
+    knowledgeSourceIds: input.knowledgeSourceIds,
+    turn: 1,
+    resolveCliTurnPath: (sid, turn) => path.join(
+      sessionPaths(ctx.paths, sid).turnsDir,
+      `${String(turn).padStart(3, '0')}.md`,
+    ),
     onSessionReady: (sid) => {
       sp = sessionPaths(ctx.paths, sid);
       ensureSessionLayout(sp);
@@ -129,6 +143,9 @@ export async function startSession(
       if (streamFile) appendStreamEvent(streamFile, update);
     },
   });
+  const persistedQuery = result.privateKnowledge
+    ? privateAnalysisQueryMessage(parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE))
+    : input.query;
 
   // Defensive: if onSessionReady didn't fire (future refactor hazard) we
   // still land on a valid session folder using the resolved sessionId.
@@ -152,8 +169,9 @@ export async function startSession(
     sdkSessionId: result.sdkSessionId,
     model: result.model,
     analysisMode: input.analysisMode,
-    codeAwareMode: input.codeAwareMode,
+    codeAwareMode: result.codeAwareMode,
     codebaseIds: input.codebaseIds,
+    knowledgeSourceIds: input.knowledgeSourceIds,
     capture: input.capture,
     createdAt: startedAt,
     lastTurnAt: now,
@@ -166,10 +184,10 @@ export async function startSession(
     renderer: ctx.renderer,
     sessionId: resolvedSessionId,
     turn: 1,
-    query: input.query,
+    query: persistedQuery,
     result,
     config,
-    turnMarkdown: formatTurnMarkdown(1, input.query, result.result.conclusion || '', result.result, false),
+    turnMarkdown: formatTurnMarkdown(1, persistedQuery, result.result.conclusion || '', result.result, false),
     reportAppendix,
     indexEntry: {
       sessionId: resolvedSessionId,
@@ -179,7 +197,7 @@ export async function startSession(
       traceFilename: referenceTracePath
         ? `${path.basename(tracePath)} vs ${path.basename(referenceTracePath)}`
         : path.basename(tracePath),
-      firstQuery: input.query,
+      firstQuery: persistedQuery,
       turnCount: 1,
       status: result.result.success ? 'completed' : 'failed',
     },
@@ -277,8 +295,14 @@ export async function continueSession(
     sessionId: requestedSessionId,
     codeAwareMode: existingConfig.codeAwareMode,
     codebaseIds: existingConfig.codebaseIds,
+    knowledgeSourceIds: existingConfig.knowledgeSourceIds,
     analysisMode: existingConfig.analysisMode,
     lineage: pendingLineage,
+    turn: nextTurn,
+    resolveCliTurnPath: (_sid, turn) => path.join(
+      sp.turnsDir,
+      `${String(turn).padStart(3, '0')}.md`,
+    ),
     onSessionReady: () => {
       ensureSessionLayout(sp);
     },
@@ -320,9 +344,13 @@ export async function continueSession(
     providerSnapshotHash: result.providerSnapshotHash ?? existingConfig.providerSnapshotHash,
     sdkSessionId: result.sdkSessionId || existingConfig.sdkSessionId,
     model: result.model || existingConfig.model,
+    codeAwareMode: result.codeAwareMode,
     lastTurnAt: now,
     turnCount: nextTurn,
   };
+  const persistedQuery = result.privateKnowledge
+    ? privateAnalysisQueryMessage(parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE))
+    : input.query;
 
   const idx = readIndex(ctx.paths);
   const prev = idx.sessions[userSessionId];
@@ -333,12 +361,12 @@ export async function continueSession(
     renderer: ctx.renderer,
     sessionId: userSessionId,
     turn: nextTurn,
-    query: input.query,
+    query: persistedQuery,
     result,
     config: updatedConfig,
     turnMarkdown: formatTurnMarkdown(
       nextTurn,
-      input.query,
+      persistedQuery,
       result.result.conclusion || '',
       result.result,
       degraded,
@@ -350,7 +378,7 @@ export async function continueSession(
       lastTurnAt: now,
       tracePath: existingConfig.tracePath,
       traceFilename: prev?.traceFilename ?? path.basename(existingConfig.tracePath),
-      firstQuery: prev?.firstQuery ?? input.query,
+      firstQuery: result.privateKnowledge ? persistedQuery : prev?.firstQuery ?? persistedQuery,
       turnCount: nextTurn,
       status: result.result.success ? 'completed' : 'failed',
     },

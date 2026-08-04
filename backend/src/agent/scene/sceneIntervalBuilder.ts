@@ -39,6 +39,7 @@ import {
   SceneEvidenceRef,
   SceneAnalysisSelection,
 } from './types';
+import {displaySceneType} from './scenePresentation';
 
 // ---------------------------------------------------------------------------
 // Threshold table — drives priority and severity for each scene category.
@@ -61,37 +62,6 @@ const PROBLEM_THRESHOLDS: Record<string, SceneThreshold> = {
   navigation: { durationMs: 500 },
   anr: { durationMs: 5000 },
   window_transition: { durationMs: 500 },
-};
-
-const SCENE_DISPLAY_NAMES: Record<string, string> = {
-  cold_start: '冷启动',
-  warm_start: '温启动',
-  hot_start: '热启动',
-  scroll_start: '滑动启动',
-  scroll: '滑动浏览',
-  inertial_scroll: '惯性滑动',
-  navigation: '页面跳转',
-  app_switch: '应用切换',
-  app_foreground: '应用内',
-  home_screen: '桌面',
-  screen_on: '屏幕点亮',
-  screen_off: '屏幕熄灭',
-  screen_sleep: '屏幕休眠',
-  screen_unlock: '解锁屏幕',
-  notification: '通知操作',
-  split_screen: '分屏操作',
-  pip: '画中画',
-  tap: '点击',
-  long_press: '长按',
-  idle: '空闲',
-  jank_region: '性能问题区间',
-  back_key: '返回键',
-  home_key: 'Home键',
-  recents_key: '最近任务键',
-  anr: 'ANR',
-  ime_show: '键盘弹出',
-  ime_hide: '键盘收起',
-  window_transition: '窗口转场',
 };
 
 const SCENE_DEDUPE_TOLERANCE_NS = 150_000_000n;
@@ -1420,7 +1390,7 @@ function severityFor(
 }
 
 function displayNameOf(sceneType: string): string {
-  return SCENE_DISPLAY_NAMES[sceneType] ?? sceneType;
+  return displaySceneType(sceneType, 'zh-CN');
 }
 
 // ---------------------------------------------------------------------------

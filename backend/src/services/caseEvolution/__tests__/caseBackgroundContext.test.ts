@@ -10,7 +10,10 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 
 import type { CaseNode } from '../../../types/sparkContracts';
 import { CaseLibrary } from '../../caseLibrary';
-import { buildCaseBackgroundContext } from '../caseBackgroundContext';
+import {
+  buildCaseBackgroundContext,
+  buildRuntimeCaseBackgroundContext,
+} from '../caseBackgroundContext';
 import { loadCaseEvolutionConfig } from '../caseEvolutionConfig';
 
 let tmpDir: string;
@@ -87,6 +90,41 @@ describe('buildCaseBackgroundContext', () => {
     expect(context).toContain('learned:reviewed');
     expect(context).not.toContain('learned:draft');
     expect(context).not.toContain('Do not copy this into prompt');
+  });
+
+  it('renders an English-only context when English output is configured', () => {
+    library.saveCase(caseNode('learned:reviewed', 'reviewed', 'imported'));
+
+    const context = buildCaseBackgroundContext('scrolling', 'android', undefined, {
+      library,
+      config: loadCaseEvolutionConfig({
+        CASE_EVOLUTION_RETRIEVE_ENABLED: '1',
+        CASE_EVOLUTION_PROMPT_INJECT_ENABLED: '1',
+      }),
+      outputLanguage: 'en',
+    });
+
+    expect(context).toContain('Potentially Relevant Historical Cases');
+    expect(context).toContain('Status: reviewed; root cause: shader_compile');
+    expect(context).toContain('Key evidence conditions:');
+    expect(context).not.toMatch(/可能相关|状态：|关键证据条件/);
+  });
+
+  it('does not inject durable case memory into a private source or RAG analysis', () => {
+    library.saveCase(caseNode('learned:reviewed', 'reviewed', 'imported'));
+
+    expect(buildRuntimeCaseBackgroundContext({
+      sceneType: 'scrolling',
+      architectureType: 'android',
+      outputLanguage: 'en',
+      privateAnalysisContext: true,
+    }, {
+      library,
+      config: loadCaseEvolutionConfig({
+        CASE_EVOLUTION_RETRIEVE_ENABLED: '1',
+        CASE_EVOLUTION_PROMPT_INJECT_ENABLED: '1',
+      }),
+    })).toBeUndefined();
   });
 
   it('includes drafts only when the high-risk includeDrafts flag is explicitly valid', () => {

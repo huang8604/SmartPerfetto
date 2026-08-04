@@ -17,6 +17,45 @@ import {
 } from '../services/skillEngine/skillAnalysisAdapter';
 import { ErrorResponse } from '../types';
 import { toSingleString } from '../utils/httpValue';
+import {
+  localize,
+  parseOutputLanguage,
+  type OutputLanguage,
+} from '../agentv3/outputLanguage';
+import {localizeSkillDefinition} from '../services/skillLocalization';
+
+function requestOutputLanguage(req: Request) {
+  return parseOutputLanguage(
+    req.body?.outputLanguage ??
+    req.query.outputLanguage ??
+    req.headers['accept-language'] ??
+    process.env.SMARTPERFETTO_OUTPUT_LANGUAGE,
+  );
+}
+
+function localizedError(
+  outputLanguage: OutputLanguage,
+  error: {zh: string; en: string},
+  details: {zh: string; en: string},
+): ErrorResponse {
+  return {
+    error: localize(outputLanguage, error.zh, error.en),
+    details: localize(outputLanguage, details.zh, details.en),
+  };
+}
+
+function localizedFailure(
+  outputLanguage: OutputLanguage,
+  error: unknown,
+  message: {zh: string; en: string},
+): ErrorResponse {
+  return {
+    error: localize(outputLanguage, message.zh, message.en),
+    details: error instanceof Error
+      ? error.message
+      : localize(outputLanguage, '未知错误', 'Unknown error'),
+  };
+}
 
 class SkillController {
   private adapter: SkillAnalysisAdapter | null = null;
@@ -37,9 +76,10 @@ class SkillController {
    * GET /api/skills
    */
   listSkills = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const adapter = this.getAdapter();
-      const skills = await adapter.listSkills();
+      const skills = await adapter.listSkills(outputLanguage);
 
       res.json({
         skills,
@@ -47,10 +87,10 @@ class SkillController {
       });
     } catch (error) {
       console.error('[SkillController] Error listing skills:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to list skills',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法列出 Skills',
+        en: 'Failed to list Skills',
+      });
       res.status(500).json(errorResponse);
     }
   };
@@ -60,50 +100,64 @@ class SkillController {
    * GET /api/skills/:skillId
    */
   getSkillDetail = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const skillId = toSingleString(req.params.skillId);
 
       if (!skillId) {
-        return res.status(400).json({
-          error: 'Missing skill ID',
-          details: 'skillId is required',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少 Skill ID', en: 'Missing Skill ID'},
+          {zh: '必须提供 skillId', en: 'skillId is required'},
+        ));
       }
 
       const adapter = this.getAdapter();
       const skill = await adapter.getSkillDetail(skillId);
 
       if (!skill) {
-        return res.status(404).json({
-          error: 'Skill not found',
-          details: `No skill found with ID: ${skillId}`,
-        });
+        return res.status(404).json(localizedError(
+          outputLanguage,
+          {zh: '未找到 Skill', en: 'Skill not found'},
+          {
+            zh: `没有找到 ID 为 ${skillId} 的 Skill`,
+            en: `No Skill found with ID: ${skillId}`,
+          },
+        ));
       }
+      const localizedSkill = localizeSkillDefinition(
+        skill,
+        outputLanguage,
+        {
+          externalAuthored:
+            (await adapter.getSkillOrigin(skillId))?.origin === 'external_pack',
+        },
+      );
 
       res.json({
-        id: skill.name,
-        name: skill.name,
-        version: skill.version,
-        type: skill.type,
-        meta: skill.meta,
-        triggers: skill.triggers,
-        prerequisites: skill.prerequisites,
-        steps: (skill.steps || []).map((s: any) => ({
+        id: localizedSkill.name,
+        name: localizedSkill.name,
+        version: localizedSkill.version,
+        type: localizedSkill.type,
+        meta: localizedSkill.meta,
+        triggers: localizedSkill.triggers,
+        prerequisites: localizedSkill.prerequisites,
+        steps: (localizedSkill.steps || []).map((s: any) => ({
           id: s.id,
           name: s.name,
           type: s.type,
           description: s.description,
         })),
-        inputs: skill.inputs,
-        thresholds: skill.thresholds,
-        output: skill.output,
+        inputs: localizedSkill.inputs,
+        thresholds: localizedSkill.thresholds,
+        output: localizedSkill.output,
       });
     } catch (error) {
       console.error('[SkillController] Error getting skill detail:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to get skill detail',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法获取 Skill 详情',
+        en: 'Failed to get Skill details',
+      });
       res.status(500).json(errorResponse);
     }
   };
@@ -114,22 +168,31 @@ class SkillController {
    * Body: { traceId, packageName? }
    */
   executeSkill = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const skillId = toSingleString(req.params.skillId);
       const { traceId, packageName, params } = req.body;
 
       if (!skillId) {
-        return res.status(400).json({
-          error: 'Missing skill ID',
-          details: 'skillId is required in URL params',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少 Skill ID', en: 'Missing Skill ID'},
+          {
+            zh: 'URL 参数中必须提供 skillId',
+            en: 'skillId is required in URL parameters',
+          },
+        ));
       }
 
       if (!traceId) {
-        return res.status(400).json({
-          error: 'Missing trace ID',
-          details: 'traceId is required in request body',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少 Trace ID', en: 'Missing Trace ID'},
+          {
+            zh: '请求体中必须提供 traceId',
+            en: 'traceId is required in the request body',
+          },
+        ));
       }
 
       const adapter = this.getAdapter();
@@ -139,6 +202,7 @@ class SkillController {
         skillId,
         packageName: typeof packageName === 'string' ? packageName : undefined,
         params,  // Pass custom skill parameters
+        outputLanguage,
       };
 
       const result = await adapter.analyze(request);
@@ -146,10 +210,10 @@ class SkillController {
       res.json(result);
     } catch (error) {
       console.error('[SkillController] Error executing skill:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to execute skill',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法执行 Skill',
+        en: 'Failed to execute Skill',
+      });
       res.status(500).json(errorResponse);
     }
   };
@@ -160,21 +224,30 @@ class SkillController {
    * Body: { traceId, question, packageName? }
    */
   analyzeTrace = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const { traceId, question, packageName, skillId } = req.body;
 
       if (!traceId) {
-        return res.status(400).json({
-          error: 'Missing trace ID',
-          details: 'traceId is required',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少 Trace ID', en: 'Missing Trace ID'},
+          {zh: '必须提供 traceId', en: 'traceId is required'},
+        ));
       }
 
       if (!question && !skillId) {
-        return res.status(400).json({
-          error: 'Missing question or skillId',
-          details: 'Either question or skillId is required',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {
+            zh: '缺少问题或 Skill ID',
+            en: 'Missing question or Skill ID',
+          },
+          {
+            zh: '必须提供 question 或 skillId',
+            en: 'Either question or skillId is required',
+          },
+        ));
       }
 
       const adapter = this.getAdapter();
@@ -184,6 +257,7 @@ class SkillController {
         skillId,
         question,
         packageName,
+        outputLanguage,
       };
 
       const result = await adapter.analyze(request);
@@ -191,10 +265,10 @@ class SkillController {
       res.json(result);
     } catch (error) {
       console.error('[SkillController] Error analyzing trace:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to analyze trace',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法分析 Trace',
+        en: 'Failed to analyze Trace',
+      });
       res.status(500).json(errorResponse);
     }
   };
@@ -205,14 +279,16 @@ class SkillController {
    * Body: { question }
    */
   detectIntent = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const { question } = req.body;
 
       if (!question) {
-        return res.status(400).json({
-          error: 'Missing question',
-          details: 'question is required',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少问题', en: 'Missing question'},
+          {zh: '必须提供 question', en: 'question is required'},
+        ));
       }
 
       const adapter = this.getAdapter();
@@ -224,24 +300,35 @@ class SkillController {
         return res.json({
           matched: false,
           skillId: null,
-          message: 'No matching skill found for the given question',
+          message: localize(
+            outputLanguage,
+            '没有找到与该问题匹配的 Skill。',
+            'No matching Skill was found for the question.',
+          ),
         });
       }
 
       const skill = await adapter.getSkillDetail(skillId);
+      const localizedSkill = skill
+        ? localizeSkillDefinition(skill, outputLanguage, {
+            externalAuthored:
+              (await adapter.getSkillOrigin(skillId))?.origin ===
+              'external_pack',
+          })
+        : undefined;
 
       res.json({
         matched: true,
         skillId,
-        skillName: skill?.meta.display_name || skillId,
-        skillDescription: skill?.meta.description,
+        skillName: localizedSkill?.meta.display_name || skillId,
+        skillDescription: localizedSkill?.meta.description,
       });
     } catch (error) {
       console.error('[SkillController] Error detecting intent:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to detect intent',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法识别分析意图',
+        en: 'Failed to detect intent',
+      });
       res.status(500).json(errorResponse);
     }
   };
@@ -252,14 +339,16 @@ class SkillController {
    * Body: { traceId }
    */
   detectVendor = async (req: Request, res: Response) => {
+    const outputLanguage = requestOutputLanguage(req);
     try {
       const { traceId } = req.body;
 
       if (!traceId) {
-        return res.status(400).json({
-          error: 'Missing trace ID',
-          details: 'traceId is required',
-        });
+        return res.status(400).json(localizedError(
+          outputLanguage,
+          {zh: '缺少 Trace ID', en: 'Missing Trace ID'},
+          {zh: '必须提供 traceId', en: 'traceId is required'},
+        ));
       }
 
       const adapter = this.getAdapter();
@@ -271,10 +360,10 @@ class SkillController {
       });
     } catch (error) {
       console.error('[SkillController] Error detecting vendor:', error);
-      const errorResponse: ErrorResponse = {
-        error: 'Failed to detect vendor',
-        details: error instanceof Error ? error.message : 'Unknown error',
-      };
+      const errorResponse = localizedFailure(outputLanguage, error, {
+        zh: '无法识别设备厂商',
+        en: 'Failed to detect device vendor',
+      });
       res.status(500).json(errorResponse);
     }
   };

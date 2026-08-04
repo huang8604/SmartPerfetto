@@ -13,14 +13,19 @@ import {
   type RunStreamEvent,
 } from '@openai/agents';
 import OpenAI from 'openai';
+import {
+  commitEvaluationSdkHandoffIfActive,
+  recordEvaluationTokenDeltaIfPresent,
+} from '../../../services/selfEvolution/evaluationRuntimeHooks';
 
 import type { TraceProcessorService } from '../../../services/traceProcessorService';
 import { createSkillExecutor } from '../../../services/skillEngine/skillExecutor';
 import { ensureSkillRegistryInitialized, skillRegistry } from '../../../services/skillEngine/skillLoader';
+import {resolveEffectiveSkillRegistryForRuntime} from '../../../services/selfEvolution/effectiveRuntimeRegistryProvider';
 import { getSkillAnalysisAdapter } from '../../../services/skillEngine/skillAnalysisAdapter';
 import { createArchitectureDetector } from '../../../agent/detectors/architectureDetector';
 import { sessionContextManager } from '../../../agent/context/enhancedSessionContext';
-import type { StreamingUpdate, Finding } from '../../../agent/types';
+import type { ConversationTurn, StreamingUpdate, Finding } from '../../../agent/types';
 import type { Hypothesis as ProtocolHypothesis } from '../../../agent/types/agentProtocol';
 import type {
   AnalysisOptions,
@@ -40,9 +45,14 @@ import {
 } from '../../../agentv3/claudeSystemPrompt';
 import { loadPromptTemplate } from '../../../agentv3/strategyLoader';
 import { extractFindingsFromText } from '../../../agentv3/claudeFindingExtractor';
-import { detectFocusApps } from '../../../agentv3/focusAppDetector';
+import { detectFocusApps, focusAppTimeRangeFromSelection } from '../../../agentv3/focusAppDetector';
 import { classifyScene, type SceneType } from '../../../agentv3/sceneClassifier';
 import { getExtendedKnowledgeBase } from '../../../services/sqlKnowledgeBase';
+import {resolveEffectiveAnalysisMode} from '../../../services/effectiveAnalysisMode';
+import {
+  analysisContextMemoryPartitionKey,
+  analysisContextUsesPrivateKnowledge,
+} from '../../../services/resolvedAnalysisContext';
 import type {
   AnalysisNote,
   AnalysisPlanV3,
@@ -50,13 +60,14 @@ import type {
   ComplexityClassifierInput,
   Hypothesis,
   PlanPhase,
+  TracePairContext,
   TraceCompleteness,
   UncertaintyFlag,
 } from '../../../agentv3/types';
 import { expectedToolNames } from '../../../agentv3/types';
 import {
   formatPlanEvidenceGap,
-  recordPlanToolCall,
+  recordPlanOrPrePlanToolCall,
   type PlanEvidenceGap,
 } from '../../../agentv3/planToolCallRecorder';
 import {
@@ -65,51 +76,74 @@ import {
   type AnalysisPlanCompletionStatus,
 } from '../../../agentv3/planCompletionStatus';
 import { isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
-import { classifyQueryComplexityLocal } from '../../../agentv3/queryComplexityClassifier';
+import {
+  classifyQueryComplexityLocal,
+  isAcknowledgementFollowupReason,
+} from '../../../agentv3/queryComplexityClassifier';
 import { buildComplexityClassifierInput } from '../../../agentv3/queryComplexityContext';
 import { classifyQueryWithOpenAILightModel } from './openAiComplexityClassifier';
 import { ArtifactStore } from '../../../agentv3/artifactStore';
 import {
   createOpenAISnapshotEngineState,
   getOpenAISnapshotEngineState,
+  projectSessionFieldsForDurableSnapshot,
   type SessionFieldsForSnapshot,
+  sessionFieldsUsePrivateKnowledge,
   type SessionStateSnapshot,
 } from '../../../agentv3/sessionStateSnapshot';
 import {
   extractTraceFeatures,
+  extractKeyInsights,
+  saveAnalysisPattern,
+  saveQuickPathPattern,
+  promoteQuickPatternIfMatching,
   buildPatternContextSection,
   buildNegativePatternSection,
 } from '../../../agentv3/analysisPatternMemory';
 import { probeTraceCompleteness } from '../../../agentv3/traceCompletenessProber';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../../../agentv3/outputLanguage';
-import {sanitizeCodeAwareText} from '../../../services/security/codeAwareOutputRegistry';
+import {
+  createCodeAwareStreamingTextProjection,
+  sanitizeCodeAwareText,
+  type CodeAwareStreamingTextProjection,
+} from '../../../services/security/codeAwareOutputRegistry';
+import {projectToolResultForExternalSurface} from '../../../services/rag/toolResultProjectionFilter';
 import { formatToolCallNarration } from '../../../agentv3/toolNarration';
 import { loadOpenAIConfig, type OpenAIAgentConfig } from './openAiConfig';
+import { buildOpenAIChatCompletionsTokenLimit } from '../../../services/providerManager/openAiChatCompletionsCompat';
 import {
   createMimoReasoningContentFetch,
   shouldUseMimoReasoningContentCompat,
 } from './mimoReasoningCompat';
 import { createOpenAIToolsFromMcpDefinitions } from './openAiToolAdapter';
+import { buildRuntimeCaseBackgroundContext } from '../../../services/caseEvolution/caseBackgroundContext';
 import {
+  assessFinalResultComparisonIdentity,
   applyFinalResultQualityGate,
   hasDeliverableFinalReportHeading,
   looksLikePhaseSummaryFallback,
+  type FinalResultComparisonIdentity,
 } from '../../../services/finalResultQualityGate';
 import { verifyConclusion } from '../claude/claudeVerifier';
 import { assessFinalReportContractCompleteness } from '../../../services/finalReportContractGate';
 import {
   SDK_SESSION_FRESHNESS_MS,
+  buildQuickRunReceipt,
   buildEntityContext,
   buildQuickConversationContext,
+  buildQuickMemoryContextPayload,
   buildRuntimeSessionMapKey,
   captureSkillDisplayEntities,
   collectRecentFindings,
   createRuntimeSkillNotesBudget,
+  findTruncationVerificationIssue,
   getLruCacheEntry,
   isFreshRuntimeEntry,
   knowledgeScopeFromAnalysisOptions,
   providerScopeFromAnalysisOptions,
-  isTruncationVerificationIssue,
+  quickStopReasonFromTermination,
+  resolveQuickTurnBudget,
+  shouldMarkQuickRunTriage,
   repairTruncatedFinalReport,
   setLruCacheEntry,
   toProtocolHypothesis as toRuntimeProtocolHypothesis,
@@ -119,6 +153,44 @@ import {
   type AnalysisRunSpec,
 } from '../../analysisRunSpec';
 import type { RuntimeSelection } from '../../runtimeSelection';
+import {reconcileDeliveredFinalReportPhase} from '../../finalReportPhaseReconciliation';
+import { buildFocusAppEvidencePayload } from '../../focusAppEvidence';
+import {
+  completeFinalReportCodeReferences,
+  finalReportMissingRequiredCodeReference,
+  loadCodeReferenceContractPrompt,
+} from '../../../services/codebase/codeReferenceContract';
+import { extractSourceLookupCodeReferences } from '../../../services/codebase/sourceLookupTools';
+import { buildQuickProcessIdentityDirectAnswer } from '../../quickProcessIdentityDirectAnswer';
+import {
+  buildQuickProcessIdentityEvidence,
+  createQuickProcessIdentitySkillExecutor,
+  shouldUseEvidenceOnlyQuickAnalysis,
+} from '../../quickProcessIdentityEvidence';
+import { buildQuickTraceFactDirectAnswer } from '../../quickTraceFactDirectAnswer';
+import {
+  buildQuickTraceFactEvidence,
+  joinRuntimeEvidenceContexts,
+  shouldSkipFocusDetectionForQuickTraceFactEvidence,
+  shouldUseTraceFactEvidenceOnlyQuickAnalysis,
+} from '../../quickTraceFactEvidence';
+import {
+  buildRuntimeQuickEvidenceDirectAnswer,
+  countRuntimeQuickEvidenceCitedRefs,
+  type RuntimeQuickEvidenceCounts,
+  type RuntimeQuickEvidenceDirectAnswer,
+} from '../../quickEvidenceDirectAnswer';
+import {
+  buildQuickDirectAcknowledgementAnalysisResult,
+  buildQuickDirectEvidenceAnalysisResult,
+  countCompletedQuickConversationTurns,
+  emitQuickDirectAnswerEvents,
+  emitQuickDirectQualityGateIssue,
+} from '../../quickDirectResult';
+import {
+  deriveRuntimeQuickPreEvidenceFlags,
+} from '../../quickModeResolution';
+import {buildRuntimeTracePairComparisonContext} from '../../runtimePromptContext';
 
 interface OpenAISessionEntry {
   history?: AgentInputItem[];
@@ -127,8 +199,76 @@ interface OpenAISessionEntry {
   updatedAt: number;
 }
 
+type OpenAIAnalysisSessionState = {
+  artifactStore: ArtifactStore;
+  notes: AnalysisNote[];
+  analysisPlan: { current: AnalysisPlanV3 | null; history: AnalysisPlanV3[] };
+  previousPlan?: AnalysisPlanV3;
+  hypotheses: Hypothesis[];
+  uncertaintyFlags: UncertaintyFlag[];
+};
+
+interface OpenAIModeClassification {
+  quickMode: boolean;
+  source: 'user_explicit' | 'hard_rule' | 'ai';
+  reason: string;
+  skipQuickTracePreflightDetection: boolean;
+  quickAcknowledgementDirectAnswer: boolean;
+  quickFocusAppPreEvidence: boolean;
+  quickProcessIdentityPreEvidence: boolean;
+  quickTraceFactPreEvidence: boolean;
+  quickScrollingTriagePreEvidence: boolean;
+}
+
 interface RuntimeAbortHandle {
+  readonly aborted: boolean;
   abort(): void;
+}
+
+interface LinkedAbortController {
+  controller: AbortController;
+  dispose(): void;
+}
+
+class RuntimeAnalysisAbortScope implements RuntimeAbortHandle {
+  private readonly controller = new AbortController();
+
+  get aborted(): boolean {
+    return this.signal.aborted;
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  abort(): void {
+    if (this.signal.aborted) return;
+    const error = new Error('Analysis aborted');
+    error.name = 'AbortError';
+    this.controller.abort(error);
+  }
+
+  throwIfAborted(): void {
+    if (!this.signal.aborted) return;
+    if (this.signal.reason instanceof Error) throw this.signal.reason;
+    const error = new Error('Analysis aborted');
+    error.name = 'AbortError';
+    throw error;
+  }
+
+  createLinkedController(): LinkedAbortController {
+    const controller = new AbortController();
+    const abortChild = () => controller.abort(this.signal.reason);
+    if (this.signal.aborted) {
+      abortChild();
+    } else {
+      this.signal.addEventListener('abort', abortChild, { once: true });
+    }
+    return {
+      controller,
+      dispose: () => this.signal.removeEventListener('abort', abortChild),
+    };
+  }
 }
 
 const OPENAI_SESSION_FRESHNESS_MS = SDK_SESSION_FRESHNESS_MS;
@@ -488,7 +628,8 @@ function resolveOpenAIRunInput(params: {
   config: OpenAIAgentConfig;
   sessionEntry?: OpenAISessionEntry;
   effectivePrompt: string;
-  previousTurns: any[];
+  previousTurns: Parameters<typeof buildQuickConversationContext>[0];
+  allowRemotePersistence?: boolean;
   now?: number;
 }): OpenAIRunInputResolution {
   let effectivePrompt = params.effectivePrompt;
@@ -499,6 +640,21 @@ function resolveOpenAIRunInput(params: {
     );
     if (quickConversationContext) {
       effectivePrompt = `${quickConversationContext}\n\n${effectivePrompt}`;
+    }
+    return {
+      input: effectivePrompt,
+      effectivePrompt,
+      shouldPersistRemoteSession: false,
+    };
+  }
+
+  if (params.allowRemotePersistence === false) {
+    const localConversationContext = buildQuickConversationContext(
+      params.previousTurns,
+      params.config.outputLanguage,
+    );
+    if (localConversationContext) {
+      effectivePrompt = `${localConversationContext}\n\n${effectivePrompt}`;
     }
     return {
       input: effectivePrompt,
@@ -542,7 +698,39 @@ function resolveOpenAIRunInput(params: {
   };
 }
 
+function buildOpenAIModelSettings(
+  config: Pick<OpenAIAgentConfig, 'maxOutputTokens' | 'protocol'>,
+  model: string,
+  allowRemotePersistence: boolean,
+) {
+  const chatCompletionsTokenLimit = config.protocol === 'chat_completions'
+    ? buildOpenAIChatCompletionsTokenLimit(model, config.maxOutputTokens)
+    : undefined;
+  const usesMaxCompletionTokens = chatCompletionsTokenLimit
+    && 'max_completion_tokens' in chatCompletionsTokenLimit;
+
+  return {
+    ...(usesMaxCompletionTokens
+      ? { providerData: chatCompletionsTokenLimit }
+      : { maxTokens: config.maxOutputTokens }),
+    parallelToolCalls: false,
+    store: allowRemotePersistence,
+  };
+}
+
+async function commitAfterProviderClose<T>(
+  closeProvider: () => Promise<void>,
+  abortScope: Pick<RuntimeAnalysisAbortScope, 'throwIfAborted'>,
+  commit: () => T,
+): Promise<T> {
+  abortScope.throwIfAborted();
+  await closeProvider();
+  abortScope.throwIfAborted();
+  return commit();
+}
+
 export const __testing = {
+  RuntimeAnalysisAbortScope,
   isMissingOpenAIPreviousResponseError,
   readCompletedStreamFinalOutput,
   readPlanEligibleStreamFinalOutput,
@@ -555,6 +743,8 @@ export const __testing = {
   resolveOpenAIRunInput,
   isRecoverableOpenAIStreamTermination,
   compactProviderErrorMessage,
+  commitAfterProviderClose,
+  buildOpenAIModelSettings,
 };
 
 export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
@@ -565,6 +755,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   private readonly artifactStores = new Map<string, ArtifactStore>();
   private readonly sessionNotes = new Map<string, AnalysisNote[]>();
   private readonly sessionSqlErrors = new Map<string, Array<{ errorSql: string; errorMessage: string; timestamp: number; fixedSql?: string }>>();
+  private readonly sessionSqlErrorPartitions = new Map<string, string>();
   private readonly sessionPlans = new Map<string, { current: AnalysisPlanV3 | null; history: AnalysisPlanV3[] }>();
   private readonly sessionHypotheses = new Map<string, Hypothesis[]>();
   private readonly sessionUncertaintyFlags = new Map<string, UncertaintyFlag[]>();
@@ -674,6 +865,10 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     traceId: string,
     options: AnalysisOptions = {},
   ): Promise<AnalysisResult> {
+    options = {
+      ...options,
+      analysisMode: resolveEffectiveAnalysisMode(options.analysisMode, options),
+    };
     if (this.activeAnalyses.has(sessionId)) {
       throw new Error(`Analysis already in progress for session ${sessionId}`);
     }
@@ -682,34 +877,135 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const startTime = Date.now();
     let accumulatedAnswer = '';
     let rounds = 0;
-    const config = loadOpenAIConfig(options.providerId, providerScopeFromAnalysisOptions(options));
+    let observedToolCalls = 0;
+    const resolvedConfig = loadOpenAIConfig(options.providerId, providerScopeFromAnalysisOptions(options));
+    const config = options.outputLanguage
+      ? {...resolvedConfig, outputLanguage: options.outputLanguage}
+      : resolvedConfig;
     const sceneType = classifyScene(query);
-    const quickMode = await this.classifyModeForRequest(query, sessionId, traceId, options, sceneType, config);
-    const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
-    const previousTurns = sessionContext.getAllTurns?.() || [];
-    const analysisRunSpec = createAnalysisRunSpec({
-      query,
-      sessionId,
-      traceId,
-      options,
-      runtimeSelection: this.runtimeSelection,
-      sceneType,
-      outputLanguage: config.outputLanguage,
-      previousTurns,
-      resolvedMode: quickMode ? 'quick' : 'full',
-      budget: {
-        model: config.model,
-        lightModel: config.lightModel,
-        maxTurns: config.maxTurns,
-        quickMaxTurns: config.quickMaxTurns,
-        maxOutputTokens: config.maxOutputTokens,
-        fullPathPerTurnMs: config.fullPathPerTurnMs,
-        quickPathPerTurnMs: config.quickPathPerTurnMs,
-        classifierTimeoutMs: config.classifierTimeoutMs,
-      },
-    });
-
+    const analysisAbortScope = new RuntimeAnalysisAbortScope();
+    const unregisterAnalysisAbortHandle = this.registerAbortHandle(sessionId, analysisAbortScope);
     try {
+      const modeClassification = await this.classifyModeForRequest(
+        query,
+        sessionId,
+        traceId,
+        options,
+        sceneType,
+        config,
+        analysisAbortScope.signal,
+      );
+      analysisAbortScope.throwIfAborted();
+      const quickMode = modeClassification.quickMode;
+      const inferReportedRounds = (visibleText?: string) => {
+        const hasVisibleWork = Boolean((visibleText ?? accumulatedAnswer).trim()) || observedToolCalls > 0;
+        if (quickMode) {
+          return Math.max(rounds, hasVisibleWork ? (observedToolCalls > 0 ? observedToolCalls + 1 : 1) : 0);
+        }
+        return Math.max(rounds, hasVisibleWork ? 1 : 0);
+      };
+      const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
+      const previousTurns = sessionContext.getAllTurns?.() || [];
+      const analysisRunSpec = createAnalysisRunSpec({
+        query,
+        sessionId,
+        traceId,
+        options,
+        runtimeSelection: this.runtimeSelection,
+        sceneType,
+        outputLanguage: config.outputLanguage,
+        previousTurns,
+        resolvedMode: quickMode ? 'quick' : 'full',
+        budget: {
+          model: config.model,
+          lightModel: config.lightModel,
+          maxTurns: config.maxTurns,
+          quickMaxTurns: config.quickMaxTurns,
+          quickTargetTurns: config.quickTargetTurns,
+          maxOutputTokens: config.maxOutputTokens,
+          fullPathPerTurnMs: config.fullPathPerTurnMs,
+          quickPathPerTurnMs: config.quickPathPerTurnMs,
+          classifierTimeoutMs: config.classifierTimeoutMs,
+        },
+      });
+      const quickBudget = quickMode
+        ? resolveQuickTurnBudget({
+            hardCapTurns: config.quickMaxTurns,
+            targetTurns: config.quickTargetTurns,
+            enforcement: 'turn_cap',
+          })
+        : undefined;
+
+      if (quickMode && quickBudget && modeClassification.quickAcknowledgementDirectAnswer) {
+        analysisAbortScope.throwIfAborted();
+        const result = buildQuickDirectAcknowledgementAnalysisResult({
+          sessionId,
+          options,
+          outputLanguage: config.outputLanguage,
+          startedAt: startTime,
+          analysisRunSpec,
+          budget: quickBudget,
+          previousTurns,
+        });
+        emitQuickDirectQualityGateIssue({
+          emitUpdate: update => this.emitUpdate(update),
+          module: 'openAiRuntime',
+          result,
+          query,
+          sceneType,
+        });
+        this.recordTurn({
+          query,
+          sessionId,
+          result,
+          sessionContext,
+          previousTurnCount: previousTurns.length,
+          quickMode,
+        });
+        emitQuickDirectAnswerEvents({
+          emitUpdate: update => this.emitUpdate(update),
+          result,
+          startedAt: startTime,
+          outputLanguage: config.outputLanguage,
+          runtime: 'openai-agents-sdk',
+          model: 'runtime-acknowledgement',
+        });
+        return result;
+      }
+
+      const directEvidenceAnswer = quickMode && quickBudget
+        ? await buildRuntimeQuickEvidenceDirectAnswer({
+            query,
+            traceId,
+            packageName: options.packageName,
+            selectionContext: options.selectionContext,
+            traceProcessorService: this.traceProcessorService,
+            outputLanguage: config.outputLanguage,
+            quickFocusAppPreEvidence: modeClassification.quickFocusAppPreEvidence,
+            quickProcessIdentityPreEvidence: modeClassification.quickProcessIdentityPreEvidence,
+            quickTraceFactPreEvidence: modeClassification.quickTraceFactPreEvidence,
+            quickScrollingTriagePreEvidence: modeClassification.quickScrollingTriagePreEvidence,
+            emitUpdate: update => this.emitUpdate(update),
+          })
+        : undefined;
+      analysisAbortScope.throwIfAborted();
+      if (quickBudget && directEvidenceAnswer) {
+        return this.buildDirectQuickEvidenceResult({
+          query,
+          sessionId,
+          options,
+          startTime,
+          sceneType,
+          outputLanguage: config.outputLanguage,
+          sessionContext,
+          previousTurns,
+          analysisRunSpec,
+          quickBudget,
+          directAnswer: directEvidenceAnswer.directAnswer,
+          evidenceCounts: directEvidenceAnswer.evidenceCounts,
+        });
+      }
+
       const context = await this.prepareAnalysisContext(query, sessionId, traceId, options, {
         config,
         sceneType,
@@ -717,7 +1013,65 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         analysisRunSpec,
         sessionContext,
         previousTurns,
+        skipQuickTracePreflightDetection: modeClassification.skipQuickTracePreflightDetection,
+        quickProcessIdentityPreEvidence: modeClassification.quickProcessIdentityPreEvidence,
+        quickTraceFactPreEvidence: modeClassification.quickTraceFactPreEvidence,
       });
+      analysisAbortScope.throwIfAborted();
+
+      const directQuickAnswer = context.directProcessIdentityAnswer ?? context.directTraceFactAnswer;
+      if (quickMode && quickBudget && directQuickAnswer) {
+        const result = buildQuickDirectEvidenceAnalysisResult({
+          query,
+          sessionId,
+          options,
+          startedAt: startTime,
+          analysisRunSpec,
+          budget: quickBudget,
+          directAnswer: directQuickAnswer,
+          evidenceCounts: {
+            currentRunDataEnvelopes: 0,
+            citedEvidenceRefs: countRuntimeQuickEvidenceCitedRefs(directQuickAnswer),
+          },
+          previousTurns: context.previousTurns,
+          hypotheses: context.hypotheses.map(h => this.toProtocolHypothesis(h)),
+          contextInjected: context.quickMemoryContextCounts,
+        });
+        emitQuickDirectQualityGateIssue({
+          emitUpdate: update => this.emitUpdate(update),
+          module: 'openAiRuntime',
+          result,
+          query,
+          sceneType,
+        });
+        this.recordTurn({
+          query,
+          sessionId,
+          result,
+          sessionContext: context.sessionContext,
+          previousTurnCount: context.previousTurns.length,
+          quickMode,
+        });
+        this.recordPatternMemory({
+          sessionId,
+          result,
+          previousTurnCount: context.previousTurns.length,
+          quickMode,
+          sceneType,
+          architecture: context.architecture,
+          packageName: context.effectivePackageName,
+          options,
+        });
+        emitQuickDirectAnswerEvents({
+          emitUpdate: update => this.emitUpdate(update),
+          result,
+          startedAt: startTime,
+          outputLanguage: config.outputLanguage,
+          runtime: 'openai-agents-sdk',
+          model: 'runtime-pre-evidence',
+        });
+        return result;
+      }
 
       const promptPrefix = analysisRunSpec.traceContext.promptSection;
       const effectivePrompt = promptPrefix ? `${promptPrefix}\n\n${query}` : query;
@@ -728,9 +1082,12 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         sessionEntry,
         effectivePrompt,
         previousTurns: context.previousTurns,
+        allowRemotePersistence: !analysisContextUsesPrivateKnowledge(options),
       });
       const input = runInput.input;
+      const selectedModel = quickMode ? config.lightModel : config.model;
 
+      analysisAbortScope.throwIfAborted();
       setTracingDisabled(true);
       const provider = shouldUseMimoReasoningContentCompat(config)
         ? new OpenAIProvider({
@@ -756,13 +1113,14 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       const agent = new Agent({
         name: 'SmartPerfetto',
         instructions: context.systemPrompt,
-        model: quickMode ? config.lightModel : config.model,
+        model: selectedModel,
         tools: context.tools,
         toolUseBehavior: 'run_llm_again',
-        modelSettings: {
-          maxTokens: config.maxOutputTokens,
-          parallelToolCalls: false,
-        },
+        modelSettings: buildOpenAIModelSettings(
+          config,
+          selectedModel,
+          !analysisContextUsesPrivateKnowledge(options),
+        ),
       });
 
       let activeController: AbortController | undefined;
@@ -775,6 +1133,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         activeController?.abort();
       }, timeoutMs);
 
+      analysisAbortScope.throwIfAborted();
       this.emitUpdate({
         type: 'progress',
         content: {
@@ -825,20 +1184,26 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         };
 
         for (let continuation = 0; ; continuation++) {
+          analysisAbortScope.throwIfAborted();
           if (timedOut || Date.now() >= deadlineAt) {
             timedOut = true;
             markTimeoutPartial(this.getPlanCompletionStatus(sessionId, quickMode));
             break;
           }
-          const controller = new AbortController();
+          const linkedController = analysisAbortScope.createLinkedController();
+          const controller = linkedController.controller;
           activeController = controller;
-          const unregisterAbortHandle = this.registerAbortHandle(sessionId, {
-            abort: () => controller.abort(),
-          });
           let runAnswer = '';
           let runTurns = 0;
           let completedByPlanIdle = false;
           const answerStreamFilter = createOpenAiReasoningFilterState();
+          const answerTextProjection = analysisContextUsesPrivateKnowledge(options)
+            ? createCodeAwareStreamingTextProjection(
+                sessionId,
+                `openai-answer-${continuation}-${finalReportContinuations}`,
+              )
+            : undefined;
+          let suppressedRunAnswer = '';
           let planCompleteIdleTimer: ReturnType<typeof setTimeout> | undefined;
           const clearPlanCompleteIdleTimer = () => {
             if (planCompleteIdleTimer) {
@@ -852,6 +1217,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               return;
             }
             planCompleteIdleTimer = setTimeout(() => {
+              if (analysisAbortScope.signal.aborted) return;
               completedByPlanIdle = true;
                 this.emitUpdate({
                   type: 'progress',
@@ -868,18 +1234,24 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               controller.abort();
             }, OPENAI_PLAN_COMPLETE_IDLE_ABORT_MS);
           };
-          const stream = await runner.run(agent, currentInput, {
-            stream: true,
-            maxTurns: quickMode ? config.quickMaxTurns : config.maxTurns,
-            context: { signal: controller.signal },
-            signal: controller.signal,
-            ...(currentPreviousResponseId
-              ? { previousResponseId: currentPreviousResponseId }
-              : {}),
-          });
+          const runStream = () => {
+            commitEvaluationSdkHandoffIfActive();
+            return runner.run(agent, currentInput, {
+                stream: true,
+                maxTurns: quickMode ? config.quickMaxTurns : config.maxTurns,
+                context: { signal: controller.signal },
+                signal: controller.signal,
+                ...(currentPreviousResponseId
+                  ? { previousResponseId: currentPreviousResponseId }
+                  : {}),
+              });
+          };
+          let stream!: Awaited<ReturnType<typeof runStream>>;
 
           let streamCompleted = false;
           try {
+            stream = await runStream();
+            analysisAbortScope.throwIfAborted();
             try {
               for await (const event of stream) {
                 clearPlanCompleteIdleTimer();
@@ -888,7 +1260,15 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
                   sessionId,
                   quickMode,
                   answerStreamFilter,
+                  answerTextProjection,
                   toolInputsByTaskId,
+                  tracePairContext: options.tracePairContext,
+                  onToolCalled: () => {
+                    observedToolCalls++;
+                  },
+                  onSuppressedAnswerDelta: delta => {
+                    suppressedRunAnswer += delta;
+                  },
                 });
                 if (delta) {
                   runAnswer += delta;
@@ -898,10 +1278,24 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               }
               clearPlanCompleteIdleTimer();
               await stream.completed;
+              const evaluationUsage =
+                (stream as any).runContext?.usage
+                ?? (stream as any).context?.usage
+                ?? (stream as any).state?.usage;
+              recordEvaluationTokenDeltaIfPresent(evaluationUsage);
               streamCompleted = true;
             } catch (error) {
               if (!(isAbortLikeError(error) && (completedByPlanIdle || timedOut))) {
                 throw error;
+              }
+            } finally {
+              const projectedTail = answerTextProjection?.flush() ?? '';
+              if (projectedTail) {
+                this.emitUpdate({
+                  type: 'answer_token',
+                  content: {token: projectedTail},
+                  timestamp: Date.now(),
+                });
               }
             }
           } finally {
@@ -909,11 +1303,40 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             if (activeController === controller) {
               activeController = undefined;
             }
-            unregisterAbortHandle();
+            linkedController.dispose();
           }
 
+          analysisAbortScope.throwIfAborted();
           rounds += runTurns || stream.currentTurn || 0;
-          const planStatus = this.getPlanCompletionStatus(sessionId, quickMode);
+          let planStatus = this.getPlanCompletionStatus(sessionId, quickMode);
+          const completedStreamFinalOutput = readCompletedStreamFinalOutput(stream, {
+            streamCompleted,
+            completedByPlanIdle,
+            timedOut,
+          });
+          const reconciliationCandidate = chooseOpenAiConclusionText({
+            candidate: typeof completedStreamFinalOutput === 'string'
+              ? completedStreamFinalOutput
+              : (completedStreamFinalOutput
+                  ? JSON.stringify(completedStreamFinalOutput)
+                  : suppressedRunAnswer),
+            accumulatedAnswer: suppressedRunAnswer,
+            completedByPlanIdle,
+            planComplete: false,
+          });
+          if (this.reconcileCompletedConclusionPhase({
+            sessionId,
+            quickMode,
+            conclusion: reconciliationCandidate,
+            query,
+            sceneType,
+            comparisonIdentity: context.comparisonIdentity,
+          })) {
+            planStatus = this.getPlanCompletionStatus(sessionId, quickMode);
+            if (!runAnswer.trim()) {
+              runAnswer = reconciliationCandidate;
+            }
+          }
           const streamFinalOutput = readPlanEligibleStreamFinalOutput(stream, {
             streamCompleted,
             completedByPlanIdle,
@@ -952,6 +1375,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               ? stream.history as AgentInputItem[]
               : [];
             if (this.shouldRequestFinalReportAfterPlanComplete({
+              sessionId,
               quickMode,
               planStatus,
               conclusion,
@@ -961,6 +1385,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               finalReportContinuations,
               query,
               sceneType,
+              comparisonIdentity: context.comparisonIdentity,
             }) && streamHistory.length > 0) {
               finalReportContinuations++;
               this.emitUpdate({
@@ -975,7 +1400,10 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
                 ...streamHistory,
                 {
                   role: 'user',
-                  content: this.buildFinalReportAfterPlanCompletePrompt(config.outputLanguage),
+                  content: this.buildFinalReportAfterPlanCompletePrompt(
+                    config.outputLanguage,
+                    this.finalReportMissingCodeReference(sessionId, conclusion),
+                  ),
                 } as AgentInputItem,
               ];
               currentPreviousResponseId = undefined;
@@ -1021,10 +1449,16 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           currentPreviousResponseId = undefined;
         }
 
+        analysisAbortScope.throwIfAborted();
         clearTimeout(timeout);
-        if (options.codeAwareMode && options.codeAwareMode !== 'off') {
+        if (analysisContextUsesPrivateKnowledge(options)) {
           conclusion = sanitizeCodeAwareText(sessionId, conclusion);
         }
+        conclusion = completeFinalReportCodeReferences({
+          plan: this.sessionPlans.get(sessionId)?.current,
+          conclusion,
+          outputLanguage: config.outputLanguage,
+        });
         const finalFallbackConclusion = this.buildCompletedPlanFallbackConclusion(sessionId, quickMode, config.outputLanguage);
         if (
           finalFallbackConclusion &&
@@ -1053,6 +1487,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         let confidence = partial
           ? Math.min(0.55, this.estimateConfidence(findings, conclusion))
           : this.estimateConfidence(findings, conclusion);
+        rounds = inferReportedRounds(conclusion);
         const result: AnalysisResult = {
           sessionId,
           success: true,
@@ -1065,26 +1500,75 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           partial: partial || undefined,
           terminationReason,
           terminationMessage,
+          quickRun: quickMode && quickBudget
+            ? buildQuickRunReceipt({
+                requestedMode: options.analysisMode ?? 'auto',
+                profile: shouldMarkQuickRunTriage(query) ? 'triage' : undefined,
+                budget: quickBudget,
+                actualTurns: rounds,
+                elapsedMs: Date.now() - startTime,
+                stopReason: quickStopReasonFromTermination({
+                  partial,
+                  terminationReason,
+                  actualTurns: rounds,
+                  targetTurns: quickBudget.targetTurns,
+                  hardCapTurns: quickBudget.hardCapTurns,
+                }),
+                evidence: {
+                  frontendPrequeryInjected: analysisRunSpec.traceContext.datasetCount,
+                },
+                contextInjected: {
+                  conversationTurns: countCompletedQuickConversationTurns(context.previousTurns),
+                  ...(context.quickMemoryContextCounts ?? {
+                    recentSqlResults: 0,
+                    sqlPitfallPairs: 0,
+                    patternHints: 0,
+                    negativePatternHints: 0,
+                    caseBackgroundCases: 0,
+                  }),
+                },
+              })
+            : undefined,
         };
         if (!quickMode) {
-          const verifyCurrentConclusion = async () => verifyConclusion(result.findings, result.conclusion, {
-            emitUpdate: (update) => this.emitUpdate(update),
-            enableLLM: false,
-            plan: this.sessionPlans.get(sessionId)?.current ?? null,
-            hypotheses: context.hypotheses,
-            sceneType,
-            outputLanguage: config.outputLanguage,
-            query,
-            emitIssueProgress: false,
-          });
+          const verifyCurrentConclusion = async () => {
+            result.conclusion = completeFinalReportCodeReferences({
+              plan: this.sessionPlans.get(sessionId)?.current,
+              conclusion: result.conclusion,
+              outputLanguage: config.outputLanguage,
+            });
+            result.findings = extractFindingsFromText(result.conclusion);
+            return verifyConclusion(result.findings, result.conclusion, {
+              emitUpdate: (update) => this.emitUpdate(update),
+              enableLLM: false,
+              plan: this.sessionPlans.get(sessionId)?.current ?? null,
+              hypotheses: context.hypotheses,
+              sceneType,
+              outputLanguage: config.outputLanguage,
+              query,
+              emitIssueProgress: false,
+              allowPersistentLearning: !analysisContextUsesPrivateKnowledge(options),
+            });
+          };
           let verification = await verifyCurrentConclusion();
+          analysisAbortScope.throwIfAborted();
           let verificationIssue = [
             ...verification.heuristicIssues,
             ...(verification.llmIssues || []),
           ].find(issue => issue.severity === 'error');
+          const contractIssue = assessFinalReportContractCompleteness({
+            conclusion: result.conclusion,
+            query,
+            sceneType,
+            caseRecommendations: result.conclusionContract?.caseRecommendations,
+          });
+          const truncationIssue = findTruncationVerificationIssue([
+            ...verification.heuristicIssues,
+            ...(verification.llmIssues || []),
+          ].filter(issue => issue.severity === 'error'));
           if (
             verificationIssue &&
-            isTruncationVerificationIssue(verificationIssue) &&
+            (truncationIssue || Boolean(contractIssue?.missingSections.length)) &&
             this.getPlanCompletionStatus(sessionId, quickMode).complete
           ) {
             const repairedConclusion = repairTruncatedFinalReport({
@@ -1092,24 +1576,35 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
               plan: this.sessionPlans.get(sessionId)?.current ?? null,
               hypotheses: context.hypotheses,
               outputLanguage: config.outputLanguage,
+              recoveryKind: truncationIssue ? 'truncation' : 'missing_contract',
+              missingContractSections: contractIssue?.missingSections,
             });
             if (repairedConclusion) {
+              const preRecoveryConfidence = result.confidence;
               result.conclusion = repairedConclusion;
               result.findings = extractFindingsFromText(repairedConclusion);
-              result.confidence = this.estimateConfidence(result.findings, repairedConclusion);
+              result.confidence = Math.min(
+                preRecoveryConfidence,
+                this.estimateConfidence(result.findings, repairedConclusion),
+              );
               this.emitUpdate({
                 type: 'progress',
                 content: {
                   phase: 'concluding',
                   message: localize(
                     config.outputLanguage,
-                    '最终报告输出被截断，已基于结构化证据补齐收尾并重新验证。',
-                    'The final report output was truncated; it was closed from structured evidence and re-verified.',
+                    truncationIssue
+                      ? '最终报告输出被截断，已基于结构化证据补齐收尾并重新验证。'
+                      : '最终报告缺少必需结构，已基于完成阶段的证据补齐并重新验证。',
+                    truncationIssue
+                      ? 'The final report output was truncated; it was closed from structured evidence and re-verified.'
+                      : 'The final report missed required structure; it was completed from finished-phase evidence and re-verified.',
                   ),
                 },
                 timestamp: Date.now(),
               });
               verification = await verifyCurrentConclusion();
+              analysisAbortScope.throwIfAborted();
               verificationIssue = [
                 ...verification.heuristicIssues,
                 ...(verification.llmIssues || []),
@@ -1134,7 +1629,13 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             });
           }
         }
-        const gateIssue = applyFinalResultQualityGate({ result, query, sceneType });
+        analysisAbortScope.throwIfAborted();
+        const gateIssue = applyFinalResultQualityGate({
+          result,
+          query,
+          sceneType,
+          comparisonIdentity: context.comparisonIdentity,
+        });
         if (gateIssue) {
           this.emitUpdate({
             type: 'degraded',
@@ -1148,41 +1649,56 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           });
         }
 
-        if (runInput.shouldPersistRemoteSession) {
-          this.sessionMap.set(context.sessionMapKey, {
-            history: finalHistory,
-            lastResponseId: finalLastResponseId,
-            runState: finalRunState,
-            updatedAt: Date.now(),
-          });
-        }
+        return await commitAfterProviderClose(
+          () => provider.close().catch(() => undefined),
+          analysisAbortScope,
+          () => {
+            if (runInput.shouldPersistRemoteSession) {
+              this.sessionMap.set(context.sessionMapKey, {
+                history: finalHistory,
+                lastResponseId: finalLastResponseId,
+                runState: finalRunState,
+                updatedAt: Date.now(),
+              });
+            }
 
-        this.recordTurn({
-          query,
-          sessionId,
-          result,
-          sessionContext: context.sessionContext,
-          previousTurnCount: context.previousTurns.length,
-          quickMode,
-        });
+            this.recordTurn({
+              query,
+              sessionId,
+              result,
+              sessionContext: context.sessionContext,
+              previousTurnCount: context.previousTurns.length,
+              quickMode,
+            });
+            this.recordPatternMemory({
+              sessionId,
+              result,
+              previousTurnCount: context.previousTurns.length,
+              quickMode,
+              sceneType,
+              architecture: context.architecture,
+              packageName: context.effectivePackageName,
+              options,
+            });
 
-        this.emitUpdate({
-          type: 'conclusion',
-          content: { conclusion: result.conclusion, durationMs: Date.now() - startTime, turns: rounds },
-          timestamp: Date.now(),
-        });
-        this.emitUpdate({
-          type: 'answer_token',
-          content: { done: true, totalChars: result.conclusion.length },
-          timestamp: Date.now(),
-        });
+            this.emitUpdate({
+              type: 'conclusion',
+              content: { conclusion: result.conclusion, durationMs: Date.now() - startTime, turns: rounds },
+              timestamp: Date.now(),
+            });
+            this.emitUpdate({
+              type: 'answer_token',
+              content: { done: true, totalChars: result.conclusion.length },
+              timestamp: Date.now(),
+            });
 
-        await provider.close().catch(() => undefined);
-
-        return result;
+            return result;
+          },
+        );
       } catch (error) {
         clearTimeout(timeout);
         await provider.close().catch(() => undefined);
+        analysisAbortScope.throwIfAborted();
         if (currentPreviousResponseId && isMissingOpenAIPreviousResponseError(error, currentPreviousResponseId)) {
           return await this.retryWithoutPreviousResponse({
             query,
@@ -1194,6 +1710,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             outputLanguage: config.outputLanguage,
           });
         } else if (error instanceof MaxTurnsExceededError) {
+          const reportedRounds = inferReportedRounds();
           return this.recordMaxTurnsPartialResult({
             error,
             query,
@@ -1202,12 +1719,17 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
             accumulatedAnswer,
             context,
             startTime,
-            rounds,
+            rounds: reportedRounds,
             quickMode,
             maxTurns: quickMode ? config.quickMaxTurns : config.maxTurns,
+            quickBudget,
+            requestedMode: options.analysisMode ?? 'auto',
+            frontendPrequeryInjected: analysisRunSpec.traceContext.datasetCount,
             codeAwareMode: options.codeAwareMode,
+            knowledgeSourceIds: options.knowledgeSourceIds,
           });
         }
+        const reportedRounds = inferReportedRounds();
         const recoverablePartial = this.recoverPartialResultAfterStreamTermination({
           error,
           sessionId,
@@ -1217,8 +1739,12 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           context,
           query,
           startTime,
-          rounds,
+          rounds: reportedRounds,
+          quickBudget,
+          requestedMode: options.analysisMode ?? 'auto',
+          frontendPrequeryInjected: analysisRunSpec.traceContext.datasetCount,
           codeAwareMode: options.codeAwareMode,
+          knowledgeSourceIds: options.knowledgeSourceIds,
         });
         if (recoverablePartial) {
           return recoverablePartial;
@@ -1226,6 +1752,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         throw error;
       }
     } catch (error) {
+      analysisAbortScope.throwIfAborted();
       const message = compactProviderErrorMessage(error);
       this.emitUpdate({
         type: 'error',
@@ -1249,6 +1776,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         terminationMessage: message,
       };
     } finally {
+      unregisterAnalysisAbortHandle();
       this.activeAnalyses.delete(sessionId);
     }
   }
@@ -1261,6 +1789,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     this.artifactStores.clear();
     this.sessionNotes.clear();
     this.sessionSqlErrors.clear();
+    this.sessionSqlErrorPartitions.clear();
     this.sessionPlans.clear();
     this.sessionHypotheses.clear();
     this.sessionUncertaintyFlags.clear();
@@ -1277,6 +1806,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     this.artifactStores.delete(sessionId);
     this.sessionNotes.delete(sessionId);
     this.sessionSqlErrors.delete(sessionId);
+    this.sessionSqlErrorPartitions.delete(sessionId);
     this.sessionPlans.delete(sessionId);
     this.sessionHypotheses.delete(sessionId);
     this.sessionUncertaintyFlags.delete(sessionId);
@@ -1301,7 +1831,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       handles = new Set();
       this.activeAbortHandles.set(sessionId, handles);
     }
+    const cancellationAlreadyRequested = Array.from(handles).some(active => active.aborted);
     handles.add(handle);
+    if (cancellationAlreadyRequested) handle.abort();
     return () => {
       const current = this.activeAbortHandles.get(sessionId);
       if (!current) return;
@@ -1322,12 +1854,15 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     traceId: string,
     sessionFields: SessionFieldsForSnapshot,
   ): SessionStateSnapshot {
+    const privateKnowledge = sessionFieldsUsePrivateKnowledge(sessionFields);
+    const durableFields = projectSessionFieldsForDurableSnapshot(sessionFields);
     const planState = this.sessionPlans.get(sessionId);
     const artifactStore = this.artifactStores.get(sessionId);
     const sessionEntry = this.sessionMap.get(
       this.buildSessionMapKey(sessionId, sessionFields.referenceTraceId),
     );
-    const freshSessionEntry = isFreshRuntimeEntry(sessionEntry, OPENAI_SESSION_FRESHNESS_MS)
+    const freshSessionEntry = !privateKnowledge &&
+      isFreshRuntimeEntry(sessionEntry, OPENAI_SESSION_FRESHNESS_MS)
       ? sessionEntry
       : undefined;
     return {
@@ -1335,12 +1870,12 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       snapshotTimestamp: Date.now(),
       sessionId,
       traceId,
-      ...sessionFields,
-      analysisNotes: this.sessionNotes.get(sessionId) || [],
-      analysisPlan: planState?.current ?? null,
-      planHistory: planState?.history ?? [],
-      uncertaintyFlags: this.sessionUncertaintyFlags.get(sessionId) || [],
-      claudeHypotheses: this.sessionHypotheses.get(sessionId) || undefined,
+      ...durableFields,
+      analysisNotes: privateKnowledge ? [] : this.sessionNotes.get(sessionId) || [],
+      analysisPlan: privateKnowledge ? null : planState?.current ?? null,
+      planHistory: privateKnowledge ? [] : planState?.history ?? [],
+      uncertaintyFlags: privateKnowledge ? [] : this.sessionUncertaintyFlags.get(sessionId) || [],
+      claudeHypotheses: privateKnowledge ? undefined : this.sessionHypotheses.get(sessionId) || undefined,
       architecture: this.architectureCache.get(traceId),
       engineState: createOpenAISnapshotEngineState({
         providerId: sessionFields.agentRuntimeProviderId,
@@ -1356,7 +1891,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       openAIHistory: freshSessionEntry?.history,
       openAILastResponseId: freshSessionEntry?.lastResponseId,
       openAIRunState: freshSessionEntry?.runState,
-      artifacts: artifactStore?.serialize(),
+      artifacts: privateKnowledge ? undefined : artifactStore?.serialize(),
     };
   }
 
@@ -1393,61 +1928,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     }
   }
 
-  private async prepareAnalysisContext(
-    query: string,
-    sessionId: string,
-    traceId: string,
-    options: AnalysisOptions,
-    runtime: {
-      config: OpenAIAgentConfig;
-      sceneType: SceneType;
-      lightweight: boolean;
-      analysisRunSpec: AnalysisRunSpec;
-      sessionContext: ReturnType<typeof sessionContextManager.getOrCreate>;
-      previousTurns: any[];
-    },
-  ) {
-    const { config, sceneType, lightweight, analysisRunSpec } = runtime;
-    const knowledgeScope = analysisRunSpec.scopes.knowledge;
-    let effectivePackageName = options.packageName;
-    const focusResult = await detectFocusApps(this.traceProcessorService, traceId);
-    if (!effectivePackageName && focusResult.primaryApp) {
-      effectivePackageName = focusResult.primaryApp;
-      this.emitUpdate({
-        type: 'progress',
-        content: {
-          phase: 'starting',
-          message: localize(
-            config.outputLanguage,
-            `检测到焦点应用: ${focusResult.primaryApp} (${focusResult.method})`,
-            `Detected focus app: ${focusResult.primaryApp} (${focusResult.method})`,
-          ),
-        },
-        timestamp: Date.now(),
-      });
-    }
-
-    const skillExecutor = createSkillExecutor(this.traceProcessorService);
-    await ensureSkillRegistryInitialized();
-    skillExecutor.registerSkills(skillRegistry.getAllSkills());
-    skillExecutor.setFragmentRegistry(skillRegistry.getFragmentCache());
-
-    const architecture = await this.detectArchitecture(traceId, effectivePackageName);
-    const detectedVendor = await this.detectVendor(traceId);
-    const traceCompleteness = await this.detectCompleteness(traceId, architecture);
-    const comparisonContext = options.referenceTraceId
-      ? await this.buildComparisonContext(traceId, options.referenceTraceId, config.outputLanguage)
-      : undefined;
-
-    const sessionContext = runtime.sessionContext;
-    const previousTurns = runtime.previousTurns;
-    const previousFindings = this.collectPreviousFindings(sessionContext);
-    const conversationSummary = previousTurns.length > 0
-      ? sessionContext.generatePromptContext(2000)
-      : undefined;
-    const entityStore = sessionContext.getEntityStore();
-    const entityContext = this.buildEntityContext(entityStore);
-
+  private resetAnalysisSessionState(sessionId: string): OpenAIAnalysisSessionState {
     if (!this.artifactStores.has(sessionId)) {
       this.artifactStores.set(sessionId, new ArtifactStore());
     }
@@ -1482,74 +1963,346 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     const uncertaintyFlags = this.sessionUncertaintyFlags.get(sessionId)!;
     uncertaintyFlags.splice(0);
 
-    let sqlErrors = this.sessionSqlErrors.get(sessionId);
-    if (!sqlErrors) {
-      sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScope);
-      this.sessionSqlErrors.set(sessionId, sqlErrors);
-    }
-
-    const skillNotesBudget = createRuntimeSkillNotesBudget(lightweight);
-    const { allowedTools, toolDefinitions } = createClaudeMcpServer({
-      sessionId,
-      traceId,
-      userQuery: query,
-      traceProcessorService: this.traceProcessorService,
-      skillExecutor,
-      packageName: effectivePackageName,
-      emitUpdate: (update) => this.emitUpdate(update),
-      onSkillResult: (result) => {
-        if (result.displayResults) {
-          this.captureEntitiesFromSkillDisplayResults(result.displayResults, entityStore);
-        }
-      },
-      analysisNotes: notes,
+    return {
       artifactStore,
-      cachedArchitecture: architecture,
-      cachedVendor: detectedVendor,
-      recentSqlErrors: sqlErrors,
-      analysisPlan: lightweight ? undefined : analysisPlan,
-      watchdogWarning: { current: null },
+      notes,
+      analysisPlan,
+      previousPlan,
       hypotheses,
-      sceneType,
       uncertaintyFlags,
-      referenceTraceId: options.referenceTraceId,
-      comparisonContext,
-      lightweight,
-      skillNotesBudget,
-      outputLanguage: config.outputLanguage,
-      knowledgeScope,
-      codeAwareMode: options.codeAwareMode,
-      codebaseIds: options.codebaseIds,
-    });
+    };
+  }
 
-    const tools = createOpenAIToolsFromMcpDefinitions(toolDefinitions);
+  private async prepareAnalysisContext(
+    query: string,
+    sessionId: string,
+    traceId: string,
+    options: AnalysisOptions,
+    runtime: {
+      config: OpenAIAgentConfig;
+      sceneType: SceneType;
+      lightweight: boolean;
+      analysisRunSpec: AnalysisRunSpec;
+      sessionContext: ReturnType<typeof sessionContextManager.getOrCreate>;
+      previousTurns: ConversationTurn[];
+      skipQuickTracePreflightDetection: boolean;
+      quickProcessIdentityPreEvidence?: boolean;
+      quickTraceFactPreEvidence?: boolean;
+    },
+  ) {
+    const { config, sceneType, lightweight, analysisRunSpec, sessionContext } = runtime;
+    const knowledgeScope = analysisRunSpec.scopes.knowledge;
+    let effectivePackageName = options.packageName;
 
-    let knowledgeBaseContext: string | undefined;
-    try {
-      const kb = await getExtendedKnowledgeBase();
-      knowledgeBaseContext = kb.getContextForAI(query, 8);
-    } catch {
-      // Optional context only.
+    const skipQuickTracePreflight = lightweight && runtime.skipQuickTracePreflightDetection;
+    const quickProcessIdentityPreEvidence = lightweight && !!runtime.quickProcessIdentityPreEvidence;
+    const quickTraceFactPreEvidence = lightweight && !!runtime.quickTraceFactPreEvidence;
+    const skipFocusDetectionForQuickTraceFact = !!effectivePackageName
+      ? (quickProcessIdentityPreEvidence || quickTraceFactPreEvidence)
+      : quickTraceFactPreEvidence
+        && !quickProcessIdentityPreEvidence
+        && shouldSkipFocusDetectionForQuickTraceFactEvidence(query);
+    const focusResult = skipFocusDetectionForQuickTraceFact
+      ? { apps: [], primaryApp: undefined, method: 'none' as const }
+      : await detectFocusApps(this.traceProcessorService, traceId, {
+          timeRange: focusAppTimeRangeFromSelection(options.selectionContext),
+        });
+    if (!effectivePackageName && focusResult.primaryApp) {
+      effectivePackageName = focusResult.primaryApp;
+      this.emitUpdate({
+        type: 'progress',
+        content: {
+          phase: 'starting',
+          message: localize(
+            config.outputLanguage,
+            `检测到焦点应用: ${focusResult.primaryApp} (${focusResult.method})`,
+            `Detected focus app: ${focusResult.primaryApp} (${focusResult.method})`,
+          ),
+        },
+        timestamp: Date.now(),
+      });
     }
 
-    const traceFeatures = extractTraceFeatures({
-      architectureType: architecture?.type,
-      sceneType,
-      packageName: effectivePackageName,
+    const quickProcessIdentityExecutor = quickProcessIdentityPreEvidence
+      ? createQuickProcessIdentitySkillExecutor(this.traceProcessorService)
+      : undefined;
+    const focusEvidencePayload = lightweight && !skipFocusDetectionForQuickTraceFact
+      ? buildFocusAppEvidencePayload(focusResult, traceId, 'current', config.outputLanguage)
+      : undefined;
+    if (focusEvidencePayload?.envelope) {
+      this.emitUpdate({
+        type: 'data',
+        content: [focusEvidencePayload.envelope],
+        timestamp: Date.now(),
+      });
+    }
+    const promptFocusResult = focusEvidencePayload?.focusResult ?? focusResult;
+    const processIdentityEvidencePromise = quickProcessIdentityExecutor
+      ? buildQuickProcessIdentityEvidence({
+          skillExecutor: quickProcessIdentityExecutor,
+          traceId,
+          focusResult: promptFocusResult,
+          packageName: effectivePackageName,
+          outputLanguage: config.outputLanguage,
+        })
+      : Promise.resolve(undefined);
+    const traceFactEvidencePromise = quickTraceFactPreEvidence
+      ? buildQuickTraceFactEvidence({
+          traceProcessor: this.traceProcessorService,
+          traceId,
+          query,
+          focusResult: promptFocusResult,
+          packageName: effectivePackageName,
+          timeRange: focusAppTimeRangeFromSelection(options.selectionContext),
+          outputLanguage: config.outputLanguage,
+        })
+      : Promise.resolve(undefined);
+    const architecturePromise = skipQuickTracePreflight
+      ? Promise.resolve(undefined)
+      : this.detectArchitecture(traceId, effectivePackageName);
+    const detectedVendorPromise = skipQuickTracePreflight
+      ? Promise.resolve(null)
+      : this.detectVendor(traceId);
+    const traceCompletenessPromise = architecturePromise
+      .then(architecture => lightweight ? undefined : this.detectCompleteness(traceId, architecture));
+
+    let [architecture, detectedVendor, traceCompleteness] = await Promise.all([
+      architecturePromise,
+      detectedVendorPromise,
+      traceCompletenessPromise,
+    ]);
+
+    const previousTurns = runtime.previousTurns;
+    let traceFeatures: ReturnType<typeof extractTraceFeatures> | undefined;
+    const getTraceFeatures = () => {
+      traceFeatures ??= extractTraceFeatures({
+        architectureType: architecture?.type,
+        sceneType,
+        packageName: effectivePackageName,
+      });
+      return traceFeatures;
+    };
+
+    const [processIdentityEvidence, traceFactEvidence] = await Promise.all([
+      processIdentityEvidencePromise,
+      traceFactEvidencePromise,
+    ]);
+    if (processIdentityEvidence?.envelopes.length) {
+      this.emitUpdate({
+        type: 'data',
+        content: processIdentityEvidence.envelopes,
+        timestamp: Date.now(),
+      });
+    }
+    if (traceFactEvidence?.envelopes.length) {
+      this.emitUpdate({
+        type: 'data',
+        content: traceFactEvidence.envelopes,
+        timestamp: Date.now(),
+      });
+    }
+    const useProcessIdentityEvidenceOnlyQuick = shouldUseEvidenceOnlyQuickAnalysis({
+      skipQuickTracePreflightDetection: skipQuickTracePreflight,
+      processIdentityEvidence,
     });
-    const sqlErrorFixPairs = sqlErrors
-      .filter((e: any) => e.fixedSql)
-      .slice(-3)
-      .map((e: any) => ({ errorSql: e.errorSql, errorMessage: e.errorMessage, fixedSql: e.fixedSql }));
-    const traceInfo = this.traceProcessorService.getTrace(traceId);
+    const useTraceFactEvidenceOnlyQuick = shouldUseTraceFactEvidenceOnlyQuickAnalysis({
+      quickTraceFactPreEvidence,
+      traceFactEvidence,
+    });
+    const useEvidenceOnlyQuick = (
+      quickProcessIdentityPreEvidence || quickTraceFactPreEvidence
+    )
+      && (!quickProcessIdentityPreEvidence || useProcessIdentityEvidenceOnlyQuick)
+      && (!quickTraceFactPreEvidence || useTraceFactEvidenceOnlyQuick);
+    const directProcessIdentityAnswer = quickProcessIdentityPreEvidence && !quickTraceFactPreEvidence
+      ? buildQuickProcessIdentityDirectAnswer({
+          evidence: processIdentityEvidence,
+          outputLanguage: config.outputLanguage,
+        })
+      : undefined;
+    const directTraceFactAnswer = !quickProcessIdentityPreEvidence
+      ? buildQuickTraceFactDirectAnswer({
+          evidence: traceFactEvidence,
+          outputLanguage: config.outputLanguage,
+        })
+      : undefined;
+    const directQuickAnswer = directProcessIdentityAnswer ?? directTraceFactAnswer;
+
+    if (directQuickAnswer) {
+      const { hypotheses } = this.resetAnalysisSessionState(sessionId);
+      return {
+        systemPrompt: '',
+        tools: [],
+        sessionContext,
+        previousTurns,
+        architecture,
+        hypotheses,
+        allowedTools: [],
+        sessionMapKey: analysisRunSpec.identity.sessionMapKey,
+        quickMemoryContextCounts: undefined,
+        effectivePackageName,
+        comparisonIdentity: undefined,
+        directProcessIdentityAnswer,
+        directTraceFactAnswer,
+      };
+    }
+
+    const sqlErrorPartition = analysisContextMemoryPartitionKey(options);
+    if (this.sessionSqlErrorPartitions.get(sessionId) !== sqlErrorPartition) {
+      this.sessionSqlErrors.delete(sessionId);
+      this.sessionSqlErrorPartitions.set(sessionId, sqlErrorPartition);
+    }
+    let sqlErrors = this.sessionSqlErrors.get(sessionId);
+    const ensureSqlErrorsLoaded = () => {
+      if (!this.sessionSqlErrors.has(sessionId)) {
+        sqlErrors = loadLearnedSqlFixPairs(5, knowledgeScope, options);
+        this.sessionSqlErrors.set(sessionId, sqlErrors);
+      }
+      sqlErrors = this.sessionSqlErrors.get(sessionId) ?? [];
+      return sqlErrors;
+    };
+    if (!skipQuickTracePreflight) {
+      ensureSqlErrorsLoaded();
+    }
+    sqlErrors ??= [];
+
+    const {
+      artifactStore,
+      notes,
+      analysisPlan,
+      previousPlan,
+      hypotheses,
+      uncertaintyFlags,
+    } = this.resetAnalysisSessionState(sessionId);
+    const previousFindings = this.collectPreviousFindings(sessionContext);
+    const conversationSummary = previousTurns.length > 0
+      ? sessionContext.generatePromptContext(2000)
+      : undefined;
+    const entityStore = sessionContext.getEntityStore();
+    const entityContext = this.buildEntityContext(entityStore);
+    const referenceTraceId = options.referenceTraceId;
+    const shouldBuildComparisonContext = !!referenceTraceId && (!lightweight || !useEvidenceOnlyQuick);
+    const comparisonContext = shouldBuildComparisonContext
+      ? await this.buildComparisonContext(traceId, referenceTraceId, config.outputLanguage, options.tracePairContext)
+      : undefined;
+    const skillRegistryReady = !useEvidenceOnlyQuick
+      ? ensureSkillRegistryInitialized()
+      : undefined;
+    let knowledgeBaseContext: string | undefined;
+    if (!lightweight) {
+      try {
+        const kb = await getExtendedKnowledgeBase();
+        knowledgeBaseContext = kb.getContextForAI(query, 8);
+      } catch {
+        // Optional context only.
+      }
+    }
+    const traceInfo = lightweight ? undefined : this.traceProcessorService.getTrace(traceId);
+
+    if (skipQuickTracePreflight && !useEvidenceOnlyQuick) {
+      const [fallbackArchitecture, fallbackDetectedVendor] = await Promise.all([
+        architecture ? Promise.resolve(architecture) : this.detectArchitecture(traceId, effectivePackageName),
+        detectedVendor ? Promise.resolve(detectedVendor) : this.detectVendor(traceId),
+      ]);
+      architecture = fallbackArchitecture;
+      detectedVendor = fallbackDetectedVendor;
+      sqlErrors = ensureSqlErrorsLoaded();
+    }
+
+    const shouldInjectQuickMemoryContext = lightweight && !useEvidenceOnlyQuick;
+    const sqlErrorFixPairs = (!lightweight || shouldInjectQuickMemoryContext)
+      ? sqlErrors
+          .filter((e: any) => e.fixedSql)
+          .slice(-3)
+          .map((e: any) => ({ errorSql: e.errorSql, errorMessage: e.errorMessage, fixedSql: e.fixedSql }))
+      : [];
+    const quickMemoryPayload = shouldInjectQuickMemoryContext
+      ? buildQuickMemoryContextPayload({
+          patternContext: analysisContextUsesPrivateKnowledge(options)
+            ? undefined
+            : buildPatternContextSection(getTraceFeatures(), knowledgeScope),
+          negativePatternContext: analysisContextUsesPrivateKnowledge(options)
+            ? undefined
+            : buildNegativePatternSection(getTraceFeatures(), knowledgeScope),
+          caseBackgroundContext: buildRuntimeCaseBackgroundContext({
+            sceneType,
+            architectureType: architecture?.type,
+            knowledgeScope,
+            outputLanguage: config.outputLanguage,
+            privateAnalysisContext: analysisContextUsesPrivateKnowledge(options),
+          }),
+          sqlErrorFixPairs,
+          recentSqlResultsContext: sessionContext.generateRecentSqlResultPromptContext(3),
+          outputLanguage: config.outputLanguage,
+        })
+      : undefined;
+    const quickMemoryContext = quickMemoryPayload?.text;
+
+    let allowedTools: string[] = [];
+    let tools: ReturnType<typeof createOpenAIToolsFromMcpDefinitions> = [];
+    if (!useEvidenceOnlyQuick) {
+      await (skillRegistryReady ?? ensureSkillRegistryInitialized());
+      const skillExecutor = createSkillExecutor(this.traceProcessorService);
+      const effectiveSkillRegistry =
+        resolveEffectiveSkillRegistryForRuntime(skillRegistry);
+      skillExecutor.registerSkills(effectiveSkillRegistry.getAllSkills());
+      skillExecutor.setFragmentRegistry(
+        effectiveSkillRegistry.getFragmentCache(),
+      );
+
+      const skillNotesBudget = createRuntimeSkillNotesBudget(lightweight);
+      const mcp = createClaudeMcpServer({
+        runManifestAttributionSink: options.runManifestAttributionSink,
+        sessionId,
+        traceId,
+        userQuery: query,
+        traceProcessorService: this.traceProcessorService,
+        skillExecutor,
+        packageName: effectivePackageName,
+        emitUpdate: (update) => this.emitUpdate(update),
+        onSkillResult: (result) => {
+          if (result.displayResults) {
+            this.captureEntitiesFromSkillDisplayResults(result.displayResults, entityStore);
+          }
+        },
+        analysisNotes: notes,
+        artifactStore,
+        cachedArchitecture: architecture,
+        cachedVendor: detectedVendor,
+        recentSqlErrors: sqlErrors,
+        analysisPlan: lightweight ? undefined : analysisPlan,
+        watchdogWarning: { current: null },
+        hypotheses,
+        sceneType,
+        uncertaintyFlags,
+        referenceTraceId: options.referenceTraceId,
+        comparisonContext,
+        lightweight,
+        skillNotesBudget,
+        outputLanguage: config.outputLanguage,
+        knowledgeScope,
+        codeAwareMode: options.codeAwareMode,
+        codebaseIds: options.codebaseIds,
+        knowledgeSourceIds: options.knowledgeSourceIds,
+        analysisContextFingerprint: options.analysisContextFingerprint,
+        androidInternalsPackPin: options.androidInternalsPackPin,
+      });
+      allowedTools = mcp.allowedTools;
+      tools = createOpenAIToolsFromMcpDefinitions(mcp.toolDefinitions);
+    }
 
     const systemPrompt = lightweight
       ? buildQuickSystemPrompt({
           architecture,
           packageName: effectivePackageName,
-          focusApps: focusResult.apps.length > 0 ? focusResult.apps : undefined,
-          focusMethod: focusResult.method,
+          focusApps: promptFocusResult.apps.length > 0 ? promptFocusResult.apps : undefined,
+          focusMethod: promptFocusResult.method,
           selectionContext: options.selectionContext,
+          runtimeEvidenceContext: joinRuntimeEvidenceContexts(
+            processIdentityEvidence?.promptContext,
+            traceFactEvidence?.promptContext,
+          ),
+          quickMemoryContext,
           outputLanguage: config.outputLanguage,
         })
       : buildSystemPrompt({
@@ -1566,8 +2319,19 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           analysisNotes: notes.length > 0 ? notes : undefined,
           availableAgents: undefined,
           sqlErrorFixPairs: sqlErrorFixPairs.length > 0 ? sqlErrorFixPairs : undefined,
-          patternContext: buildPatternContextSection(traceFeatures),
-          negativePatternContext: buildNegativePatternSection(traceFeatures),
+          patternContext: analysisContextUsesPrivateKnowledge(options)
+            ? undefined
+            : buildPatternContextSection(getTraceFeatures(), knowledgeScope),
+          negativePatternContext: analysisContextUsesPrivateKnowledge(options)
+            ? undefined
+            : buildNegativePatternSection(getTraceFeatures(), knowledgeScope),
+          caseBackgroundContext: buildRuntimeCaseBackgroundContext({
+            sceneType,
+            architectureType: architecture?.type,
+            knowledgeScope,
+            outputLanguage: config.outputLanguage,
+            privateAnalysisContext: analysisContextUsesPrivateKnowledge(options),
+          }),
           previousPlan,
           planHistory: analysisPlan.history.length > 0 ? analysisPlan.history : undefined,
           selectionContext: options.selectionContext,
@@ -1591,6 +2355,16 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       hypotheses,
       allowedTools,
       sessionMapKey,
+      quickMemoryContextCounts: quickMemoryPayload?.counts,
+      effectivePackageName,
+      ...(comparisonContext ? {
+        comparisonIdentity: {
+          currentPackageName: effectivePackageName,
+          referencePackageName: comparisonContext.referencePackageName,
+        } satisfies FinalResultComparisonIdentity,
+      } : {}),
+      directProcessIdentityAnswer,
+      directTraceFactAnswer,
     };
   }
 
@@ -1622,6 +2396,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     traceId: string,
     referenceTraceId: string,
     outputLanguage: OutputLanguage,
+    tracePairContext?: TracePairContext,
   ): Promise<import('../../../agentv3/types').ComparisonContext> {
     this.emitUpdate({
       type: 'progress',
@@ -1636,45 +2411,23 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       timestamp: Date.now(),
     });
 
-    const capSql = "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND (name LIKE 'android_%' OR name LIKE 'linux_%' OR name LIKE 'sched_%' OR name LIKE 'slices_%')";
-    const [refFocusResult, refArchitecture, currentTables, refTables] = await Promise.all([
-      detectFocusApps(this.traceProcessorService, referenceTraceId).catch(() => ({
-        apps: [],
-        method: 'none' as const,
-        primaryApp: undefined,
-      })),
-      this.detectArchitecture(referenceTraceId, undefined).catch(() => undefined),
-      this.traceProcessorService.query(traceId, capSql).catch((error) => {
-        console.warn('[OpenAIRuntime] Capability query failed for current trace:', error.message);
-        return null;
-      }),
-      this.traceProcessorService.query(referenceTraceId, capSql).catch((error) => {
-        console.warn('[OpenAIRuntime] Capability query failed for reference trace:', error.message);
-        return null;
-      }),
-    ]);
-
-    let commonCapabilities: string[] = [];
-    let capabilityDiff: { currentOnly: string[]; referenceOnly: string[] } | undefined;
-    if (currentTables && refTables) {
-      const currentSet = new Set(currentTables.rows.map((r: any[]) => r[0] as string));
-      const refSet = new Set(refTables.rows.map((r: any[]) => r[0] as string));
-      commonCapabilities = [...currentSet].filter(t => refSet.has(t));
-      const currentOnly = [...currentSet].filter(t => !refSet.has(t));
-      const referenceOnly = [...refSet].filter(t => !currentSet.has(t));
-      if (currentOnly.length > 0 || referenceOnly.length > 0) {
-        capabilityDiff = { currentOnly, referenceOnly };
-      }
-    }
-
-    return {
+    const comparisonContext = await buildRuntimeTracePairComparisonContext({
+      traceProcessorService: this.traceProcessorService,
+      currentTraceId: traceId,
       referenceTraceId,
-      referencePackageName: refFocusResult.primaryApp,
-      referenceFocusApps: refFocusResult.apps.length > 0 ? refFocusResult.apps : undefined,
-      referenceArchitecture: refArchitecture,
-      commonCapabilities,
-      capabilityDiff,
-    };
+      ...(tracePairContext ? {tracePairContext} : {}),
+      detectReferenceArchitecture: id => this.detectArchitecture(id, undefined),
+      onCapabilityQueryError: (side, error) => {
+        console.warn(
+          `[OpenAIRuntime] Capability query failed for ${side} trace:`,
+          (error as Error).message,
+        );
+      },
+    });
+    if (!comparisonContext) {
+      throw new Error('Reference trace comparison context was not created');
+    }
+    return comparisonContext;
   }
 
   private async detectVendor(traceId: string): Promise<string | null> {
@@ -1727,11 +2480,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     options: AnalysisOptions,
     sceneType: SceneType,
     config: OpenAIAgentConfig,
-  ): Promise<boolean> {
+    analysisSignal?: AbortSignal,
+  ): Promise<OpenAIModeClassification> {
     const explicitMode = options.analysisMode;
-    if (explicitMode === 'fast') return true;
-    if (explicitMode === 'full') return false;
-
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = sessionContext.getAllTurns?.() ?? [];
     const classifierInput: ComplexityClassifierInput = buildComplexityClassifierInput({
@@ -1741,16 +2492,85 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       hasReferenceTrace: !!options.referenceTraceId,
       previousTurns,
     });
+    const deriveFlags = (classification: { complexity?: string; reason?: string } | undefined) =>
+      deriveRuntimeQuickPreEvidenceFlags({
+        query,
+        selectionContext: options.selectionContext,
+        packageName: options.packageName,
+        hasReferenceTrace: !!options.referenceTraceId,
+        directEvidenceEligibleQuickMode: !options.referenceTraceId && classification?.complexity === 'quick',
+        complexity: classification?.complexity,
+        reason: classification?.reason,
+      });
+    const shouldSkipQuickPreflightForEvidence = (flags: ReturnType<typeof deriveFlags>) => (
+      flags.quickProcessIdentityPreEvidence || flags.quickTraceFactPreEvidence
+    );
+
+    if (explicitMode === 'fast') {
+      const local = classifyQueryComplexityLocal(classifierInput);
+      const flags = deriveRuntimeQuickPreEvidenceFlags({
+        query,
+        selectionContext: options.selectionContext,
+        packageName: options.packageName,
+        hasReferenceTrace: !!options.referenceTraceId,
+        directEvidenceEligibleQuickMode: !options.referenceTraceId,
+        complexity: local?.complexity,
+        reason: local?.reason,
+      });
+      const quickAcknowledgementDirectAnswer = !!local
+        && local.complexity === 'quick'
+        && isAcknowledgementFollowupReason(local.reason);
+      return {
+        quickMode: true,
+        source: 'user_explicit',
+        reason: 'user requested fast',
+        skipQuickTracePreflightDetection: shouldSkipQuickPreflightForEvidence(flags),
+        quickAcknowledgementDirectAnswer,
+        ...flags,
+      };
+    }
+    if (explicitMode === 'full') {
+      return {
+        quickMode: false,
+        source: 'user_explicit',
+        reason: 'user requested full',
+        skipQuickTracePreflightDetection: false,
+        quickAcknowledgementDirectAnswer: false,
+        quickFocusAppPreEvidence: false,
+        quickProcessIdentityPreEvidence: false,
+        quickTraceFactPreEvidence: false,
+        quickScrollingTriagePreEvidence: false,
+      };
+    }
 
     const local = classifyQueryComplexityLocal(classifierInput);
     if (local) {
       console.log(`[OpenAIRuntime] auto → ${local.complexity} (${local.source}: ${local.reason})`);
-      return local.complexity === 'quick';
+      const flags = deriveFlags(local);
+      const quickAcknowledgementDirectAnswer = local.complexity === 'quick'
+        && isAcknowledgementFollowupReason(local.reason);
+      return {
+        quickMode: local.complexity === 'quick',
+        source: local.source,
+        reason: local.reason,
+        skipQuickTracePreflightDetection: shouldSkipQuickPreflightForEvidence(flags),
+        quickAcknowledgementDirectAnswer,
+        ...flags,
+      };
     }
 
-    const ai = await classifyQueryWithOpenAILightModel(classifierInput, config);
+    const ai = await classifyQueryWithOpenAILightModel(classifierInput, config, analysisSignal);
     console.log(`[OpenAIRuntime] auto → ${ai.complexity} (ai: ${ai.reason})`);
-    return ai.complexity === 'quick';
+    const flags = deriveFlags(ai);
+    return {
+      quickMode: ai.complexity === 'quick',
+      source: 'ai',
+      reason: ai.reason,
+      skipQuickTracePreflightDetection: shouldSkipQuickPreflightForEvidence(flags),
+      quickAcknowledgementDirectAnswer: ai.complexity === 'quick' &&
+        isAcknowledgementFollowupReason(ai.reason),
+      ...flags,
+    };
   }
 
   private getPlanCompletionStatus(sessionId: string, quickMode: boolean): PlanCompletionStatus {
@@ -1759,6 +2579,46 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       quickMode,
       minSummaryChars: MIN_PHASE_SUMMARY_CHARS,
     });
+  }
+
+  private reconcileCompletedConclusionPhase(input: {
+    sessionId: string;
+    quickMode: boolean;
+    conclusion: string;
+    query?: string;
+    sceneType?: SceneType;
+    comparisonIdentity?: FinalResultComparisonIdentity;
+  }): boolean {
+    if (input.quickMode) return false;
+    const conclusion = sanitizeOpenAiConclusionText(input.conclusion);
+    const phase = reconcileDeliveredFinalReportPhase({
+      plan: this.sessionPlans.get(input.sessionId)?.current,
+      conclusion,
+      minSummaryChars: MIN_PHASE_SUMMARY_CHARS,
+      isDeliverableReport: candidate => (
+        isSubstantialReportText(candidate) &&
+        !assessFinalReportContractCompleteness({
+          conclusion: candidate,
+          query: input.query,
+          sceneType: input.sceneType,
+        }) &&
+        !assessFinalResultComparisonIdentity(candidate, input.comparisonIdentity)
+      ),
+      buildSummary: candidate => candidate.replace(/\s+/g, ' ').trim().slice(0, 600),
+    });
+    if (!phase) return false;
+    this.emitUpdate({
+      type: 'plan_phase_updated',
+      content: {
+        phaseId: phase.id,
+        phaseName: phase.name,
+        status: 'completed',
+        summary: phase.summary,
+        reconciledFromFinalReport: true,
+      },
+      timestamp: Date.now(),
+    });
+    return true;
   }
 
   private shouldFinalizeAfterPlanComplete(
@@ -1780,6 +2640,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
   }
 
   private shouldRequestFinalReportAfterPlanComplete(input: {
+    sessionId?: string;
     quickMode: boolean;
     planStatus: PlanCompletionStatus;
     conclusion: string;
@@ -1789,6 +2650,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     finalReportContinuations: number;
     query?: string;
     sceneType?: SceneType;
+    comparisonIdentity?: FinalResultComparisonIdentity;
   }): boolean {
     if (
       input.quickMode ||
@@ -1813,10 +2675,22 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     })) {
       return true;
     }
+    if (assessFinalResultComparisonIdentity(conclusion, input.comparisonIdentity)) return true;
+    if (input.sessionId && this.finalReportMissingCodeReference(input.sessionId, conclusion)) return true;
     return looksLikeProcessNarrationParagraph(conclusion.split(/\n{2,}/)[0] || '');
   }
 
-  private buildFinalReportAfterPlanCompletePrompt(outputLanguage: OutputLanguage): string {
+  private finalReportMissingCodeReference(sessionId: string, conclusion: string): boolean {
+    return finalReportMissingRequiredCodeReference({
+      plan: this.sessionPlans.get(sessionId)?.current,
+      conclusion,
+    });
+  }
+
+  private buildFinalReportAfterPlanCompletePrompt(
+    outputLanguage: OutputLanguage,
+    requireCodeReference = false,
+  ): string {
     const templateName = outputLanguage === 'en'
       ? 'prompt-openai-final-report-continuation-en'
       : 'prompt-openai-final-report-continuation-zh';
@@ -1824,7 +2698,9 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     if (!template) {
       throw new Error(`Missing OpenAI final-report continuation prompt template: ${templateName}`);
     }
-    return template;
+    return requireCodeReference
+      ? `${template}\n\n${loadCodeReferenceContractPrompt(outputLanguage)}`
+      : template;
   }
 
   private formatPlanCompleteReportContinuationMessage(outputLanguage: OutputLanguage): string {
@@ -1956,7 +2832,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     query: string;
     startTime: number;
     rounds: number;
+    quickBudget?: ReturnType<typeof resolveQuickTurnBudget>;
+    requestedMode?: AnalysisOptions['analysisMode'];
+    frontendPrequeryInjected?: number;
     codeAwareMode?: AnalysisOptions['codeAwareMode'];
+    knowledgeSourceIds?: string[];
   }): AnalysisResult | undefined {
     if (!isRecoverableOpenAIStreamTermination(params.error)) {
       return undefined;
@@ -1983,7 +2863,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     let conclusion = planStatus.complete
       ? conclusionBase
       : this.withIncompletePlanWarning(conclusionBase, planStatus, params.outputLanguage);
-    if (params.codeAwareMode && params.codeAwareMode !== 'off') {
+    if ((params.codeAwareMode && params.codeAwareMode !== 'off') || params.knowledgeSourceIds?.length) {
       conclusion = sanitizeCodeAwareText(params.sessionId, conclusion);
     }
     const findings = extractFindingsFromText(conclusion);
@@ -2007,22 +2887,53 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       timestamp: Date.now(),
     });
 
+    const result: AnalysisResult = {
+      sessionId: params.sessionId,
+      success: true,
+      findings,
+      hypotheses: params.context.hypotheses.map(h => this.toProtocolHypothesis(h)),
+      conclusion,
+      confidence,
+      rounds: params.rounds,
+      totalDurationMs: Date.now() - params.startTime,
+      partial: true,
+      terminationReason,
+      terminationMessage,
+      quickRun: params.quickMode && params.quickBudget
+        ? buildQuickRunReceipt({
+            requestedMode: params.requestedMode ?? 'auto',
+            profile: shouldMarkQuickRunTriage(params.query) ? 'triage' : undefined,
+            budget: params.quickBudget,
+            actualTurns: params.rounds,
+            elapsedMs: Date.now() - params.startTime,
+            stopReason: quickStopReasonFromTermination({
+              partial: true,
+              terminationReason,
+              actualTurns: params.rounds,
+              targetTurns: params.quickBudget.targetTurns,
+              hardCapTurns: params.quickBudget.hardCapTurns,
+            }),
+            evidence: {
+              frontendPrequeryInjected: params.frontendPrequeryInjected ?? 0,
+              },
+              contextInjected: {
+                conversationTurns: countCompletedQuickConversationTurns(params.context.previousTurns),
+                ...(params.context.quickMemoryContextCounts ?? {
+                  recentSqlResults: 0,
+                  sqlPitfallPairs: 0,
+                patternHints: 0,
+                negativePatternHints: 0,
+                caseBackgroundCases: 0,
+              }),
+            },
+          })
+        : undefined,
+    };
+
     this.recordTurn({
       query: params.query,
       sessionId: params.sessionId,
-      result: {
-        sessionId: params.sessionId,
-        success: true,
-        findings,
-        hypotheses: params.context.hypotheses.map(h => this.toProtocolHypothesis(h)),
-        conclusion,
-        confidence,
-        rounds: params.rounds,
-        totalDurationMs: Date.now() - params.startTime,
-        partial: true,
-        terminationReason,
-        terminationMessage,
-      },
+      result,
       sessionContext: params.context.sessionContext,
       previousTurnCount: params.context.previousTurns.length,
       quickMode: params.quickMode,
@@ -2039,19 +2950,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       timestamp: Date.now(),
     });
 
-    return {
-      sessionId: params.sessionId,
-      success: true,
-      findings,
-      hypotheses: params.context.hypotheses.map(h => this.toProtocolHypothesis(h)),
-      conclusion,
-      confidence,
-      rounds: params.rounds,
-      totalDurationMs: Date.now() - params.startTime,
-      partial: true,
-      terminationReason,
-      terminationMessage,
-    };
+    return result;
   }
 
   private recordMaxTurnsPartialResult(params: {
@@ -2062,13 +2961,17 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
     accumulatedAnswer: string;
     context: Pick<
       Awaited<ReturnType<OpenAIRuntime['prepareAnalysisContext']>>,
-      'hypotheses' | 'sessionContext' | 'previousTurns'
+      'hypotheses' | 'sessionContext' | 'previousTurns' | 'quickMemoryContextCounts'
     >;
     startTime: number;
     rounds: number;
     quickMode: boolean;
     maxTurns?: number;
+    quickBudget?: ReturnType<typeof resolveQuickTurnBudget>;
+    requestedMode?: AnalysisOptions['analysisMode'];
+    frontendPrequeryInjected?: number;
     codeAwareMode?: AnalysisOptions['codeAwareMode'];
+    knowledgeSourceIds?: string[];
   }): AnalysisResult {
     const maxTurnText = Number.isFinite(params.maxTurns)
       ? localize(
@@ -2082,7 +2985,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       `分析达到轮次上限${maxTurnText}，尚未形成完整结论。`,
       `The analysis reached the turn limit${maxTurnText} before a complete conclusion was produced.`,
     );
-    if (params.codeAwareMode && params.codeAwareMode !== 'off') {
+    if ((params.codeAwareMode && params.codeAwareMode !== 'off') || params.knowledgeSourceIds?.length) {
       partialConclusion = sanitizeCodeAwareText(params.sessionId, partialConclusion);
     }
     const findings = extractFindingsFromText(partialConclusion);
@@ -2099,6 +3002,35 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       partial: true,
       terminationReason: 'max_turns',
       terminationMessage: params.error.message,
+      quickRun: params.quickMode && params.quickBudget
+        ? buildQuickRunReceipt({
+            requestedMode: params.requestedMode ?? 'auto',
+            profile: shouldMarkQuickRunTriage(params.query) ? 'triage' : undefined,
+            budget: params.quickBudget,
+            actualTurns: params.rounds,
+            elapsedMs: Date.now() - params.startTime,
+            stopReason: quickStopReasonFromTermination({
+              partial: true,
+              terminationReason: 'max_turns',
+              actualTurns: params.rounds,
+              targetTurns: params.quickBudget.targetTurns,
+              hardCapTurns: params.quickBudget.hardCapTurns,
+            }),
+            evidence: {
+              frontendPrequeryInjected: params.frontendPrequeryInjected ?? 0,
+              },
+              contextInjected: {
+                conversationTurns: countCompletedQuickConversationTurns(params.context.previousTurns),
+                ...(params.context.quickMemoryContextCounts ?? {
+                  recentSqlResults: 0,
+                  sqlPitfallPairs: 0,
+                patternHints: 0,
+                negativePatternHints: 0,
+                caseBackgroundCases: 0,
+              }),
+            },
+          })
+        : undefined,
     };
 
     this.emitUpdate({
@@ -2246,7 +3178,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       sessionId: string;
       quickMode: boolean;
       answerStreamFilter: OpenAiReasoningFilterState;
+      answerTextProjection?: CodeAwareStreamingTextProjection;
       toolInputsByTaskId: Map<string, { toolName: string; args: Record<string, unknown> }>;
+      tracePairContext?: TracePairContext;
+      onToolCalled?: () => void;
+      onSuppressedAnswerDelta?: (delta: string) => void;
     },
   ): string {
     const now = Date.now();
@@ -2255,10 +3191,14 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       if (data?.type === 'output_text_delta' && typeof data.delta === 'string') {
         const delta = filterOpenAiVisibleAnswerDelta(data.delta, streamContext.answerStreamFilter);
         if (!this.shouldExposeOpenAiAnswerDelta(streamContext.sessionId, streamContext.quickMode)) {
+          if (delta) streamContext.onSuppressedAnswerDelta?.(delta);
           return '';
         }
         if (!delta) return '';
-        this.emitUpdate({ type: 'answer_token', content: { token: delta }, timestamp: now });
+        const projected = streamContext.answerTextProjection?.write(delta) ?? delta;
+        if (projected) {
+          this.emitUpdate({type: 'answer_token', content: {token: projected}, timestamp: now});
+        }
         return delta;
       }
       return '';
@@ -2282,6 +3222,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
 
     const rawItem = (event.item as any)?.rawItem;
     if (event.name === 'tool_called') {
+      streamContext.onToolCalled?.();
       const args = parseJsonObject(rawItem?.arguments) || {};
       const taskIds = [rawItem?.callId, rawItem?.call_id, rawItem?.id]
         .filter((id): id is string => typeof id === 'string' && id.length > 0);
@@ -2297,22 +3238,31 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
           taskId: rawItem?.callId || rawItem?.id || 'unknown',
           toolName: rawItem?.name || 'unknown',
           args,
-          message: formatToolCallNarration(rawItem?.name || 'unknown', args, outputLanguage),
+          message: formatToolCallNarration(rawItem?.name || 'unknown', args, outputLanguage, {
+            tracePairContext: streamContext.tracePairContext,
+          }),
         },
         timestamp: now,
       });
     } else if (event.name === 'tool_output') {
+      const rawOutput = (event.item as any)?.output ?? rawItem?.output;
       const taskIds = [rawItem?.callId, rawItem?.call_id, rawItem?.id]
         .filter((id): id is string => typeof id === 'string' && id.length > 0);
       const cached = taskIds
         .map(taskId => streamContext.toolInputsByTaskId.get(taskId))
         .find(Boolean);
+      const toolName = cached?.toolName || rawItem?.name || 'unknown';
+      const resultText = summarizeToolOutput(
+        projectToolResultForExternalSurface(toolName, rawOutput),
+      );
       if (cached) {
-        const plan = this.sessionPlans.get(streamContext.sessionId)?.current ?? null;
-        recordPlanToolCall(plan, {
+        const codeReferences = extractSourceLookupCodeReferences(cached.toolName, rawOutput);
+        recordPlanOrPrePlanToolCall(this.sessionPlans.get(streamContext.sessionId), {
           toolName: cached.toolName,
           input: cached.args,
-          resultText: summarizeToolOutput(rawItem?.output),
+          resultText,
+          returnedCodeReferences: codeReferences.length > 0,
+          returnedCodeReferenceHints: codeReferences,
         });
         for (const taskId of taskIds) {
           streamContext.toolInputsByTaskId.delete(taskId);
@@ -2322,7 +3272,7 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         type: 'agent_response',
         content: {
           taskId: rawItem?.callId || rawItem?.id || 'unknown',
-          result: summarizeToolOutput(rawItem?.output),
+          result: resultText,
         },
         timestamp: now,
       });
@@ -2331,7 +3281,11 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
         ? rawItem.content.map((c: any) => c.text).filter(Boolean).join('\n')
         : undefined;
       if (text) {
-        this.emitUpdate({ type: 'thought', content: { thought: text }, timestamp: now });
+        this.emitUpdate({
+          type: 'thought',
+          content: {thought: streamContext.answerTextProjection?.projectComplete(text) ?? text},
+          timestamp: now,
+        });
       }
     }
     return '';
@@ -2390,6 +3344,107 @@ export class OpenAIRuntime extends EventEmitter implements IOrchestrator {
       conclusion: input.result.conclusion,
       confidence: input.result.confidence,
     });
+  }
+
+  private buildDirectQuickEvidenceResult(input: {
+    query: string;
+    sessionId: string;
+    options: AnalysisOptions;
+    startTime: number;
+    sceneType: SceneType;
+    outputLanguage: OutputLanguage;
+    sessionContext: ReturnType<typeof sessionContextManager.getOrCreate>;
+    previousTurns: ConversationTurn[];
+    analysisRunSpec: AnalysisRunSpec;
+    quickBudget: ReturnType<typeof resolveQuickTurnBudget>;
+    directAnswer: RuntimeQuickEvidenceDirectAnswer;
+    evidenceCounts: RuntimeQuickEvidenceCounts;
+  }): AnalysisResult {
+    const result = buildQuickDirectEvidenceAnalysisResult({
+      query: input.query,
+      sessionId: input.sessionId,
+      options: input.options,
+      startedAt: input.startTime,
+      analysisRunSpec: input.analysisRunSpec,
+      budget: input.quickBudget,
+      directAnswer: input.directAnswer,
+      evidenceCounts: input.evidenceCounts,
+      previousTurns: input.previousTurns,
+    });
+    emitQuickDirectQualityGateIssue({
+      emitUpdate: update => this.emitUpdate(update),
+      module: 'openAiRuntime',
+      result,
+      query: input.query,
+      sceneType: input.sceneType,
+    });
+    this.recordTurn({
+      query: input.query,
+      sessionId: input.sessionId,
+      result,
+      sessionContext: input.sessionContext,
+      previousTurnCount: input.previousTurns.length,
+      quickMode: true,
+    });
+    emitQuickDirectAnswerEvents({
+      emitUpdate: update => this.emitUpdate(update),
+      result,
+      startedAt: input.startTime,
+      outputLanguage: input.outputLanguage,
+      runtime: 'openai-agents-sdk',
+      model: 'runtime-pre-evidence',
+    });
+    return result;
+  }
+
+  private recordPatternMemory(input: {
+    sessionId: string;
+    result: AnalysisResult;
+    previousTurnCount: number;
+    quickMode: boolean;
+    sceneType: SceneType;
+    architecture?: ArchitectureInfo;
+    packageName?: string;
+    options: AnalysisOptions;
+  }): void {
+    if (analysisContextUsesPrivateKnowledge(input.options)) return;
+    if (input.result.partial === true || input.result.findings.length === 0) return;
+    const insights = extractKeyInsights(input.result.findings, input.result.conclusion);
+    if (insights.length === 0) return;
+
+    const features = extractTraceFeatures({
+      architectureType: input.architecture?.type,
+      sceneType: input.sceneType,
+      packageName: input.packageName,
+      findingTitles: input.result.findings.map(f => f.title),
+      findingCategories: input.result.findings.map(f => f.category).filter(Boolean) as string[],
+    });
+    const knowledgeScope = knowledgeScopeFromAnalysisOptions(input.options);
+    const patternExtras = {
+      status: 'provisional' as const,
+      provenance: {
+        sessionId: input.sessionId,
+        turnIndex: input.previousTurnCount,
+      },
+      knowledgeScope,
+    };
+
+    if (input.quickMode) {
+      saveQuickPathPattern(features, insights, input.sceneType, input.architecture?.type, patternExtras)
+        .catch(err => console.warn('[OpenAIRuntime] Quick pattern save failed:', (err as Error).message));
+      return;
+    }
+
+    saveAnalysisPattern(features, insights, input.sceneType, input.architecture?.type, input.result.confidence, patternExtras)
+      .catch(err => console.warn('[OpenAIRuntime] Pattern save failed:', (err as Error).message));
+    promoteQuickPatternIfMatching({
+      fullPathFeatures: features,
+      fullPathInsights: insights,
+      sceneType: input.sceneType,
+      architectureType: input.architecture?.type,
+      verifierPassed: true,
+      knowledgeScope,
+    }).catch(err => console.warn('[OpenAIRuntime] Quick→full promote failed:', (err as Error).message));
   }
 
   private captureEntitiesFromSkillDisplayResults(

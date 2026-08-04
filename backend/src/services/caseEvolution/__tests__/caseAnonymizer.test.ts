@@ -11,7 +11,7 @@ import { bucketPackageDomain } from '../domainBucket';
 function candidate(overrides: Partial<CaseCandidate> = {}): CaseCandidate {
   return {
     candidateId: 'cand-anon-1',
-    schemaVersion: 'case_candidate@1',
+    schemaVersion: 'case_candidate@2',
     provenance: {
       sourceSessionId: 'session-1',
       sourceAnalysisRunId: 'run-1',
@@ -21,6 +21,7 @@ function candidate(overrides: Partial<CaseCandidate> = {}): CaseCandidate {
       engine: 'claude',
       sceneType: 'scrolling',
       architectureType: 'unknown',
+      originScope: {tenantId: 'default-dev-tenant', workspaceId: 'default-workspace'},
     },
     cluster: {
       scene: 'scrolling',

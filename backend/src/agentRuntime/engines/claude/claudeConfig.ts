@@ -21,6 +21,8 @@ export interface ClaudeAgentConfig {
    *  to the same value as CLAUDE_MODEL so all SDK calls route to the same endpoint. */
   lightModel: string;
   maxTurns: number;
+  /** Quick-mode soft product target. The SDK hard cap remains maxTurns in quick config. */
+  quickTargetTurns: number;
   maxBudgetUsd?: number;
   cwd: string;
   effort: EffortLevel;
@@ -49,7 +51,7 @@ export interface ClaudeAgentConfig {
   outputLanguage: OutputLanguage;
 }
 
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_MODEL = 'claude-sonnet-5';
 const DEFAULT_LIGHT_MODEL = 'claude-haiku-4-5';
 // Scrolling pipeline: 1 time-range + 1 scrolling_analysis + 2-3 deep-drill (blocking_chain/binder_root_cause)
 // + 1-2 jank_frame_detail + hypothesis submit/resolve + conclusion = ~20-25 turns.
@@ -77,6 +79,8 @@ function loadClaudeConfigFromEnv(
     lightModel: env.CLAUDE_LIGHT_MODEL ?? DEFAULT_LIGHT_MODEL,
     maxTurns: overrides?.maxTurns
       ?? parsePositiveIntEnvFrom(env, 'CLAUDE_MAX_TURNS', budgetConfig.maxTurns),
+    quickTargetTurns: overrides?.quickTargetTurns
+      ?? parsePositiveIntEnvFrom(env, 'CLAUDE_QUICK_TARGET_TURNS', budgetConfig.quickTargetTurns),
     maxBudgetUsd: overrides?.maxBudgetUsd
       ?? (env.CLAUDE_MAX_BUDGET_USD ? parseFloat(env.CLAUDE_MAX_BUDGET_USD) : undefined),
     cwd: overrides?.cwd ?? env.CLAUDE_CWD ?? process.cwd(),
@@ -472,9 +476,17 @@ export function createQuickConfig(
   env: Record<string, string | undefined> = process.env,
 ): ClaudeAgentConfig {
   const budgetConfig = resolveAgentRuntimeBudgetConfig(env);
+  const quickMaxTurns = parsePositiveIntEnvFrom(env, 'CLAUDE_QUICK_MAX_TURNS', budgetConfig.quickMaxTurns);
+  const quickModel = env.CLAUDE_LIGHT_MODEL ?? baseConfig.lightModel;
   return {
     ...baseConfig,
-    maxTurns: parsePositiveIntEnvFrom(env, 'CLAUDE_QUICK_MAX_TURNS', budgetConfig.quickMaxTurns),
+    model: quickModel,
+    lightModel: quickModel,
+    maxTurns: quickMaxTurns,
+    quickTargetTurns: Math.min(
+      parsePositiveIntEnvFrom(env, 'CLAUDE_QUICK_TARGET_TURNS', budgetConfig.quickTargetTurns),
+      quickMaxTurns,
+    ),
     effort: 'low',
     enableVerification: false,
     enableSubAgents: false,
@@ -693,5 +705,19 @@ export function resolveRuntimeConfig(
   if (!providerEnv) return baseConfig;
 
   const isolatedEnv = mergeIsolatedProviderEnv(process.env, providerEnv);
-  return loadClaudeConfigFromEnv(isolatedEnv);
+  const loaded = loadClaudeConfigFromEnv(isolatedEnv);
+  return {
+    ...loaded,
+    maxTurns: providerEnv.CLAUDE_MAX_TURNS ? loaded.maxTurns : baseConfig.maxTurns,
+    quickTargetTurns: providerEnv.CLAUDE_QUICK_TARGET_TURNS ? loaded.quickTargetTurns : baseConfig.quickTargetTurns,
+    maxBudgetUsd: providerEnv.CLAUDE_MAX_BUDGET_USD ? loaded.maxBudgetUsd : baseConfig.maxBudgetUsd,
+    effort: providerEnv.CLAUDE_EFFORT ? loaded.effort : baseConfig.effort,
+    enableSubAgents: providerEnv.CLAUDE_ENABLE_SUB_AGENTS !== undefined ? loaded.enableSubAgents : baseConfig.enableSubAgents,
+    enableVerification: providerEnv.CLAUDE_ENABLE_VERIFICATION !== undefined ? loaded.enableVerification : baseConfig.enableVerification,
+    subAgentTimeoutMs: providerEnv.CLAUDE_SUB_AGENT_TIMEOUT_MS ? loaded.subAgentTimeoutMs : baseConfig.subAgentTimeoutMs,
+    fullPathPerTurnMs: providerEnv.CLAUDE_FULL_PER_TURN_MS ? loaded.fullPathPerTurnMs : baseConfig.fullPathPerTurnMs,
+    quickPathPerTurnMs: providerEnv.CLAUDE_QUICK_PER_TURN_MS ? loaded.quickPathPerTurnMs : baseConfig.quickPathPerTurnMs,
+    verifierTimeoutMs: providerEnv.CLAUDE_VERIFIER_TIMEOUT_MS ? loaded.verifierTimeoutMs : baseConfig.verifierTimeoutMs,
+    classifierTimeoutMs: providerEnv.CLAUDE_CLASSIFIER_TIMEOUT_MS ? loaded.classifierTimeoutMs : baseConfig.classifierTimeoutMs,
+  };
 }

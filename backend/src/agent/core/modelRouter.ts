@@ -16,6 +16,7 @@ import { EventEmitter } from 'events';
 import { resolveFeatureConfig } from '../../config';
 import { hasConcreteEnvValue } from '../../agentRuntime/envCredentialSources';
 import { LLM_REDACTION_VERSION, hashSha256, redactTextForLLM } from '../../utils/llmPrivacy';
+import {diagnosticLogIdentity} from '../../utils/logger';
 import {
   ModelProvider,
   ModelStrength,
@@ -359,9 +360,12 @@ export class ModelRouter extends EventEmitter {
             return result;
           }
 
-          console.log(`[ModelRouter.callWithFallback] Model ${model.id} returned unsuccessfully: ${result.error}`);
+          console.log(
+            `[ModelRouter.callWithFallback] Model ${model.id} returned unsuccessfully: ` +
+            (result.error || diagnosticLogIdentity('unknown', {domain: 'model_provider', code: 'unknown'})),
+          );
 
-          const isContextOverflow = this.isContextOverflowError(result.error);
+          const isContextOverflow = result.errorCode === 'context_overflow';
           const hasMoreCompactedCandidates = attempt < promptCandidates.length - 1;
 
           if (!isContextOverflow || !hasMoreCompactedCandidates) {
@@ -375,9 +379,13 @@ export class ModelRouter extends EventEmitter {
             `trying a shorter prompt`);
         }
       } catch (error: any) {
-        console.log(`[ModelRouter.callWithFallback] Model ${model.id} threw error: ${error.message}`);
-        this.recordFailure(model.id, error.message);
-        this.emit('modelError', { modelId: model.id, error: error.message });
+        const errorIdentity = diagnosticLogIdentity(error?.message || String(error), {
+          domain: 'model_provider',
+          code: 'call_failed',
+        });
+        console.log(`[ModelRouter.callWithFallback] Model ${model.id} threw error: ${errorIdentity}`);
+        this.recordFailure(model.id, errorIdentity);
+        this.emit('modelError', { modelId: model.id, error: errorIdentity });
         continue;
       }
     }
@@ -547,6 +555,11 @@ export class ModelRouter extends EventEmitter {
       return result;
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
+      const rawError = error?.message || String(error);
+      const errorIdentity = diagnosticLogIdentity(rawError, {
+        domain: 'model_provider',
+        code: 'call_failed',
+      });
 
       const result: ModelCallResult = {
         modelId: model.id,
@@ -554,7 +567,8 @@ export class ModelRouter extends EventEmitter {
         usage: { inputTokens: 0, outputTokens: 0, totalCost: 0 },
         latencyMs,
         success: false,
-        error: error.message,
+        error: errorIdentity,
+        errorCode: this.isContextOverflowError(rawError) ? 'context_overflow' : 'provider_error',
       };
 
       // Note: recordFailure is NOT called here — callers (callWithFallback, ensemble)
@@ -580,7 +594,7 @@ export class ModelRouter extends EventEmitter {
         jsonMode,
         latencyMs,
         success: false,
-        error: error.message,
+        error: errorIdentity,
       });
       return result;
     }

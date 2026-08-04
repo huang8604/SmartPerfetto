@@ -160,6 +160,7 @@ describe('continueSession Level-3 lineage', () => {
       agentRuntimeKind: 'claude-agent-sdk',
       providerSnapshotHash: 'hash-next',
       model: 'claude-test',
+      codeAwareMode: 'off',
       reportHtml: '<html><body>report</body></html>',
       result: {
         sessionId,
@@ -267,5 +268,25 @@ describe('continueSession Level-3 lineage', () => {
     expect(result.degraded).toBe(false);
     expect(turnMarkdown).toContain('此会话因 trace 重载已从原会话降级续接');
     expect(turnMarkdown).toContain('backend-original');
+  });
+
+  it('writes the runtime-resolved code-aware mode back to resumed session config', async () => {
+    const sp = seedSession({codebaseIds: ['cb-source'], codeAwareMode: undefined});
+    const service = {
+      reloadTraceById: jest.fn(async () => true),
+      loadTrace: jest.fn(),
+      runTurn: jest.fn(async (input: any) => {
+        input.onSessionReady?.('backend-old');
+        return {...makeRunTurnOutput('backend-old', 'trace-old'), codeAwareMode: 'metadata_only'};
+      }),
+    } as unknown as CliAnalyzeService;
+
+    await continueSession(
+      {paths, service, renderer: makeRenderer()},
+      {sessionId: 'agent-1', query: '继续源码分析'},
+    );
+
+    const saved = JSON.parse(fs.readFileSync(sp.config, 'utf-8')) as CliSessionConfig;
+    expect(saved.codeAwareMode).toBe('metadata_only');
   });
 });

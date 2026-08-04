@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "clock": {
+    "anchor": "trace-middle",
+    "duration_ns": "1000000000"
+  },
+  "actors": {
+    "processes": [
+      {
+        "id": "app",
+        "name": "com.smartperfetto.fixture",
+        "uid": 10999
+      },
+      {
+        "id": "system",
+        "name": "system_server",
+        "uid": 1000
+      },
+      {
+        "id": "sf",
+        "name": "/system/bin/surfaceflinger",
+        "uid": 1000
+      }
+    ],
+    "threads": [
+      {
+        "id": "main",
+        "process": "app",
+        "name": "main",
+        "is_main": true
+      },
+      {
+        "id": "render",
+        "process": "app",
+        "name": "RenderThread"
+      },
+      {
+        "id": "game",
+        "process": "app",
+        "name": "GameThread"
+      },
+      {
+        "id": "rn-js",
+        "process": "app",
+        "name": "mqt_js"
+      },
+      {
+        "id": "rn-native",
+        "process": "app",
+        "name": "mqt_native_modules"
+      },
+      {
+        "id": "webview",
+        "process": "app",
+        "name": "CrRendererMain"
+      },
+      {
+        "id": "system-main",
+        "process": "system",
+        "name": "android.fg",
+        "is_main": true
+      },
+      {
+        "id": "sf-main",
+        "process": "sf",
+        "name": "surfaceflinger",
+        "is_main": true
+      }
+    ]
+  },
+  "signals": [
+    {
+      "type": "atrace-slice",
+      "at_ns": "10000000",
+      "duration_ns": "18000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto::CASE::scheduler-cpu-contention"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "40000000",
+      "duration_ns": "19000000",
+      "process": "app",
+      "thread": "render",
+      "name": "RunnableWait"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "70000000",
+      "duration_ns": "20000000",
+      "process": "app",
+      "thread": "main",
+      "name": "CPU contention"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "100000000",
+      "duration_ns": "21000000",
+      "process": "app",
+      "thread": "render",
+      "name": "sched_blocked_reason"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "200000000",
+      "duration_ns": "22000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "sched_blocked_reason"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "250000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto.scheduler-cpu-contention.pressure",
+      "value": 73
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "300000000",
+      "duration_ns": "45000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "380000000",
+      "duration_ns": "20000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "cpu-frequency",
+      "at_ns": "520000000",
+      "cpu_id": 0,
+      "value": 1800000,
+      "cpu": 0
+    },
+    {
+      "type": "irq-span",
+      "at_ns": "540000000",
+      "duration_ns": "4000000",
+      "irq": 42,
+      "name": "synthetic_irq",
+      "cpu": 0
+    },
+    {
+      "type": "atrace-async-track-slice",
+      "at_ns": "560000000",
+      "duration_ns": "30000000",
+      "process": "system",
+      "thread": "system-main",
+      "track_name": "JobScheduler",
+      "name": "scheduled job #12#<10999>com.smartperfetto.fixture/.SyntheticJob#",
+      "cookie": 12
+    }
+  ]
+}

@@ -130,6 +130,8 @@ export interface AnalysisSummary {
   recommendations?: string[];
   confidence?: number;
   partialReasons?: string[];
+  analysisReceipt?: import('./dataContract').AnalysisReceipt;
+  uiActionProposals?: import('./dataContract').UiActionProposalV1[];
 }
 
 export interface NormalizedMetricSource {
@@ -176,6 +178,53 @@ export interface EvidenceRef {
   eventCursor?: number;
   url?: string;
   metadata?: Record<string, unknown>;
+}
+
+export type SimilarityHintSource = 'analysis_result_snapshot' | 'case_library';
+export type SimilarityHintBand = 'strong' | 'partial' | 'background';
+
+export interface SimilarityMatchReason {
+  feature: string;
+  currentValue?: string | number | boolean;
+  matchedValue?: string | number | boolean;
+  weight: number;
+}
+
+export interface SimilarityHintV1 {
+  schemaVersion: 1;
+  id: string;
+  source: SimilarityHintSource;
+  sourceId: string;
+  score: number;
+  band: SimilarityHintBand;
+  matchReasons: SimilarityMatchReason[];
+  limitations: string[];
+  allowedUse: 'navigation_hint_only';
+}
+
+export interface TraceSimilarityCaseQuery {
+  scene: string;
+  domainPack: string;
+  rootCause: string;
+  secondaryRootCauses?: string[];
+  responsibility?: import('./caseKnowledge').CaseKnowledgeResponsibility;
+  audiences?: Array<'app' | 'oem'>;
+}
+
+export interface TraceSimilaritySignatureV1 {
+  schemaVersion: 1;
+  sceneType?: AnalysisResultSceneType;
+  appPackage?: string;
+  processName?: string;
+  deviceModel?: string;
+  androidVersion?: string;
+  buildFingerprintPrefix?: string;
+  traceDurationMs?: number;
+  traceSizeBytes?: number;
+  metrics: Record<string, number>;
+  categoricalSignals: Record<string, string | boolean>;
+  caseEvidenceSignatures: Record<string, unknown>;
+  caseQuery?: TraceSimilarityCaseQuery;
 }
 
 export interface AnalysisResultSnapshot {

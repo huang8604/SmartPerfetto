@@ -12,31 +12,19 @@
 import type { BackendAgentRuntimeKind } from '../agentRuntime/runtimeSelection';
 import type { SessionLineage } from '../agentv3/sessionStateSnapshot';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
-
-export type CapturePresetId =
-  | 'startup'
-  | 'scrolling'
-  | 'anr'
-  | 'game'
-  | 'memory'
-  | 'cpu'
-  | 'power'
-  | 'overview'
-  | 'full';
-
-export type CaptureTarget = 'android' | 'linux';
+import type {
+  CaptureConfigRenderOptions,
+  CapturePresetId,
+  CaptureTarget,
+} from '../services/traceCaptureConfig';
 
 export type CliAnalysisMode = 'fast' | 'full' | 'auto';
 
-export interface CaptureConfigRenderOptions {
-  target: CaptureTarget;
-  preset: CapturePresetId;
-  app?: string;
-  durationSeconds: number;
-  bufferSizeKb?: number;
-  extraAtraceCategories?: string[];
-  cuj?: string;
-}
+export type {
+  CaptureConfigRenderOptions,
+  CapturePresetId,
+  CaptureTarget,
+};
 
 export interface CaptureToolResolution {
   name: 'adb' | 'tracebox';
@@ -115,6 +103,8 @@ export interface CliSessionConfig {
   codeAwareMode?: CodeAwareMode;
   /** Registered codebase ids exposed to this analysis turn. */
   codebaseIds?: string[];
+  /** Registered private knowledge source ids exposed to this analysis turn. */
+  knowledgeSourceIds?: string[];
   /** Analysis mode selected for the latest turn. */
   analysisMode?: CliAnalysisMode;
   /** Capture metadata when the session was created by `smp capture ... --analyze`. */

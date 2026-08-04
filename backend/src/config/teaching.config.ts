@@ -24,20 +24,12 @@
 /**
  * Default pipeline configuration when detection fails or returns incomplete data.
  *
- * Rationale:
- * - ANDROID_VIEW_STANDARD_BLAST: Most common rendering pipeline on modern Android
- * - confidence 0.5: Neutral confidence indicating uncertain detection
- * - doc_path: Points to standard Android View documentation
+ * The default pipeline/type/document selection belongs to the rendering
+ * catalog. This object only contains generic presentation defaults.
  */
 export const TEACHING_DEFAULTS = {
-  /** Default pipeline ID when detection fails */
-  pipelineId: 'ANDROID_VIEW_STANDARD_BLAST',
-
   /** Default confidence when parsing fails (0.5 = uncertain) */
   confidence: 0.5,
-
-  /** Default documentation path */
-  docPath: 'rendering_pipelines/android_view_standard.md',
 
   /** Default icon for unknown pipeline types */
   icon: '📱',

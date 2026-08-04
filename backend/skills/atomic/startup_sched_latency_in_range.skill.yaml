@@ -21,7 +21,6 @@ meta:
 prerequisites:
   modules:
     - android.startup.startups
-    - sched
 
 inputs:
   - name: package

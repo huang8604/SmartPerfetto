@@ -9,7 +9,7 @@ import type { ClaimVerificationIssue } from '../../types/claimVerification';
 import type { DataEnvelope } from '../../types/dataContract';
 import type { CaseNode } from '../../types/sparkContracts';
 import { CaseLibrary } from '../caseLibrary';
-import { RagStore } from '../ragStore';
+import { getDefaultRagStore, type RagStore } from '../ragStore';
 import type { KnowledgeScope } from '../scopedKnowledgeStore';
 import {
   createCaseRetriever,
@@ -170,7 +170,7 @@ function audienceForResponsibility(responsibility: string): Array<'app' | 'oem'>
 
 function defaultRetriever(input: AttachCaseHitsToContractInput): (query: CaseRecommendationQuery) => CaseKnowledgeReportRecommendation[] {
   const library = input.library ?? new CaseLibrary(backendLogPath('case_library.json'));
-  const ragStore = input.ragStore ?? new RagStore(backendLogPath('rag_store.json'));
+  const ragStore = input.ragStore ?? getDefaultRagStore();
   const retriever = createCaseRetriever({ library, ragStore, scope: input.knowledgeScope });
   return query => retriever.retrieve(query);
 }

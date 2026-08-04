@@ -6,7 +6,7 @@ priority: high
 
 meta:
   display_name: Multi Trace Result Comparison
-  description: Builds a comparison matrix from persisted analysis result snapshots.
+  description: Builds a comparison matrix from persisted analysis result snapshots, not live raw trace-pair panes.
   tags:
     - comparison
     - analysis_result_snapshot
@@ -15,14 +15,14 @@ meta:
 triggers:
   keywords:
     en:
-      - multi trace comparison
       - result comparison
-      - startup comparison
-      - fps comparison
-      - jank comparison
+      - multi trace result comparison
+      - snapshot comparison
+      - analysis result snapshot comparison
   patterns:
     - compare .* analysis results
     - compare .* snapshots
+    - compare .* result snapshots
 
 inputs:
   - name: snapshot_ids

@@ -22,7 +22,7 @@ Directory roles:
 | Composite | `backend/skills/composite/` | Multi-step orchestration |
 | Comparison | `backend/skills/comparison/` | Multi-trace or multi-result comparison Skills |
 | Deep | `backend/skills/deep/` | Deep analysis such as CPU profiling |
-| Pipeline | `backend/skills/pipelines/` | Rendering pipeline detection and teaching content |
+| Pipeline | `backend/skills/pipelines/` | Rendering subpath detection, supporting feature evidence, and teaching-source references |
 | Module | `backend/skills/modules/` | Modular app/framework/hardware/kernel analysis |
 | Template | `backend/skills/_template/` | Authoring templates, not necessarily runtime analysis capability |
 
@@ -79,7 +79,26 @@ steps:
 | `parallel` | Run independent child steps concurrently |
 | `conditional` | Branch by expression |
 | `diagnostic` | Emit rule-based findings |
+| `ai_decision` | Ask the configured AI runtime for a structured decision; disabled runtimes produce an explicit skipped result |
+| `ai_summary` | Ask the configured AI runtime to summarize selected step inputs; disabled runtimes produce an explicit skipped result |
 | `pipeline` | Detect or describe rendering pipeline behavior |
+
+## Rendering Pipeline Catalog
+
+`docs/rendering_pipelines/*.md` is synchronized from a pinned
+`Gracker/rendering_pipelines` commit and is the Android 17 teaching source of
+truth. `backend/skills/pipelines/index.yaml` is the live inventory that maps
+concrete rendering types to detector entries. A `variant` may become the
+primary type; a `feature` only adds evidence such as ANGLE, PIP, HWC overlay,
+or SurfaceControl usage.
+
+Pipeline definitions retain trace signals, auto-pin guidance, and analysis
+recommendations, but their `teaching` block contains only a `source` reference
+to one of the synchronized documents. Builds copy all catalog documents into
+`backend/dist/rendering_pipelines/` for Docker, portable, and npm CLI runtime
+paths. Use `npm run sync:rendering-pipelines -- --source <checkout> --apply` to
+update the import and `npm run check:rendering-pipelines` to verify the pin,
+hashes, and references.
 
 ## Parameter Substitution
 
@@ -120,4 +139,120 @@ npm run validate:skills
 npm run test:scene-trace-regression
 ```
 
-SmartPerfetto Skills are repository-specific YAML DSL files for deterministic trace analysis, SQL execution, layered result construction, and frontend DataEnvelope rendering.
+## Relationship To Standard Agent Skills
+
+SmartPerfetto YAML Skills and standard Agent Skills serve different execution
+boundaries. YAML under `backend/skills/` remains the deterministic product
+runtime truth: it drives registry selection, multi-step execution,
+DataEnvelope output, artifacts, reports, session provenance, and frontend
+projection. It is not replaced by Markdown instructions.
+
+[Gracker/Perfetto-Skills](https://github.com/Gracker/Perfetto-Skills) is the
+generated and curated portable projection for compatible agents with local
+filesystem and terminal access. It exports agent-readable workflows, extracted
+SQL, selected strategy and knowledge methodology, rendering-pipeline material,
+and a checksum-pinned local trace-processor runtime. It does not export provider
+management, session state, artifacts, streaming, or UI behavior.
+
+`backend/skills/public-export.yaml` explicitly classifies every runtime
+candidate by workflow, disposition, and destination. The public catalog records
+the SmartPerfetto source commit and per-file SHA-256 values; normal export never
+infers missing policy entries. After changing `backend/skills/`,
+`backend/strategies/`, `docs/rendering_pipelines/`, or the export policy, run:
+
+```bash
+npm run verify:public-skills
+```
+
+The command uses the sibling `../Perfetto-Skills` checkout by default, or
+`PERFETTO_SKILLS_DIR` when set, and rejects source/catalog/generated-file drift.
+
+## Skill Tiers And Validation Rules
+
+Skills may declare top-level `tier: S | A | B` to express target complexity and
+review expectations:
+
+| Tier | Use case | Structural expectation |
+|---|---|---|
+| `S` | Flagship cross-domain analysis such as startup, scrolling, CPU, or scene reconstruction | `type: composite` or `deep`, usually multiple Perfetto stdlib modules and 5+ steps |
+| `A` | Focused single-domain analysis that can produce diagnostic findings or key lists | Declares relevant `prerequisites.modules` and reusable display layers |
+| `B` | Single-fact or helper data provider | Clear query boundary, fields, and missing-data semantics |
+
+`cd backend && npm run validate:skills` enforces these stable rules:
+
+| Rule | Behavior |
+|---|---|
+| `skill-tier-must-match-declared` | Validates `tier` is `S/A/B` and reports structural gaps as migration warnings |
+| `skill-stdlib-detected-vs-declared` | Scans SQL for Perfetto stdlib symbols and requires coverage in `prerequisites.modules` |
+| `skill-include-budget-soft-cap` | Warns when `prerequisites.modules` exceeds 8 modules |
+| `skill-step-id-uniqueness` | Requires unique step ids inside each Skill |
+| `skill-vendor-override-runtime-conformant` | Requires vendor overrides to contain real `additional_steps`, vendor signatures, and a registered base Skill |
+
+`backend/skills/_template/` contains authoring templates and is not loaded into
+the runtime registry. After copying a template, remove placeholders, place the
+Skill under a runtime Skill directory, then run `validate:skills` and the
+matching trace regression.
+
+## Local Skill Packs
+
+Local Skill Packs let reviewed team or OEM Skills be installed for one
+workspace without editing `backend/skills/`. The first release is a local
+directory import path, not a remote marketplace: HTTPS URLs, auto-sync,
+`.well-known` discovery, and archive unpacking are not supported.
+
+The directory must contain `smartperfetto-skill-pack.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "packId": "vendor-scroll-pack",
+  "name": "Vendor Scroll Pack",
+  "version": "1.0.0",
+  "publisher": "vendor-team",
+  "description": "Reviewed scrolling diagnostics",
+  "license": "AGPL-3.0-or-later",
+  "compatibility": {
+    "smartPerfettoMinVersion": "0.1.0"
+  },
+  "assets": [
+    {
+      "kind": "skill",
+      "path": "atomic/vendor_scroll.skill.yaml",
+      "sha256": "<64 hex chars>",
+      "sizeBytes": 1234
+    }
+  ]
+}
+```
+
+Allowed asset roots are `atomic/`, `composite/`, `deep/`, `system/`,
+`comparison/`, `modules/`, `pipelines/`, `fragments/`, and `docs/`.
+`strategies/`, `vendors/`, `custom/`, hidden files, symlinks, executable
+extensions, and undeclared files are rejected. Each asset's `sha256` and
+`sizeBytes` must match the actual file.
+
+Workspace management endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/workspaces/:workspaceId/skill-packs/preview` | Read-only preview |
+| `POST` | `/api/workspaces/:workspaceId/skill-packs/install` | Rerun preview, then install |
+| `GET` | `/api/workspaces/:workspaceId/skill-packs` | List installed packs |
+| `PATCH` | `/api/workspaces/:workspaceId/skill-packs/:packId` | Enable or disable |
+| `DELETE` | `/api/workspaces/:workspaceId/skill-packs/:packId` | Disable and remove the managed copy |
+
+Install copies declared assets to managed storage and records manifest hash,
+content hash, approver, Skill IDs, fragment keys, and docs paths in
+`skill_registry_entries.metadata_json`. Reinstalling the same `packId +
+version` with a different content hash is rejected. External Skill IDs cannot
+override built-in Skills, and SQL fragment keys cannot override different
+built-in fragment content.
+
+Agent sessions with workspace context load built-in Skills plus the enabled
+Skill Packs for that workspace at runtime. `list_skills` returns external-pack
+`origin` metadata, and `invoke_skill` refreshes the executor and SQL fragment
+cache when the registry fingerprint changes, so enabling, disabling, or
+removing a pack does not keep stale content executable. Legacy global
+`/api/admin/skills` and the current `smp skill` CLI path remain built-in-only;
+CLI execution of workspace packs requires future explicit tenant/workspace
+context support.

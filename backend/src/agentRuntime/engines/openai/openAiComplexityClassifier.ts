@@ -16,6 +16,7 @@
 
 import { buildComplexityClassifierPrompt } from '../../../agentv3/queryComplexityPrompt';
 import type { ComplexityClassifierInput, QueryComplexity } from '../../../agentv3/types';
+import { buildOpenAIChatCompletionsTokenLimit } from '../../../services/providerManager/openAiChatCompletionsCompat';
 import type { OpenAIAgentConfig } from './openAiConfig';
 
 interface ChatCompletionsResponse {
@@ -61,6 +62,7 @@ export function buildChatCompletionsUrl(baseUrl: string): URL {
 export async function classifyQueryWithOpenAILightModel(
   input: string | ComplexityClassifierInput,
   config: Pick<OpenAIAgentConfig, 'baseURL' | 'apiKey' | 'lightModel' | 'classifierTimeoutMs'>,
+  analysisSignal?: AbortSignal,
 ): Promise<{ complexity: QueryComplexity; reason: string }> {
   if (!config.baseURL) {
     return { complexity: 'full', reason: 'OpenAI baseURL missing' };
@@ -69,6 +71,12 @@ export async function classifyQueryWithOpenAILightModel(
   const prompt = buildComplexityClassifierPrompt(input);
   const url = buildChatCompletionsUrl(config.baseURL);
   const controller = new AbortController();
+  const abortFromAnalysis = () => controller.abort(analysisSignal?.reason);
+  if (analysisSignal?.aborted) {
+    abortFromAnalysis();
+  } else {
+    analysisSignal?.addEventListener('abort', abortFromAnalysis, { once: true });
+  }
   const timeoutMs = config.classifierTimeoutMs ?? 30_000;
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -88,7 +96,7 @@ export async function classifyQueryWithOpenAILightModel(
         model: config.lightModel,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0,
-        max_tokens: 200,
+        ...buildOpenAIChatCompletionsTokenLimit(config.lightModel, 200),
       }),
     });
 
@@ -100,11 +108,13 @@ export async function classifyQueryWithOpenAILightModel(
     const text = data.choices?.[0]?.message?.content ?? '';
     return parseClassifierJson(text);
   } catch (err) {
+    if (analysisSignal?.aborted) throw err;
     if (timedOut) {
       return { complexity: 'full', reason: `OpenAI classifier timed out after ${timeoutMs / 1000}s` };
     }
     return { complexity: 'full', reason: `OpenAI classifier failed: ${(err as Error).message}` };
   } finally {
     clearTimeout(timer);
+    analysisSignal?.removeEventListener('abort', abortFromAnalysis);
   }
 }

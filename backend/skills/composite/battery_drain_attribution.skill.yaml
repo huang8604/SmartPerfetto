@@ -149,7 +149,7 @@ steps:
     name: "JobScheduler 事件"
     skill: android_job_scheduler_events
     params:
-      package: "${package|${process_name|}}"
+      package: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:

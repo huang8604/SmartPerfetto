@@ -5,6 +5,7 @@
 import {describe, expect, it, jest} from '@jest/globals';
 import {SkillAnalysisAdapter} from '../skillAnalysisAdapter';
 import {LayeredResult} from '../skillExecutor';
+import {SkillRegistry} from '../skillLoader';
 
 describe('SkillAnalysisAdapter layered conversion', () => {
   const createAdapter = () => {
@@ -239,7 +240,8 @@ describe('SkillAnalysisAdapter layered conversion', () => {
 
   it('maps detected vendor ids consistently with available vendor profiles', async () => {
     const queryMock = jest.fn() as any;
-    queryMock.mockResolvedValue({
+    queryMock.mockResolvedValueOnce({rows: []});
+    queryMock.mockResolvedValueOnce({
       rows: [['pixel']],
     });
     const traceProcessorMock = {
@@ -263,5 +265,46 @@ describe('SkillAnalysisAdapter layered conversion', () => {
 
     const detected = await adapter.detectVendor('trace-1');
     expect(detected).toEqual({ vendor: 'aosp', confidence: 0.5 });
+  });
+
+  it('preserves external-pack metadata and reports authored localization', async () => {
+    const registry = new SkillRegistry();
+    const externalSkill = {
+      name: 'external_latency_probe',
+      version: '1.0.0',
+      type: 'atomic',
+      meta: {
+        display_name: '外部延迟探针',
+        description: '由外部 Skill Pack 原样提供',
+      },
+      triggers: {keywords: ['external']},
+      steps: [],
+    };
+    (registry as any).skills.set(externalSkill.name, externalSkill);
+    (registry as any).skillOrigins.set(externalSkill.name, {
+      origin: 'external_pack',
+      packId: 'test-pack',
+    });
+    (registry as any).initialized = true;
+
+    const adapter = new SkillAnalysisAdapter(
+      {query: jest.fn()} as any,
+      undefined,
+      {registry},
+    );
+    const skills = await adapter.listSkills('en');
+
+    expect(skills).toEqual([
+      expect.objectContaining({
+        id: externalSkill.name,
+        displayName: externalSkill.meta.display_name,
+        description: externalSkill.meta.description,
+        localizationStatus: 'external_authored',
+      }),
+    ]);
+    await expect(adapter.getSkillOrigin(externalSkill.name)).resolves.toMatchObject({
+      origin: 'external_pack',
+      packId: 'test-pack',
+    });
   });
 });

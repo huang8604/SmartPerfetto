@@ -280,6 +280,212 @@ describe('final result quality gate', () => {
     })?.code).toBe('missing_final_report_heading');
   });
 
+  it('does not require a deliverable final-report heading for quick-run answers', () => {
+    const quickRun: NonNullable<AnalysisResult['quickRun']> = {
+      requestedMode: 'fast',
+      resolvedMode: 'quick',
+      profile: 'normal',
+      targetTurns: 5,
+      hardCapTurns: 50,
+      actualTurns: 0,
+      elapsedMs: 1200,
+      enforcement: 'turn_cap',
+      stopReason: 'answered',
+      evidence: {
+        frontendPrequeryInjected: 1,
+        frontendPrequeryCited: 1,
+        currentRunDataEnvelopes: 1,
+        citedEvidenceRefs: 1,
+      },
+      contextInjected: {
+        conversationTurns: 1,
+        recentSqlResults: 0,
+        sqlPitfallPairs: 0,
+        patternHints: 0,
+        negativePatternHints: 0,
+        caseBackgroundCases: 0,
+      },
+      verifierStatus: 'passed',
+    };
+    const quickAnswer = [
+      '## 快速回答',
+      '',
+      '- 总体 janky frame 数：21',
+      '- drop rate：0.00%',
+      '',
+      '证据：data:frontend_prequery:current:abc123',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({
+        conclusion: quickAnswer,
+        quickRun,
+      }),
+      query: '基于上一轮结果，只说总体 janky frame 数和 drop rate',
+    })).toBeUndefined();
+  });
+
+  it('does not treat quick fact boundary disclaimers as full-report language', () => {
+    const quickRun: NonNullable<AnalysisResult['quickRun']> = {
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      profile: 'normal',
+      targetTurns: 5,
+      hardCapTurns: 50,
+      actualTurns: 0,
+      elapsedMs: 64,
+      enforcement: 'turn_cap',
+      stopReason: 'answered',
+      evidence: {
+        frontendPrequeryInjected: 0,
+        frontendPrequeryCited: 0,
+        currentRunDataEnvelopes: 1,
+        citedEvidenceRefs: 1,
+      },
+      contextInjected: {
+        conversationTurns: 0,
+        recentSqlResults: 0,
+        sqlPitfallPairs: 0,
+        patternHints: 0,
+        negativePatternHints: 0,
+        caseBackgroundCases: 0,
+      },
+      verifierStatus: 'passed',
+    };
+
+    const quickFactAnswer = [
+      '当前 trace 的常用数据清单包括：trace_bounds 录制时长 7.815673 秒；slice/track 时间线（slice=101278, track=771）；FrameTimeline（actual=697, expected=697）。这是基于常用 Perfetto 表/模块计数的快速清单，不等同于完整数据源枚举或问题诊断。',
+      '',
+      '## 逐句数据引用（结构化来源）',
+      '- evidence_ref_id=`data:runtime_trace_fact:trace_data_inventory:current:abc123`',
+    ].join('\n');
+
+    expect(assessFinalResultQuality({
+      result: result({
+        conclusion: quickFactAnswer,
+        quickRun,
+      }),
+      query: '这个 trace 采集了哪些数据？',
+    })).toBeUndefined();
+  });
+
+  it('marks quick answers with failed claim verification as partial', () => {
+    const quickRun: NonNullable<AnalysisResult['quickRun']> = {
+      requestedMode: 'fast',
+      resolvedMode: 'quick',
+      profile: 'normal',
+      targetTurns: 5,
+      hardCapTurns: 50,
+      actualTurns: 4,
+      elapsedMs: 9000,
+      enforcement: 'turn_cap',
+      stopReason: 'answered',
+      evidence: {
+        frontendPrequeryInjected: 0,
+        frontendPrequeryCited: 0,
+        currentRunDataEnvelopes: 1,
+        citedEvidenceRefs: 1,
+      },
+      contextInjected: {
+        conversationTurns: 0,
+        recentSqlResults: 0,
+        sqlPitfallPairs: 0,
+        patternHints: 0,
+        negativePatternHints: 0,
+        caseBackgroundCases: 0,
+      },
+      verifierStatus: 'failed',
+    };
+    const target = result({
+      quickRun,
+      conclusion: '滑动总帧数 **347**，janky frame 数 **0**。证据：data:sql_summary:current:abc',
+      claimVerificationResult: {
+        schemaVersion: 'claim_verifier@1',
+        status: 'failed',
+        policy: 'record_only',
+        passed: false,
+        checkedClaimCount: 1,
+        unsupportedClaimCount: 1,
+        claimResults: [{ claimId: 'claim-frames', status: 'unsupported' }],
+        issues: [{
+          claimId: 'claim-frames',
+          severity: 'error',
+          code: 'unsupported_claim',
+          message: 'No evidence matched this claim',
+        }],
+      },
+    });
+
+    const issue = applyFinalResultQualityGate({
+      result: target,
+      query: '这条 trace 的滑动总帧数和 janky frame 数是多少？',
+    });
+
+    expect(issue?.code).toBe('quick_verifier_failed');
+    expect(target.partial).toBe(true);
+    expect(target.terminationMessage).toContain('未通过证据核对');
+  });
+
+  it('marks over-expanded quick triage reports as partial', () => {
+    const quickRun: NonNullable<AnalysisResult['quickRun']> = {
+      requestedMode: 'fast',
+      resolvedMode: 'quick',
+      profile: 'triage',
+      targetTurns: 5,
+      hardCapTurns: 50,
+      actualTurns: 7,
+      elapsedMs: 28_000,
+      enforcement: 'turn_cap',
+      stopReason: 'extended_answered',
+      evidence: {
+        frontendPrequeryInjected: 0,
+        frontendPrequeryCited: 0,
+        currentRunDataEnvelopes: 13,
+        citedEvidenceRefs: 5,
+      },
+      contextInjected: {
+        conversationTurns: 0,
+        recentSqlResults: 0,
+        sqlPitfallPairs: 0,
+        patternHints: 0,
+        negativePatternHints: 0,
+        caseBackgroundCases: 0,
+      },
+      verifierStatus: 'passed',
+    };
+    const target = result({
+      quickRun,
+      conclusion: [
+        '# 滑动卡顿完整诊断报告',
+        '',
+        '## 一、全景概览',
+        '',
+        '总帧数 347，掉帧 7。',
+        '',
+        '## 二、根因分析',
+        '',
+        '主因 A。',
+        '',
+        '## 三、代码责任链',
+        '',
+        '责任链 B。',
+        '',
+        '## 四、优化建议',
+        '',
+        '建议 C。',
+      ].join('\n'),
+    });
+
+    const issue = applyFinalResultQualityGate({
+      result: target,
+      query: '请完整诊断这次滑动卡顿的根因、优化方案和代码责任链',
+    });
+
+    expect(issue?.code).toBe('quick_full_report_shape');
+    expect(target.partial).toBe(true);
+    expect(target.terminationMessage).toContain('快速模式');
+  });
+
   it('flags sparse unverified analysis conclusions and keeps concise factual answers alone', () => {
     expect(assessFinalResultQuality({
       result: result({
@@ -743,7 +949,7 @@ describe('final result quality gate', () => {
       '',
       '- queueBuffer 不等于上屏；它只证明 producer submission。',
       '- dequeueBuffer 等待更接近 release fence/backpressure。',
-      '- acquire fence 影响 SF latch，present fence 影响可见上屏，release fence 影响 producer 复用。',
+      '- acquire fence 影响 SF latch，present fence 只锚定显示栈提交边界、不证明用户实际看到，release fence 影响 producer 复用。',
       '- BLAST Transaction 到达和 SurfaceFlinger latch 是独立阶段，不能混用。',
       '',
       '## 图形内存/刷新策略边界',
@@ -1830,5 +2036,46 @@ describe('final result quality gate', () => {
     });
 
     expect(issue?.code).toBe('kernel_blocking_claim_boundary');
+  });
+
+  it('requires every known dual-trace package identity in the deliverable conclusion', () => {
+    const issue = assessFinalResultQuality({
+      result: result({
+        conclusion: [
+          '# 双 Trace 对比分析报告',
+          '',
+          '## 综合结论',
+          '',
+          '当前侧 com.example.heavy 的主线程阻塞明显高于右侧 demo。',
+        ].join('\n'),
+      }),
+      query: '对比两个 trace 的性能差异',
+      comparisonIdentity: {
+        currentPackageName: 'com.example.heavy',
+        referencePackageName: 'com.example.demo',
+      },
+    });
+
+    expect(issue?.code).toBe('comparison_identity_incomplete');
+    expect(issue?.message).toContain('com.example.demo');
+  });
+
+  it('accepts a dual-trace conclusion that explicitly names both package identities', () => {
+    expect(assessFinalResultQuality({
+      result: result({
+        conclusion: [
+          '# 双 Trace 对比分析报告',
+          '',
+          '## 综合结论',
+          '',
+          '当前侧 com.example.heavy 的主线程阻塞明显高于参考侧 com.example.demo。',
+        ].join('\n'),
+      }),
+      query: '对比两个 trace 的性能差异',
+      comparisonIdentity: {
+        currentPackageName: 'com.example.heavy',
+        referencePackageName: 'com.example.demo',
+      },
+    })).toBeUndefined();
   });
 });

@@ -15,9 +15,10 @@ import { makeSparkProvenance } from '../../types/sparkContracts';
 import { CaseGraph } from '../caseGraph';
 import { CaseLibrary } from '../caseLibrary';
 import { RagStore } from '../ragStore';
-import type { KnowledgeScope } from '../scopedKnowledgeStore';
+import {resolveKnowledgeScope, type KnowledgeScope} from '../scopedKnowledgeStore';
 import { anonymizeCaseEvolutionInput } from './caseAnonymizer';
 import type { CaseCandidateOutboxHandle } from './caseCandidateOutbox';
+import {caseCandidateKnowledgeScope} from './caseCandidateBuilder';
 
 export const LEARNED_CASE_SOURCE = 'runtime_analysis_candidate';
 export const LEARNED_CASE_EDGE_PREFIX = 'case-learned-edge:';
@@ -91,10 +92,39 @@ export function rederiveLearnedCandidates(
   const warnings: string[] = [];
   const reviewedRows = opts.outbox.listCandidates({ states: ['reviewed'] });
   const rejectedRows = opts.outbox.listCandidates({ states: ['rejected'] });
+  const requestedScope = opts.knowledgeScope
+    ? resolveKnowledgeScope(opts.knowledgeScope)
+    : null;
+  const scopes = new Map<string, KnowledgeScope>();
+  if (requestedScope) {
+    scopes.set(`${requestedScope.tenantId}\0${requestedScope.workspaceId}`, {
+      tenantId: requestedScope.tenantId,
+      workspaceId: requestedScope.workspaceId,
+    });
+  }
+  for (const row of [...reviewedRows, ...rejectedRows]) {
+    const scope = caseCandidateKnowledgeScope(row.candidate);
+    if (!scope) {
+      warnings.push(`skipped legacy unscoped candidate ${row.candidateId}`);
+      continue;
+    }
+    const resolved = resolveKnowledgeScope(scope);
+    if (requestedScope && (
+      requestedScope.tenantId !== resolved.tenantId ||
+      requestedScope.workspaceId !== resolved.workspaceId
+    )) continue;
+    scopes.set(`${resolved.tenantId}\0${resolved.workspaceId}`, scope);
+  }
 
-  const artifacts = reviewedRows
-    .filter(row => row.review?.decision === 'promote')
-    .map(row => {
+  let reviewed = 0;
+  let demotedPrivate = 0;
+  for (const scope of scopes.values()) {
+    const rowsForScope = reviewedRows.filter(row => {
+      const rowScope = caseCandidateKnowledgeScope(row.candidate);
+      return rowScope && sameKnowledgePartition(rowScope, scope) &&
+        row.review?.decision === 'promote';
+    });
+    const artifacts = rowsForScope.map(row => {
       const built = buildArtifacts(
         row.candidate,
         row.review!,
@@ -106,50 +136,55 @@ export function rederiveLearnedCandidates(
       warnings.push(...built.warnings);
       return built;
     });
+    reviewed += artifacts.length;
 
-  for (const edge of opts.graph.listEdges(opts.knowledgeScope)) {
-    if (edge.edgeId.startsWith(LEARNED_CASE_EDGE_PREFIX)) {
-      opts.graph.removeEdge(edge.edgeId, opts.knowledgeScope);
+    for (const edge of opts.graph.listEdges(scope)) {
+      if (edge.edgeId.startsWith(LEARNED_CASE_EDGE_PREFIX)) {
+        opts.graph.removeEdge(edge.edgeId, scope);
+      }
     }
-  }
-  for (const chunk of opts.ragStore.listChunks({
-    kind: 'case_library',
-    registryOrigin: 'plan54_cases',
-    uriPrefix: LEARNED_CASE_RAG_URI_PREFIX,
-    scope: opts.knowledgeScope,
-  })) {
-    opts.ragStore.removeChunk(chunk.chunkId, opts.knowledgeScope);
-  }
-  for (const built of artifacts) {
-    for (const edge of built.edges) opts.graph.addEdge(edge, opts.knowledgeScope);
-    opts.ragStore.addChunk(built.chunk, opts.knowledgeScope);
+    for (const chunk of opts.ragStore.listChunks({
+      kind: 'case_library',
+      registryOrigin: 'plan54_cases',
+      uriPrefix: LEARNED_CASE_RAG_URI_PREFIX,
+      scope,
+    })) {
+      opts.ragStore.removeChunk(chunk.chunkId, scope);
+    }
+    for (const built of artifacts) {
+      for (const edge of built.edges) opts.graph.addEdge(edge, scope);
+      opts.ragStore.addChunk(built.chunk, scope);
+      opts.library.saveCase(built.caseNode, scope);
+    }
+
+    const reviewedCaseIds = new Set(artifacts.map(built => built.caseNode.caseId));
+    for (const existing of opts.library.listCases({}, scope)) {
+      if (existing.source !== LEARNED_CASE_SOURCE) continue;
+      if (reviewedCaseIds.has(existing.caseId) || existing.status === 'private') continue;
+      opts.library.saveCase({ ...existing, status: 'private' }, scope);
+      demotedPrivate++;
+    }
+
+    for (const row of rejectedRows) {
+      const rowScope = caseCandidateKnowledgeScope(row.candidate);
+      if (!rowScope || !sameKnowledgePartition(rowScope, scope)) continue;
+      const learnedCaseId = row.learnedCaseId ?? learnedCaseIdForCandidate(row.candidateId);
+      const existing = opts.library.getCase(learnedCaseId, scope);
+      if (existing && existing.status !== 'private') {
+        opts.library.saveCase({ ...existing, status: 'private' }, scope);
+        demotedPrivate++;
+      }
+    }
   }
   opts.ragStore.flush();
 
-  const reviewedCaseIds = new Set(artifacts.map(built => built.caseNode.caseId));
-  for (const built of artifacts) {
-    opts.library.saveCase(built.caseNode, opts.knowledgeScope);
-  }
+  return { reviewed, demotedPrivate, warnings };
+}
 
-  let demotedPrivate = 0;
-  for (const existing of opts.library.listCases({}, opts.knowledgeScope)) {
-    if (existing.source !== LEARNED_CASE_SOURCE) continue;
-    if (reviewedCaseIds.has(existing.caseId)) continue;
-    if (existing.status === 'private') continue;
-    opts.library.saveCase({ ...existing, status: 'private' }, opts.knowledgeScope);
-    demotedPrivate++;
-  }
-
-  for (const row of rejectedRows) {
-    const learnedCaseId = row.learnedCaseId ?? learnedCaseIdForCandidate(row.candidateId);
-    const existing = opts.library.getCase(learnedCaseId, opts.knowledgeScope);
-    if (existing && existing.status !== 'private') {
-      opts.library.saveCase({ ...existing, status: 'private' }, opts.knowledgeScope);
-      demotedPrivate++;
-    }
-  }
-
-  return { reviewed: artifacts.length, demotedPrivate, warnings };
+function sameKnowledgePartition(a: KnowledgeScope, b: KnowledgeScope): boolean {
+  const left = resolveKnowledgeScope(a);
+  const right = resolveKnowledgeScope(b);
+  return left.tenantId === right.tenantId && left.workspaceId === right.workspaceId;
 }
 
 function buildArtifacts(

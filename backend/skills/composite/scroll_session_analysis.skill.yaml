@@ -22,10 +22,6 @@ meta:
   icon: "swipe"
   tags: [scroll, jank, interaction, composite]
 
-prerequisites:
-  required_tables:
-    - android_input_event
-
 inputs:
   - name: session_id
     type: number

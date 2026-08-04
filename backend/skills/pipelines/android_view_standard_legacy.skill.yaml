@@ -20,7 +20,7 @@ meta:
   description: "Android 12 之前的 HWUI + Legacy BufferQueue 渲染管线"
   icon: "android"
   family: hwui
-  doc_path: "rendering_pipelines/android_view_standard.md"
+  doc_path: rendering_pipelines/S02_aosp_standard_type.md
   # ----- Article-grounded signature (S02) -----
   s_article_ref: "S02"
   four_features:
@@ -59,67 +59,7 @@ detection:
     - thread: UnityGfx         # Game Engine
 
 teaching:
-  title: "Android View 标准渲染管线 (Legacy)"
-  summary: |
-    Android 12 之前的默认渲染管线，使用 HWUI 硬件加速和传统 BufferQueue 机制。
-    Buffer 通过 Binder 调用提交给 SurfaceFlinger，缺少原子性事务支持。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant Main as App (main)
-      participant RT as RenderThread
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 Frame N Production Phase (Legacy)
-      VA->>Main: 🔔 VSync-app 信号触发
-      activate Main
-      Main->>Main: Choreographer#doFrame
-      Main->>Main: Input → Animation → Measure → Layout → Draw
-      Main->>RT: syncFrameState (阻塞)
-      deactivate Main
-
-      activate RT
-      RT->>BQ: dequeueBuffer
-      RT->>RT: DrawFrame (GPU 渲染)
-      RT->>BQ: queueBuffer (Binder 调用)
-      deactivate RT
-
-      Note over BQ,SF: 📍 Frame N Consumption Phase
-      BQ-->>SF: onFrameAvailable 回调
-      VS->>SF: 🔔 VSync-sf 信号触发
-      activate SF
-      SF->>SF: handleMessageRefresh
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over VA,SF: ⚠️ Legacy 缺少原子事务，可能出现撕裂/尺寸不同步
-
-  thread_roles:
-    - thread: main
-      role: "UI 构建"
-      description: "Measure/Layout/Draw 生成 DisplayList"
-    - thread: RenderThread
-      role: "GPU 渲染"
-      description: "执行绘制命令，通过 BufferQueue 提交"
-    - thread: SurfaceFlinger
-      role: "合成显示"
-      description: "Latch Buffer，HWC 合成"
-
-  key_slices:
-    - name: "DrawFrame"
-      thread: RenderThread
-      description: "开始渲染"
-    - name: "queueBuffer"
-      thread: RenderThread
-      description: "提交 Buffer 到 BufferQueue"
-    - name: "dequeueBuffer"
-      thread: RenderThread
-      description: "获取空闲 Buffer"
-
+  source: "rendering_pipelines/S02_aosp_standard_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

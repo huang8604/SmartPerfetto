@@ -10,6 +10,12 @@ import { getTraceProcessorService } from '../../services/traceProcessorService';
 import { createSkillExecutor } from '../../services/skillEngine/skillExecutor';
 import { ensureSkillRegistryInitialized, skillRegistry } from '../../services/skillEngine/skillLoader';
 import { withConsoleLogToStderr } from '../io/stdio';
+import {parseOutputLanguage} from '../../agentv3/outputLanguage';
+import {
+  localizeSkillDiagnostics,
+  localizeSkillDisplayResults,
+  localizeSkillDefinition,
+} from '../../services/skillLocalization';
 
 export interface SkillCommandArgs {
   trace: string;
@@ -22,13 +28,15 @@ export interface SkillCommandArgs {
 
 export async function runSkillCommand(args: SkillCommandArgs): Promise<number> {
   const tracePath = path.resolve(args.trace);
-  bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
   const format = args.format ?? 'text';
-  const service = new CliAnalyzeService();
+  const lifecycle: { service?: CliAnalyzeService } = {};
 
   try {
     const params = parseParams(args.params);
     const { traceId, result } = await withConsoleLogToStderr(format !== 'text', async () => {
+      bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
       await ensureSkillRegistryInitialized();
       const skill = skillRegistry.getSkill(args.skillId);
       if (!skill) {
@@ -36,6 +44,9 @@ export async function runSkillCommand(args: SkillCommandArgs): Promise<number> {
       }
 
       const loadedTraceId = await service.loadTrace(tracePath);
+      const outputLanguage = parseOutputLanguage(
+        process.env.SMARTPERFETTO_OUTPUT_LANGUAGE,
+      );
       const executor = createSkillExecutor(
         getTraceProcessorService(),
         undefined,
@@ -48,8 +59,37 @@ export async function runSkillCommand(args: SkillCommandArgs): Promise<number> {
       executor.setFragmentRegistry(skillRegistry.getFragmentCache());
       executor.registerSkills(skillRegistry.getAllSkills());
 
-      const skillResult = await executor.execute(args.skillId, loadedTraceId, params);
-      return { traceId: loadedTraceId, result: skillResult };
+      const skillResult = await executor.execute(
+        args.skillId,
+        loadedTraceId,
+        params,
+        {__outputLanguage: outputLanguage},
+      );
+      const externalAuthored =
+        skillRegistry.getSkillOrigin(args.skillId)?.origin === 'external_pack';
+      const localizedSkill = localizeSkillDefinition(
+        skill,
+        outputLanguage,
+        {externalAuthored},
+      );
+      return {
+        traceId: loadedTraceId,
+        result: {
+          ...skillResult,
+          skillName: localizedSkill.meta.display_name,
+          displayResults: localizeSkillDisplayResults(
+            args.skillId,
+            skillResult.displayResults,
+            outputLanguage,
+            {externalAuthored},
+          ),
+          diagnostics: localizeSkillDiagnostics(
+            skillResult.diagnostics,
+            outputLanguage,
+            {externalAuthored},
+          ),
+        },
+      };
     });
     writeSkillOutput(format, {
       tracePath,
@@ -63,7 +103,7 @@ export async function runSkillCommand(args: SkillCommandArgs): Promise<number> {
     writeError(format, (err as Error).message);
     return 1;
   } finally {
-    await service.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }
 

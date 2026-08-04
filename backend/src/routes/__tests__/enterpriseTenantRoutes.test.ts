@@ -327,7 +327,7 @@ describe('enterprise tenant lifecycle routes', () => {
 
     const tenantListDenied = await analystHeaders(request(app).get('/api/tenant/workspaces'));
     expect(tenantListDenied.status).toBe(403);
-    expect(tenantListDenied.body.details).toContain('Tenant management requires');
+    expect(tenantListDenied.body.details).toContain('Tenant metadata requires');
 
     const ownWorkspaceUpdate = await workspaceAdminHeaders(
       request(app).patch('/api/tenant/workspaces/workspace-a/policies'),
@@ -345,6 +345,38 @@ describe('enterprise tenant lifecycle routes', () => {
     });
     expect(otherWorkspaceDenied.status).toBe(403);
     expect(otherWorkspaceDenied.body.details).toContain('Workspace management requires');
+  });
+
+  it('prevents workspace administrators from elevating themselves or peers', async () => {
+    await seedTenantData();
+    const app = makeApp();
+
+    const selfElevation = await workspaceAdminHeaders(
+      request(app).put('/api/tenant/workspaces/workspace-a/members/workspace-admin-a'),
+    ).send({role: 'org_admin'});
+    expect(selfElevation.status).toBe(403);
+    expect(selfElevation.body.error).toContain('own role');
+
+    const peerElevation = await workspaceAdminHeaders(
+      request(app).put('/api/tenant/workspaces/workspace-a/members/analyst-b'),
+    ).send({role: 'workspace_admin'});
+    expect(peerElevation.status).toBe(403);
+    expect(peerElevation.body.error).toContain('cannot grant role');
+  });
+
+  it('protects the last organization administrator membership', async () => {
+    await seedTenantData();
+    const app = makeApp();
+
+    await adminHeaders(
+      request(app).put('/api/tenant/workspaces/workspace-a/members/admin-a'),
+    ).send({role: 'org_admin'}).expect(200);
+
+    const deletion = await adminHeaders(
+      request(app).delete('/api/tenant/workspaces/workspace-a/members/admin-a'),
+    );
+    expect(deletion.status).toBe(409);
+    expect(deletion.body.error).toContain('last organization administrator');
   });
 
   it('creates a tenant tombstone, records audit state, and blocks new work', async () => {

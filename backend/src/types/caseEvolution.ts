@@ -17,7 +17,7 @@ import type { DataEnvelope } from './dataContract';
 import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 
 export type CaseCandidateState = 'pending_review' | 'reviewed' | 'rejected' | 'archived';
-export const CASE_CANDIDATE_SCHEMA_VERSION = 'case_candidate@1' as const;
+export const CASE_CANDIDATE_SCHEMA_VERSION = 'case_candidate@2' as const;
 export const CASE_CANDIDATE_REVIEW_SCHEMA_VERSION = 'case_candidate_review@1' as const;
 export const CONFIDENCE_HIGH_THRESHOLD = 0.8;
 
@@ -36,6 +36,10 @@ export interface CaseCandidate {
     engine: CaseEvolutionEngine;
     sceneType: string;
     architectureType: string;
+    originScope: {
+      tenantId: string;
+      workspaceId: string;
+    };
   };
   cluster: {
     scene: string;

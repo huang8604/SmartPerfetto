@@ -1,6 +1,6 @@
 {
   "name": "smart-perfetto",
-  "version": "1.0.37",
+  "version": "1.4.0",
   "description": "AI-powered Perfetto analysis platform",
   "private": true,
   "scripts": {
@@ -14,21 +14,37 @@
     "shellcheck": "shellcheck -x start.sh scripts/*.sh",
     "check:frontend-prebuild": "node scripts/check-frontend-prebuild.cjs",
     "test:node-env": "bash scripts/test-node-env.sh",
+    "test:governance": "node --test scripts/__tests__/check-perfetto-skills-impact.test.mjs scripts/__tests__/process-harness.test.mjs scripts/__tests__/service-lifecycle.test.mjs scripts/__tests__/startup-contracts.test.mjs scripts/__tests__/frontend-server-health.test.mjs scripts/__tests__/ensure-trace-processor.test.mjs scripts/__tests__/runtime-distribution-assets.test.mjs scripts/__tests__/release-portable.test.mjs scripts/__tests__/portable-release-smoke-workflow.test.mjs scripts/__tests__/verify-portable-package-safety.test.mjs scripts/__tests__/smoke-portable-archive.test.mjs scripts/__tests__/verify-portable-smoke-evidence.test.mjs scripts/__tests__/native-runtime-compat.test.mjs scripts/__tests__/dual-trace-e2e-services.test.mjs scripts/__tests__/verify-docs.test.mjs scripts/__tests__/find-macho-files.test.mjs scripts/__tests__/i18n-heading-contract.test.mjs",
+    "verify:docs": "node scripts/verify-docs.mjs",
+    "verify:i18n": "npm --prefix backend run check:skill-localizations && node scripts/verify-i18n.mjs",
+    "sync:rendering-pipelines": "node scripts/sync-rendering-pipelines.mjs",
+    "check:rendering-pipelines": "node scripts/sync-rendering-pipelines.mjs --check",
+    "verify:rendering-pipelines": "npm run check:rendering-pipelines && node --test scripts/__tests__/sync-rendering-pipelines.test.mjs scripts/__tests__/rendering-pipeline-runtime-assets.test.mjs && npm --prefix backend run generate:pipeline-detection -- --check",
+    "test:e2e:dual-trace": "node scripts/run-dual-trace-browser-e2e.cjs",
+    "test:e2e:dual-trace-real": "node scripts/run-dual-trace-browser-e2e.cjs --real-provider",
+    "trace:validate": "node Trace/tools/trace-corpus.cjs validate --check-generated",
+    "trace:build": "node Trace/tools/trace-corpus.cjs build --check",
+    "trace:materialize": "node Trace/tools/trace-corpus.cjs materialize",
+    "trace:test": "npm --prefix backend run trace:test",
+    "trace:sql-regression": "npm run trace:validate && npm run trace:materialize && npm run trace:test",
+    "trace:regression": "npm run trace:validate && npm run trace:build && npm run trace:test",
     "rust:fmt": "cargo fmt --manifest-path rust/flamegraph-analyzer/Cargo.toml -- --check",
     "rust:check": "cargo check --manifest-path rust/flamegraph-analyzer/Cargo.toml",
     "rust:test": "cargo test --manifest-path rust/flamegraph-analyzer/Cargo.toml",
     "rust:verify": "npm run rust:fmt && npm run rust:check && npm run rust:test",
-    "package:portable": "./scripts/package-portable.sh",
-    "package:windows-exe": "./scripts/package-windows-exe.sh",
-    "package:macos-app": "./scripts/package-portable.sh --targets macos-arm64",
-    "package:linux": "./scripts/package-portable.sh --targets linux-x64",
+    "package:portable": "bash ./scripts/package-portable.sh",
+    "package:windows-exe": "bash ./scripts/package-windows-exe.sh",
+    "package:macos-app": "bash ./scripts/package-portable.sh --targets macos-arm64",
+    "package:linux": "bash ./scripts/package-portable.sh --targets linux-x64",
     "version:sync": "node scripts/sync-version.cjs",
     "version:set": "node scripts/sync-version.cjs",
+    "verify:public-skills": "bash ./scripts/verify-public-skill-export.sh",
+    "check:perfetto-skills-impact": "node scripts/check-perfetto-skills-impact.mjs",
     "trace-processor:sync-prebuilts": "node scripts/sync-trace-processor-prebuilts.cjs",
-    "release:portable": "./scripts/release-portable.sh",
-    "release:windows-exe": "./scripts/release-windows-exe.sh",
+    "release:portable": "bash ./scripts/release-portable.sh",
+    "release:windows-exe": "bash ./scripts/release-windows-exe.sh",
     "quality": "npm run lint && npm run format:check && npm run deadcode && npm run shellcheck",
-    "verify:pr": "npm run quality && npm run check:frontend-prebuild && npm run rust:verify && npm --prefix backend run verify:pr"
+    "verify:pr": "npm run test:governance && npm run verify:docs && npm run verify:i18n && npm run verify:rendering-pipelines && npm run quality && npm run check:frontend-prebuild && npm run rust:verify && npm --prefix backend run verify:pr"
   },
   "engines": {
     "node": ">=24.0.0 <25.0.0"
@@ -37,7 +53,13 @@
     "node": "24.15.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.16",
-    "knip": "^6.14.2"
+    "@biomejs/biome": "^2.5.4",
+    "ajv": "^8.17.1",
+    "js-yaml": "^5.2.1",
+    "knip": "^6.27.0",
+    "protobufjs": "^7.6.5"
+  },
+  "allowScripts": {
+    "protobufjs@7.6.5": true
   }
 }

@@ -7,6 +7,11 @@ import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
 import { requireRequestContext } from '../middleware/auth';
 import { isOwnedByContext } from '../services/resourceOwnership';
+import {parseOutputLanguage, type OutputLanguage} from '../agentv3/outputLanguage';
+import {
+  privateAnalysisQueryMessage,
+  sessionUsesPrivateKnowledge,
+} from '../services/security/privateAnalysisProjection';
 
 interface SessionStoreLike<TSession> {
   entries(): IterableIterator<[string, TSession]>;
@@ -20,6 +25,10 @@ interface SessionLike {
   tenantId?: string;
   workspaceId?: string;
   userId?: string;
+  codeAwareMode?: string;
+  codebaseIds?: string[];
+  knowledgeSourceIds?: string[];
+  outputLanguage?: import('../agentv3/outputLanguage').OutputLanguage;
 }
 
 interface AgentSessionCatalogRoutesDeps<TSession extends SessionLike> {
@@ -40,6 +49,7 @@ export function registerAgentSessionCatalogRoutes<TSession extends SessionLike>(
 
       const activeSessions: any[] = [];
       const activeIds = new Set<string>();
+      const defaultOutputLanguage = parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
 
       for (const [sessionId, session] of deps.sessionStore.entries()) {
         if (traceId && session.traceId !== traceId) continue;
@@ -51,7 +61,9 @@ export function registerAgentSessionCatalogRoutes<TSession extends SessionLike>(
           sessionId,
           status: session.status,
           traceId: session.traceId,
-          query: session.query,
+          query: sessionUsesPrivateKnowledge(session)
+            ? privateAnalysisQueryMessage(session.outputLanguage ?? defaultOutputLanguage)
+            : session.query,
           createdAt: session.createdAt,
           isActive: true,
           turnCount: activeContext?.getAllTurns().length ?? 0,
@@ -76,13 +88,25 @@ export function registerAgentSessionCatalogRoutes<TSession extends SessionLike>(
 
             const storeStats = persistenceService.getEntityStoreStats(persistedSession.id);
             const persistedContext = persistenceService.loadSessionContext(persistedSession.id);
+            const persistedSelection = (
+              persistenceService.loadSessionStateSnapshot(persistedSession.id) ?? {}
+            ) as {
+              outputLanguage?: OutputLanguage;
+              codeAwareMode?: string;
+              codebaseIds?: string[];
+              knowledgeSourceIds?: string[];
+            };
+            const persistedOutputLanguage = persistedSelection.outputLanguage
+              ?? defaultOutputLanguage;
 
             recoverableSessions.push({
               sessionId: persistedSession.id,
               status: 'recoverable',
               traceId: persistedSession.traceId,
               traceName: persistedSession.traceName,
-              query: persistedSession.question,
+              query: sessionUsesPrivateKnowledge(persistedSelection)
+                ? privateAnalysisQueryMessage(persistedOutputLanguage)
+                : persistedSession.question,
               createdAt: persistedSession.createdAt,
               updatedAt: persistedSession.updatedAt,
               isActive: false,

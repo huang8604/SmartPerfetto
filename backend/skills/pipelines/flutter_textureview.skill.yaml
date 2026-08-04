@@ -20,7 +20,7 @@ meta:
   description: "Flutter TextureView render mode，宿主侧纹理合成路径"
   icon: "flutter"
   family: flutter
-  doc_path: "rendering_pipelines/flutter_textureview.md"
+  doc_path: rendering_pipelines/S10_flutter_type.md
   # ----- Article-grounded signature (S10 + S04) -----
   s_article_ref: "S10"
   four_features:
@@ -61,73 +61,7 @@ detection:
       weight: 10
 
 teaching:
-  title: "Flutter TextureView 渲染管线"
-  summary: |
-    Flutter 使用 TextureView render mode 时，内容先进入 SurfaceTexture，
-    再由宿主侧参与一次纹理采样/合成。它与 PlatformView 的 HC / TLHC
-    不是同一个概念，但二者组合后往往会放大宿主合成开销。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant UI as ui/main (Dart)
-      participant Raster as raster
-      participant RT as RenderThread (Host)
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 Flutter TextureView render mode
-      VA->>UI: 🔔 VSync → BeginFrame (常见)
-      activate UI
-      UI->>UI: Dart 构建 Widget Tree
-      UI->>Raster: 提交 Layer Tree
-      deactivate UI
-
-      activate Raster
-      Raster->>Raster: 光栅化 Flutter 内容
-      Raster->>Raster: queueBuffer → SurfaceTexture
-      Note over Raster,RT: onFrameAvailable → Main → invalidate → RT
-      RT->>RT: updateTexImage
-      deactivate Raster
-
-      activate RT
-      RT->>RT: DrawFrame (合成 Flutter + Native)
-      RT->>BQ: queueBuffer
-      deactivate RT
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over VA,SF: ⚠️ 额外的宿主纹理采样/合成可能带来性能开销
-  thread_roles:
-    - thread: "ui / main / 1.ui"
-      role: "Dart UI 线程"
-      description: "Flutter UI 构建；线程名依版本变化"
-    - thread: "raster / 1.raster"
-      role: "Flutter 光栅化"
-      description: "Flutter 内容光栅化；线程名依版本变化"
-    - thread: RenderThread
-      role: "Android 合成"
-      description: "将 Flutter 纹理与原生 View 合成"
-
-  key_slices:
-    - name: "Engine::BeginFrame"
-      thread: "ui / main / 1.ui"
-      description: "帧开始提示信号，线程名与可见性依版本变化"
-    - name: "Rasterizer::DrawToSurfaces"
-      thread: "raster / 1.raster"
-      description: "Flutter 光栅化输出（线程名与 slice 名不稳定）"
-    - name: "SurfaceTexture"
-      thread: any
-      description: "TextureView / SurfaceTexture 的纹理生产-消费链路"
-    - name: "updateTexImage (hint)"
-      thread: RenderThread
-      description: "宿主侧常见的纹理消费提示信号"
-
+  source: "rendering_pipelines/S10_flutter_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

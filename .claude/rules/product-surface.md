@@ -10,13 +10,15 @@ be checked against the public product surfaces below.
 
 | Entry point | User command/path | Primary users | Notes |
 | --- | --- | --- | --- |
-| Web UI from source | `./start.sh` -> `http://localhost:10000` | local users and maintainers | Uses committed `frontend/`; no `perfetto/` build needed for normal use |
+| Web UI from source | `./start.sh` -> `http://127.0.0.1:10000` | local users and maintainers | Uses committed `frontend/`; backend and frontend bind to IPv4 loopback by default; no `perfetto/` build needed for normal use |
 | Web UI dev mode | `./scripts/start-dev.sh` | AI Assistant plugin developers | Requires `perfetto/` submodule and rebuilt `frontend/` before shipping |
 | Docker | `docker compose -f docker-compose.hub.yml up -d` | users who do not want host Node.js | Cannot read host Claude Code local auth |
 | Portable app | GitHub release assets | non-developer Windows/macOS/Linux users | Bundles Node.js 24, native deps, backend, `frontend/`, trace processor |
 | npm CLI | `npm install -g @gracker/smartperfetto`; `smp` | automation and terminal users | Requires host Node.js `>=24 <25`, no Web UI |
 | CLI trace capture | `smp capture ...` | terminal users collecting traces | Uses Android capture presets/configs, optional post-capture `--analyze`, and local turn artifacts |
 | HTTP/SSE API | `/api/agent/v1/*`, `/api/traces/*`, `/api/reports/*` | integrations and frontend | Keep response contracts stable or regenerate frontend types |
+| Agent external feedback | Analysis message CTA, `/api/agent/v1/:sessionId/external-issue/*` | users reporting analysis, Skill, runtime, docs, or UI gaps | Resolve the persisted source run; pin provider/runtime; validate and deidentify; never submit to GitHub |
+| Self-Evolution admin | Settings `Evolution`, `/api/admin/self-evolution/*` | authorized analysts and administrators | Default off; preserve RBAC/scope, immutable run snapshots, persistence fail-closed, gate binding, reconciliation, and revert |
 
 ## Runtime And Provider Matrix
 
@@ -26,6 +28,7 @@ be checked against the public product surfaces below.
 | `openai-agents-sdk` | OpenAI Responses API, OpenAI-compatible gateways, Ollama/chat-completions endpoints | OpenAI history and last response id in `SessionStateSnapshot` | Requires OpenAI runtime rules; do not validate only Claude env vars |
 | `pi-agent-core` | Custom Provider Manager profiles, Pi model JSON, OpenAI-compatible providers where supported by Pi AI | Pi opaque transcript state in `SessionStateSnapshot` | Keep SmartPerfetto MCP tool allowlists, plan evidence logging, and final verifier parity with the Claude target path |
 | `opencode` | Custom Provider Manager profiles, OpenCode model JSON, OpenAI-compatible providers | OpenCode session id and isolated project/home/config dirs in `SessionStateSnapshot` | Keep the bridge sandboxed and route all SmartPerfetto tools through the shared MCP registry/plan evidence log |
+| `qoder-agent-sdk` | Custom Provider Manager profiles or env, local `qodercli` login, PAT, explicit CLI path | Qoder SDK session id for public runs only | SDK is opt-in; disable built-in tools, project tokens before SSE, and never resume or persist opaque state for private-knowledge runs |
 
 Provider Manager active profiles override `.env` and system fallback. A
 session keeps its selected provider/runtime. Resume must not silently switch to
@@ -53,6 +56,7 @@ AI analysis output is consumed through several surfaces:
 | HTML report | `/api/reports/*`, report export | Keeps evidence, claim verification, identities, and appendix detail |
 | CLI turn artifacts | `~/.smartperfetto/` session/report files | Used by `smp run`, `smp ask`, `smp capture --analyze`, and `smp report` |
 | Analysis-result snapshot | snapshot services and frontend comparison state | Used for multi-result comparison and later review |
+| Agent-assisted issue draft | `/api/agent/v1/:sessionId/external-issue/*`, per-message UI state | Uses persisted run evidence and user confirmation; a durable public thumbs-down may add only an explicit triage signal, while Agent invocation, drafting, Self-Evolution actions, and GitHub submission remain separate |
 | Frontend generated contract | generated DataEnvelope/analysis types | Regenerate when backend contract types change |
 
 Do not collapse these into one behavior. A readability fix for chat should not
@@ -66,7 +70,7 @@ affected:
 - Web UI, CLI, API, reports, Docker, portable packages, and source scripts.
 - CLI trace capture, including capture presets/config output and optional
   post-capture analysis.
-- Claude, OpenAI, Pi Agent Core, and OpenCode runtimes; Provider Manager, env
+- Claude, OpenAI, Pi Agent Core, OpenCode, and Qoder runtimes; Provider Manager, env
   fallback, local Claude auth, and resume/session snapshots.
 - Single-trace, raw trace comparison, multi-analysis-result comparison, and
   report export.
@@ -74,11 +78,38 @@ affected:
   identity resolution, and analysis-result snapshots.
 - Runtime-read content: Skills, Strategies, rendering pipeline docs, SQL schema
   indexes, pre-built UI, and trace processor assets.
+- Self-Evolution: feedback visibility, RunManifest attribution, fixed
+  validation/holdout replay, admin RBAC/SSE, overlay generation, external user
+  data, restart/upgrade reconciliation, and explicit revert.
+- Agent external feedback: current/historical completed runs, exact provider
+  snapshot pin, unsupported-runtime fallback, strict source refs, public
+  sanitization, private/security fail-closed behavior, user confirmation, and
+  no GitHub write.
 - Node.js 24 boundary: source/npm require Node `>=24 <25`; portable packages
   bundle Node 24; Docker does not require host Node.
 - Generated files and artifacts: frontend types, committed `frontend/`,
   package manifests, and release asset manifests.
 - Tests and smoke paths listed in `.claude/rules/testing.md`.
+
+## Portable Impact Triggers
+
+A code change is portable-impacting when it changes any of these contracts,
+even if the original report reproduces on only one operating system:
+
+- launcher process lifecycle, startup/readiness polling, loopback URLs, health
+  endpoints, browser-open URLs, shutdown, or port release;
+- package-relative paths, user data/log directories, archive layout, package
+  manifest fields, or update/migration behavior;
+- bundled Node.js, Claude, OpenCode, `trace_processor_shell`, native
+  dependencies/modules, or their executable/signature metadata;
+- macOS Mach-O discovery, code signing, Hardened Runtime entitlements,
+  notarization, stapling, or Gatekeeper behavior.
+
+During code/PR work, record the portable impact, update the shared contracts
+and focused tests, and run the portable verification tier in
+`.claude/rules/testing.md`. Building and runtime-smoking all final release
+archives is a public release gate, not a requirement for every intermediate
+code edit.
 
 ## Comparison Mode Contract
 
@@ -104,5 +135,11 @@ frontend outputs.
   under `docs/reference/` and `.claude/rules/`.
 - Architecture-affecting changes need `docs/architecture/overview*.md` and the
   relevant subsystem doc updated.
+- Self-Evolution behavior changes also need the bilingual user acceptance guide,
+  configuration/API references, and `self-improving-design.md` kept consistent.
+- Agent external-feedback changes also need the bilingual
+  `agent-assisted-feedback` guide, API/configuration/troubleshooting references,
+  Issue Forms, security policy, and data/runtime architecture docs kept
+  consistent.
 - If a doc path is runtime-read, update code references before moving or
   deleting it.

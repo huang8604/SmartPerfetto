@@ -20,7 +20,7 @@ meta:
   description: "X5/UC 等定制 WebView 内核，使用 TextureView"
   icon: "web"
   family: webview
-  doc_path: "rendering_pipelines/webview_textureview_custom.md"
+  doc_path: rendering_pipelines/S09_webview_type.md
   # ----- Article-grounded signature (S09 + S04) -----
   s_article_ref: "S09"
   four_features:
@@ -55,68 +55,7 @@ detection:
     - thread: "1.ui"           # Flutter engine present → use Flutter pipeline
 
 teaching:
-  title: "WebView TextureView (定制内核) 渲染管线"
-  summary: |
-    使用腾讯 X5、UC 等第三方定制 WebView 内核，通常使用 TextureView
-    进行渲染。这些内核可能有自己的渲染优化策略，但整体上仍属于
-    “SurfaceTexture producer + 宿主侧再次合成”的架构；回调线程和消费线程实现差异很大。
-
-  mermaid: |
-    sequenceDiagram
-      participant Main as App (main)
-      participant RT as RenderThread
-      participant X5 as X5/UC Core
-      participant TV as TextureView
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over Main,SF: 📍 自定义 WebView 内核 (X5/UC)
-      Main->>X5: 加载网页
-      activate X5
-      X5->>TV: 渲染到 TextureView
-      X5->>TV: queueBuffer / produce frame
-      deactivate X5
-
-      Main->>RT: syncFrameState
-      activate RT
-      RT->>RT: DrawFrame
-      RT->>RT: 绑定 TextureView 纹理
-      RT->>BQ: queueBuffer
-      deactivate RT
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over Main,SF: 🇨🇳 国内常见的第三方 WebView 方案
-  thread_roles:
-    - thread: main
-      role: "UI 集成"
-      description: "承载定制 WebView 的 Activity"
-    - thread: RenderThread
-      role: "纹理合成"
-      description: "将定制内核内容作为纹理合成"
-    - thread: WebViewCore
-      role: "定制内核渲染"
-      description: "X5/UC 等内核渲染线程（trace 中可能表现为 WebViewCore/CrRendererMain/其他专用线程）"
-
-  key_slices:
-    - name: "SurfaceTexture"
-      thread: any
-      description: "TextureView/SurfaceTexture 生产-消费链路"
-    - name: "updateTexImage (hint)"
-      thread: RenderThread
-      description: "消费侧更新纹理的常见提示信号"
-    - name: "syncFrameState"
-      thread: RenderThread
-      description: "宿主 UI 与 RenderThread 同步，驱动纹理合成"
-    - name: "DrawFrame"
-      thread: RenderThread
-      description: "宿主 RenderThread 合成 WebView 纹理并提交"
-
+  source: "rendering_pipelines/S09_webview_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

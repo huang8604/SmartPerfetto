@@ -10,6 +10,8 @@ import {
 } from '../traceProcessorProtobuf';
 import {
   normalizeTraceProcessorQueryPriority,
+  TraceProcessorSqlDeadlineExceededError,
+  TraceProcessorSqlQueueOverloadedError,
   TraceProcessorSqlWorker,
 } from '../traceProcessorSqlWorker';
 import { isTraceProcessorQueryCancelledError } from '../traceProcessorCancellation';
@@ -132,6 +134,125 @@ describe('TraceProcessorSqlWorker', () => {
 
     gates.get('SELECT second')!.resolve(encodedSqlResult('SELECT second'));
     await expect(second).resolves.toMatchObject({ rows: [['SELECT second']] });
+  });
+
+  it('bounds queued task count and retained request bytes', async () => {
+    const gate = deferred<Buffer>();
+    worker = new TraceProcessorSqlWorker({
+      processorId: 'processor-bounded',
+      traceId: 'trace-bounded',
+      port: 1,
+      forceInline: true,
+      maxQueuedTasks: 1,
+      maxQueuedBytes: 4,
+      rawExecutor: async () => gate.promise,
+    });
+
+    const running = worker.enqueueRaw(Buffer.from([1]));
+    await flushPromises();
+    const queued = worker.enqueueRaw(Buffer.from([2, 3, 4, 5]));
+    await expect(worker.enqueueRaw(Buffer.from([6]))).rejects.toBeInstanceOf(
+      TraceProcessorSqlQueueOverloadedError,
+    );
+    expect(worker.getStats()).toMatchObject({queuedP1: 1, queuedBytes: 4});
+
+    worker.destroy();
+    gate.resolve(Buffer.from([7]));
+    await expect(running).resolves.toEqual(Buffer.from([7]));
+    await expect(queued).rejects.toThrow(/destroyed/);
+    worker = null;
+  });
+
+  it('enforces bounded query row and response-byte limits', async () => {
+    const encoded = encodeQueryResult({
+      columnNames: ['value'],
+      rows: [[1], [2]],
+    });
+    const observedLimits: Array<number | undefined> = [];
+    worker = new TraceProcessorSqlWorker({
+      processorId: 'processor-bounded-result',
+      traceId: 'trace-bounded-result',
+      port: 1,
+      forceInline: true,
+      rawExecutor: async request => {
+        observedLimits.push(request.maxResponseBytes);
+        return encoded;
+      },
+    });
+
+    await expect(worker.queryBounded('SELECT value', {
+      maxRows: 1,
+      maxResponseBytes: 1024,
+    })).resolves.toMatchObject({
+      rows: [],
+      error: 'trace_processor_row_budget_exceeded',
+    });
+    expect(observedLimits).toEqual([1024]);
+
+    await expect(worker.queryBounded('SELECT value', {
+      maxRows: Number.NaN,
+      maxResponseBytes: 1024,
+    })).resolves.toMatchObject({
+      rows: [],
+      error: 'trace_processor_query_budget_invalid',
+    });
+    await expect(worker.queryBounded('SELECT value', {
+      maxRows: 10,
+      maxResponseBytes: -1,
+    })).resolves.toMatchObject({
+      rows: [],
+      error: 'trace_processor_query_budget_invalid',
+    });
+    expect(observedLimits).toEqual([1024]);
+
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, {'Content-Type': 'application/x-protobuf'});
+      res.end(encoded);
+    });
+    await new Promise<void>(resolve =>
+      server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('test HTTP server did not bind to a port');
+    }
+    worker.destroy();
+    worker = new TraceProcessorSqlWorker({
+      processorId: 'processor-bounded-response',
+      traceId: 'trace-bounded-response',
+      port: address.port,
+      forceInline: true,
+    });
+    try {
+      await expect(worker.queryBounded('SELECT value', {
+        maxRows: 10,
+        maxResponseBytes: encoded.byteLength - 1,
+      })).resolves.toMatchObject({
+        rows: [],
+        error: 'trace_processor_response_budget_exceeded',
+      });
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  it('applies the query deadline while a task is waiting in the queue', async () => {
+    const gate = deferred<Buffer>();
+    worker = new TraceProcessorSqlWorker({
+      processorId: 'processor-deadline',
+      traceId: 'trace-deadline',
+      port: 1,
+      forceInline: true,
+      rawExecutor: async () => gate.promise,
+    });
+
+    const running = worker.enqueueRaw(Buffer.from([1]), {timeoutMs: 5_000});
+    await flushPromises();
+    const queued = worker.enqueueRaw(Buffer.from([2]), {timeoutMs: 10});
+    await expect(queued).rejects.toBeInstanceOf(TraceProcessorSqlDeadlineExceededError);
+    expect(worker.getStats()).toMatchObject({queuedP1: 0, queuedBytes: 0});
+
+    gate.resolve(Buffer.from([3]));
+    await expect(running).resolves.toEqual(Buffer.from([3]));
   });
 
   it('normalizes public priority names', () => {

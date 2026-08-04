@@ -21,7 +21,7 @@ meta:
   description: "通过 ImageReader API 获取渲染帧的管线，常见于 ML 推理、屏幕录制、自定义相机处理和部分 Chrome 渲染模式"
   icon: "image"
   family: specialized
-  doc_path: "rendering_pipelines/imagereader_pipeline.md"
+  doc_path: rendering_pipelines/S07_software_offscreen_type.md
   # ----- Article-grounded signature (S07 + S09 + S11 cross-cutting) -----
   s_article_ref: "S07"   # ImageReader 是离屏消费者；S09 提到 WebView 罕见 ImageReader 路径；S11 提到 Camera 分析路径
   four_features:
@@ -38,7 +38,8 @@ meta:
     Detection 标志着"App 主动消费帧做二次处理"（ML 推理 / 屏幕录制 / 自定义 ISP / 帧分析）。
   subvariants_note: |
     文章 S11 把 Camera ImageReader 路径单列为 CAMERA_IMAGEANALYSIS_READER 子变种。
-    Phase E 评估是否拆分。
+    当前条目在 catalog 中作为 S07 的 feature 证据；Camera ImageAnalysis 语义由 S11 文档补充，
+    不参与主类型竞争。
 
 # ==========================================================================
 # Detection Rules
@@ -74,80 +75,7 @@ detection:
 # Teaching Content
 # ==========================================================================
 teaching:
-  title: "ImageReader 渲染管线"
-  summary: |
-    ImageReader 允许应用直接访问渲染到 Surface 的图像数据。它底层基于 BufferQueue，
-    作为 consumer 端从 producer（Camera HAL、MediaCodec 解码器、GPU 渲染等）获取帧。
-
-    典型使用场景：
-    - ML 推理：获取 Camera/GPU 帧进行实时模型推理
-    - 屏幕录制：捕获渲染帧编码为视频
-    - 自定义相机处理：Camera2 API + ImageReader 实现自定义 ISP
-    - 部分 Chrome 渲染模式：通过 ImageReader 获取合成帧
-
-    关键特征：
-    - Java API: `ImageReader.newInstance()` + `onImageAvailable` 回调
-    - NDK API: `AImageReader_new()` + `AImageReader_ImageListener`
-    - 与 HardwareBuffer 结合可实现零拷贝跨进程/跨 GPU 帧传递
-    - maxImages 参数控制 BufferQueue 深度，影响内存占用和延迟
-
-  mermaid: |
-    sequenceDiagram
-      participant P as Producer<br/>(Camera/GPU/Codec)
-      participant BQ as BufferQueue
-      participant IR as ImageReader
-      participant App as App (Consumer)
-      participant Proc as Processing<br/>(ML/Encode/Display)
-
-      Note over P,Proc: 📍 ImageReader 帧获取流程
-      P->>BQ: dequeueBuffer
-      P->>P: 渲染/解码/捕获
-      P->>BQ: queueBuffer (帧就绪)
-
-      BQ->>IR: onImageAvailable 回调
-      activate IR
-      IR->>App: 通知新帧可用
-      deactivate IR
-
-      activate App
-      App->>IR: acquireNextImage
-      IR->>BQ: acquireBuffer (获取帧)
-      IR-->>App: Image (HardwareBuffer)
-      App->>Proc: 处理帧 (ML 推理/编码/展示)
-      App->>IR: Image.close()
-      IR->>BQ: releaseBuffer
-      deactivate App
-
-      Note over P,Proc: ⏱️ 关键耗时点：queueBuffer→回调延迟、帧处理耗时、Buffer 释放速度
-
-  thread_roles:
-    - thread: main
-      role: "应用主线程"
-      description: "配置 ImageReader, 注册回调, 管理生命周期"
-      trace_tags: "bindApplication, activityStart, ImageReader"
-    - thread: ImageReader
-      role: "ImageReader 回调"
-      description: "处理 onImageAvailable 回调, 获取和释放 Image"
-      trace_tags: "ImageReader, onImageAvailable, acquireNextImage"
-    - thread: Producer
-      role: "帧生产者"
-      description: "帧生产线程 — 可以是 Camera HAL, MediaCodec 解码器, 或 GPU 渲染线程"
-      trace_tags: "Camera, MediaCodec, dequeueBuffer, queueBuffer"
-
-  key_slices:
-    - name: "acquireNextImage"
-      thread: any
-      description: "获取下一帧 Image — 从 BufferQueue 获取渲染好的帧"
-    - name: "onImageAvailable"
-      thread: any
-      description: "帧可用回调 — ImageReader 通知应用有新帧"
-    - name: "queueBuffer"
-      thread: any
-      description: "提交 Buffer — 生产者将渲染好的帧提交到 BufferQueue"
-    - name: "HardwareBuffer"
-      thread: any
-      description: "硬件 Buffer 操作 — GPU/Camera/Codec 直接读写"
-
+  source: "rendering_pipelines/S07_software_offscreen_type.md"
 # ==========================================================================
 # Auto Pin Configuration
 # ==========================================================================

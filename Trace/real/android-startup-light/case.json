@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "android-startup-light",
+  "kind": "real",
+  "title": "Android 16 light startup",
+  "description": "Existing SmartPerfetto light application startup fixture captured on a Google raven device.",
+  "scene": "startup",
+  "tags": ["android", "startup", "light"],
+  "aliases": ["launch_light.pftrace"],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "6c5479fd1b765ee4d29692c43a8204b972bc0f97eb373aca98ea7e11e99fd8b4",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "16",
+    "api_level": 36,
+    "device": "Google raven",
+    "build_fingerprint": "google/raven_beta/raven:16/BP31.250523.010/13667654:user/release-keys",
+    "compatibility": {"min_api": 36, "max_api": 36}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/launch_light.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

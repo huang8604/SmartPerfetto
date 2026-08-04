@@ -72,6 +72,12 @@ This still compares persisted analysis result snapshots. The other Perfetto UI w
 
 The result picker shows each result's scene, original question, trace metadata, creation time, owner, metric count, evidence reference count, and visibility. The current window's latest result is marked `Current`; results from still-open windows are marked `Open`.
 
+If you are unsure which historical result to inspect, click the row-level
+`travel_explore` similarity button first. SmartPerfetto shows similar snapshots
+or case-library hints marked as `navigation_hint_only`. These hints only help
+you choose what to inspect or compare next; they are not diagnostic evidence
+for the current trace.
+
 ## What The Output Contains
 
 After the comparison finishes, AI Assistant appends an "analysis result comparison completed" message with:

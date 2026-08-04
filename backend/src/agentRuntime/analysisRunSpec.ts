@@ -8,7 +8,12 @@ import { buildComplexityClassifierInput } from '../agentv3/queryComplexityContex
 import type { SceneType } from '../agentv3/sceneClassifier';
 import type { ComplexityClassifierInput, QueryComplexity, SelectionContext } from '../agentv3/types';
 import type { OutputLanguage } from '../agentv3/outputLanguage';
-import { normalizeCodeAwareMode, type CodeAwareMode } from '../services/codebase/codeAwareFeature';
+import {
+  MAX_CODEBASE_IDS_PER_ANALYSIS,
+  MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS,
+  normalizeCodeAwareMode,
+  type CodeAwareMode,
+} from '../services/codebase/codeAwareFeature';
 import type { KnowledgeScope } from '../services/scopedKnowledgeStore';
 import type { ProviderScope } from '../services/providerManager';
 import type { RuntimeSelection } from './runtimeSelection';
@@ -20,12 +25,25 @@ import {
   knowledgeScopeFromAnalysisOptions,
   providerScopeFromAnalysisOptions,
 } from './runtimeCommon';
+import {
+  EXPERIMENTAL_OPENCODE_RUNTIME_KIND,
+  EXPERIMENTAL_PI_AGENT_CORE_RUNTIME_KIND,
+  OPENCODE_RUNTIME_KIND,
+  PI_AGENT_CORE_RUNTIME_KIND,
+  isProductionAgentRuntimeKind,
+  type AgentRuntimeKind,
+} from './runtimeKinds';
+import {
+  currentRunManifestAttributionSink,
+  resolveRunManifestAttributionSink,
+} from '../services/selfEvolution/runManifestLifecycle';
 
 export interface RuntimeBudgetInputs {
   model?: string;
   lightModel?: string;
   maxTurns?: number;
   quickMaxTurns?: number;
+  quickTargetTurns?: number;
   maxBudgetUsd?: number;
   maxOutputTokens?: number;
   fullPathPerTurnMs?: number;
@@ -45,7 +63,7 @@ export interface AnalysisRunSpec {
     text: string;
   };
   runtime: {
-    kind: string;
+    kind: AgentRuntimeKind;
     selection: RuntimeSelection<string>;
     capabilities: EngineCapabilities;
   };
@@ -79,6 +97,7 @@ export interface AnalysisRunSpec {
     };
     codeAwareMode: CodeAwareMode;
     codebaseIds: string[];
+    knowledgeSourceIds: string[];
   };
   budget: RuntimeBudgetInputs;
 }
@@ -97,8 +116,12 @@ export interface CreateAnalysisRunSpecInput {
   budget?: RuntimeBudgetInputs;
 }
 
-function compactCodebaseIds(ids: string[] | undefined): string[] {
-  return Array.from(new Set(ids ?? [])).filter(Boolean);
+function compactAuthorizationIds(ids: string[] | undefined, label: string, maxItems: number): string[] {
+  const compacted = Array.from(new Set(ids ?? [])).filter(Boolean);
+  if (compacted.length > maxItems) {
+    throw new Error(`${label} exceeds the maximum of ${maxItems} unique ids`);
+  }
+  return compacted;
 }
 
 function resolveEngineCapabilities(input: CreateAnalysisRunSpecInput): EngineCapabilities {
@@ -112,11 +135,31 @@ function resolveEngineCapabilities(input: CreateAnalysisRunSpecInput): EngineCap
   return capabilities;
 }
 
+function canonicalRuntimeKind(value: string): AgentRuntimeKind {
+  if (isProductionAgentRuntimeKind(value)) return value;
+  if (value === EXPERIMENTAL_PI_AGENT_CORE_RUNTIME_KIND) {
+    return PI_AGENT_CORE_RUNTIME_KIND;
+  }
+  if (value === EXPERIMENTAL_OPENCODE_RUNTIME_KIND) {
+    return OPENCODE_RUNTIME_KIND;
+  }
+  throw new Error(`Unsupported production analysis runtime: ${value}`);
+}
+
 export function createAnalysisRunSpec(input: CreateAnalysisRunSpecInput): AnalysisRunSpec {
   const options = input.options ?? {};
   const engineCapabilities = resolveEngineCapabilities(input);
   const codeAwareMode = normalizeCodeAwareMode(options.codeAwareMode);
-  const codebaseIds = compactCodebaseIds(options.codebaseIds);
+  const codebaseIds = compactAuthorizationIds(
+    options.codebaseIds,
+    'codebaseIds',
+    MAX_CODEBASE_IDS_PER_ANALYSIS,
+  );
+  const knowledgeSourceIds = compactAuthorizationIds(
+    options.knowledgeSourceIds,
+    'knowledgeSourceIds',
+    MAX_KNOWLEDGE_SOURCE_IDS_PER_ANALYSIS,
+  );
   const providerScope = providerScopeFromAnalysisOptions(options);
   const knowledgeScope = knowledgeScopeFromAnalysisOptions(options);
   const classifierInput = buildComplexityClassifierInput({
@@ -127,6 +170,29 @@ export function createAnalysisRunSpec(input: CreateAnalysisRunSpecInput): Analys
     previousTurns: input.previousTurns ?? [],
   });
   const traceContextPrompt = formatTraceContext(options.traceContext, input.outputLanguage);
+  const runtimeKind = canonicalRuntimeKind(input.runtimeSelection.kind);
+  const sink = resolveRunManifestAttributionSink(
+    options.runManifestAttributionSink,
+    currentRunManifestAttributionSink(),
+  );
+  sink?.recordScene({sceneType: input.sceneType});
+  sink?.recordRuntime({
+    runtime: runtimeKind,
+    providerId: options.providerId ?? null,
+    ...(input.budget?.model ? {model: input.budget.model} : {}),
+    outputLanguage: input.outputLanguage,
+  });
+  sink?.recordMode({
+    requested: options.analysisMode ?? 'auto',
+    resolved: input.resolvedMode === 'quick' ? 'quick' : input.resolvedMode === 'full' ? 'full' : undefined,
+    capabilityFlags: [
+      ...(engineCapabilities.production ? ['production'] : []),
+      ...(engineCapabilities.publicRuntime ? ['public_runtime'] : []),
+      ...(engineCapabilities.promptCache.systemPromptDynamicBoundary
+        ? ['system_prompt_dynamic_boundary']
+        : []),
+    ],
+  });
 
   return {
     identity: {
@@ -139,7 +205,7 @@ export function createAnalysisRunSpec(input: CreateAnalysisRunSpecInput): Analys
       text: input.query,
     },
     runtime: {
-      kind: input.runtimeSelection.kind,
+      kind: runtimeKind,
       selection: input.runtimeSelection,
       capabilities: engineCapabilities,
     },
@@ -173,6 +239,7 @@ export function createAnalysisRunSpec(input: CreateAnalysisRunSpecInput): Analys
       },
       codeAwareMode,
       codebaseIds,
+      knowledgeSourceIds,
     },
     budget: input.budget ?? {},
   };

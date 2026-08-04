@@ -20,7 +20,7 @@ meta:
   description: "Flutter + Skia 引擎，运行时 Shader 编译 (Runtime Shader Compilation)"
   icon: "flutter"
   family: flutter
-  doc_path: "rendering_pipelines/flutter_surfaceview.md"
+  doc_path: rendering_pipelines/S10_flutter_type.md
   # ----- Article-grounded signature (S10) -----
   s_article_ref: "S10"
   four_features:
@@ -64,63 +64,7 @@ detection:
     - slice_pattern: "*EntityPass*"
 
 teaching:
-  title: "Flutter SurfaceView (Skia) 渲染管线"
-  summary: |
-    Flutter 使用 Skia 渲染引擎，通过 SurfaceView 独立渲染。
-    Skia 使用运行时 Shader 编译 (Runtime Shader Compilation)，首次使用新效果时可能有编译卡顿。
-    在旧版本、特定配置或 Impeller fallback 场景中仍可能使用该模式，需重点关注 Shader 编译与光栅化耗时。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant UI as ui/main (Dart)
-      participant IO as 1.io
-      participant Raster as raster (Skia)
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 Flutter Frame Production (Skia)
-      VA->>UI: 🔔 VSync → BeginFrame (常见)
-      activate UI
-      UI->>UI: Dart VM 执行 (build → layout → paint)
-      UI->>UI: 生成 Layer Tree
-      UI->>Raster: 提交 Layer Tree
-      deactivate UI
-
-      activate Raster
-      Raster->>Raster: SkGpu::DrawLayers
-      Raster->>Raster: GPU 光栅化 (OpenGL/Vulkan)
-      Raster->>BQ: queueBuffer
-      deactivate Raster
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC Composite
-      deactivate SF
-
-      Note over IO: 1.io 线程负责图片解码
-      Note over VA,SF: ⚠️ Skia 运行时 Shader 编译可能导致首帧卡顿
-  thread_roles:
-    - thread: "ui / main / 1.ui"
-      role: "Dart UI 线程"
-      description: "执行 Dart 代码，生成 Layer Tree；线程名依版本变化"
-    - thread: "raster / 1.raster"
-      role: "Skia 光栅化"
-      description: "使用 Skia 光栅化"
-    - thread: "1.io"
-      role: "Flutter IO"
-      description: "资源加载"
-
-  key_slices:
-    - name: "SkGpu"
-      thread: "raster / 1.raster"
-      description: "Skia GPU 渲染提示信号"
-    - name: "Rasterizer"
-      thread: "raster / 1.raster"
-      description: "光栅化操作提示信号"
-
+  source: "rendering_pipelines/S10_flutter_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

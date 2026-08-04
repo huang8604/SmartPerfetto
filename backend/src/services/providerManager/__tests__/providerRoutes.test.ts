@@ -27,6 +27,7 @@ const originalEnv = {
   secretStoreDir: process.env[SECRET_STORE_DIR_ENV],
   allowLocalMasterKey: process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV],
   apiKey: process.env.SMARTPERFETTO_API_KEY,
+  aiEnabled: process.env.SMARTPERFETTO_AI_ENABLED,
 };
 
 describe('Provider Routes', () => {
@@ -53,6 +54,7 @@ describe('Provider Routes', () => {
     restoreEnvValue(SECRET_STORE_DIR_ENV, originalEnv.secretStoreDir);
     restoreEnvValue(SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV, originalEnv.allowLocalMasterKey);
     restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
+    restoreEnvValue('SMARTPERFETTO_AI_ENABLED', originalEnv.aiEnabled);
     resetProviderService();
     await fsp.rm(dir, { recursive: true, force: true });
   });
@@ -234,6 +236,44 @@ describe('Provider Routes', () => {
     expect(runtimeRes.body.error).toMatch(/does not support pi-agent-core/);
   });
 
+  it('keeps provider configuration available but blocks connection tests when AI is disabled', async () => {
+    process.env.SMARTPERFETTO_AI_ENABLED = 'false';
+    const createRes = await request(app).post('/api/v1/providers').send({
+      name: 'Disabled Test Provider',
+      category: 'official',
+      type: 'deepseek',
+      models: { primary: 'deepseek-v4-pro', light: 'deepseek-v4-flash' },
+      connection: {
+        apiKey: 'sk-disabled-provider',
+        agentRuntime: 'openai-agents-sdk',
+        openaiBaseUrl: 'https://api.deepseek.com/v1',
+      },
+    });
+    expect(createRes.status).toBe(201);
+    const id = createRes.body.provider.id;
+    expect(await request(app).get(`/api/v1/providers/${id}`)).toHaveProperty('status', 200);
+    expect(await request(app).post(`/api/v1/providers/${id}/activate`)).toHaveProperty('status', 200);
+
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    try {
+      const testRes = await request(app).post(`/api/v1/providers/${id}/test`);
+      expect(testRes.status).toBe(403);
+      expect(testRes.body).toMatchObject({
+        success: false,
+        code: 'AI_DISABLED',
+        feature: 'provider_test',
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('creates and activates custom Pi agent-core providers without exposing model JSON', async () => {
     const createRes = await request(app).post('/api/v1/providers').send({
       name: 'Pi Custom',
@@ -411,6 +451,86 @@ describe('Provider Routes', () => {
       expect(JSON.parse(row.policy_json).isActive).toBe(true);
     } finally {
       db.close();
+    }
+  });
+
+  it('preserves inherited org provider mutation behavior outside OIDC', async () => {
+    const dbPath = path.join(dir, 'enterprise.sqlite');
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
+    process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+    process.env[SECRET_STORE_DIR_ENV] = path.join(dir, 'secrets');
+    process.env[SECRET_STORE_ALLOW_LOCAL_MASTER_KEY_ENV] = 'true';
+    delete process.env.SMARTPERFETTO_API_KEY;
+    resetProviderService();
+
+    const { default: workspaceProviderRoutes } = await import('../../../routes/providerRoutes');
+    const workspaceApp = express();
+    workspaceApp.use(express.json());
+    workspaceApp.use(
+      '/api/workspaces/:workspaceId/providers',
+      bindWorkspaceRouteContext,
+      authenticate,
+      requireWorkspaceRouteContext,
+      workspaceProviderRoutes,
+    );
+
+    const createRes = await ssoHeaders(
+      request(workspaceApp).post('/api/workspaces/workspace-a/providers'),
+    ).send({
+      name: 'Organization Default',
+      category: 'official',
+      type: 'openai',
+      models: { primary: 'gpt-5.5', light: 'gpt-5.4-mini' },
+      connection: {
+        agentRuntime: 'openai-agents-sdk',
+        openaiApiKey: 'sk-org-provider',
+      },
+    });
+    expect(createRes.status).toBe(201);
+    const id = createRes.body.provider.id;
+
+    const db = openEnterpriseDb(dbPath);
+    try {
+      db.prepare(`
+        UPDATE provider_credentials
+        SET scope = 'org', workspace_id = NULL, owner_user_id = NULL
+        WHERE id = ?
+      `).run(id);
+    } finally {
+      db.close();
+    }
+
+    const inherited = await ssoHeaders(
+      request(workspaceApp).get(`/api/workspaces/workspace-a/providers/${id}`),
+    );
+    expect(inherited.status).toBe(200);
+
+    const update = await ssoHeaders(request(workspaceApp)
+      .patch(`/api/workspaces/workspace-a/providers/${id}`))
+      .send({name: 'Updated Outside OIDC'});
+    expect(update.status).toBe(200);
+
+    const verifyDb = openEnterpriseDb(dbPath);
+    try {
+      const row = verifyDb.prepare(`
+        SELECT scope, workspace_id, name, policy_json
+        FROM provider_credentials
+        WHERE id = ?
+      `).get(id) as {
+        scope: string;
+        workspace_id: string | null;
+        name: string;
+        policy_json: string;
+      };
+      expect(row).toMatchObject({
+        scope: 'org',
+        workspace_id: null,
+        name: 'Updated Outside OIDC',
+      });
+      expect(JSON.parse(row.policy_json).isActive).toBe(false);
+    } finally {
+      verifyDb.close();
     }
   });
 });

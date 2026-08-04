@@ -4,6 +4,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
+import {resolveAuthConfig} from '../../config';
 import { openEnterpriseDb } from '../enterpriseDb';
 import {
   enterpriseDbReadAuthorityEnabled,
@@ -13,6 +15,15 @@ import {
 import { recordEnterpriseAuditEvent } from '../enterpriseAuditService';
 import type { ProviderConfig, ProviderConnection, ProviderScope } from './types';
 import { LocalEncryptedSecretStore } from './localSecretStore';
+import {
+  localProviderMutationScope,
+  ProviderMutationGenerationStore,
+  providerMutationRequestScopes,
+  type ProviderMutationGenerationVectorV1,
+  type ProviderMutationLease,
+  type ProviderMutationOwner,
+  type ProviderMutationScope,
+} from './providerMutationGeneration';
 
 type ProviderCredentialScope = 'personal' | 'workspace' | 'org';
 
@@ -76,6 +87,10 @@ function enterpriseProviderDbWritesEnabled(): boolean {
 
 function legacyProviderWritesEnabled(): boolean {
   return legacyFilesystemWritesEnabled();
+}
+
+function oidcProviderWriteIsolationEnabled(): boolean {
+  return resolveAuthConfig(process.env).oidcEnabled;
 }
 
 function assertSafeScopeSegment(value: string, label: string): string {
@@ -146,6 +161,60 @@ function mergeConnectionSecrets(
   };
 }
 
+const CUSTOM_HEADER_SECRET_PREFIX = 'custom-header:';
+const CUSTOM_ENV_SECRET_PREFIX = 'custom-env:';
+
+function splitProviderSecrets(provider: ProviderConfig): {
+  publicConnection: ProviderConnection;
+  publicCustom: ProviderConfig['custom'];
+  secrets: Record<string, string>;
+} {
+  const {publicConnection, secretConnection} = splitConnectionSecrets(provider.connection);
+  const secrets = {...secretConnection};
+  for (const [key, value] of Object.entries(provider.custom?.headers ?? {})) {
+    secrets[`${CUSTOM_HEADER_SECRET_PREFIX}${encodeURIComponent(key)}`] = value;
+  }
+  for (const [key, value] of Object.entries(provider.custom?.envOverrides ?? {})) {
+    secrets[`${CUSTOM_ENV_SECRET_PREFIX}${encodeURIComponent(key)}`] = value;
+  }
+  const publicCustom = provider.custom
+    ? {
+        ...(provider.custom.headers ? {headers: {}} : {}),
+        ...(provider.custom.envOverrides ? {envOverrides: {}} : {}),
+      }
+    : undefined;
+  return {publicConnection, publicCustom, secrets};
+}
+
+function mergeProviderSecrets(
+  publicConnection: ProviderConnection | undefined,
+  publicCustom: ProviderConfig['custom'],
+  secrets: Record<string, string>,
+): {connection: ProviderConnection; custom: ProviderConfig['custom']} {
+  const connectionSecrets: Record<string, string> = {};
+  const headers = {...(publicCustom?.headers ?? {})};
+  const envOverrides = {...(publicCustom?.envOverrides ?? {})};
+  for (const [key, value] of Object.entries(secrets)) {
+    if (key.startsWith(CUSTOM_HEADER_SECRET_PREFIX)) {
+      headers[decodeURIComponent(key.slice(CUSTOM_HEADER_SECRET_PREFIX.length))] = value;
+    } else if (key.startsWith(CUSTOM_ENV_SECRET_PREFIX)) {
+      envOverrides[decodeURIComponent(key.slice(CUSTOM_ENV_SECRET_PREFIX.length))] = value;
+    } else {
+      connectionSecrets[key] = value;
+    }
+  }
+  const hasCustom = publicCustom || Object.keys(headers).length > 0 || Object.keys(envOverrides).length > 0;
+  return {
+    connection: mergeConnectionSecrets(publicConnection, connectionSecrets),
+    custom: hasCustom
+      ? {
+          ...(Object.keys(headers).length > 0 ? {headers} : {}),
+          ...(Object.keys(envOverrides).length > 0 ? {envOverrides} : {}),
+        }
+      : undefined,
+  };
+}
+
 function providerSecretRef(scope: ResolvedProviderScope, providerId: string): string {
   return `secret:provider:${scope.tenantId}:${scope.workspaceId}:${scope.userId ?? '_workspace'}:${providerId}`;
 }
@@ -196,13 +265,40 @@ function accessibleProviderWhere(): string {
   `;
 }
 
+function writableProviderWhere(): string {
+  return `
+    tenant_id = @tenantId
+    AND (
+      (@userId IS NOT NULL
+        AND scope = 'personal'
+        AND workspace_id = @workspaceId
+        AND owner_user_id = @userId)
+      OR (@userId IS NULL
+        AND scope = 'workspace'
+        AND workspace_id = @workspaceId
+        AND owner_user_id IS NULL)
+    )
+  `;
+}
+
 export class ProviderStore {
   private providers = new Map<string, ProviderConfig>();
   private filePath: string;
   private secretStore?: LocalEncryptedSecretStore;
+  private readonly mutationGenerations: ProviderMutationGenerationStore;
 
   constructor(filePath: string) {
     this.filePath = filePath;
+    const enterprise = enterpriseProviderStoreEnabled();
+    this.mutationGenerations = new ProviderMutationGenerationStore({
+      openDatabase: () => {
+        if (enterprise) return openEnterpriseDb();
+        const databasePath = `${this.filePath}.generations.db`;
+        fs.mkdirSync(path.dirname(databasePath), {recursive: true});
+        return new Database(databasePath);
+      },
+      ensureSchema: !enterprise,
+    });
   }
 
   load(): void {
@@ -280,11 +376,115 @@ export class ProviderStore {
     return this.rotateEnterpriseSecret(id, scope);
   }
 
+  beginMutationForNewProvider(
+    scope: ProviderScope | undefined,
+    owner: ProviderMutationOwner,
+  ): ProviderMutationLease {
+    if (enterpriseProviderStoreEnabled()) {
+      ensureEnterpriseProviderGraph(resolveProviderScope(scope));
+    }
+    return this.mutationGenerations.beginMutation(
+      this.newProviderMutationScope(scope),
+      owner,
+    );
+  }
+
+  beginMutationForProvider(
+    id: string,
+    scope: ProviderScope | undefined,
+    owner: ProviderMutationOwner,
+  ): ProviderMutationLease {
+    return this.mutationGenerations.beginMutation(
+      this.existingProviderMutationScope(id, scope),
+      owner,
+    );
+  }
+
+  completeMutation(lease: ProviderMutationLease): void {
+    this.mutationGenerations.completeMutation(lease);
+  }
+
+  readMutationGeneration(
+    scope?: ProviderScope,
+  ): ProviderMutationGenerationVectorV1 {
+    return this.mutationGenerations.readVector(
+      this.requestMutationScopes(scope),
+    );
+  }
+
+  listInFlightMutations(scope?: ProviderScope): ProviderMutationLease[] {
+    return this.mutationGenerations.listInFlight(
+      this.requestMutationScopes(scope),
+    );
+  }
+
+  recoverAbandonedMutation(
+    mutationId: string,
+    mutationScope: ProviderMutationScope,
+  ): boolean {
+    return this.mutationGenerations.recoverAbandonedMutation(
+      mutationId,
+      mutationScope,
+    );
+  }
+
   private getSecretStore(): LocalEncryptedSecretStore {
     if (!this.secretStore) {
       this.secretStore = new LocalEncryptedSecretStore();
     }
     return this.secretStore;
+  }
+
+  private newProviderMutationScope(
+    scope?: ProviderScope,
+  ): ProviderMutationScope {
+    if (!enterpriseProviderStoreEnabled()) {
+      return localProviderMutationScope();
+    }
+    const resolved = resolveProviderScope(scope);
+    return {
+      level: resolved.userId ? 'personal' : 'workspace',
+      tenantId: resolved.tenantId,
+      workspaceId: resolved.workspaceId,
+      userId: resolved.userId,
+    };
+  }
+
+  private existingProviderMutationScope(
+    id: string,
+    scope?: ProviderScope,
+  ): ProviderMutationScope {
+    const oidcWriteIsolation = oidcProviderWriteIsolationEnabled();
+    if (!enterpriseProviderStoreEnabled()) {
+      if (oidcWriteIsolation && enterpriseProviderDbWritesEnabled()) {
+        const resolved = resolveProviderScope(scope);
+        const existing = this.getEnterpriseRowById(id);
+        if (existing && !this.getWritableEnterpriseRowById(id, resolved)) {
+          throw new Error(`Provider not found: ${id}`);
+        }
+      }
+      return localProviderMutationScope();
+    }
+    const resolved = resolveProviderScope(scope);
+    const row = oidcWriteIsolation
+      ? this.getWritableEnterpriseRowById(id, resolved)
+      : this.getAccessibleEnterpriseRowById(id, resolved);
+    if (!row) throw new Error(`Provider not found: ${id}`);
+    return {
+      level: row.scope,
+      tenantId: row.tenant_id,
+      workspaceId: row.workspace_id,
+      userId: row.owner_user_id,
+    };
+  }
+
+  private requestMutationScopes(
+    scope?: ProviderScope,
+  ): ProviderMutationScope[] {
+    if (!enterpriseProviderStoreEnabled()) {
+      return [localProviderMutationScope()];
+    }
+    return providerMutationRequestScopes(resolveProviderScope(scope));
   }
 
   private getAllEnterprise(scope?: ProviderScope): ProviderConfig[] {
@@ -330,54 +530,105 @@ export class ProviderStore {
   private setEnterprise(provider: ProviderConfig, scope?: ProviderScope): void {
     const resolved = resolveProviderScope(scope);
     ensureEnterpriseProviderGraph(resolved);
-    const existing = this.getEnterpriseRowById(provider.id, resolved);
+    const oidcWriteIsolation = oidcProviderWriteIsolationEnabled();
+    const existing = oidcWriteIsolation
+      ? this.getWritableEnterpriseRowById(provider.id, resolved)
+      : this.getAccessibleEnterpriseRowById(provider.id, resolved);
+    if (oidcWriteIsolation && !existing && this.getEnterpriseRowById(provider.id)) {
+      throw new Error(`Provider not found: ${provider.id}`);
+    }
     const effectiveScope = existing?.scope ?? (resolved.userId ? 'personal' : 'workspace');
     const workspaceId = effectiveScope === 'org' ? null : resolved.workspaceId;
     const ownerUserId = effectiveScope === 'personal' ? resolved.userId : null;
     const secretRef = existing?.secret_ref ?? providerSecretRef(resolved, provider.id);
-    const { publicConnection, secretConnection } = splitConnectionSecrets(provider.connection);
-    const secretVersion = this.getSecretStore().put(secretRef, secretConnection);
+    const {publicConnection, publicCustom, secrets} = splitProviderSecrets(provider);
+    const secretVersion = this.getSecretStore().put(secretRef, secrets);
     const policy: ProviderPolicyJson = {
       category: provider.category,
       isActive: provider.isActive,
       connection: publicConnection,
       ...(provider.tuning ? { tuning: provider.tuning } : {}),
-      ...(provider.custom ? { custom: provider.custom } : {}),
+      ...(publicCustom ? {custom: publicCustom} : {}),
       secretVersion,
     };
 
     const db = openEnterpriseDb();
     try {
-      db.prepare(`
-        INSERT INTO provider_credentials
-          (id, tenant_id, workspace_id, owner_user_id, scope, name, type, models_json, secret_ref, policy_json, created_at, updated_at)
-        VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          tenant_id = excluded.tenant_id,
-          workspace_id = excluded.workspace_id,
-          owner_user_id = excluded.owner_user_id,
-          scope = excluded.scope,
-          name = excluded.name,
-          type = excluded.type,
-          models_json = excluded.models_json,
-          secret_ref = excluded.secret_ref,
-          policy_json = excluded.policy_json,
-          updated_at = excluded.updated_at
-      `).run(
-        provider.id,
-        resolved.tenantId,
-        workspaceId,
-        ownerUserId,
-        effectiveScope,
-        provider.name,
-        provider.type,
-        JSON.stringify(provider.models),
-        secretRef,
-        JSON.stringify(policy),
-        existing?.created_at ?? toEpochMs(provider.createdAt),
-        toEpochMs(provider.updatedAt),
-      );
+      if (!oidcWriteIsolation) {
+        db.prepare(`
+          INSERT INTO provider_credentials
+            (id, tenant_id, workspace_id, owner_user_id, scope, name, type, models_json, secret_ref, policy_json, created_at, updated_at)
+          VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            tenant_id = excluded.tenant_id,
+            workspace_id = excluded.workspace_id,
+            owner_user_id = excluded.owner_user_id,
+            scope = excluded.scope,
+            name = excluded.name,
+            type = excluded.type,
+            models_json = excluded.models_json,
+            secret_ref = excluded.secret_ref,
+            policy_json = excluded.policy_json,
+            updated_at = excluded.updated_at
+        `).run(
+          provider.id,
+          resolved.tenantId,
+          workspaceId,
+          ownerUserId,
+          effectiveScope,
+          provider.name,
+          provider.type,
+          JSON.stringify(provider.models),
+          secretRef,
+          JSON.stringify(policy),
+          existing?.created_at ?? toEpochMs(provider.createdAt),
+          toEpochMs(provider.updatedAt),
+        );
+      } else if (existing) {
+        const result = db.prepare(`
+          UPDATE provider_credentials
+          SET name = @name,
+              type = @type,
+              models_json = @modelsJson,
+              secret_ref = @secretRef,
+              policy_json = @policyJson,
+              updated_at = @updatedAt
+          WHERE id = @id AND ${writableProviderWhere()}
+        `).run({
+          ...resolved,
+          id: provider.id,
+          name: provider.name,
+          type: provider.type,
+          modelsJson: JSON.stringify(provider.models),
+          secretRef,
+          policyJson: JSON.stringify(policy),
+          updatedAt: toEpochMs(provider.updatedAt),
+        });
+        if (result.changes !== 1) {
+          throw new Error(`Provider not found: ${provider.id}`);
+        }
+      } else {
+        db.prepare(`
+          INSERT INTO provider_credentials
+            (id, tenant_id, workspace_id, owner_user_id, scope, name, type, models_json, secret_ref, policy_json, created_at, updated_at)
+          VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          provider.id,
+          resolved.tenantId,
+          workspaceId,
+          ownerUserId,
+          effectiveScope,
+          provider.name,
+          provider.type,
+          JSON.stringify(provider.models),
+          secretRef,
+          JSON.stringify(policy),
+          toEpochMs(provider.createdAt),
+          toEpochMs(provider.updatedAt),
+        );
+      }
       this.recordProviderSecretAudit(db, {
         action: existing ? 'provider.secret.write' : 'provider.secret.create',
         row: {
@@ -396,13 +647,16 @@ export class ProviderStore {
 
   private deleteEnterprise(id: string, scope?: ProviderScope): boolean {
     const resolved = resolveProviderScope(scope);
-    const row = this.getEnterpriseRowById(id, resolved);
+    const oidcWriteIsolation = oidcProviderWriteIsolationEnabled();
+    const row = oidcWriteIsolation
+      ? this.getWritableEnterpriseRowById(id, resolved)
+      : this.getAccessibleEnterpriseRowById(id, resolved);
     if (!row) return false;
     const db = openEnterpriseDb();
     try {
       const result = db.prepare(`
         DELETE FROM provider_credentials
-        WHERE id = @id AND ${accessibleProviderWhere()}
+        WHERE id = @id AND ${oidcWriteIsolation ? writableProviderWhere() : accessibleProviderWhere()}
       `).run({ ...resolved, id });
       if (result.changes > 0) {
         this.getSecretStore().delete(row.secret_ref);
@@ -420,7 +674,10 @@ export class ProviderStore {
 
   private rotateEnterpriseSecret(id: string, scope?: ProviderScope): number | undefined {
     const resolved = resolveProviderScope(scope);
-    const row = this.getEnterpriseRowById(id, resolved);
+    const oidcWriteIsolation = oidcProviderWriteIsolationEnabled();
+    const row = oidcWriteIsolation
+      ? this.getWritableEnterpriseRowById(id, resolved)
+      : this.getAccessibleEnterpriseRowById(id, resolved);
     if (!row) return undefined;
     const secretVersion = this.getSecretStore().rotate(row.secret_ref);
     const policy = {
@@ -432,7 +689,7 @@ export class ProviderStore {
       db.prepare(`
         UPDATE provider_credentials
         SET policy_json = @policyJson, updated_at = @updatedAt
-        WHERE id = @id AND ${accessibleProviderWhere()}
+        WHERE id = @id AND ${oidcWriteIsolation ? writableProviderWhere() : accessibleProviderWhere()}
       `).run({
         ...resolved,
         id,
@@ -452,7 +709,7 @@ export class ProviderStore {
 
   private getActiveEnterprisePeer(id: string, scope?: ProviderScope): ProviderConfig | undefined {
     const resolved = resolveProviderScope(scope);
-    const row = this.getEnterpriseRowById(id, resolved);
+    const row = this.getAccessibleEnterpriseRowById(id, resolved);
     if (!row) return undefined;
     return this.getActiveEnterpriseInCredentialScope({
       tenantId: row.tenant_id,
@@ -499,13 +756,47 @@ export class ProviderStore {
     }
   }
 
-  private getEnterpriseRowById(id: string, scope: ResolvedProviderScope): ProviderCredentialRow | undefined {
+  private getEnterpriseRowById(id: string): ProviderCredentialRow | undefined {
+    const db = openEnterpriseDb();
+    try {
+      return db.prepare<unknown[], ProviderCredentialRow>(`
+        SELECT *
+        FROM provider_credentials
+        WHERE id = ?
+        LIMIT 1
+      `).get(id);
+    } finally {
+      db.close();
+    }
+  }
+
+  private getAccessibleEnterpriseRowById(
+    id: string,
+    scope: ResolvedProviderScope,
+  ): ProviderCredentialRow | undefined {
     const db = openEnterpriseDb();
     try {
       return db.prepare<unknown[], ProviderCredentialRow>(`
         SELECT *
         FROM provider_credentials
         WHERE id = @id AND ${accessibleProviderWhere()}
+        LIMIT 1
+      `).get({ ...scope, id });
+    } finally {
+      db.close();
+    }
+  }
+
+  private getWritableEnterpriseRowById(
+    id: string,
+    scope: ResolvedProviderScope,
+  ): ProviderCredentialRow | undefined {
+    const db = openEnterpriseDb();
+    try {
+      return db.prepare<unknown[], ProviderCredentialRow>(`
+        SELECT *
+        FROM provider_credentials
+        WHERE id = @id AND ${writableProviderWhere()}
         LIMIT 1
       `).get({ ...scope, id });
     } finally {
@@ -524,8 +815,8 @@ export class ProviderStore {
       row,
       secretVersion: policy.secretVersion,
     });
-    const secretConnection = this.getSecretStore().get(row.secret_ref);
-    const connection = mergeConnectionSecrets(policy.connection, secretConnection);
+    const secrets = this.getSecretStore().get(row.secret_ref);
+    const {connection, custom} = mergeProviderSecrets(policy.connection, policy.custom, secrets);
     return {
       id: row.id,
       name: row.name,
@@ -541,7 +832,7 @@ export class ProviderStore {
       },
       connection,
       ...(policy.tuning ? { tuning: policy.tuning } : {}),
-      ...(policy.custom ? { custom: policy.custom } : {}),
+      ...(custom ? {custom} : {}),
     };
   }
 

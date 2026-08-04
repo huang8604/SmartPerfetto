@@ -391,12 +391,12 @@ steps:
       suspect_objects AS (
         SELECT
           h.*,
-          s.leak_state
+          sc.leak_state
         FROM heap_objects h
-        JOIN suspect_classes s
-          ON s.upid = h.upid
-          AND s.graph_sample_ts = h.graph_sample_ts
-          AND s.class_name = h.class_name
+        JOIN suspect_classes sc
+          ON sc.upid = h.upid
+          AND sc.graph_sample_ts = h.graph_sample_ts
+          AND sc.class_name = h.class_name
       )
       SELECT
         so.process_name,

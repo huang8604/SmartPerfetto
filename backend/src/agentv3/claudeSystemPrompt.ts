@@ -2,7 +2,15 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import type { ClaudeAnalysisContext, ComparisonContext, SelectionContext, SelectionTrackInfo, TraceCompleteness } from './types';
+import type {
+  ClaudeAnalysisContext,
+  ComparisonContext,
+  SelectionContext,
+  SelectionTrackInfo,
+  TraceCompleteness,
+  TracePaneSide,
+  TraceSource,
+} from './types';
 import type { SceneType } from './sceneClassifier';
 import type { ArchitectureInfo } from '../agent/detectors/types';
 import type { DetectedFocusApp } from './focusAppDetector';
@@ -14,7 +22,13 @@ import {
   loadSelectionTemplate,
   renderTemplate,
 } from './strategyLoader';
-import { DEFAULT_OUTPUT_LANGUAGE, type OutputLanguage } from './outputLanguage';
+import {loadCodeReferenceContractPrompt} from '../services/codebase/codeReferenceContract';
+import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from './outputLanguage';
+import {
+  QUICK_TRIAGE_MAX_CHINESE_CHARS,
+  QUICK_TRIAGE_MAX_CLAIMS,
+  QUICK_TRIAGE_MAX_FACT_BULLETS,
+} from './quickAnswerContract';
 
 /**
  * Rough token estimate for mixed Chinese/English text.
@@ -93,14 +107,22 @@ function buildFocusAppSection(
   focusMethod?: 'battery_stats' | 'oom_adj' | 'frame_timeline' | 'none',
 ): string {
   const isFrameMode = focusMethod === 'frame_timeline';
+  const scoped = focusApps.some(app => app.scopeStartNs !== undefined && app.scopeEndNs !== undefined);
+  const scopeText = scoped ? '当前选区/范围内' : 'trace 期间';
   const appLines = focusApps.map((app, i) => {
     const marker = i === 0 ? ' **(主焦点)** ' : ' ';
     const countLabel = isFrameMode
       ? `${app.switchCount} 帧`
       : `切换 ${app.switchCount} 次`;
-    return `- \`${app.packageName}\`${marker}— 前台时长 ${formatDurationNs(app.totalDurationNs)}，${countLabel}`;
+    const scopeRef = app.scopeStartNs !== undefined && app.scopeEndNs !== undefined
+      ? `；scope_start_ns=${app.scopeStartNs}，scope_end_ns=${app.scopeEndNs}`
+      : '';
+    const evidenceRef = app.evidenceRefId
+      ? `；source_ref=\`Runtime focus app detection\`，evidence_ref_id=\`${app.evidenceRefId}\`，row_index=${app.evidenceRowIndex ?? i}，columns=package_name/foreground_duration_ns/foreground_count${scopeRef}`
+      : '';
+    return `- \`${app.packageName}\`${marker}— 前台时长 ${formatDurationNs(app.totalDurationNs)}，${countLabel}${evidenceRef}`;
   });
-  return `## 焦点应用\n\n以下应用在 trace 期间处于前台：\n${appLines.join('\n')}\n\n默认分析第一个（主焦点）应用。调用 Skill 时，使用 process_name="${focusApps[0].packageName}" 作为参数；系统会在进程级 Skill 执行前自动做身份准入和参数重写。如果准入返回 ambiguous/blocked，先查看候选进程或澄清目标，不要继续基于未验证包名下结论。`;
+  return `## 焦点应用\n\n以下应用在${scopeText}处于前台：\n${appLines.join('\n')}\n\n默认分析第一个（主焦点）应用。调用 Skill 时，使用 process_name="${focusApps[0].packageName}" 作为参数；系统会在进程级 Skill 执行前自动做身份准入和参数重写。如果准入返回 ambiguous/blocked，先查看候选进程或澄清目标，不要继续基于未验证包名下结论。`;
 }
 
 interface SceneStrategySections {
@@ -220,60 +242,207 @@ export function buildSelectionContextSection(sel: SelectionContext): string {
  * Build comparison context section for dual-trace analysis.
  * Injected into system prompt when comparison mode is active (orthogonal to scene type).
  */
-function buildComparisonContextSection(ctx: ComparisonContext, currentPackageName?: string): string {
-  const lines: string[] = ['## 对比模式\n'];
-  lines.push('你正在进行**双 Trace 对比分析**。两个 Trace 已加载，你可以同时查询两侧数据。\n');
+function buildComparisonContextSection(
+  ctx: ComparisonContext,
+  currentPackageName: string | undefined,
+  outputLanguage: OutputLanguage,
+): string {
+  const template = loadPromptTemplate(
+    outputLanguage === 'en' ? 'comparison-context-en' : 'comparison-context',
+  );
+  const currentTraceLabel = comparisonTraceDisplayLabel(ctx, 'current', outputLanguage);
+  const referenceTraceLabel = comparisonTraceDisplayLabel(ctx, 'reference', outputLanguage);
+  const vars = {
+    currentTraceLabel,
+    referenceTraceLabel,
+    currentPackageName: currentPackageName || localize(outputLanguage, '未知包名', 'unknown package'),
+    referencePackageName: ctx.referencePackageName || localize(outputLanguage, '未知包名', 'unknown package'),
+    tracePairMapping: buildTracePairMappingSection(ctx, outputLanguage),
+    packageAlignment: buildPackageAlignmentSection(ctx, currentPackageName, outputLanguage),
+    referenceArchitecture: buildReferenceArchitectureSection(ctx, outputLanguage),
+    capabilityAlignment: buildCapabilityAlignmentSection(ctx, outputLanguage),
+  };
+  return template ? renderTemplate(template, vars) : '';
+}
 
-  // Trace identity
-  lines.push('### Trace 身份');
-  lines.push(`- **当前 Trace**: ${currentPackageName || '未知包名'}`);
-  lines.push(`- **参考 Trace**: ${ctx.referencePackageName || '未知包名'}`);
+function comparisonTraceDisplayLabel(
+  ctx: ComparisonContext,
+  traceSide: TraceSource,
+  outputLanguage: OutputLanguage,
+): string {
+  const pane = ctx.tracePairContext?.panes.find(item => item.traceSide === traceSide);
+  const role = traceSide === 'current'
+    ? localize(outputLanguage, '当前 Trace', 'Current trace')
+    : localize(outputLanguage, '参考 Trace', 'Reference trace');
+  return pane ? `${tracePaneSideLabel(pane.side, outputLanguage)}/${role}` : role;
+}
 
-  // Package alignment warning
-  if (currentPackageName && ctx.referencePackageName) {
-    if (currentPackageName === ctx.referencePackageName) {
-      lines.push(`- **包名对齐**: ✅ 相同 (${currentPackageName})`);
-    } else {
-      lines.push(`- **包名对齐**: ⚠️ 不同 — 当前=${currentPackageName}, 参考=${ctx.referencePackageName}`);
-      lines.push('  - 注意：对比不同应用的 Trace 时，部分指标可能不具可比性');
+function buildTracePairMappingSection(
+  ctx: ComparisonContext,
+  outputLanguage: OutputLanguage,
+): string {
+  const pair = ctx.tracePairContext;
+  if (!pair) return '';
+  const lines = [
+    localize(outputLanguage, '### 窗口映射', '### Pane mapping'),
+    localize(
+      outputLanguage,
+      `- 布局: ${pair.layout === 'vertical' ? '上下' : '左右'}`,
+      `- Layout: ${pair.layout === 'vertical' ? 'top/bottom' : 'left/right'}`,
+    ),
+  ];
+  if (pair.workspaceOpen !== undefined) {
+    lines.push(localize(
+      outputLanguage,
+      `- 同页双窗: ${pair.workspaceOpen ? '已打开' : '未打开'}`,
+      `- Same-page dual panes: ${pair.workspaceOpen ? 'open' : 'not open'}`,
+    ));
+  }
+  if (pair.splitPercent !== undefined) {
+    lines.push(localize(
+      outputLanguage,
+      `- 分割比例: 主窗口 ${pair.splitPercent}%`,
+      `- Split ratio: primary pane ${pair.splitPercent}%`,
+    ));
+  }
+  if (pair.maximizedTraceSide) {
+    lines.push(localize(
+      outputLanguage,
+      `- 最大化: ${pair.maximizedTraceSide === 'current' ? '当前 Trace' : '参考 Trace'}`,
+      `- Maximized: ${pair.maximizedTraceSide === 'current' ? 'current trace' : 'reference trace'}`,
+    ));
+  }
+  if (pair.minimizedTraceSides && pair.minimizedTraceSides.length > 0) {
+    const minimized = pair.minimizedTraceSides
+      .map(traceSide => traceSide === 'current'
+        ? localize(outputLanguage, '当前 Trace', 'current trace')
+        : localize(outputLanguage, '参考 Trace', 'reference trace'))
+      .join(localize(outputLanguage, '、', ', '));
+    lines.push(localize(outputLanguage, `- 最小化: ${minimized}`, `- Minimized: ${minimized}`));
+  }
+  for (const pane of pair.panes) {
+    const role = pane.traceSide === 'current'
+      ? localize(outputLanguage, '当前 Trace', 'Current trace')
+      : localize(outputLanguage, '参考 Trace', 'Reference trace');
+    const active = pane.active ? localize(outputLanguage, '，当前焦点', ', active') : '';
+    const visualState = pane.visualState === 'context_only'
+      ? localize(outputLanguage, '，后端上下文', ', backend context')
+      : localize(outputLanguage, '，可视窗口', ', visible pane');
+    lines.push(`- ${tracePaneSideLabel(pane.side, outputLanguage)}: ${role}${pane.traceName ? ` (${pane.traceName})` : ''}${active}${visualState}`);
+  }
+  if (pair.aliases) {
+    const currentAliases = Object.entries(pair.aliases)
+      .filter(([, traceSide]) => traceSide === 'current')
+      .map(([alias]) => alias)
+      .slice(0, 8);
+    const referenceAliases = Object.entries(pair.aliases)
+      .filter(([, traceSide]) => traceSide === 'reference')
+      .map(([alias]) => alias)
+      .slice(0, 8);
+    if (currentAliases.length > 0 || referenceAliases.length > 0) {
+      lines.push(localize(
+        outputLanguage,
+        `- 指代别名: 当前 Trace=${currentAliases.join('/') || '无'}；参考 Trace=${referenceAliases.join('/') || '无'}`,
+        `- Trace aliases: current=${currentAliases.join('/') || 'none'}; reference=${referenceAliases.join('/') || 'none'}`,
+      ));
     }
   }
+  return `\n\n${lines.join('\n')}`;
+}
 
-  // Architecture comparison
-  if (ctx.referenceArchitecture) {
-    lines.push(`- **参考 Trace 架构**: ${ctx.referenceArchitecture.type}`);
+function buildPackageAlignmentSection(
+  ctx: ComparisonContext,
+  currentPackageName: string | undefined,
+  outputLanguage: OutputLanguage,
+): string {
+  if (!currentPackageName || !ctx.referencePackageName) return '';
+  if (currentPackageName === ctx.referencePackageName) {
+    return localize(
+      outputLanguage,
+      `\n- **包名对齐**: 相同 (${currentPackageName})`,
+      `\n- **Package alignment**: same (${currentPackageName})`,
+    );
   }
+  const zh = [
+    `\n- **包名对齐**: 不同，当前=${currentPackageName}, 参考=${ctx.referencePackageName}`,
+    '- 注意：对比不同应用的 Trace 时，部分指标可能不具可比性',
+  ].join('\n');
+  const en = [
+    `\n- **Package alignment**: different, current=${currentPackageName}, reference=${ctx.referencePackageName}`,
+    '- Caution: some metrics are not comparable across traces from different applications',
+  ].join('\n');
+  return localize(outputLanguage, zh, en);
+}
 
-  // Capability alignment
-  if (ctx.commonCapabilities.length > 0) {
-    lines.push(`\n### 能力对齐`);
-    lines.push(`- **共有表/视图**: ${ctx.commonCapabilities.length} 个 — 可安全对比`);
-    if (ctx.capabilityDiff) {
-      if (ctx.capabilityDiff.currentOnly.length > 0) {
-        lines.push(`- **仅当前 Trace 有**: ${ctx.capabilityDiff.currentOnly.slice(0, 5).join(', ')}${ctx.capabilityDiff.currentOnly.length > 5 ? '...' : ''}`);
-      }
-      if (ctx.capabilityDiff.referenceOnly.length > 0) {
-        lines.push(`- **仅参考 Trace 有**: ${ctx.capabilityDiff.referenceOnly.slice(0, 5).join(', ')}${ctx.capabilityDiff.referenceOnly.length > 5 ? '...' : ''}`);
-      }
+function buildReferenceArchitectureSection(
+  ctx: ComparisonContext,
+  outputLanguage: OutputLanguage,
+): string {
+  return ctx.referenceArchitecture
+    ? localize(
+        outputLanguage,
+        `\n- **参考 Trace 架构**: ${ctx.referenceArchitecture.type}`,
+        `\n- **Reference trace architecture**: ${ctx.referenceArchitecture.type}`,
+      )
+    : '';
+}
+
+function buildCapabilityAlignmentSection(
+  ctx: ComparisonContext,
+  outputLanguage: OutputLanguage,
+): string {
+  if (ctx.commonCapabilities.length === 0 && !ctx.capabilityDiff) return '';
+  const lines = [
+    '',
+    localize(outputLanguage, '### 能力对齐', '### Capability alignment'),
+    ctx.commonCapabilities.length > 0
+      ? localize(
+          outputLanguage,
+          `- **共有表/视图**: ${ctx.commonCapabilities.length} 个，可安全对比`,
+          `- **Shared tables/views**: ${ctx.commonCapabilities.length}; safe to compare`,
+        )
+      : localize(
+          outputLanguage,
+          '- **共有表/视图**: 0 个，不可直接对比',
+          '- **Shared tables/views**: 0; do not compare directly',
+        ),
+  ];
+  if (ctx.capabilityDiff) {
+    if (ctx.capabilityDiff.currentOnly.length > 0) {
+      lines.push(localize(
+        outputLanguage,
+        `- **仅当前 Trace 有**: ${summarizeCapabilityList(ctx.capabilityDiff.currentOnly)}`,
+        `- **Current trace only**: ${summarizeCapabilityList(ctx.capabilityDiff.currentOnly)}`,
+      ));
+    }
+    if (ctx.capabilityDiff.referenceOnly.length > 0) {
+      lines.push(localize(
+        outputLanguage,
+        `- **仅参考 Trace 有**: ${summarizeCapabilityList(ctx.capabilityDiff.referenceOnly)}`,
+        `- **Reference trace only**: ${summarizeCapabilityList(ctx.capabilityDiff.referenceOnly)}`,
+      ));
     }
   }
-
-  // Available tools
-  lines.push(`\n### 对比工具`);
-  lines.push('- `compare_skill(skillId, params)` — 在两个 Trace 上并行运行同一 Skill，返回对比结果 + schema 对齐信息');
-  lines.push('- `execute_sql_on(trace, sql)` — 在指定 Trace 上执行 SQL（"current" 或 "reference"）');
-  lines.push('- `get_comparison_context()` — 获取两个 Trace 的元数据和能力对齐信息');
-  lines.push('- 默认 `execute_sql` 和 `invoke_skill` 仍然作用于**当前 Trace**\n');
-
-  // Analysis rules
-  lines.push('### 对比分析规则');
-  lines.push('1. **首先调用 `get_comparison_context()`** 确认两个 Trace 的可比性');
-  lines.push('2. 数值对比必须标注**归一化方式**（绝对值 / 百分比 / 相对于总时长）');
-  lines.push('3. 只在共有能力（commonCapabilities）范围内做定量对比');
-  lines.push('4. 所有数据引用必须标注来源：[当前 Trace] 或 [参考 Trace]');
-  lines.push('5. 结论格式：先列 delta 表（指标 | 当前值 | 参考值 | 变化），再分析根因');
-
   return lines.join('\n');
+}
+
+function summarizeCapabilityList(capabilities: string[]): string {
+  const visible = capabilities.slice(0, 5).join(', ');
+  return capabilities.length > 5 ? `${visible}...` : visible;
+}
+
+
+function tracePaneSideLabel(side: TracePaneSide, outputLanguage: OutputLanguage): string {
+  switch (side) {
+    case 'left':
+      return localize(outputLanguage, '左侧', 'Left');
+    case 'right':
+      return localize(outputLanguage, '右侧', 'Right');
+    case 'top':
+      return localize(outputLanguage, '上方', 'Top');
+    case 'bottom':
+      return localize(outputLanguage, '下方', 'Bottom');
+  }
 }
 
 /**
@@ -496,6 +665,15 @@ export function buildSystemPromptParts(
   const outputFormat = loadPromptTemplate('prompt-output-format');
   if (outputFormat) push(1, 'output_format', outputFormat);
 
+  // Retrieval tools are available even without a private codebase selection
+  // (for example public AOSP/blog knowledge), so this boundary must always be
+  // present and must never be dropped by prompt-budget truncation.
+  const retrievedContextSafety = loadPromptTemplate('retrieved-context-safety');
+  if (!retrievedContextSafety) {
+    throw new Error('Missing required retrieved-context-safety prompt template');
+  }
+  push(1, 'retrieved_context_safety', retrievedContextSafety);
+
   // ── Tier 2: PER-TRACE STABLE ─────────────────────────────────────────────
   if (context.architecture) {
     push(2, 'architecture', buildArchitectureSection(context.architecture, context.packageName, true));
@@ -563,6 +741,7 @@ export function buildSystemPromptParts(
         codebaseIds: context.codebaseIds.join(', '),
       }), false, { truncatable: true });
     }
+    push(3, 'code_reference_contract', loadCodeReferenceContractPrompt(outputLanguage));
   }
 
   if (context.sceneType === 'multi_trace_result_comparison') {
@@ -603,7 +782,13 @@ export function buildSystemPromptParts(
   }
 
   if (context.comparison) {
-    push(4, 'comparison_context', buildComparisonContextSection(context.comparison, context.packageName), false, { truncatable: true });
+    push(
+      4,
+      'comparison_context',
+      buildComparisonContextSection(context.comparison, context.packageName, outputLanguage),
+      false,
+      {truncatable: true},
+    );
     const compMethodology = loadPromptTemplate('comparison-methodology');
     if (compMethodology) push(4, 'comparison_methodology', compMethodology, false, { truncatable: true });
   }
@@ -811,6 +996,8 @@ export function buildQuickSystemPrompt(opts: {
   focusApps?: DetectedFocusApp[];
   focusMethod?: 'battery_stats' | 'oom_adj' | 'frame_timeline' | 'none';
   selectionContext?: SelectionContext;
+  runtimeEvidenceContext?: string;
+  quickMemoryContext?: string;
   outputLanguage?: OutputLanguage;
 }): string {
   const template = loadPromptTemplate('prompt-quick');
@@ -832,5 +1019,15 @@ export function buildQuickSystemPrompt(opts: {
     ? buildSelectionContextSection(opts.selectionContext)
     : '';
 
-  return renderTemplate(template, { outputLanguageSection, architectureContext, focusAppContext, selectionSection });
+  return renderTemplate(template, {
+    outputLanguageSection,
+    architectureContext,
+    focusAppContext,
+    runtimeEvidenceContext: opts.runtimeEvidenceContext ?? '',
+    selectionSection,
+    quickMemoryContext: opts.quickMemoryContext ?? '',
+    quickTriageMaxChineseChars: QUICK_TRIAGE_MAX_CHINESE_CHARS,
+    quickTriageMaxFactBullets: QUICK_TRIAGE_MAX_FACT_BULLETS,
+    quickTriageMaxClaims: QUICK_TRIAGE_MAX_CLAIMS,
+  });
 }

@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "clock": {
+    "anchor": "trace-middle",
+    "duration_ns": "1000000000"
+  },
+  "actors": {
+    "processes": [
+      {
+        "id": "app",
+        "name": "com.smartperfetto.fixture",
+        "uid": 10999
+      },
+      {
+        "id": "system",
+        "name": "system_server",
+        "uid": 1000
+      },
+      {
+        "id": "sf",
+        "name": "/system/bin/surfaceflinger",
+        "uid": 1000
+      }
+    ],
+    "threads": [
+      {
+        "id": "main",
+        "process": "app",
+        "name": "main",
+        "is_main": true
+      },
+      {
+        "id": "render",
+        "process": "app",
+        "name": "RenderThread"
+      },
+      {
+        "id": "game",
+        "process": "app",
+        "name": "GameThread"
+      },
+      {
+        "id": "rn-js",
+        "process": "app",
+        "name": "mqt_js"
+      },
+      {
+        "id": "rn-native",
+        "process": "app",
+        "name": "mqt_native_modules"
+      },
+      {
+        "id": "webview",
+        "process": "app",
+        "name": "CrRendererMain"
+      },
+      {
+        "id": "system-main",
+        "process": "system",
+        "name": "android.fg",
+        "is_main": true
+      },
+      {
+        "id": "sf-main",
+        "process": "sf",
+        "name": "surfaceflinger",
+        "is_main": true
+      }
+    ]
+  },
+  "signals": [
+    {
+      "type": "atrace-slice",
+      "at_ns": "10000000",
+      "duration_ns": "18000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto::CASE::linux-system-state"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "40000000",
+      "duration_ns": "19000000",
+      "process": "app",
+      "thread": "render",
+      "name": "system_server state"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "70000000",
+      "duration_ns": "20000000",
+      "process": "app",
+      "thread": "main",
+      "name": "journald"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "100000000",
+      "duration_ns": "21000000",
+      "process": "app",
+      "thread": "render",
+      "name": "JobScheduler"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "200000000",
+      "duration_ns": "22000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "device_idle"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "250000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto.linux-system-state.pressure",
+      "value": 73
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "300000000",
+      "duration_ns": "45000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "380000000",
+      "duration_ns": "20000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "520000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "ScreenState",
+      "value": 1
+    },
+    {
+      "type": "battery-counters",
+      "at_ns": "540000000",
+      "capacity_percent": 80,
+      "charge_counter_uah": "4000000",
+      "current_ua": "-500000",
+      "voltage_uv": "4000000"
+    }
+  ]
+}

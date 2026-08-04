@@ -159,32 +159,32 @@ const DEFAULT_TRACE_CANDIDATES: TraceBenchmarkSpec[] = [
   {
     scene: 'startup',
     label: 'launch-heavy-local',
-    path: '../test-traces/lacunh_heavy.pftrace',
+    path: '../Trace/real/android-startup-heavy/trace.pftrace',
   },
   {
     scene: 'startup',
     label: 'launch-light-local',
-    path: '../test-traces/launch_light.pftrace',
+    path: '../Trace/real/android-startup-light/trace.pftrace',
   },
   {
     scene: 'scroll',
     label: 'scroll-standard-local',
-    path: '../test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace',
+    path: '../Trace/real/android-scroll-standard/trace.pftrace',
   },
   {
     scene: 'scroll',
     label: 'scroll-customer-local',
-    path: '../test-traces/scroll-demo-customer-scroll.pftrace',
+    path: '../Trace/real/android-scroll-customer/trace.pftrace',
   },
   {
     scene: 'scroll',
     label: 'flutter-textureview-local',
-    path: '../test-traces/Scroll-Flutter-327-TextureView.pftrace',
+    path: '../Trace/real/flutter-scroll-texture-view/trace.pftrace',
   },
   {
     scene: 'scroll',
     label: 'flutter-surfaceview-local',
-    path: '../test-traces/Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace',
+    path: '../Trace/real/flutter-scroll-surface-view/trace.pftrace',
   },
 ];
 

@@ -8,8 +8,23 @@ import path from 'path';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
+import {
+  ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV,
+  ENTERPRISE_MIGRATION_PHASE_ENV,
+} from '../../services/enterpriseMigration';
 import { getProviderService, resetProviderService } from '../../services/providerManager';
 import { saveClaudeSessionMapToRuntimeSnapshots } from '../../services/runtimeSnapshotStore';
+import type { TraceProcessorService } from '../../services/traceProcessorService';
+import * as quickEvidenceDirectAnswer from '../../agentRuntime/quickEvidenceDirectAnswer';
+import {evaluationRuntimeCapabilities} from '../../services/selfEvolution/evaluationRuntimeCapabilities';
+import {
+  clearCodeAwareOutputGuards,
+  registerCodeAwareCanary,
+} from '../../services/security/codeAwareOutputRegistry';
+import {
+  snapshotEvaluationUsageReceipt,
+  withEvaluationTelemetry,
+} from '../../services/selfEvolution/evaluationTelemetry';
 import { ClaudeRuntime, __testing } from '../claudeRuntime';
 
 const claudeSdkMock = require('@anthropic-ai/claude-agent-sdk') as {
@@ -21,6 +36,8 @@ const claudeSdkMock = require('@anthropic-ai/claude-agent-sdk') as {
 const originalEnv = {
   enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
   enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
+  migrationPhase: process.env[ENTERPRISE_MIGRATION_PHASE_ENV],
+  cutoverConfirmed: process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV],
   providerDataDirOverride: process.env.PROVIDER_DATA_DIR_OVERRIDE,
   precompactThreshold: process.env.CLAUDE_PRECOMPACT_THRESHOLD,
   precompactWarnEnabled: process.env.CLAUDE_PRECOMPACT_WARN_ENABLED,
@@ -54,17 +71,26 @@ beforeEach(async () => {
   dbPath = path.join(tmpDir, 'enterprise.sqlite');
   process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
+  process.env[ENTERPRISE_MIGRATION_PHASE_ENV] = 'cutover';
+  process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV] = 'true';
   process.env.PROVIDER_DATA_DIR_OVERRIDE = tmpDir;
   resetProviderService();
 });
 
 afterEach(async () => {
   claudeSdkMock.__resetQueryMock();
+  clearCodeAwareOutputGuards('session-private-stream-recovery');
   sessionContextManager.remove('session-a');
   sessionContextManager.remove('session-quick');
+  sessionContextManager.remove('session-quick-focus-evidence');
+  sessionContextManager.remove('session-quick-selection-trace-fact');
+  sessionContextManager.remove('session-language-quick');
+  sessionContextManager.remove('session-language-full');
   sessionContextManager.remove('session-provider');
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
+  restoreEnvValue(ENTERPRISE_MIGRATION_PHASE_ENV, originalEnv.migrationPhase);
+  restoreEnvValue(ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV, originalEnv.cutoverConfirmed);
   restoreEnvValue('PROVIDER_DATA_DIR_OVERRIDE', originalEnv.providerDataDirOverride);
   restoreEnvValue('CLAUDE_PRECOMPACT_THRESHOLD', originalEnv.precompactThreshold);
   restoreEnvValue('CLAUDE_PRECOMPACT_WARN_ENABLED', originalEnv.precompactWarnEnabled);
@@ -76,6 +102,108 @@ afterEach(async () => {
 });
 
 describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
+  it('does not manufacture a final report from completed plan evidence', () => {
+    const recovered = __testing.recoverClaudeInterruptedFinalReport({
+      accumulatedAnswer: '',
+      plan: {
+        phases: [
+          {
+            id: 'p1',
+            name: '启动概览',
+            goal: '确认启动指标',
+            expectedTools: ['invoke_skill'],
+            status: 'completed',
+            summary: '冷启动 TTID=1912ms，证据来自 art-1。',
+          },
+          {
+            id: 'p2',
+            name: '综合结论',
+            goal: '输出最终报告',
+            expectedTools: [],
+            status: 'pending',
+          },
+        ],
+        successCriteria: '形成可验证结论',
+        submittedAt: 1,
+        toolCallLog: [],
+      },
+      hypotheses: [],
+      outputLanguage: 'zh-CN',
+    });
+
+    expect(recovered).toBeUndefined();
+  });
+
+  it('preserves an evidence-backed truncated answer when recovering an interrupted report', () => {
+    const recovered = __testing.recoverClaudeInterruptedFinalReport({
+      accumulatedAnswer: [
+        '# 启动性能分析报告',
+        '',
+        '## 综合结论',
+        '',
+        '冷启动 TTID=1912ms，主线程热点 568.8ms，证据来自 art-1。',
+        '',
+        '## 优化建议',
+        '',
+        '- 拆分主线程初始化中的同步热点任务',
+      ].join('\n'),
+      plan: null,
+      hypotheses: [],
+      outputLanguage: 'zh-CN',
+    });
+
+    expect(recovered).toContain('冷启动 TTID=1912ms，主线程热点 568.8ms');
+    expect(recovered).not.toContain('拆分主线程初始化中的同步热点任务');
+    expect(recovered).toContain('## 截断恢复补充');
+  });
+
+  it('rejects metric-bearing process narration instead of promoting plan evidence', () => {
+    const recovered = __testing.recoverClaudeInterruptedFinalReport({
+      accumulatedAnswer:
+        '我需要继续执行 Phase 2，并调用 update_plan_phase。当前看到 TTID=9999ms，但还不能输出结论。',
+      plan: {
+        phases: [{
+          id: 'p1',
+          name: '启动概览',
+          goal: '确认启动指标',
+          expectedTools: ['invoke_skill'],
+          status: 'completed',
+          summary: '已验证冷启动 TTID=1912ms，证据来自 art-1。',
+        }],
+        successCriteria: '形成可验证结论',
+        submittedAt: 1,
+        toolCallLog: [],
+      },
+      hypotheses: [],
+      outputLanguage: 'zh-CN',
+    });
+
+    expect(recovered).toBeUndefined();
+  });
+
+  it('only treats bounded mid-stream failures as recoverable', () => {
+    const recoverable = (errorMessage: string, hasPartialEvidence = true) =>
+      __testing.isRecoverableClaudeStreamInterruption({
+        errorMessage,
+        streamStarted: true,
+        hasPartialEvidence,
+        quotaExceeded: false,
+      });
+
+    expect(recoverable('stream terminated before completion')).toBe(true);
+    expect(recoverable('Claude analysis error after tool execution')).toBe(false);
+    expect(recoverable('Claude analysis error after tool execution', false)).toBe(false);
+    expect(recoverable('401 unauthorized: invalid API key')).toBe(false);
+    expect(recoverable('No conversation found with session ID sdk-a')).toBe(false);
+    expect(recoverable('permission denied for configured cwd')).toBe(false);
+    expect(__testing.isRecoverableClaudeStreamInterruption({
+      errorMessage: 'stream terminated before completion',
+      streamStarted: true,
+      hasPartialEvidence: true,
+      quotaExceeded: true,
+    })).toBe(false);
+  });
+
   it('does not mark a correction timeout partial when the existing conclusion is deliverable', () => {
     const conclusion =
       '我来分析这个 WebView 应用的启动性能。首先提交分析计划并获取启动概览数据。计划已提交。开始 Phase 1：获取启动概览数据。\n\n' +
@@ -644,6 +772,61 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     }
   });
 
+  it('does not persist provider resume or intermediate model state for private source sessions', () => {
+    const now = 1_700_000_000_000;
+    const runtime = new ClaudeRuntime({} as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).sessionMap.set('session-private', {
+      sdkSessionId: 'PRIVATE_PROVIDER_SESSION_CANARY',
+      updatedAt: now,
+      mode: 'full',
+    });
+    (runtime as any).sessionNotes.set('session-private', [{content: 'PRIVATE_NOTE_CANARY'}]);
+    (runtime as any).sessionPlans.set('session-private', {
+      current: {
+        phases: [],
+        successCriteria: 'PRIVATE_PLAN_CANARY',
+        submittedAt: now,
+        toolCallLog: [{
+          toolName: 'submit_hypothesis',
+          timestamp: now,
+          inputSummary: 'PRIVATE_TOOL_ARGUMENT_CANARY',
+        }],
+      },
+      history: [],
+    });
+    (runtime as any).sessionHypotheses.set('session-private', [{statement: 'PRIVATE_TITLE_ONLY_CANARY'}]);
+
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const snapshot = runtime.takeSnapshot('session-private', 'trace-a', {
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['private-app'],
+        conversationSteps: [{content: {text: 'PRIVATE_STEP_CANARY'}}] as any,
+        queryHistory: [],
+        conclusionHistory: [],
+        agentDialogue: [{content: 'PRIVATE_DIALOGUE_CANARY'}] as any,
+        agentResponses: [{response: 'PRIVATE_RESPONSE_CANARY'}] as any,
+        dataEnvelopes: [],
+        hypotheses: [{description: 'PRIVATE_HYPOTHESIS_CANARY'}],
+        runSequence: 0,
+        conversationOrdinal: 0,
+      });
+
+      expect(snapshot.sdkSessionId).toBeUndefined();
+      expect(snapshot.analysisNotes).toEqual([]);
+      expect(snapshot.analysisPlan).toBeNull();
+      expect(snapshot.planHistory).toEqual([]);
+      expect(snapshot.claudeHypotheses).toBeUndefined();
+      expect(snapshot.artifacts).toBeUndefined();
+      expect(JSON.stringify(snapshot)).not.toContain('PRIVATE_');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('persists fresh comparison SDK session mappings into snapshots', () => {
     const now = 1_700_000_000_000;
     const runtime = new ClaudeRuntime({} as any, {
@@ -778,11 +961,563 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     const calls = claudeSdkMock.__getQueryCalls();
     expect(calls).toHaveLength(1);
     expect(calls[0].options.resume).toBeUndefined();
+    expect(calls[0].options.persistSession).toBe(false);
+    expect(calls[0].options.allowedTools).toContain('mcp__smartperfetto__fetch_artifact');
     expect(calls[0].prompt).toContain('上一轮回答：主要包名是 com.example.app。');
     expect((runtime as any).sessionMap.get('session-quick')).toEqual(expect.objectContaining({
       sdkSessionId: 'full-sdk-session',
       mode: 'full',
     }));
+  });
+
+  it('uses the request language throughout the quick path without mutating runtime defaults', async () => {
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: ['cnt'], rows: [[0]]}),
+    } as any, {
+      outputLanguage: 'zh-CN',
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-language-quick', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    const updates: any[] = [];
+    runtime.on('update', update => updates.push(update));
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-language-quick',
+        num_turns: 1,
+        result: 'The current app is com.example.app.',
+      };
+    });
+
+    await runtime.analyze(
+      'Explain the current app briefly',
+      'session-language-quick',
+      'trace-language-quick',
+      {analysisMode: 'fast', outputLanguage: 'en', packageName: 'com.example.app'},
+    );
+
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(JSON.stringify(call.options.systemPrompt)).toContain('English');
+    const progress = updates.filter(update => update.type === 'progress')
+      .map(update => String(update.content?.message ?? '')).join('\n');
+    expect(progress).toContain('Fast Q&A mode');
+    expect(progress).not.toContain('快速问答模式');
+    expect((runtime as any).config.outputLanguage).toBe('zh-CN');
+  });
+
+  it('emits focus evidence for auto-detected app-scoped direct quick facts', async () => {
+    const traceProcessor = {
+      query: jest.fn(async (_traceId: string, sql: string) => {
+        if (sql.includes('android_battery_stats_event_slices')) {
+          return {
+            columns: ['package_name', 'total_duration_ns', 'switch_count'],
+            rows: [['com.example.app', 1_250_000_000, 3]],
+            durationMs: 1,
+          };
+        }
+        if (sql.includes('runtime_app_process_thread_count')) {
+          return {
+            columns: [
+              'package_name',
+              'process_count',
+              'thread_count',
+              'process_names',
+              'process_thread_counts',
+              'source_table',
+            ],
+            rows: [[
+              'com.example.app',
+              2,
+              7,
+              'com.example.app,com.example.app:worker',
+              '4,3',
+              'process,thread,android_process_metadata',
+            ]],
+            durationMs: 2,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    const updates: Array<{ type?: string; content?: unknown }> = [];
+    runtime.on('update', update => updates.push(update));
+
+    const result = await runtime.analyze(
+      '焦点应用有多少线程？',
+      'session-quick-focus-evidence',
+      'trace-quick-focus-evidence',
+    );
+
+    expect(claudeSdkMock.__getQueryCalls()).toHaveLength(0);
+    expect(traceProcessor.query).toHaveBeenCalledTimes(2);
+    expect(result.rounds).toBe(0);
+    expect(result.conclusion).toContain('焦点应用 com.example.app');
+    expect(result.quickRun).toMatchObject({
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      actualTurns: 0,
+      stopReason: 'answered',
+      evidence: {
+        currentRunDataEnvelopes: 2,
+        citedEvidenceRefs: 1,
+      },
+    });
+    const dataUpdates = updates.filter(update => update.type === 'data');
+    expect(dataUpdates).toHaveLength(2);
+    expect(dataUpdates[0].content).toEqual([
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          source: 'runtime_focus_detection',
+          intent: 'runtime_focus_app_detection',
+        }),
+      }),
+    ]);
+    expect(dataUpdates[1].content).toEqual([
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          source: 'runtime_trace_fact:app_thread_count',
+        }),
+      }),
+    ]);
+  });
+
+  it('answers selected trace-wide frame facts without focus or SDK preflight', async () => {
+    const traceProcessor = {
+      query: jest.fn(async (_traceId: string, sql: string) => {
+        if (sql.includes('actual_frame_timeline_slice')) {
+          return {
+            columns: [
+              'scope',
+              'total_frames',
+              'window_start_ns',
+              'window_end_ns',
+              'duration_s',
+              'scope_start_ns',
+              'scope_end_ns',
+              'source_table',
+            ],
+            rows: [[
+              'selected_range',
+              57,
+              100,
+              200,
+              0.0000001,
+              100,
+              200,
+              'actual_frame_timeline_slice',
+            ]],
+            durationMs: 2,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    const updates: Array<{ type?: string; content?: unknown }> = [];
+    runtime.on('update', update => updates.push(update));
+
+    const result = await runtime.analyze(
+      '这个 trace 一共有多少帧？',
+      'session-quick-selected-trace-frame-count',
+      'trace-quick-selected-trace-frame-count',
+      {
+        selectionContext: {
+          kind: 'area',
+          source: 'area_selection',
+          startNs: 100,
+          endNs: 200,
+        },
+      },
+    );
+
+    expect(claudeSdkMock.__getQueryCalls()).toHaveLength(0);
+    expect(traceProcessor.query).toHaveBeenCalledTimes(1);
+    expect(result.rounds).toBe(0);
+    expect(result.conclusion).toContain('当前选区的 FrameTimeline 中共有 57 帧');
+    expect(result.quickRun).toMatchObject({
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      actualTurns: 0,
+      stopReason: 'answered',
+      evidence: {
+        currentRunDataEnvelopes: 1,
+        citedEvidenceRefs: 1,
+      },
+    });
+    const dataUpdates = updates.filter(update => update.type === 'data');
+    expect(dataUpdates).toHaveLength(1);
+    expect(dataUpdates[0].content).toEqual([
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          source: 'runtime_trace_fact:trace_frame_count',
+        }),
+        data: expect.objectContaining({
+          rows: [[
+            'selected_range',
+            57,
+            100,
+            200,
+            0.0000001,
+            100,
+            200,
+            'actual_frame_timeline_slice',
+          ]],
+        }),
+      }),
+    ]);
+  });
+
+  it('skips architecture preflight when shared quick direct evidence answers', async () => {
+    const directEvidence = jest.spyOn(
+      quickEvidenceDirectAnswer,
+      'buildRuntimeQuickEvidenceDirectAnswer',
+    );
+    directEvidence.mockImplementation(async input => {
+      input.emitUpdate({
+        type: 'data',
+        content: [{
+          meta: {
+            type: 'skill_result',
+            version: '2.0.0',
+            source: 'scrolling_analysis:performance_summary',
+            timestamp: 1,
+            skillId: 'scrolling_analysis',
+            stepId: 'performance_summary',
+            evidenceRefId: 'data:skill:scrolling_analysis:current:test:performance_summary',
+            sourceToolCallId: 'runtime-skill:scrolling_analysis:test',
+            traceSide: 'current',
+            traceId: 'trace-quick-shared-direct',
+            planPhaseId: 'quick',
+          },
+          data: {
+            columns: ['total_frames'],
+            rows: [[347]],
+          },
+          display: {
+            layer: 'overview',
+            format: 'table',
+            title: '滑动性能概览',
+          },
+        }],
+        timestamp: Date.now(),
+      });
+      return {
+        directAnswer: {
+          conclusion:
+            '## 快速 Triage\n当前滑动概览可由 performance_summary 直接回答；' +
+            'evidence_ref_id=`data:skill:scrolling_analysis:current:test:performance_summary`。',
+          confidence: 0.9,
+          conclusionContract: {
+            schemaVersion: 'conclusion_contract_v1',
+            mode: 'focused_answer',
+            conclusions: [{
+              rank: 1,
+              statement: '当前滑动概览可由 performance_summary 直接回答。',
+              confidencePercent: 90,
+            }],
+            clusters: [],
+            evidenceChain: [{
+              conclusionId: 'quick_scrolling_summary',
+              text: 'performance_summary total_frames=347',
+            }],
+            claims: [{
+              id: 'quick_scrolling_total_frames',
+              text: 'performance_summary total_frames=347',
+              kind: 'numeric',
+              references: [{
+                evidenceRefId: 'data:skill:scrolling_analysis:current:test:performance_summary',
+                sourceRef: 'runtime-skill:scrolling_analysis:test',
+                column: 'total_frames',
+                value: 347,
+              }],
+              supportLevel: 'verified',
+            }],
+            uncertainties: [],
+            nextSteps: [],
+            metadata: {
+              confidencePercent: 90,
+              rounds: 0,
+              claimDerivation: 'explicit_model_contract',
+              claimVerificationScope: 'explicit_claims',
+            },
+          },
+        },
+        effectivePackageName: 'com.example.app',
+        evidenceCounts: {
+          currentRunDataEnvelopes: 1,
+          citedEvidenceRefs: 1,
+        },
+      };
+    });
+    const traceProcessor = {
+      query: jest.fn(async (_traceId: string, sql: string) => {
+        if (sql.includes('android_battery_stats_event_slices')) {
+          return {
+            columns: ['package_name', 'total_duration_ns', 'switch_count'],
+            rows: [['com.example.app', 1_250_000_000, 3]],
+            durationMs: 1,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as unknown as TraceProcessorService, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    const updates: Array<{ type?: string; content?: unknown }> = [];
+    runtime.on('update', update => updates.push(update));
+
+    try {
+      const result = await runtime.analyze(
+        'scroll jank overview and smoothness',
+        'session-quick-shared-direct',
+        'trace-quick-shared-direct',
+      );
+
+      expect(directEvidence).toHaveBeenCalledTimes(1);
+      expect(claudeSdkMock.__getQueryCalls()).toHaveLength(0);
+      expect(traceProcessor.query).toHaveBeenCalledTimes(1);
+      expect(result.rounds).toBe(0);
+      expect(result.quickRun).toMatchObject({
+        requestedMode: 'auto',
+        resolvedMode: 'quick',
+        actualTurns: 0,
+        stopReason: 'answered',
+        evidence: {
+          currentRunDataEnvelopes: 1,
+          citedEvidenceRefs: 1,
+        },
+      });
+      expect(updates.map(update => update.type)).not.toContain('architecture_detected');
+    } finally {
+      directEvidence.mockRestore();
+      sessionContextManager.remove('session-quick-shared-direct');
+    }
+  });
+
+  it('keeps Claude mixed trace-fact plus scrolling quick evidence in the shared direct builder', async () => {
+    const directEvidence = jest.spyOn(
+      quickEvidenceDirectAnswer,
+      'buildRuntimeQuickEvidenceDirectAnswer',
+    );
+    directEvidence.mockImplementation(async input => {
+      expect(input.quickTraceFactPreEvidence).toBe(true);
+      expect(input.quickScrollingTriagePreEvidence).toBe(true);
+      expect(input.quickProcessIdentityPreEvidence).toBe(false);
+      expect(input.quickFocusAppPreEvidence).toBe(false);
+      return {
+        directAnswer: {
+          conclusion:
+            '## 快速 Triage\n- 总帧数和整体流畅度均已由运行时结构化证据回答。\n\n' +
+            '## 逐句数据引用（结构化来源）\n' +
+            '- Q1: FPS 和流畅度均有结构化引用。\n' +
+            '  - evidence_ref_id=`data:runtime:test`; source_ref=runtime; column=`fps`; value=`58`',
+          confidence: 0.9,
+          conclusionContract: {
+            schemaVersion: 'conclusion_contract_v1',
+            mode: 'focused_answer',
+            conclusions: [{
+              rank: 1,
+              statement: '总帧数和整体流畅度均已由运行时结构化证据回答。',
+              confidencePercent: 90,
+            }],
+            clusters: [],
+            evidenceChain: [{
+              conclusionId: 'quick_mixed_trace_scrolling',
+              text: 'runtime mixed trace fact and scrolling evidence',
+            }],
+            claims: [{
+              id: 'quick_mixed_fps',
+              text: '总帧数和流畅度均有结构化引用。',
+              kind: 'numeric',
+              references: [{
+                evidenceRefId: 'data:runtime:test',
+                sourceRef: 'runtime',
+                column: 'fps',
+                value: 58,
+              }],
+              supportLevel: 'verified',
+            }],
+            uncertainties: [],
+            nextSteps: [],
+            metadata: {
+              confidencePercent: 90,
+              rounds: 0,
+              claimDerivation: 'explicit_model_contract',
+              claimVerificationScope: 'explicit_claims',
+            },
+          },
+        },
+        evidenceCounts: {
+          currentRunDataEnvelopes: 2,
+          citedEvidenceRefs: 1,
+        },
+      };
+    });
+    const traceProcessor = {
+      query: jest.fn(async (_traceId: string, sql: string) => {
+        if (sql.includes('android_battery_stats_event_slices')) {
+          return {
+            columns: ['package_name', 'total_duration_ns', 'switch_count'],
+            rows: [['com.example.app', 1_250_000_000, 3]],
+            durationMs: 1,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      }),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as unknown as TraceProcessorService, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+
+    try {
+      const result = await runtime.analyze(
+        '总帧数是多少？整体流畅吗？',
+        'session-quick-mixed-trace-scrolling',
+        'trace-quick-mixed-trace-scrolling',
+      );
+
+      expect(directEvidence).toHaveBeenCalledTimes(1);
+      expect(claudeSdkMock.__getQueryCalls()).toHaveLength(0);
+      expect(result.rounds).toBe(0);
+      expect(result.quickRun).toMatchObject({
+        actualTurns: 0,
+        evidence: {
+          currentRunDataEnvelopes: 2,
+          citedEvidenceRefs: 1,
+        },
+      });
+      expect(result.conclusion).toContain('总帧数和整体流畅度');
+    } finally {
+      directEvidence.mockRestore();
+      sessionContextManager.remove('session-quick-mixed-trace-scrolling');
+    }
+  });
+
+  it('does not answer selected-range trace facts from global runtime pre-evidence', async () => {
+    const traceProcessor = {
+      query: jest.fn(async (_traceId: string, sql: string) => {
+        if (sql.includes('android_battery_stats_event_slices')) {
+          return {
+            columns: ['package_name', 'total_duration_ns', 'switch_count'],
+            rows: [['com.example.app', 1_250_000_000, 3]],
+            durationMs: 1,
+          };
+        }
+        return { columns: [], rows: [], durationMs: 1 };
+      }),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-quick-selection-trace-fact', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'quick-selection-sdk-session',
+        num_turns: 1,
+        result: '选区内帧数需要基于选区上下文查询，不能使用全局 trace 计数直接代替。',
+      };
+    });
+
+    const result = await runtime.analyze(
+      '这个 trace 一共有多少帧？',
+      'session-quick-selection-trace-fact',
+      'trace-quick-selection-trace-fact',
+      {
+        selectionContext: {
+          kind: 'area',
+          source: 'area_selection',
+          startNs: 100,
+          endNs: 200,
+        },
+      },
+    );
+
+    expect(claudeSdkMock.__getQueryCalls()).toHaveLength(1);
+    expect(result.rounds).toBe(1);
+    expect(result.quickRun).toMatchObject({
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      actualTurns: 1,
+      stopReason: 'answered',
+    });
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(call.options.systemPrompt).toContain('用户选区上下文');
+    expect(call.options.systemPrompt).toContain('起始时间:** 100 ns');
+    expect(call.options.systemPrompt).toContain('结束时间:** 200 ns');
+  });
+
+  it('does not answer selected-range process identity questions from global runtime pre-evidence', async () => {
+    const traceProcessor = {
+      query: jest.fn(async () => ({ columns: [], rows: [], durationMs: 1 })),
+    };
+    const runtime = new ClaudeRuntime(traceProcessor as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-quick-selection-identity', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'quick-selection-identity-sdk-session',
+        num_turns: 1,
+        result: '选区内进程身份需要基于选区上下文查询，不能使用全局 trace 进程身份直接代替。',
+      };
+    });
+
+    const result = await runtime.analyze(
+      '这个选区的应用包名和主要进程是什么？',
+      'session-quick-selection-identity',
+      'trace-quick-selection-identity',
+      {
+        selectionContext: {
+          kind: 'area',
+          source: 'area_selection',
+          startNs: 100,
+          endNs: 200,
+        },
+      },
+    );
+
+    expect(claudeSdkMock.__getQueryCalls()).toHaveLength(1);
+    expect(result.rounds).toBe(1);
+    expect(result.quickRun).toMatchObject({
+      requestedMode: 'auto',
+      resolvedMode: 'quick',
+      actualTurns: 1,
+      stopReason: 'answered',
+    });
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(call.options.systemPrompt).toContain('用户选区上下文');
+    expect(call.options.systemPrompt).toContain('起始时间:** 100 ns');
+    expect(call.options.systemPrompt).toContain('结束时间:** 200 ns');
   });
 
   it('passes stable and volatile full-mode prompt blocks through the Claude cache boundary', async () => {
@@ -831,6 +1566,325 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     expect(boundaryIndex).toBeGreaterThan(0);
     expect(blocks.slice(0, boundaryIndex).join('\n\n')).toContain('SmartPerfetto');
     expect(blocks.slice(boundaryIndex + 1).join('\n\n')).toContain('用户选区上下文');
+    expect(call.options.persistSession).toBe(true);
+  });
+
+  it('uses the request language throughout the full path without mutating runtime defaults', async () => {
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: ['cnt'], rows: [[0]]}),
+      getTrace: () => ({traceOs: 'android', traceFormat: 'perfetto'}),
+    } as any, {
+      outputLanguage: 'zh-CN',
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-language-full', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    const updates: any[] = [];
+    runtime.on('update', update => updates.push(update));
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-language-full',
+        num_turns: 1,
+        result: [
+          '# Performance Analysis Report',
+          '',
+          '## Overall Conclusion',
+          '',
+          'The selected interval is stable based on the collected evidence.',
+          '',
+          '## Key Evidence Chain',
+          '',
+          '- The trace query completed successfully.',
+          '',
+          '## Recommendations',
+          '',
+          '- Continue monitoring the selected interval.',
+        ].join('\n'),
+      };
+    });
+
+    await runtime.analyze(
+      'Analyze the selected interval',
+      'session-language-full',
+      'trace-language-full',
+      {
+        analysisMode: 'full',
+        outputLanguage: 'en',
+        packageName: 'com.example.app',
+        selectionContext: {kind: 'area', startNs: 100, endNs: 200} as any,
+      },
+    );
+
+    const [call] = claudeSdkMock.__getQueryCalls();
+    expect(JSON.stringify(call.options.systemPrompt)).toContain(
+      'All user-facing answers, reports, phase summaries',
+    );
+    const progress = updates.filter(update => update.type === 'progress')
+      .map(update => String(update.content?.message ?? '')).join('\n');
+    expect(progress).toContain('Starting analysis with');
+    expect(progress).not.toContain('开始分析');
+    expect((runtime as any).config.outputLanguage).toBe('zh-CN');
+  });
+
+  it('keeps private full-mode Claude transcripts ephemeral and out of resume maps', async () => {
+    const sessionId = 'session-private-sdk';
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: ['cnt'], rows: [[0]]}),
+      getTrace: () => ({traceOs: 'android', traceFormat: 'perfetto'}),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-private-sdk', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    sessionContextManager.getOrCreate(sessionId, 'trace-private-sdk').addTurn(
+      '上一轮私有问题',
+      {
+        primaryGoal: '上一轮私有问题',
+        aspects: [],
+        expectedOutputType: 'diagnosis',
+        complexity: 'complex',
+        followUpType: 'initial',
+      },
+      {
+        agentId: 'claude-agent',
+        success: true,
+        findings: [],
+        confidence: 0.8,
+        message: 'PRIVATE_LOCAL_CONTINUITY_CANARY',
+      },
+      [],
+    );
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-private-session-canary',
+        num_turns: 1,
+        result: [
+          '## 综合结论',
+          '私有源码分析已完成。',
+          '',
+          '## 关键证据链',
+          '- 仅使用本轮授权上下文。',
+          '',
+          '## 优化建议',
+          '- 修正私有源码中的热点路径。',
+        ].join('\n'),
+      };
+    });
+
+    try {
+      const result = await runtime.analyze('分析私有源码热点', sessionId, 'trace-private-sdk', {
+        analysisMode: 'full',
+        codeAwareMode: 'metadata_only',
+        codebaseIds: ['private-app'],
+        tenantId: 'tenant-private',
+        workspaceId: 'workspace-private',
+        userId: 'user-private',
+      });
+
+      expect(result.success).toBe(true);
+      const [call] = claudeSdkMock.__getQueryCalls();
+      expect(call.options.persistSession).toBe(false);
+      expect(call.options.resume).toBeUndefined();
+      expect(call.prompt).toContain('PRIVATE_LOCAL_CONTINUITY_CANARY');
+      expect(runtime.getSdkSessionId(sessionId)).toBeUndefined();
+      expect(JSON.stringify(Array.from((runtime as any).sessionMap.values())))
+        .not.toContain('sdk-private-session-canary');
+    } finally {
+      sessionContextManager.remove(sessionId);
+    }
+  });
+
+  it('keeps generic SDK execution errors failed after an evidence-backed streamed answer', async () => {
+    const sessionId = 'session-generic-stream-failure';
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: ['cnt'], rows: [[0]]}),
+      getTrace: () => ({traceOs: 'android', traceFormat: 'perfetto'}),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-generic-stream-failure', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    const updates: Array<{type?: string; content?: Record<string, unknown>}> = [];
+    runtime.on('update', update => updates.push(update as any));
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'assistant',
+        session_id: 'sdk-generic-stream-failure',
+        message: {
+          content: [{
+            type: 'text',
+            text: [
+              '# 启动性能分析报告',
+              '',
+              '## 综合结论',
+              '',
+              '冷启动 TTID=1912ms，证据来自 art-1。',
+              '',
+              '## 关键证据链',
+              '',
+              '- art-1: 主线程热点 568.8ms。',
+              '',
+              '## 优化建议',
+              '',
+              '- 拆分主线程同步初始化。',
+            ].join('\n'),
+          }],
+        },
+      };
+      yield {
+        type: 'result',
+        subtype: 'error_during_execution',
+        session_id: 'sdk-generic-stream-failure',
+        num_turns: 2,
+        errors: ['Claude analysis error after tool execution'],
+      };
+    });
+
+    try {
+      const result = await runtime.analyze(
+        '分析启动性能',
+        sessionId,
+        'trace-generic-stream-failure',
+        {analysisMode: 'full'},
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        terminationReason: 'execution_error',
+      });
+      expect(result.partial).not.toBe(true);
+      expect(result.conclusion).toContain('分析过程中出错');
+      expect(updates).not.toContainEqual(expect.objectContaining({
+        type: 'degraded',
+        content: expect.objectContaining({
+          fallback: 'partial_result_after_stream_termination',
+        }),
+      }));
+    } finally {
+      sessionContextManager.remove(sessionId);
+    }
+  });
+
+  it.each([
+    {
+      name: 'stream execution failure',
+      subtype: 'error_during_execution',
+      errors: ['stream terminated before completion'],
+      terminationReason: 'execution_error',
+      fallback: 'partial_result_after_stream_termination',
+    },
+    {
+      name: 'maximum-turn termination',
+      subtype: 'error_max_turns',
+      errors: ['maximum turns reached'],
+      terminationReason: 'max_turns',
+      fallback: 'partial_result_after_max_turns',
+    },
+  ])('sanitizes a private streamed report before returning after $name', async ({
+    subtype,
+    errors,
+    terminationReason,
+    fallback,
+  }) => {
+    const sessionId = 'session-private-stream-recovery';
+    const privateCanary = 'PRIVATE_STREAM_RECOVERY_CANARY';
+    registerCodeAwareCanary(sessionId, privateCanary);
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: ['cnt'], rows: [[0]]}),
+      getTrace: () => ({traceOs: 'android', traceFormat: 'perfetto'}),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-private-stream-recovery', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    const updates: Array<{type?: string; content?: Record<string, unknown>}> = [];
+    runtime.on('update', update => updates.push(update as any));
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'assistant',
+        session_id: 'sdk-private-stream-recovery',
+        message: {
+          content: [{
+            type: 'text',
+            text: [
+              '# 启动性能分析报告',
+              '',
+              '## 综合结论',
+              '',
+              `冷启动 TTID=1912ms，证据来自 art-1。${privateCanary}`,
+              '',
+              '## 关键证据链',
+              '',
+              '- art-1: 主线程热点 568.8ms。',
+              '',
+              '## 优化建议',
+              '',
+              '- 拆分主线程同步初始化。',
+            ].join('\n'),
+          }],
+        },
+      };
+      yield {
+        type: 'result',
+        subtype,
+        session_id: 'sdk-private-stream-recovery',
+        num_turns: 2,
+        errors,
+      };
+    });
+
+    try {
+      const result = await runtime.analyze(
+        '分析私有源码启动热点',
+        sessionId,
+        'trace-private-stream-recovery',
+        {
+          analysisMode: 'full',
+          codeAwareMode: 'metadata_only',
+          codebaseIds: ['private-app'],
+          tenantId: 'tenant-private',
+          workspaceId: 'workspace-private',
+          userId: 'user-private',
+        },
+      );
+
+      expect(result).toMatchObject({
+        success: true,
+        partial: true,
+        terminationReason,
+      });
+      expect(result.conclusion).toContain('TTID=1912ms');
+      expect(JSON.stringify(result)).not.toContain(privateCanary);
+      expect(updates).toContainEqual(expect.objectContaining({
+        type: 'degraded',
+        content: expect.objectContaining({
+          fallback,
+          partial: true,
+        }),
+      }));
+    } finally {
+      sessionContextManager.remove(sessionId);
+    }
   });
 
   it('keeps unsupported runtime prompt cache capabilities on the full system prompt string', () => {
@@ -925,6 +1979,88 @@ describe('ClaudeRuntime enterprise runtime_snapshots session map', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('records authoritative first-turn Claude result usage including cache tokens', async () => {
+    const runtime = new ClaudeRuntime({
+      query: async () => ({columns: [], rows: []}),
+      getTrace: () => ({traceOs: 'android', traceFormat: 'perfetto'}),
+    } as any, {
+      enableVerification: false,
+      enableSubAgents: false,
+    });
+    (runtime as any).architectureCache.set('trace-evaluation-usage', {
+      type: 'STANDARD',
+      confidence: 0.9,
+      evidence: [],
+    });
+    claudeSdkMock.__setQueryImplementation(async function* () {
+      yield {
+        type: 'assistant',
+        session_id: 'sdk-evaluation-usage',
+        message: {content: []},
+      };
+      yield {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sdk-evaluation-usage',
+        num_turns: 1,
+        usage: {
+          input_tokens: 10,
+          output_tokens: 3,
+          cache_read_input_tokens: 7,
+          cache_creation_input_tokens: 2,
+        },
+        result: [
+          '# 启动性能分析报告',
+          '',
+          '## 综合结论',
+          '',
+          '启动分析完成，证据来自 data:art-usage。',
+          '',
+          '## 关键证据链',
+          '',
+          '- data:art-usage: 启动路径证据。',
+          '',
+          '## 优化建议',
+          '',
+          '- 缩短主线程初始化。',
+        ].join('\n'),
+      };
+    });
+
+    const receipt = await withEvaluationTelemetry({
+      limits: {
+        schemaVersion: 1,
+        maxTokens: 100,
+        maxToolCalls: 100,
+        maxWallclockMs: 30_000,
+        maxTraceProcessorCpuMs: 30_000,
+      },
+      capabilities: evaluationRuntimeCapabilities({
+        runtime: 'claude-agent-sdk',
+      }),
+      signal: new AbortController().signal,
+      isAuthoritative: () => true,
+    }, async () => {
+      const result = await runtime.analyze(
+        '分析启动性能',
+        'session-evaluation-usage',
+        'trace-evaluation-usage',
+        {
+          analysisMode: 'full',
+          packageName: 'com.example.app',
+        },
+      );
+      expect(result.success).toBe(true);
+      return snapshotEvaluationUsageReceipt();
+    });
+
+    expect(receipt.tokens).toMatchObject({
+      used: 22,
+      guarantee: 'soft_observed',
+    });
+    sessionContextManager.remove('session-evaluation-usage');
   });
 
   it('uses scoped Claude provider tuning when preparing full SDK options', async () => {

@@ -5,6 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getTraceProcessorService } from '../services/traceProcessorService';
+import { listTraceCases, resolveTraceCase } from '../utils/traceCorpus';
 
 interface ProbeColumn {
   name: string;
@@ -163,14 +164,12 @@ async function probeTrace(filePath: string): Promise<ProbeReport> {
 
 async function main(): Promise<void> {
   const repoRoot = path.resolve(__dirname, '../../..');
-  const traceDir = path.join(repoRoot, 'test-traces');
-  const traceFiles = fs
-    .readdirSync(traceDir)
-    .filter((file) => file.endsWith('.pftrace'))
-    .map((file) => path.join(traceDir, file));
+  const traceFiles = listTraceCases(repoRoot)
+    .filter(entry => entry.kind === 'real')
+    .map(entry => resolveTraceCase(entry.id, repoRoot));
 
   if (traceFiles.length === 0) {
-    console.error(`No .pftrace files found in ${traceDir}`);
+    console.error(`No real trace cases found in ${path.join(repoRoot, 'Trace', 'catalog.json')}`);
     process.exit(1);
   }
 

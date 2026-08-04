@@ -24,6 +24,10 @@ import {
 } from '../agentv3/sessionStateSnapshot';
 import { readTraceMetadataForContext } from '../services/traceMetadataStore';
 import { applyFinalResultQualityGate } from '../services/finalResultQualityGate';
+import {
+  requireAiEnabledForHttp,
+  sendAiDisabledErrorIfPresent,
+} from './aiCapabilityPolicyHttp';
 
 interface AssistantSessionStore {
   getSession(sessionId: string): any;
@@ -67,6 +71,10 @@ export function registerAgentResumeRoutes(
         success: false,
         error: 'sessionId is required',
       });
+    }
+
+    if (!requireAiEnabledForHttp(res, 'agent_resume')) {
+      return;
     }
 
     const existingSession = deps.sessionStore.getSession(sessionId);
@@ -176,7 +184,8 @@ export function registerAgentResumeRoutes(
         providerId: restoredProviderId,
         runtimeOverride: restoredProviderId ? undefined : snapshotRuntimeKind,
         providerScope,
-      }) as any;
+        aiFeature: 'agent_resume',
+      });
 
       const focusSnapshot = persistenceService.loadFocusStore(sessionId);
       if (focusSnapshot && typeof orchestrator.getFocusStore === 'function') {
@@ -336,7 +345,9 @@ export function registerAgentResumeRoutes(
           turnCount: restoredTurns.length,
           latestTurn: latestTurn ? deps.buildTurnSummary(latestTurn) : null,
           entityStore: restoredContext.getEntityStore().getStats(),
-          focusStore: focusSnapshot ? orchestrator.getFocusStore().getStats() : null,
+          focusStore: focusSnapshot && typeof orchestrator.getFocusStore === 'function'
+            ? orchestrator.getFocusStore().getStats()
+            : null,
           traceAgentState: traceAgentStateSnapshot
             ? {
                 version: traceAgentStateSnapshot.version,
@@ -352,6 +363,9 @@ export function registerAgentResumeRoutes(
         },
       });
     } catch (error: any) {
+      if (sendAiDisabledErrorIfPresent(res, error)) {
+        return;
+      }
       console.error('[AgentRoutes] Session restore failed:', error);
       return res.status(500).json({
         success: false,

@@ -57,12 +57,23 @@ function buildTeachingResponse(): any {
     detection: {
       detected: true,
       primaryPipelineId: 'ANDROID_VIEW_STANDARD_BLAST',
+      primaryRenderingTypeId: 'S02_AOSP_STANDARD',
       primaryConfidence: 0.9,
       primary_pipeline: {
         id: 'ANDROID_VIEW_STANDARD_BLAST',
         confidence: 0.9,
       },
+      renderingType: {
+        id: 'S02_AOSP_STANDARD',
+        docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
+      },
       candidates: [{ id: 'ANDROID_VIEW_STANDARD_BLAST', confidence: 0.9 }],
+      renderingTypeCandidates: [{ id: 'S02_AOSP_STANDARD', confidence: 0.9 }],
+      relatedRenderingTypes: [{
+        id: 'S06_MULTI_WINDOW',
+        confidence: 0.7,
+        docPath: 'rendering_pipelines/S06_multi_window_type.md',
+      }],
       features: [],
       subvariants: {
         buffer_mode: 'BLAST',
@@ -116,20 +127,20 @@ function buildTeachingResponse(): any {
       },
     },
     teaching: {
-      title: 'Android View 标准渲染管线 (BLAST)',
+      title: 'S02 AOSP 标准类型',
       summary: 'Trace-backed teaching content.',
       mermaidBlocks: [],
       threadRoles: [],
       keySlices: ['Choreographer#doFrame'],
-      docPath: 'rendering_pipelines/android_view_standard.md',
+      docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
     },
     teachingContent: {
-      title: 'Android View 标准渲染管线 (BLAST)',
+      title: 'S02 AOSP 标准类型',
       summary: 'Trace-backed teaching content.',
       mermaidBlocks: [],
       threadRoles: [],
       keySlices: ['Choreographer#doFrame'],
-      docPath: 'rendering_pipelines/android_view_standard.md',
+      docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
     },
     pinPlan: {
       status: 'planned',
@@ -164,7 +175,7 @@ describe('agent teaching pipeline route', () => {
   it('requires traceId', async () => {
     const res = await request(makeApp())
       .post('/api/agent/v1/teaching/pipeline')
-      .send({});
+      .send({outputLanguage: 'en'});
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({
@@ -234,10 +245,20 @@ describe('agent teaching pipeline route', () => {
     }));
     expect(res.body.detection).toEqual(expect.objectContaining({
       primaryPipelineId: 'ANDROID_VIEW_STANDARD_BLAST',
+      primaryRenderingTypeId: 'S02_AOSP_STANDARD',
       primary_pipeline: {
         id: 'ANDROID_VIEW_STANDARD_BLAST',
         confidence: 0.9,
       },
+      renderingType: {
+        id: 'S02_AOSP_STANDARD',
+        docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
+      },
+      relatedRenderingTypes: [{
+        id: 'S06_MULTI_WINDOW',
+        confidence: 0.7,
+        docPath: 'rendering_pipelines/S06_multi_window_type.md',
+      }],
       trace_requirements_missing: [],
     }));
   });

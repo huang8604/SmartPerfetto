@@ -14,6 +14,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { pipelineSkillLoader } from './pipelineSkillLoader';
+import type { PipelineCatalogEntry, RenderingTypeDefinition } from './pipelineSkillLoader';
 
 /**
  * Thread role information extracted from documentation
@@ -42,54 +44,35 @@ export interface PipelineTeachingContent {
   docPath: string;
 }
 
-/**
- * Pipeline type to document path mapping
- */
-const PIPELINE_DOC_MAP: Record<string, string> = {
-  ANDROID_VIEW_STANDARD_BLAST: 'android_view_standard.md',
-  ANDROID_VIEW_STANDARD_LEGACY: 'android_view_standard.md',
-  ANDROID_VIEW_SOFTWARE: 'android_view_software.md',
-  ANDROID_VIEW_MIXED: 'android_view_mixed.md',
-  ANDROID_VIEW_MULTI_WINDOW: 'android_view_multi_window.md',
-  ANDROID_PIP_FREEFORM: 'android_pip_freeform.md',
-  COMPOSE_STANDARD: 'compose_standard.md',
-  SURFACEVIEW_BLAST: 'surfaceview.md',
-  TEXTUREVIEW_STANDARD: 'textureview.md',
-  SURFACE_CONTROL_API: 'surface_control_api.md',
-  OPENGL_ES: 'opengl_es.md',
-  VULKAN_NATIVE: 'vulkan_native.md',
-  ANGLE_GLES_VULKAN: 'angle_gles_vulkan.md',
-  FLUTTER_SURFACEVIEW_IMPELLER: 'flutter_surfaceview.md',
-  FLUTTER_SURFACEVIEW_SKIA: 'flutter_surfaceview.md',
-  FLUTTER_TEXTUREVIEW: 'flutter_textureview.md',
-  RN_OLD_ARCH_HWUI: 'rn_old_arch.md',
-  RN_NEW_ARCH_HWUI: 'rn_new_arch.md',
-  RN_SKIA_RENDERER: 'rn_skia.md',
-  WEBVIEW_GL_FUNCTOR: 'webview_gl_functor.md',
-  WEBVIEW_SURFACE_CONTROL: 'webview_surface_control.md',
-  WEBVIEW_SURFACEVIEW_WRAPPER: 'webview_surfaceview_wrapper.md',
-  WEBVIEW_TEXTUREVIEW_CUSTOM: 'webview_textureview_custom.md',
-  CHROME_BROWSER_VIZ: 'chrome_browser_viz.md',
-  GAME_ENGINE: 'game_engine.md',
-  IMAGEREADER_PIPELINE: 'imagereader_pipeline.md',
-  CAMERA_PIPELINE: 'camera_pipeline.md',
-  VIDEO_OVERLAY_HWC: 'video_overlay_hwc.md',
-  HARDWARE_BUFFER_RENDERER: 'hardware_buffer_renderer.md',
-  VARIABLE_REFRESH_RATE: 'variable_refresh_rate.md',
-  SOFTWARE_COMPOSITING: 'software_compositing.md',
-};
+export interface PipelineCatalogReader {
+  getPipelineCatalogEntry(pipelineId: string): PipelineCatalogEntry | null;
+  getRenderingType(renderingTypeId: string): RenderingTypeDefinition | null;
+  getAllPipelineIds(): string[];
+}
 
 export class PipelineDocService {
   private docsDir: string;
   private cache: Map<string, PipelineTeachingContent> = new Map();
 
-  constructor(docsDir?: string) {
-    // Default to docs/rendering_pipelines directory relative to project root.
-    // These markdown files are part of the public docs and are also used as
-    // runtime teaching content by pipeline analysis.
-    this.docsDir =
-      docsDir ||
-      path.join(__dirname, '..', '..', '..', 'docs', 'rendering_pipelines');
+  constructor(
+    docsDir?: string,
+    private readonly catalogReader: PipelineCatalogReader = pipelineSkillLoader
+  ) {
+    this.docsDir = docsDir || this.resolveDefaultDocsDir();
+  }
+
+  private resolveDefaultDocsDir(): string {
+    const candidates = [
+      path.resolve(__dirname, '..', 'rendering_pipelines'),
+      path.resolve(__dirname, '..', '..', '..', 'docs', 'rendering_pipelines'),
+    ];
+    return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+  }
+
+  private getDocumentFile(pipelineId: string): string | null {
+    const entry = this.catalogReader.getPipelineCatalogEntry(pipelineId);
+    if (!entry) return null;
+    return this.catalogReader.getRenderingType(entry.teaching_type_id)?.document || null;
   }
 
   /**
@@ -101,7 +84,7 @@ export class PipelineDocService {
       return this.cache.get(pipelineId)!;
     }
 
-    const docFile = PIPELINE_DOC_MAP[pipelineId];
+    const docFile = this.getDocumentFile(pipelineId);
     if (!docFile) {
       console.warn(`[PipelineDocService] No document mapping for pipeline: ${pipelineId}`);
       return null;
@@ -416,14 +399,14 @@ export class PipelineDocService {
    * Get all available pipeline types
    */
   getAvailablePipelines(): string[] {
-    return Object.keys(PIPELINE_DOC_MAP);
+    return this.catalogReader.getAllPipelineIds();
   }
 
   /**
    * Check if a document exists for a pipeline type
    */
   hasDocument(pipelineId: string): boolean {
-    const docFile = PIPELINE_DOC_MAP[pipelineId];
+    const docFile = this.getDocumentFile(pipelineId);
     if (!docFile) return false;
 
     const docPath = path.join(this.docsDir, docFile);

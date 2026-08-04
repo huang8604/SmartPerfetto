@@ -19,6 +19,11 @@ import {
   type TraceProcessorLeaseRecord,
 } from '../../services/traceProcessorLeaseStore';
 import { setTraceProcessorServiceForTests } from '../../services/traceProcessorService';
+import {
+  TRACE_PROCESSOR_CAPABILITY_SECRET_ENV,
+  issueTraceProcessorProxyCapability,
+  resetTraceProcessorProxyCapabilitiesForTests,
+} from '../../services/traceProcessorProxyCapability';
 import traceProcessorProxyRoutes, {
   handleTraceProcessorProxyUpgrade,
 } from '../traceProcessorProxyRoutes';
@@ -28,6 +33,7 @@ const originalEnv = {
   trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
   enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
   apiKey: process.env.SMARTPERFETTO_API_KEY,
+  capabilitySecret: process.env[TRACE_PROCESSOR_CAPABILITY_SECRET_ENV],
 };
 
 const scope: EnterpriseRepositoryScope = {
@@ -154,6 +160,9 @@ beforeEach(async () => {
   process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
   delete process.env.SMARTPERFETTO_API_KEY;
+  process.env[TRACE_PROCESSOR_CAPABILITY_SECRET_ENV] =
+    'test-trace-processor-capability-secret-at-least-32-bytes';
+  resetTraceProcessorProxyCapabilitiesForTests();
 
   upstreamServer = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -175,6 +184,7 @@ beforeEach(async () => {
   });
   upstreamServer.on('upgrade', (req, socket) => {
     expect(req.url).toBe('/websocket');
+    expect(req.headers.origin).toBe('http://127.0.0.1:10000');
     socket.write(
       'HTTP/1.1 101 Switching Protocols\r\n'
       + 'Upgrade: websocket\r\n'
@@ -244,10 +254,54 @@ afterEach(async () => {
   restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
   restoreEnvValue('SMARTPERFETTO_API_KEY', originalEnv.apiKey);
+  restoreEnvValue(
+    TRACE_PROCESSOR_CAPABILITY_SECRET_ENV,
+    originalEnv.capabilitySecret,
+  );
+  resetTraceProcessorProxyCapabilitiesForTests();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 describe('trace processor lease proxy routes', () => {
+  it('rejects unauthenticated websocket upgrades when a legacy API key is configured', async () => {
+    process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'false';
+    process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'false';
+    process.env.SMARTPERFETTO_API_KEY = 'configured-legacy-key';
+    const app = makeApp();
+    const proxyServer = http.createServer(app);
+    proxyServer.on('upgrade', (req, socket, head) => {
+      if (handleTraceProcessorProxyUpgrade(req, socket, head)) return;
+      socket.destroy();
+    });
+    const proxyPort = await listen(proxyServer);
+
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: proxyPort,
+          path: `/api/tp/${lease.id}/websocket?tenantId=tenant-a&workspaceId=workspace-a`,
+          headers: {
+            Upgrade: 'websocket',
+            Connection: 'Upgrade',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+          },
+        });
+        req.on('response', response => resolve(response.statusCode ?? 0));
+        req.on('upgrade', (_response, socket) => {
+          socket.destroy();
+          reject(new Error('unauthenticated websocket unexpectedly upgraded'));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(status).toBe(401);
+    } finally {
+      await closeServer(proxyServer);
+    }
+  });
+
   it('proxies status and query bytes through the scoped lease', async () => {
     const app = makeApp();
 
@@ -274,7 +328,7 @@ describe('trace processor lease proxy routes', () => {
     expect(queryRawMock).toHaveBeenCalledWith(
       'trace-a',
       queryBody,
-      {
+      expect.objectContaining({
         priority: 'p0',
         leaseId: lease.id,
         leaseMode: 'shared',
@@ -283,7 +337,8 @@ describe('trace processor lease proxy routes', () => {
           workspaceId: 'workspace-a',
           userId: 'user-a',
         },
-      },
+        signal: expect.any(AbortSignal),
+      }),
     );
   });
 
@@ -322,7 +377,7 @@ describe('trace processor lease proxy routes', () => {
     expect(queryRawMock).toHaveBeenCalledTimes(2);
     for (const call of queryRawMock.mock.calls) {
       expect(call[0]).toBe('trace-a');
-      expect(call[2]).toEqual({
+      expect(call[2]).toEqual(expect.objectContaining({
         priority: 'p0',
         leaseId: lease.id,
         leaseMode: 'shared',
@@ -331,7 +386,8 @@ describe('trace processor lease proxy routes', () => {
           workspaceId: 'workspace-a',
           userId: 'user-a',
         },
-      });
+        signal: expect.any(AbortSignal),
+      }));
     }
   });
 
@@ -508,7 +564,7 @@ describe('trace processor lease proxy routes', () => {
     );
   });
 
-  it('tunnels websocket upgrades to the leased trace processor port', async () => {
+  it('tunnels API-key browser websocket upgrades with a scoped capability', async () => {
     const app = makeApp();
     const proxyServer = http.createServer(app);
     const proxySockets = new Set<NetSocket>();
@@ -523,6 +579,20 @@ describe('trace processor lease proxy routes', () => {
     const proxyPort = await listen(proxyServer);
 
     try {
+      process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'false';
+      const capability = issueTraceProcessorProxyCapability({
+        context: {
+          tenantId: 'tenant-a',
+          workspaceId: 'workspace-a',
+          userId: 'user-a',
+          authType: 'api_key',
+          roles: ['api_key'],
+          scopes: ['trace:read'],
+          requestId: 'upload-request',
+          windowId: 'window-a',
+        },
+        leaseId: lease.id,
+      });
       const echoed = await new Promise<string>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('websocket tunnel timed out'));
@@ -544,12 +614,8 @@ describe('trace processor lease proxy routes', () => {
             Connection: 'Upgrade',
             'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
             'Sec-WebSocket-Version': '13',
-            'X-SmartPerfetto-SSO-User-Id': 'user-a',
-            'X-SmartPerfetto-SSO-Tenant-Id': 'tenant-a',
-            'X-SmartPerfetto-SSO-Workspace-Id': 'workspace-a',
-            'X-SmartPerfetto-SSO-Roles': 'analyst',
-            'X-SmartPerfetto-SSO-Scopes': 'trace:read,trace:write',
-            'X-Window-Id': 'window-a',
+            'Sec-WebSocket-Protocol': capability.protocol,
+            Origin: 'http://127.0.0.1:54321',
           },
         });
         req.setTimeout(5000, () => {
@@ -560,6 +626,7 @@ describe('trace processor lease proxy routes', () => {
         });
         req.on('upgrade', (res, socket, head) => {
           let buffer = `HTTP/1.1 ${res.statusCode} ${res.statusMessage}\r\n`;
+          expect(res.headers['sec-websocket-protocol']).toBe(capability.protocol);
           if (head.length > 0) buffer += head.toString('utf8');
           socket.setTimeout(5000, () => {
             socket.destroy(new Error('websocket echo timed out'));

@@ -24,7 +24,16 @@ prerequisites:
   modules:
     - linux.cpu.utilization.process
 
-inputs: []
+inputs:
+  - name: process_name
+    type: string
+    required: false
+  - name: start_ts
+    type: timestamp
+    required: false
+  - name: end_ts
+    type: timestamp
+    required: false
 
 steps:
   - id: process_util
@@ -43,9 +52,23 @@ steps:
           type: number
           format: compact
     sql: |
-      SELECT
-        process_name,
-        ROUND(utilization, 4) AS utilization
-      FROM cpu_process_utilization_per_period
+      WITH target_processes AS (
+        SELECT upid, name AS process_name
+        FROM process
+        WHERE upid IS NOT NULL
+          AND name IS NOT NULL
+          AND (name GLOB '${process_name}*' OR '${process_name}' = '')
+      ), samples AS (
+        SELECT
+          p.process_name,
+          u.ts,
+          u.utilization
+        FROM target_processes p
+        CROSS JOIN cpu_process_utilization_per_period(time_from_ms(100), p.upid) u
+        WHERE (${start_ts} IS NULL OR u.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR u.ts < ${end_ts})
+      )
+      SELECT process_name, ts, ROUND(utilization, 4) AS utilization
+      FROM samples
       ORDER BY utilization DESC
       LIMIT 30

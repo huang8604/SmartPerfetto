@@ -53,5 +53,29 @@ describe('HTMLReportGenerator code-aware rendering', () => {
     expect(html).not.toContain('-secret');
     expect(html).not.toContain('+secret');
   });
-});
 
+  it('renders Pack provenance as background instead of trace evidence', () => {
+    const data = makeReportData({});
+    data.backgroundKnowledgeReferences = [{
+      sourceKind: 'android_internals_pack',
+      packVersion: '2026.07.18.1',
+      packFingerprint: 'b'.repeat(64),
+      sourceRevision: 'a'.repeat(40),
+      articleId: 'article-1',
+      articleTitle: 'Binder 线程池',
+      sectionId: 'section-1',
+      sectionHeading: '线程池饱和',
+      chunkId: 'chunk-1',
+      chunkHash: 'c'.repeat(64),
+      license: 'CC-BY-NC-SA-4.0 OR LicenseRef-AIW-Commercial',
+    }];
+
+    const html = new HTMLReportGenerator().generateAgentDrivenHTML(data);
+
+    expect(html).toContain('Android Internals 背景引用');
+    expect(html).toContain('Binder 线程池');
+    expect(html).toContain('2026.07.18.1');
+    expect(html).toContain('不能替代当前 Trace 的 SQL/Skill 证据');
+    expect(html).not.toContain('chunk-1</code></li>');
+  });
+});

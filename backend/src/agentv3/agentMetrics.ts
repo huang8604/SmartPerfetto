@@ -278,8 +278,23 @@ export class AgentMetricsCollector {
 export const METRICS_DIR = backendLogPath('metrics');
 const METRICS_RETENTION_DAYS = 7;
 
+/** Keep operational counts for private runs without retaining provider errors. */
+export function projectSessionMetricsForPersistence(
+  metrics: SessionMetrics,
+  privateAnalysisContext: boolean,
+): SessionMetrics {
+  if (!privateAnalysisContext) return metrics;
+  return {
+    ...metrics,
+    toolExecutions: metrics.toolExecutions.map(({error: _error, ...execution}) => execution),
+  };
+}
+
 /** Write session metrics to disk. */
-export function persistSessionMetrics(metrics: SessionMetrics): void {
+export function persistSessionMetrics(
+  metrics: SessionMetrics,
+  privateAnalysisContext = false,
+): void {
   try {
     if (!fs.existsSync(METRICS_DIR)) {
       fs.mkdirSync(METRICS_DIR, { recursive: true });
@@ -287,7 +302,8 @@ export function persistSessionMetrics(metrics: SessionMetrics): void {
     const fileName = `session_${metrics.sessionId}_metrics.json`;
     const filePath = path.join(METRICS_DIR, fileName);
     const tmpPath = filePath + '.tmp';
-    fs.writeFileSync(tmpPath, JSON.stringify(metrics, null, 2));
+    const projected = projectSessionMetricsForPersistence(metrics, privateAnalysisContext);
+    fs.writeFileSync(tmpPath, JSON.stringify(projected, null, 2));
     fs.renameSync(tmpPath, filePath);
   } catch (err) {
     console.warn('[AgentMetrics] Failed to persist metrics:', (err as Error).message);

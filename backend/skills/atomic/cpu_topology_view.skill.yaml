@@ -3,10 +3,11 @@
 # This file is part of SmartPerfetto. See LICENSE for details.
 
 # =============================================================================
-# CPU Topology View Initialization (Atomic Skill)
+# CPU Topology Relation Initialization (Atomic Skill)
 # =============================================================================
-# Creates a reusable SQL VIEW `_cpu_topology` for CPU core classification.
-# Subsequent steps in the same trace_processor session can JOIN this view.
+# Creates a reusable materialized Perfetto table `_cpu_topology` for CPU core
+# classification. Materialization avoids exponential SQLite view expansion when
+# a downstream query joins the topology relation more than once.
 #
 # The CPU universe is based on CPUs observed in trace data (sched/thread_state
 # or CPU counters). The `cpu` table is used only for capacity metadata because
@@ -36,8 +37,8 @@ category: hardware
 tier: B
 
 meta:
-  display_name: "CPU 拓扑视图初始化"
-  description: "创建 CPU 拓扑分类视图，供后续 SQL JOIN 使用"
+  display_name: "CPU 拓扑关系初始化"
+  description: "创建物化 CPU 拓扑分类关系，供后续 SQL JOIN 使用"
   icon: "memory"
   tags: [cpu, topology, cluster, view, atomic]
 
@@ -52,24 +53,45 @@ inputs:
     description: "分析结束时间（可选，用于 cpufreq 回退检测）"
 
 steps:
+  - id: inspect_existing_topology_object
+    type: atomic
+    name: "检查旧 CPU 拓扑对象"
+    display:
+      level: hidden
+    sql: |
+      SELECT type
+      FROM sqlite_master
+      WHERE name = '_cpu_topology'
+      LIMIT 1
+    save_as: existing_topology_object
+
   - id: drop_existing_topology_view
     type: atomic
     name: "清理旧 CPU 拓扑视图"
-    optional: true
     display:
       level: hidden
+    condition: "existing_topology_object.data?.[0]?.type === 'view'"
     sql: |
       DROP VIEW IF EXISTS _cpu_topology
 
-  # Step 1: Create the topology view (DDL, returns no rows)
+  - id: drop_existing_topology_table
+    type: atomic
+    name: "清理旧 CPU 拓扑表"
+    display:
+      level: hidden
+    condition: "existing_topology_object.data?.[0]?.type === 'table'"
+    sql: |
+      DROP TABLE IF EXISTS _cpu_topology
+
+  # Create the materialized topology relation (DDL, returns no rows)
   - id: create_topology_view
     type: atomic
-    name: "创建 CPU 拓扑视图"
+    name: "创建 CPU 拓扑关系"
     optional: true
     display:
       level: hidden
     sql: |
-      CREATE VIEW IF NOT EXISTS _cpu_topology AS
+      CREATE PERFETTO TABLE _cpu_topology AS
       WITH
       observed_sched_cpus AS (
         SELECT cpu as cpu_id FROM sched_slice WHERE cpu IS NOT NULL
@@ -216,7 +238,7 @@ steps:
       FROM cpu_scale cs
       LEFT JOIN scale_clusters sc ON cs.scale_bucket = sc.scale_bucket
 
-  # Step 2: Query the view (provides data for save_as and verification)
+  # Query the relation (provides data for save_as and verification)
   - id: read_topology
     type: atomic
     name: "读取 CPU 拓扑"

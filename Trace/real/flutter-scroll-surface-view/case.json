@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "flutter-scroll-surface-view",
+  "kind": "real",
+  "title": "Android 15 Flutter SurfaceView scroll",
+  "description": "Existing WeChat Flutter scrolling fixture rendered through SurfaceView.",
+  "scene": "scrolling",
+  "tags": ["android", "flutter", "scrolling", "surfaceview", "wechat"],
+  "aliases": ["Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace"],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "e876c56b5d7290acda596e73929c1a127df4255e9ca6951605dad40833e67a53",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "15",
+    "api_level": 35,
+    "device": "nubia pacific",
+    "build_fingerprint": "nubia/pacific/pacific:15/1.4.1.0/101:user/release-keys",
+    "compatibility": {"min_api": 35, "max_api": 35}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

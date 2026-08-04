@@ -20,6 +20,15 @@ import type { AgentDrivenReportData } from './htmlReportGenerator';
 import type { AnalyzeManagedSession } from '../assistant/application/agentAnalyzeSessionService';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import { getTraceProcessorService } from './traceProcessorService';
+import {parseOutputLanguage} from '../agentv3/outputLanguage';
+import {
+  privateAnalysisQueryMessage,
+  projectPrivateAnalysisResult,
+  projectPrivateDataEnvelopes,
+  projectPrivateHypotheses,
+  projectPrivateStructuredValue,
+  sessionUsesPrivateKnowledge,
+} from './security/privateAnalysisProjection';
 
 /**
  * The subset of `AnalysisResult` the builder reads. Stated explicitly so
@@ -43,6 +52,8 @@ interface ReportResultLike {
   partial?: boolean;
   terminationReason?: string;
   terminationMessage?: string;
+  analysisReceipt?: AgentDrivenReportData['result']['analysisReceipt'];
+  uiActionProposals?: AgentDrivenReportData['result']['uiActionProposals'];
 }
 
 export interface BuildAgentReportDataInput {
@@ -54,14 +65,23 @@ export function buildAgentDrivenReportData(
   input: BuildAgentReportDataInput,
 ): AgentDrivenReportData {
   const { session, result } = input;
+  const privateKnowledge = sessionUsesPrivateKnowledge(session);
+  const outputLanguage = session.outputLanguage
+    ?? parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
 
   // Cumulative findings: dedup across all persisted turns. `session.result`
   // only carries the current turn's findings, but multi-turn reports need
   // the full picture to stay consistent with the timeline section.
-  let cumulativeResult: ReportResultLike = result;
+  let cumulativeResult: ReportResultLike = privateKnowledge
+    ? projectPrivateAnalysisResult(
+        session.sessionId,
+        result as import('../agent/core/orchestratorTypes').AnalysisResult,
+        outputLanguage,
+      )
+    : result;
   try {
     const ctx = sessionContextManager.get(session.sessionId, session.traceId);
-    if (ctx) {
+    if (ctx && !privateKnowledge) {
       const allTurns = ctx.getAllTurns();
       if (allTurns.length > 1) {
         const allFindings = allTurns.flatMap((t) => t.findings || []);
@@ -81,7 +101,7 @@ export function buildAgentDrivenReportData(
   // Empty-conclusion recovery: rare SDK result-message drops leave an empty
   // string even though tokens streamed fine. Use conclusionHistory's latest
   // as a last-resort source of truth.
-  if (!cumulativeResult.conclusion || !cumulativeResult.conclusion.trim()) {
+  if (!privateKnowledge && (!cumulativeResult.conclusion || !cumulativeResult.conclusion.trim())) {
     const lastCH = session.conclusionHistory?.length
       ? session.conclusionHistory[session.conclusionHistory.length - 1]
       : null;
@@ -98,37 +118,51 @@ export function buildAgentDrivenReportData(
     analysisPlan?: unknown;
     uncertaintyFlags?: unknown[];
     comparisonReportSection?: AgentDrivenReportData['comparisonReportSection'];
+    backgroundKnowledgeReferences?: AgentDrivenReportData['backgroundKnowledgeReferences'];
   } })._lastSnapshot;
+  const hypotheses = privateKnowledge
+    ? projectPrivateHypotheses(session.sessionId, session.hypotheses as any[])
+    : session.hypotheses;
 
   return {
     traceId: session.traceId,
-    query: session.query,
+    query: privateKnowledge ? privateAnalysisQueryMessage(outputLanguage) : session.query,
+    outputLanguage,
     traceStartNs:
       traceStartNs !== undefined && traceStartNs !== null ? String(traceStartNs) : undefined,
     result: cumulativeResult as AgentDrivenReportData['result'],
-    hypotheses: session.hypotheses as AgentDrivenReportData['hypotheses'],
-    dialogue: session.agentDialogue as AgentDrivenReportData['dialogue'],
-    conversationTimeline: session.conversationSteps as AgentDrivenReportData['conversationTimeline'],
-    dataEnvelopes: session.dataEnvelopes as AgentDrivenReportData['dataEnvelopes'],
-    agentResponses: session.agentResponses as AgentDrivenReportData['agentResponses'],
+    hypotheses: hypotheses as AgentDrivenReportData['hypotheses'],
+    dialogue: privateKnowledge ? [] : session.agentDialogue as AgentDrivenReportData['dialogue'],
+    conversationTimeline: privateKnowledge
+      ? []
+      : session.conversationSteps as AgentDrivenReportData['conversationTimeline'],
+    dataEnvelopes: (privateKnowledge
+      ? projectPrivateDataEnvelopes(session.sessionId, session.dataEnvelopes as any[])
+      : session.dataEnvelopes) as AgentDrivenReportData['dataEnvelopes'],
+    agentResponses: privateKnowledge ? [] : session.agentResponses as AgentDrivenReportData['agentResponses'],
     timestamp: Date.now(),
     conversationTurns: session.runSequence || 1,
-    queryHistory: session.queryHistory || [],
-    conclusionHistory: session.conclusionHistory || [],
+    queryHistory: privateKnowledge ? [] : session.queryHistory || [],
+    conclusionHistory: privateKnowledge ? [] : session.conclusionHistory || [],
     // Snapshot-first — the HTTP route's persistence step stashes `_lastSnapshot`
     // on the session, the CLI's `persistTurnToBackend` does the same. Callers
     // that skip the snapshot step (tests, partial builds) fall through to
     // the orchestrator getters.
-    analysisNotes: (snapshot?.analysisNotes as AgentDrivenReportData['analysisNotes'])
+    analysisNotes: privateKnowledge ? [] : (snapshot?.analysisNotes as AgentDrivenReportData['analysisNotes'])
       ?? (typeof session.orchestrator.getSessionNotes === 'function'
         ? session.orchestrator.getSessionNotes(session.sessionId) : []),
-    analysisPlan: (snapshot?.analysisPlan as AgentDrivenReportData['analysisPlan'])
+    analysisPlan: privateKnowledge ? null : (snapshot?.analysisPlan as AgentDrivenReportData['analysisPlan'])
       ?? (typeof session.orchestrator.getSessionPlan === 'function'
         ? session.orchestrator.getSessionPlan(session.sessionId) : null),
-    uncertaintyFlags: (snapshot?.uncertaintyFlags as AgentDrivenReportData['uncertaintyFlags'])
+    uncertaintyFlags: privateKnowledge ? [] : (snapshot?.uncertaintyFlags as AgentDrivenReportData['uncertaintyFlags'])
       ?? (typeof session.orchestrator.getSessionUncertaintyFlags === 'function'
         ? session.orchestrator.getSessionUncertaintyFlags(session.sessionId) : []),
-    comparisonReportSection: snapshot?.comparisonReportSection
-      ?? session.comparisonReportSection,
+    comparisonReportSection: privateKnowledge
+      ? projectPrivateStructuredValue(
+          session.sessionId,
+          snapshot?.comparisonReportSection ?? session.comparisonReportSection,
+        )
+      : snapshot?.comparisonReportSection ?? session.comparisonReportSection,
+    backgroundKnowledgeReferences: snapshot?.backgroundKnowledgeReferences,
   };
 }

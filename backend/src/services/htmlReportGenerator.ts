@@ -18,15 +18,17 @@ import {
   AnalysisSession,
   CollectedResult,
   QueryResult,
-  AnalysisCompletedEvent,
 } from '../types/analysis';
 import { OrchestratorResult, MasterOrchestratorResult, Finding, Diagnostic, ExpertResult, StageResult } from '../agent/types';
 import {
+  type AnalysisReceipt,
   DataEnvelope,
   ColumnDefinition,
   buildColumnDefinitions,
   inferColumnDefinition,
+  type UiActionProposalV1,
 } from '../types/dataContract';
+import type { QueryReviewV1 } from '../types/queryReviewContract';
 import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from './reportCausalMapAssets';
 import { REPORT_LAYOUT_FIX_CSS } from './reportLayoutAssets';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
@@ -34,11 +36,15 @@ import type { ComparisonReportSection } from '../agentv3/sessionStateSnapshot';
 import type { ClaimVerificationResult } from '../types/claimVerification';
 import type { ClaimSupportV1 } from '../types/evidenceContract';
 import type { IdentityResolutionV1 } from '../types/identityContract';
+import type {BackgroundKnowledgeReference} from '../types/sparkContracts';
 
 interface ClaimSourceLookupEntry {
   label: string;
   count: number;
 }
+
+type ReportTraceSide = 'current' | 'reference';
+type ReportPaneSide = NonNullable<DataEnvelope['meta']['paneSide']>;
 
 export interface ReportData {
   sessionId: string;
@@ -84,6 +90,8 @@ export interface MasterAgentReportData {
 export interface AgentDrivenReportData {
   traceId: string;
   query: string;
+  /** Language pinned to the analysis session; process configuration is only a fallback. */
+  outputLanguage?: OutputLanguage;
   /** Trace start timestamp in ns (string to preserve precision) */
   traceStartNs?: string;
   result: {
@@ -109,6 +117,8 @@ export interface AgentDrivenReportData {
     partial?: boolean;
     terminationReason?: string;
     terminationMessage?: string;
+    analysisReceipt?: AnalysisReceipt;
+    uiActionProposals?: UiActionProposalV1[];
   };
   hypotheses: Array<{
     id: string;
@@ -155,6 +165,8 @@ export interface AgentDrivenReportData {
   uncertaintyFlags?: Array<{ topic: string; assumption: string; question: string }>;
   /** Shared deterministic comparison section for raw or snapshot comparison reports. */
   comparisonReportSection?: ComparisonReportSection;
+  /** Public explanatory citations; never current-trace evidence. */
+  backgroundKnowledgeReferences?: BackgroundKnowledgeReference[];
 }
 
 export class HTMLReportGenerator {
@@ -4067,7 +4079,9 @@ export class HTMLReportGenerator {
             Object.entries(v).map(([nk, nv]) => `
                             <div class="property-item">
                               <span class="property-label">${this.formatMetricLabel(nk)}</span>
-                              <span class="property-value">${typeof nv === 'object' ? JSON.stringify(nv) : this.escapeHtml(String(nv))}</span>
+                              <span class="property-value">${this.escapeHtml(
+                                typeof nv === 'object' ? JSON.stringify(nv) : String(nv),
+                              )}</span>
                             </div>
                           `).join('')
           }
@@ -4093,12 +4107,12 @@ export class HTMLReportGenerator {
    */
   private formatMetricLabel(key: string): string {
     // Convert snake_case or camelCase to readable label
-    return key
+    return this.escapeHtml(key
       .replace(/_/g, ' ')
       .replace(/([a-z])([A-Z])/g, '$1 $2')
       .replace(/^./, str => str.toUpperCase())
       .replace(/\b(id|ms|fps|ui|gpu|cpu|sql)\b/gi, match => match.toUpperCase())
-      .trim();
+      .trim());
   }
 
   /**
@@ -4106,7 +4120,7 @@ export class HTMLReportGenerator {
    */
   generateAgentDrivenHTML(data: AgentDrivenReportData): string {
     const { traceId, query, result, hypotheses, dialogue, conversationTimeline, timestamp, queryHistory, conclusionHistory } = data;
-    const outputLanguage = this.getOutputLanguage();
+    const outputLanguage = data.outputLanguage ?? this.getOutputLanguage();
     const htmlLang = outputLanguage === 'en' ? 'en' : 'zh-CN';
     const locale = this.getReportLocale(outputLanguage);
     const dataEnvelopes = this.prepareAgentDrivenEnvelopes(data.dataEnvelopes || []);
@@ -4291,6 +4305,12 @@ export class HTMLReportGenerator {
     }
     .envelope-sql-detail pre {
       margin: 0; padding: 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+    }
+    .envelope-query-review {
+      margin-top: 8px; font-size: 11px; color: #6b7280;
+    }
+    .envelope-query-review > summary {
+      cursor: pointer; user-select: none; color: #4b5563; font-weight: 500;
     }
     .evidence-section { margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; }
     .evidence-item { font-size: 12px; color: #666; margin-bottom: 4px; }
@@ -4509,6 +4529,15 @@ export class HTMLReportGenerator {
     .warning-card { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px 16px; color: #78350f; }
     .warning-title { font-weight: 700; margin-bottom: 6px; }
     .warning-body { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+    .receipt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .receipt-card { border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; padding: 12px; }
+    .receipt-card-title { color: #4b5563; font-size: 12px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; }
+    .receipt-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: #374151; padding: 3px 0; }
+    .receipt-row span:first-child { color: #6b7280; }
+    .receipt-pill { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
+    .receipt-pill.passed { background: #dcfce7; color: #166534; }
+    .receipt-pill.partial { background: #fef3c7; color: #92400e; }
+    .receipt-pill.not_applicable { background: #e5e7eb; color: #374151; }
     @media (max-width: 640px) {
       body { padding: 8px; }
       .header { padding: 16px; }
@@ -4565,6 +4594,9 @@ export class HTMLReportGenerator {
       </div>
     </div>
 
+    ${this.renderAnalysisReceiptSection(result.analysisReceipt, outputLanguage)}
+    ${this.renderUiActionProposalsSection(result.uiActionProposals, outputLanguage)}
+
     <div class="section">
       <h2 class="section-title">${localize(outputLanguage, '用户问题', 'User Question')}</h2>
       ${(queryHistory && queryHistory.length > 1)
@@ -4596,6 +4628,11 @@ export class HTMLReportGenerator {
     ${this.renderFindingsSection(result.findings, dataEnvelopes)}
 
     ${this.renderCodeAwareReferencesSection(result.conclusionContract, outputLanguage)}
+
+    ${this.renderBackgroundKnowledgeReferencesSection(
+      data.backgroundKnowledgeReferences,
+      outputLanguage,
+    )}
 
     ${this.renderCaseRecommendationsSection(result.conclusionContract, outputLanguage)}
 
@@ -4800,6 +4837,124 @@ export class HTMLReportGenerator {
 </html>`;
   }
 
+  private renderAnalysisReceiptSection(
+    receipt: AnalysisReceipt | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (!receipt) return '';
+    const gateLabel = (status: AnalysisReceipt['qualityGates']['claimVerification']) =>
+      status === 'passed'
+        ? localize(outputLanguage, '通过', 'Passed')
+        : status === 'partial'
+          ? localize(outputLanguage, '部分通过', 'Partial')
+          : localize(outputLanguage, '不适用', 'Not applicable');
+    const gate = (label: string, status: AnalysisReceipt['qualityGates']['claimVerification']) => `
+          <div class="receipt-row">
+            <span>${label}</span>
+            <span class="receipt-pill ${status}">${gateLabel(status)}</span>
+          </div>`;
+    const outputRows = [
+      receipt.outputs.reportId ? ['Report', receipt.outputs.reportId] : undefined,
+      receipt.outputs.resultSnapshotId ? ['Snapshot', receipt.outputs.resultSnapshotId] : undefined,
+      receipt.outputs.cliTurnPath ? ['CLI', receipt.outputs.cliTurnPath] : undefined,
+      receipt.outputs.reportError ? [localize(outputLanguage, '报告错误', 'Report error'), receipt.outputs.reportError] : undefined,
+    ].filter((row): row is string[] => Boolean(row));
+    return `
+    <div class="section">
+      <h2 class="section-title">${localize(outputLanguage, '分析回执', 'Analysis Receipt')}</h2>
+      <div class="receipt-grid">
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, 'Trace 证据', 'Trace Evidence')}</div>
+          <div class="receipt-row"><span>SQL</span><span>${receipt.traceEvidence.sqlCount}</span></div>
+          <div class="receipt-row"><span>Skills</span><span>${receipt.traceEvidence.skillCount}</span></div>
+          <div class="receipt-row"><span>DataEnvelope</span><span>${receipt.traceEvidence.dataEnvelopeCount}</span></div>
+          <div class="receipt-row"><span>Evidence refs</span><span>${receipt.traceEvidence.evidenceRefCount}</span></div>
+          <div class="receipt-row"><span>Artifacts</span><span>${receipt.traceEvidence.artifactCount}</span></div>
+        </div>
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, '非证据上下文', 'Non-evidence Context')}</div>
+          <div class="receipt-row"><span>Frontend prequery</span><span>${receipt.nonEvidenceContext.frontendPrequeryCount}</span></div>
+          <div class="receipt-row"><span>Memory hints</span><span>${receipt.nonEvidenceContext.memoryHintCount}</span></div>
+          <div class="receipt-row"><span>Conversation context</span><span>${receipt.nonEvidenceContext.conversationContextCount}</span></div>
+          <div class="receipt-row"><span>Strategy hints</span><span>${receipt.nonEvidenceContext.strategyHintCount}</span></div>
+        </div>
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, '声明审计', 'Claim Audit')}</div>
+          <div class="receipt-row"><span>Total</span><span>${receipt.claimAudit.totalClaims}</span></div>
+          <div class="receipt-row"><span>Verified</span><span>${receipt.claimAudit.verifiedClaims}</span></div>
+          <div class="receipt-row"><span>Unsupported</span><span>${receipt.claimAudit.unsupportedClaims}</span></div>
+          <div class="receipt-row"><span>Uncertain</span><span>${receipt.claimAudit.uncertainClaims}</span></div>
+        </div>
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, '质量闸门', 'Quality Gates')}</div>
+          ${gate(localize(outputLanguage, '最终报告', 'Final report'), receipt.qualityGates.finalReportContract)}
+          ${gate(localize(outputLanguage, '声明核验', 'Claim verification'), receipt.qualityGates.claimVerification)}
+          ${gate(localize(outputLanguage, '身份解析', 'Identity resolution'), receipt.qualityGates.identityResolution)}
+        </div>
+        ${outputRows.length > 0 ? `
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, '输出', 'Outputs')}</div>
+          ${outputRows.map(([label, value]) => `
+          <div class="receipt-row"><span>${this.escapeHtml(label)}</span><span>${this.escapeHtml(value)}</span></div>`).join('')}
+        </div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  private renderUiActionProposalsSection(
+    proposals: UiActionProposalV1[] | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (!proposals || proposals.length === 0) return '';
+    const kindLabel = (kind: UiActionProposalV1['kind']) => {
+      switch (kind) {
+        case 'navigate_timeline':
+          return localize(outputLanguage, '跳转时间点', 'Navigate timestamp');
+        case 'navigate_range':
+          return localize(outputLanguage, '查看时间区间', 'Navigate range');
+        case 'open_evidence_table':
+          return localize(outputLanguage, '打开证据表', 'Open evidence table');
+        case 'pin_evidence':
+          return localize(outputLanguage, '固定证据', 'Pin evidence');
+        default:
+          return kind;
+      }
+    };
+    const payloadText = (proposal: UiActionProposalV1) => {
+      switch (proposal.kind) {
+        case 'navigate_timeline':
+          return `ts=${proposal.payload.ts}${proposal.payload.traceId ? ` trace=${proposal.payload.traceId}` : ''}`;
+        case 'navigate_range':
+          return `start=${proposal.payload.startNs} end=${proposal.payload.endNs}${proposal.payload.traceId ? ` trace=${proposal.payload.traceId}` : ''}`;
+        case 'open_evidence_table':
+          return `artifact=${proposal.payload.artifactId}${proposal.payload.evidenceRefId ? ` evidence=${proposal.payload.evidenceRefId}` : ''}`;
+        case 'pin_evidence':
+          return `evidence=${proposal.payload.evidenceRefId}`;
+        default:
+          return '';
+      }
+    };
+    return `
+    <div class="section">
+      <h2 class="section-title">${localize(outputLanguage, 'UI 动作提案', 'UI Action Proposals')}</h2>
+      <div class="receipt-grid">
+        ${proposals.map(proposal => `
+        <div class="receipt-card">
+          <div class="receipt-card-title">${this.escapeHtml(proposal.title)}</div>
+          <div class="receipt-row"><span>${localize(outputLanguage, '类型', 'Kind')}</span><span>${this.escapeHtml(kindLabel(proposal.kind))}</span></div>
+          <div class="receipt-row"><span>${localize(outputLanguage, '原因', 'Reason')}</span><span>${this.escapeHtml(proposal.reason)}</span></div>
+          <div class="receipt-row"><span>Source</span><span>${this.escapeHtml([
+            proposal.source.evidenceRefId,
+            proposal.source.artifactId,
+            proposal.source.skillId,
+            proposal.source.sourceToolCallId,
+          ].filter(Boolean).join(' · ') || proposal.id)}</span></div>
+          <div class="receipt-row"><span>Payload</span><span>${this.escapeHtml(payloadText(proposal))}</span></div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
   private prepareAgentDrivenEnvelopes(envelopes: DataEnvelope[]): DataEnvelope[] {
     if (!Array.isArray(envelopes) || envelopes.length === 0) return [];
 
@@ -4913,6 +5068,40 @@ export class HTMLReportGenerator {
         ${codeRefHtml}
         ${patchHtml}
       </div>
+    </div>`;
+  }
+
+  private renderBackgroundKnowledgeReferencesSection(
+    references: BackgroundKnowledgeReference[] | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (!references?.length) return '';
+    const items = references.map(reference => `
+      <div class="hypothesis-card" style="margin-bottom: 8px;">
+        <div class="hypothesis-title">${this.escapeHtml(reference.articleTitle)}</div>
+        <div style="font-size: 13px; color: #4b5563;">
+          ${this.escapeHtml(reference.sectionHeading)}
+          · <code>${this.escapeHtml(reference.packVersion)}</code>
+          · <code>${this.escapeHtml(reference.chunkId)}</code>
+        </div>
+        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">
+          ${this.escapeHtml(reference.license)}
+          · source <code>${this.escapeHtml(reference.sourceRevision)}</code>
+        </div>
+      </div>`).join('');
+    return `
+    <div class="section">
+      <h2 class="section-title">${localize(
+        outputLanguage,
+        'Android Internals 背景引用',
+        'Android Internals Background References',
+      )}</h2>
+      <div class="empty-state" style="margin-bottom: 12px;">${localize(
+        outputLanguage,
+        '这些引用只解释系统背景，不能替代当前 Trace 的 SQL/Skill 证据。',
+        'These references explain system background only and do not replace current-trace SQL/Skill evidence.',
+      )}</div>
+      ${items}
     </div>`;
   }
 
@@ -5597,7 +5786,14 @@ export class HTMLReportGenerator {
       outputLanguage,
     );
     const source = envelope.meta?.source || '';
-    const traceSide = (envelope.meta as any)?.traceSide || (envelope as any)?.traceSide || '';
+    const envelopeRecord = this.asReportRecord(envelope) || {};
+    const metaRecord = this.asReportRecord(envelope.meta) || {};
+    const traceProvenance = this.asReportRecord(envelopeRecord.traceProvenance) || {};
+    const traceLocation = this.formatReportTraceLocation(
+      metaRecord.traceSide || envelopeRecord.traceSide || traceProvenance.traceSide,
+      metaRecord.paneSide || envelopeRecord.paneSide || traceProvenance.paneSide,
+      outputLanguage,
+    );
     const planPhaseId = envelope.meta?.planPhaseId || '';
     const planPhaseTitle = envelope.meta?.planPhaseTitle || '';
     const producerReason = this.getReportEnvelopePurpose(envelope, title, outputLanguage);
@@ -5605,11 +5801,7 @@ export class HTMLReportGenerator {
     const layer = envelope.display?.layer || '';
 
     const metaParts: string[] = [];
-    if (traceSide) {
-      metaParts.push(this.escapeHtml(traceSide === 'reference'
-        ? localize(outputLanguage, '参考 Trace', 'Reference trace')
-        : localize(outputLanguage, '当前 Trace', 'Current trace')));
-    }
+    if (traceLocation) metaParts.push(this.escapeHtml(traceLocation));
     if (source) metaParts.push(`${this.escapeHtml(localize(outputLanguage, '来源', 'Source'))}: ${this.escapeHtml(this.formatEnvelopeSource(source))}`);
     if (layer) metaParts.push(this.escapeHtml(`DataEnvelope.${layer}`));
     if (planPhaseId || planPhaseTitle) {
@@ -5628,6 +5820,7 @@ export class HTMLReportGenerator {
       bodyHtml = this.generateTableFromEnvelope(envelope, traceStartNs, outputLanguage);
     }
     const technicalDetails = this.renderEnvelopeTechnicalDetails(envelope, outputLanguage);
+    const queryReviewDetails = this.renderEnvelopeQueryReview(envelope, outputLanguage);
 
     return `
       <div class="envelope-card">
@@ -5635,6 +5828,7 @@ export class HTMLReportGenerator {
           <div class="envelope-title">${this.escapeHtml(title)}</div>
           <div class="envelope-meta">${metaParts.join(' / ')}</div>
           ${producerReason ? `<div class="envelope-meta">${this.escapeHtml(localize(outputLanguage, '用途', 'Purpose'))}: ${this.escapeHtml(producerReason)}</div>` : ''}
+          ${queryReviewDetails}
           ${technicalDetails}
         </div>
         <div class="envelope-body">
@@ -5642,6 +5836,95 @@ export class HTMLReportGenerator {
         </div>
       </div>
     `;
+  }
+
+  private normalizeReportTraceSide(value: unknown): ReportTraceSide | undefined {
+    return value === 'current' || value === 'reference' ? value : undefined;
+  }
+
+  private normalizeReportPaneSide(value: unknown): ReportPaneSide | undefined {
+    switch (value) {
+      case 'left':
+      case 'right':
+      case 'top':
+      case 'bottom':
+        return value;
+      default:
+        return undefined;
+    }
+  }
+
+  private formatReportTraceSideLabel(
+    traceSide: ReportTraceSide | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (traceSide === 'current') return localize(outputLanguage, '当前 Trace', 'Current trace');
+    if (traceSide === 'reference') return localize(outputLanguage, '参考 Trace', 'Reference trace');
+    return '';
+  }
+
+  private formatReportPaneLabel(
+    paneSide: ReportPaneSide | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (paneSide === 'left') return localize(outputLanguage, '左侧', 'Left pane');
+    if (paneSide === 'right') return localize(outputLanguage, '右侧', 'Right pane');
+    if (paneSide === 'top') return localize(outputLanguage, '上方', 'Top pane');
+    if (paneSide === 'bottom') return localize(outputLanguage, '下方', 'Bottom pane');
+    return '';
+  }
+
+  private formatReportTraceLocation(
+    traceSide: unknown,
+    paneSide: unknown,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const traceLabel = this.formatReportTraceSideLabel(
+      this.normalizeReportTraceSide(traceSide),
+      outputLanguage,
+    );
+    const paneLabel = this.formatReportPaneLabel(
+      this.normalizeReportPaneSide(paneSide),
+      outputLanguage,
+    );
+    if (paneLabel && traceLabel) return `${paneLabel}/${traceLabel}`;
+    return paneLabel || traceLabel;
+  }
+
+  private renderEnvelopeQueryReview(
+    envelope: DataEnvelope,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const review = envelope.meta?.queryReview;
+    if (!review) return '';
+    const rows: Array<[string, unknown]> = [
+      [localize(outputLanguage, 'Review ID', 'Review ID'), review.id],
+      [localize(outputLanguage, '生产者', 'Producer'), review.producer.kind],
+      [localize(outputLanguage, '读取', 'Reads'), this.formatQueryReviewReads(review)],
+      [localize(outputLanguage, '过滤', 'Filters'), review.filters.map(filter => filter.expression)],
+      [localize(outputLanguage, '输出列', 'Output columns'), review.outputShape.map(column => column.name)],
+      [localize(outputLanguage, 'Guardrails', 'Guardrails'), review.guardrails.map(item => `${item.ruleId}: ${item.message}`)],
+      [localize(outputLanguage, '限制', 'Limitations'), review.limitations],
+      [localize(outputLanguage, '用途限制', 'Allowed use'), review.allowedUse],
+    ];
+    const renderedRows = rows
+      .map(([label, value]) => this.renderEnvelopeTechnicalRow(label, value))
+      .filter(Boolean)
+      .join('');
+    if (!renderedRows) return '';
+    return `
+      <details class="envelope-query-review">
+        <summary>${this.escapeHtml(localize(outputLanguage, 'Query Review（默认收起）', 'Query review (collapsed by default)'))}</summary>
+        <div class="envelope-technical-grid">${renderedRows}</div>
+      </details>
+    `;
+  }
+
+  private formatQueryReviewReads(review: QueryReviewV1): string[] {
+    return review.reads.map(read => {
+      const columns = read.columns?.length ? ` (${read.columns.join(', ')})` : '';
+      return `${read.table}${columns} [${read.confidence}]`;
+    });
   }
 
   private renderEnvelopeTechnicalDetails(

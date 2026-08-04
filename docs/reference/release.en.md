@@ -8,6 +8,8 @@ This file is part of SmartPerfetto. See LICENSE for details.
 
 [English](release.en.md) | [中文](release.md)
 
+<!-- i18n-headings: paired -->
+
 This is the maintainer-facing public release runbook. Before an LLM/agent runs
 any release work, it must also read [AGENTS.md](../../AGENTS.md),
 [`.claude/rules/release.md`](../../.claude/rules/release.md),
@@ -19,8 +21,8 @@ any release work, it must also read [AGENTS.md](../../AGENTS.md),
 
 | Form | Artifact | User entry | Key boundary |
 |---|---|---|---|
-| npm CLI | `@gracker/smartperfetto` | `smp` / `smartperfetto` | Requires user Node.js `>=24 <25`; does not include the Web UI launcher |
-| GitHub portable | `smartperfetto-v<version>-windows-x64.zip`, `smartperfetto-v<version>-macos-arm64.zip`, `smartperfetto-v<version>-linux-x64.tar.gz` | bundled launcher | Bundles Node.js 24, native dependencies, committed `frontend/`, and pinned `trace_processor_shell` |
+| npm CLI | `@gracker/smartperfetto` | `smp` / `smartperfetto` | Requires user Node.js `>=24 <25`; includes Skills/Strategies/SQL/trace processor/signed Knowledge Pack, but not the Web UI launcher |
+| GitHub portable | `smartperfetto-v<version>-windows-x64.zip`, `smartperfetto-v<version>-macos-arm64.zip`, `smartperfetto-v<version>-linux-x64.tar.gz` | bundled launcher | Bundles Node.js 24, native dependencies, committed `frontend/`, pinned `trace_processor_shell`, and the signed Knowledge Pack |
 | Docker Hub | Linux image built from `main` workflow | `docker compose -f docker-compose.hub.yml up -d` | Does not read host Claude Code local auth |
 | Source checkout | Git repository | `./start.sh` | Normal use serves committed `frontend/`; `perfetto/` submodule is only needed for UI plugin work |
 
@@ -50,7 +52,9 @@ Publish the npm CLI:
 ```bash
 npm whoami
 npm --prefix backend run cli:pack-check
-npm --prefix backend publish --access public
+cd backend
+npm publish --access public
+cd ..
 npm view @gracker/smartperfetto version --json
 ```
 
@@ -61,15 +65,71 @@ npm install @gracker/smartperfetto@<version>
 ./node_modules/.bin/smp --version
 ./node_modules/.bin/smartperfetto --help
 ./node_modules/.bin/smp doctor --format json
+./node_modules/.bin/smp knowledge-pack status --format json
 ```
 
 Publish the GitHub portable assets:
 
 ```bash
 npm run package:portable
-npm run release:portable -- <version> --skip-build --no-draft
+# Run on each matching target; the macOS asset must be the post-notarization, post-staple final zip
+node scripts/smoke-portable-archive.cjs \
+  --asset "<final-archive>" \
+  --target "<windows-x64|macos-arm64|linux-x64>" \
+  --version "<version>" \
+  --commit "<release-commit>" \
+  --public-release \
+  --output-dir "dist/portable/smoke-evidence/<target>"
+# When a target machine is unavailable, run the existing draft from the default branch; only all can promote.
+gh workflow run portable-exact-archive-smoke.yml \
+  -f release_id=<numeric-release-id> -f selection=all
+gh run download <run-id> \
+  --name portable-smoke-evidence-release-<numeric-release-id> \
+  --dir <download-dir>
+npm run release:portable -- <version> --skip-build --no-draft \
+  --release-commit <draft-target-full-sha> \
+  --smoke-evidence-dir <download-dir>/promotion-evidence \
+  --smoke-attestation <download-dir>/portable-smoke-attestation.json \
+  --smoke-run-id <run-id>
 gh release view v<version> --json tagName,isDraft,assets
 ```
+
+Portable packages use a build-once rule: test and upload the same final archive
+bytes, and never rebuild after smoke. Cross-compilation, manifest/structure
+checks, and static signature verification do not prove target-OS startup.
+Windows, macOS, and Linux must each verify backend/frontend health through
+`127.0.0.1`, bundled runtimes, a minimal trace-processor operation, graceful
+shutdown, and port release. Keep the release as a draft when a target runner is
+unavailable. An explicitly user-accepted gap must be named in release/hand-off
+notes and must not be described as a complete all-platform smoke.
+Each target's schema-v2 smoke summary also binds the final archive name, byte
+size, and SHA-256. Promotion re-hashes the archive, so stale evidence or a
+replaced artifact cannot pass.
+`--output-dir` must name a fresh directory that does not already exist.
+Successful evidence is written atomically, failures use a separate
+`smoke-failure.json`, and reruns must not overwrite existing release evidence.
+
+The hosted workflow downloads exact bytes by release ID and asset ID,
+re-checks the release after download and after smoke, and runs both the release
+commit verifier and a fixed default-branch verifier. `windows-linux` and
+single-target runs are explicitly partial. Only an `all` run containing the
+signed, notarized, stapled final macOS zip can become promotion evidence.
+Download the whole combined artifact by successful run ID and pass its
+`promotion-evidence/`, sibling attestation, and run ID together to promotion.
+The script verifies the real Actions run and GitHub artifact digest; do not
+assemble individual job evidence by hand.
+
+`release:portable` is always draft-first: it uploads and verifies the target
+commit, title, and all three asset names, sizes, and GitHub digests.
+`--no-draft` only promotes an existing draft. It never creates the release,
+edits title/target, uploads, or clobbers assets; before and after changing the
+draft flag it compares the release ID and every asset ID, state, name, size,
+and digest. Public releases and assets are immutable;
+a repeated run performs strict read-only verification and exits idempotently
+only when everything matches.
+If the gate code is newer than the draft bytes, add
+`--release-commit <draft-target-full-sha>`; only an ancestor of the current
+gate commit is accepted.
 
 Finally, verify that generated outputs were not staged:
 
@@ -84,6 +144,15 @@ git status --short --branch
 - Published npm versions are immutable. If package contents or runtime behavior are wrong, fix and publish the next patch version.
 - Public portable releases must not use `--allow-dirty`.
 - `--skip-build` is only valid for packages just built from the same version and commit.
+- `--no-draft` may publish only the complete default three-platform set; it
+  cannot publish a single target or partial set.
+- `--no-draft` must reuse the existing exact-asset-smoked draft and cannot
+  upload or replace assets.
+- Public macOS packages require Developer ID, Hardened Runtime, Apple
+  notarization, and a stapled ticket. Ad-hoc signing is only for local or draft
+  testing.
+- A published GitHub release and its asset set are read-only; never clobber,
+  replace, or edit them.
 - `dist/portable/`, `dist/windows-exe/`, and `.cache/smartperfetto-portable/` are generated outputs and must not be committed.
 - `frontend/` is consumed by Docker, `./start.sh`, and portable packages; AI Assistant plugin UI changes must run `./scripts/update-frontend.sh`.
 - If a root commit points at a new `perfetto/` submodule commit, that submodule commit must already be pushed to the Gracker fork.
@@ -91,7 +160,11 @@ git status --short --branch
 
 ## Post-Release Verification
 
-- npm: `npm view @gracker/smartperfetto version --json` equals the new version, and an empty-directory install can run `smp doctor --format json`.
-- GitHub: `gh release view v<version>` returns a non-draft release and all three platform assets have versioned names.
+- npm: `npm view @gracker/smartperfetto version --json` equals the new version, and an empty-directory install can run `smp doctor --format json` plus `smp knowledge-pack status --format json`.
+- GitHub: `gh release view v<version>` returns a non-draft release, and all
+  three asset names, sizes, target commit, and remote `sha256:` digests match
+  the locally smoked archives.
+- Docker: stable releases have an immutable SemVer tag plus `latest`; only the
+  scheduled/manual `main` workflow updates the opt-in `nightly` tag.
 - Docs: README, CLI, portable, and release docs match the real install commands, version boundary, and user entry points.
 - If a major bug is found after release, stop promoting the old version, fix it with tests, publish a new patch version, and mention the superseding relationship in release notes.

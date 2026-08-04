@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "case_id": "gpu-workload",
+  "marker": "SmartPerfetto::CASE::gpu-workload",
+  "expectations": [
+    {
+      "id": "execute-android_gpu_work_period_track",
+      "type": "skill",
+      "target": "android_gpu_work_period_track",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/android_gpu_work_period_track.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "gpu_work"
+      ],
+      "required_sql_steps": [
+        "gpu_work"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "gpu_work",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_analysis",
+      "type": "skill",
+      "target": "gpu_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/gpu_analysis.skill.yaml",
+      "parameters": {
+        "high_freq_threshold_pct": 70,
+        "mid_freq_threshold_pct": 40,
+        "low_freq_threshold_pct": 10,
+        "freq_drop_ratio": 0.7,
+        "freq_drop_count_threshold": 20,
+        "high_load_min_dur_ns": 500000000
+      },
+      "required_steps": [
+        "data_check",
+        "gpu_freq_overview",
+        "gpu_memory_overview",
+        "gpu_freq_distribution",
+        "gpu_frame_correlation",
+        "gpu_high_load_periods",
+        "root_cause_classification",
+        "fallback_no_gpu_data"
+      ],
+      "required_sql_steps": [
+        "data_check",
+        "gpu_freq_overview",
+        "gpu_memory_overview",
+        "gpu_freq_distribution",
+        "gpu_frame_correlation",
+        "gpu_high_load_periods",
+        "root_cause_classification",
+        "fallback_no_gpu_data"
+      ],
+      "forced_sql_steps": [
+        "gpu_freq_overview",
+        "gpu_memory_overview",
+        "gpu_freq_distribution",
+        "gpu_frame_correlation",
+        "gpu_high_load_periods",
+        "root_cause_classification",
+        "fallback_no_gpu_data"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "gpu_freq_overview",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_compute_kernel_analysis",
+      "type": "skill",
+      "target": "gpu_compute_kernel_analysis",
+      "mode": "semantic",
+      "source_file": "backend/skills/composite/gpu_compute_kernel_analysis.skill.yaml",
+      "parameters": {
+        "max_rows": 50
+      },
+      "required_steps": [
+        "data_check",
+        "kernel_summary",
+        "launch_configuration",
+        "no_compute_contract",
+        "missing_launch_args_contract"
+      ],
+      "required_sql_steps": [
+        "data_check",
+        "kernel_summary",
+        "launch_configuration",
+        "no_compute_contract",
+        "missing_launch_args_contract"
+      ],
+      "forced_sql_steps": [
+        "kernel_summary",
+        "launch_configuration",
+        "no_compute_contract",
+        "missing_launch_args_contract"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "kernel_summary",
+      "min_rows": 2,
+      "assertions": [
+        {
+          "column": "kernel",
+          "operator": "contains",
+          "value": "SyntheticComputeKernelA"
+        },
+        {
+          "column": "dur_ns",
+          "operator": "gte",
+          "value": 12000000
+        }
+      ],
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_freq_in_range",
+      "type": "skill",
+      "target": "gpu_freq_in_range",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/gpu_freq_in_range.skill.yaml",
+      "parameters": {
+        "low_freq_threshold_pct": 40
+      },
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_frequency_analysis",
+      "type": "skill",
+      "target": "gpu_frequency_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/gpu_frequency_analysis.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_metrics",
+      "type": "skill",
+      "target": "gpu_metrics",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/gpu_metrics.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "gpu_frequency",
+        "gpu_utilization",
+        "gpu_render_time",
+        "gpu_fence_waits",
+        "gpu_summary"
+      ],
+      "required_sql_steps": [
+        "gpu_frequency",
+        "gpu_utilization",
+        "gpu_render_time",
+        "gpu_fence_waits",
+        "gpu_summary"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "gpu_frequency",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_module",
+      "type": "skill",
+      "target": "gpu_module",
+      "mode": "execution",
+      "source_file": "backend/skills/modules/hardware/gpu_module.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "gpu_frequency_overview",
+        "gpu_utilization",
+        "render_thread_gpu",
+        "slow_gpu_operations"
+      ],
+      "required_sql_steps": [
+        "gpu_frequency_overview",
+        "gpu_utilization",
+        "render_thread_gpu",
+        "slow_gpu_operations"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "gpu_frequency_overview",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "execute-gpu_v57_ai_diagnostics",
+      "type": "skill",
+      "target": "gpu_v57_ai_diagnostics",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/gpu_v57_ai_diagnostics.skill.yaml",
+      "parameters": {
+        "target_freq_ratio": 0.9,
+        "min_throttle_ns": 1000,
+        "max_rows": 20
+      },
+      "required_steps": [
+        "data_check",
+        "gpu_inventory",
+        "timeline_occupancy",
+        "idle_gaps",
+        "frequency_residency",
+        "dvfs_ramp_events",
+        "sustained_throttle_events",
+        "no_data_contract"
+      ],
+      "required_sql_steps": [
+        "data_check",
+        "gpu_inventory",
+        "timeline_occupancy",
+        "idle_gaps",
+        "frequency_residency",
+        "dvfs_ramp_events",
+        "sustained_throttle_events",
+        "no_data_contract"
+      ],
+      "forced_sql_steps": [
+        "gpu_inventory",
+        "idle_gaps",
+        "no_data_contract"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [
+        {
+          "step": "timeline_occupancy",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "frequency_residency",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "dvfs_ramp_events",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "sustained_throttle_events",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        }
+      ],
+      "semantic_step": "gpu_inventory",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "definition-pipeline_angle_gles_vulkan",
+      "type": "skill",
+      "target": "pipeline_angle_gles_vulkan",
+      "mode": "definition",
+      "source_file": "backend/skills/pipelines/angle_gles_vulkan.skill.yaml",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "definition-pipeline_opengl_es",
+      "type": "skill",
+      "target": "pipeline_opengl_es",
+      "mode": "definition",
+      "source_file": "backend/skills/pipelines/opengl_es.skill.yaml",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "id": "definition-pipeline_vulkan_native",
+      "type": "skill",
+      "target": "pipeline_vulkan_native",
+      "mode": "definition",
+      "source_file": "backend/skills/pipelines/vulkan_native.skill.yaml",
+      "required_marker": "SmartPerfetto::CASE::gpu-workload"
+    }
+  ]
+}

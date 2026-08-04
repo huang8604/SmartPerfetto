@@ -187,6 +187,7 @@ steps:
     type: atomic
     name: "设备状态泳道（降级）"
     condition: timeline_bounds.data[0]?.has_screen_state !== 1
+    optional: true
     display:
       level: detail
       layer: list
@@ -723,6 +724,7 @@ steps:
     type: atomic
     name: "应用状态泳道（降级）"
     condition: timeline_bounds.data[0]?.has_battery_top !== 1
+    optional: true
     display:
       level: detail
       layer: list

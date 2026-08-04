@@ -20,7 +20,7 @@ meta:
   description: "Jetpack Compose + HWUI RenderThread, Recomposition driven"
   icon: "android"
   family: hwui
-  doc_path: "rendering_pipelines/compose_standard.md"
+  doc_path: rendering_pipelines/S02_aosp_standard_type.md
   # ----- Article-grounded signature (S02 Compose 章节) -----
   s_article_ref: "S02"   # Compose 走相同 HWUI 路径，仅 main thread 工作形态不同
   four_features:
@@ -68,84 +68,7 @@ detection:
     - thread: CrRendererMain   # WebView
 
 teaching:
-  title: "Jetpack Compose 渲染管线"
-  summary: |
-    Jetpack Compose 基于 HWUI RenderThread 渲染，但在 UI 构建阶段有独特的机制：
-    - Composition 阶段: Recomposer 驱动 @Composable 函数重新执行
-    - Layout 阶段: Compose 自有的 measure/layout (非 View.onMeasure)
-    - Draw 阶段: 生成 DisplayList, 由 RenderThread 执行 GPU 渲染
-
-    性能关键点:
-    - Recomposition 风暴: 不必要的重组导致频繁重绘
-    - State 读取范围: 过宽的 State 读取触发过多组件重组
-    - LazyColumn/LazyRow: 类似 RecyclerView 的虚拟化列表
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant Main as Main Thread
-      participant RC as Recomposer
-      participant RT as RenderThread
-      participant BQ as BLASTBufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: Jetpack Compose (HWUI + BLAST)
-      VA->>Main: VSync -> Choreographer#doFrame
-      activate Main
-      Main->>RC: Recomposition (State changed)
-      RC->>RC: @Composable functions
-      RC->>Main: Layout (measure + place)
-      Main->>Main: Draw (Canvas -> DisplayList)
-      Main->>RT: syncFrameState
-      deactivate Main
-
-      activate RT
-      RT->>RT: DrawFrame (GPU commands)
-      RT->>BQ: queueBuffer + applyTransaction
-      deactivate RT
-
-      VS->>SF: VSync-sf
-      activate SF
-      SF->>SF: latchBuffer + Composite
-      deactivate SF
-
-  thread_roles:
-    - thread: main
-      role: "Composition + Layout + Draw"
-      description: "Recomposer 驱动 Composable 函数, Layout, 生成 DisplayList"
-      trace_tags:
-        - "Recompos*"
-        - "Compose:*"
-        - "Choreographer#doFrame"
-    - thread: RenderThread
-      role: "GPU 渲染"
-      description: "执行 DisplayList -> GPU 命令 -> queueBuffer"
-      trace_tags:
-        - "DrawFrame"
-        - "syncFrameState"
-        - "queueBuffer"
-    - thread: SurfaceFlinger
-      role: "合成显示"
-      description: "BLAST Transaction 接收, HWC/GPU 合成"
-
-  key_slices:
-    - name: "Recomposition"
-      thread: main
-      description: "Compose 重组 -- 当 State 变化时触发, 是性能问题的主要来源"
-    - name: "Compose:*"
-      thread: main
-      description: "Compose 内部操作 (CompositionLocal, SnapshotState 等)"
-    - name: "Choreographer#doFrame"
-      thread: main
-      description: "帧开始, 驱动 Composition -> Layout -> Draw"
-    - name: "DrawFrame"
-      thread: RenderThread
-      description: "GPU 渲染, 执行 DisplayList"
-    - name: "syncFrameState"
-      thread: RenderThread
-      description: "Main -> RenderThread 同步 DisplayList (阻塞 Main)"
-
+  source: "rendering_pipelines/S02_aosp_standard_type.md"
 auto_pin:
   instructions:
     - pattern: "^VSYNC-app$"

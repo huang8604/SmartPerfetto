@@ -11,10 +11,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {analyzeCriticalPath} from '../services/criticalPathAnalyzer';
 import {getTraceProcessorService} from '../services/traceProcessorService';
+import {resolveTraceCase} from '../utils/traceCorpus';
 
 async function main(): Promise<void> {
   const repoRoot = path.resolve(__dirname, '../../..');
-  const tracePath = path.join(repoRoot, 'test-traces', 'scroll-demo-customer-scroll.pftrace');
+  const tracePath = resolveTraceCase('scroll-demo-customer-scroll.pftrace', repoRoot);
   if (!fs.existsSync(tracePath)) {
     throw new Error(`fixture missing: ${tracePath}`);
   }

@@ -49,20 +49,29 @@ function buildSkillResult(): any {
           detection: {
             detected: true,
             primaryPipelineId: 'ANDROID_VIEW_STANDARD_BLAST',
+            primaryRenderingTypeId: 'S02_AOSP_STANDARD',
             primaryConfidence: 0.92,
             candidates: [
               { id: 'ANDROID_VIEW_STANDARD_BLAST', confidence: 0.92 },
             ],
+            renderingTypeCandidates: [
+              { id: 'S02_AOSP_STANDARD', confidence: 0.92 },
+            ],
+            relatedRenderingTypes: [{
+              id: 'S06_MULTI_WINDOW',
+              confidence: 0.81,
+              docPath: 'rendering_pipelines/S06_multi_window_type.md',
+            }],
             features: [{ name: 'has_draw_frame', detected: true }],
             traceRequirementsMissing: [],
           },
           teachingContent: {
-            title: 'Android View 标准渲染管线 (BLAST)',
+            title: 'S02 AOSP 标准类型',
             summary: 'Standard HWUI path.',
             mermaidBlocks: [],
             threadRoles: [],
             keySlices: ['Choreographer#doFrame', 'DrawFrame'],
-            docPath: 'rendering_pipelines/android_view_standard.md',
+            docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
           },
           pinInstructions: [{
             pattern: '^main',
@@ -76,7 +85,7 @@ function buildSkillResult(): any {
             frameCount: 30,
             renderThreadTid: 1234,
           }],
-          docPath: 'rendering_pipelines/android_view_standard.md',
+          docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
         },
       },
     },
@@ -198,16 +207,29 @@ describe('RenderingPipelineTeachingService', () => {
       success: true,
       schemaVersion: 'teaching.pipeline.v2',
       teaching: expect.objectContaining({
-        title: 'Android View 标准渲染管线 (BLAST)',
+        title: 'S02 AOSP 标准类型',
       }),
       teachingContent: expect.objectContaining({
-        title: 'Android View 标准渲染管线 (BLAST)',
+        title: 'S02 AOSP 标准类型',
       }),
       pinInstructions: expect.any(Array),
       activeRenderingProcesses: expect.any(Array),
     }));
     expect(response.detection).toEqual(expect.objectContaining({
       primaryPipelineId: 'ANDROID_VIEW_STANDARD_BLAST',
+      primaryRenderingTypeId: 'S02_AOSP_STANDARD',
+      renderingType: {
+        id: 'S02_AOSP_STANDARD',
+        docPath: 'rendering_pipelines/S02_aosp_standard_type.md',
+      },
+      renderingTypeCandidates: [
+        { id: 'S02_AOSP_STANDARD', confidence: 0.92 },
+      ],
+      relatedRenderingTypes: [{
+        id: 'S06_MULTI_WINDOW',
+        confidence: 0.81,
+        docPath: 'rendering_pipelines/S06_multi_window_type.md',
+      }],
       primary_pipeline: {
         id: 'ANDROID_VIEW_STANDARD_BLAST',
         confidence: 0.92,

@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartperfetto.dev/schemas/trace-scenario-v1.json",
+  "title": "SmartPerfetto Constructed Trace Scenario",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "clock", "actors", "signals"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor", "duration_ns"],
+      "properties": {
+        "anchor": {"enum": ["trace-start", "trace-middle", "trace-end"]},
+        "duration_ns": {"type": "string", "pattern": "^[1-9][0-9]*$"}
+      }
+    },
+    "actors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["processes", "threads"],
+      "properties": {
+        "processes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "uid": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "threads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "process", "name"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "process": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "is_main": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "at_ns"],
+        "properties": {
+          "type": {
+            "enum": [
+              "atrace-slice", "atrace-counter", "atrace-async-slice", "atrace-async-track-slice",
+              "sched-running", "process-stats", "battery-counters", "power-rail",
+              "gpu-work-period", "gpu-frequency", "gpu-power-state", "cpu-frequency", "cpu-idle",
+              "irq-span", "frame-timeline", "lmk-kill", "managed-heap-graph",
+              "gpu-compute-kernel", "anr-event", "perf-sample"
+            ]
+          },
+          "at_ns": {"type": "string", "pattern": "^[0-9]+$"},
+          "duration_ns": {"type": "string", "pattern": "^[0-9]+$"},
+          "process": {"type": "string"},
+          "thread": {"type": "string"},
+          "target_process": {"type": "string"},
+          "name": {"type": "string"},
+          "error_id": {"type": "string", "minLength": 1},
+          "subject": {"type": "string", "minLength": 1},
+          "function_name": {"type": "string", "minLength": 1},
+          "module_name": {"type": "string", "minLength": 1},
+          "sample_count": {"type": "integer", "minimum": 1, "maximum": 1000},
+          "sample_interval_ns": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+          "track_name": {"type": "string"},
+          "subsystem": {"type": "string"},
+          "layer_name": {"type": "string"},
+          "value": {"type": "number"},
+          "cpu": {"type": "integer", "minimum": 0},
+          "cpu_id": {"type": "integer", "minimum": 0},
+          "gpu_id": {"type": "integer", "minimum": 0},
+          "uid": {"type": "integer", "minimum": 0},
+          "irq": {"type": "integer", "minimum": 0},
+          "cookie": {"type": "integer", "minimum": 0},
+          "token": {"type": "integer", "minimum": 0},
+          "display_frame_token": {"type": "integer", "minimum": 0},
+          "jank_type": {"type": "integer", "minimum": 0},
+          "old_state": {"type": "integer", "minimum": 0},
+          "new_state": {"type": "integer", "minimum": 0},
+          "state": {"type": "integer", "minimum": 0},
+          "kill_reason": {"type": "integer", "minimum": 0},
+          "oom_score_adj": {"type": "integer"},
+          "vm_rss_kb": {"type": "integer", "minimum": 0},
+          "rss_anon_kb": {"type": "integer", "minimum": 0},
+          "rss_file_kb": {"type": "integer", "minimum": 0},
+          "rss_shmem_kb": {"type": "integer", "minimum": 0},
+          "vm_swap_kb": {"type": "integer", "minimum": 0},
+          "vm_hwm_kb": {"type": "integer", "minimum": 0},
+          "capacity_percent": {"type": "number"},
+          "charge_counter_uah": {"type": "string", "pattern": "^-?[0-9]+$"},
+          "current_ua": {"type": "string", "pattern": "^-?[0-9]+$"},
+          "current_avg_ua": {"type": "string", "pattern": "^-?[0-9]+$"},
+          "energy_counter_uwh": {"type": "string", "pattern": "^-?[0-9]+$"},
+          "voltage_uv": {"type": "string", "pattern": "^-?[0-9]+$"},
+          "start_energy_uws": {"type": "string", "pattern": "^[0-9]+$"},
+          "end_energy_uws": {"type": "string", "pattern": "^[0-9]+$"},
+          "active_duration_ns": {"type": "string", "pattern": "^[0-9]+$"},
+          "end_state": {"enum": ["R", "S", "D"]},
+          "heap_bytes_allocated": {"type": "string", "pattern": "^[0-9]+$"},
+          "types": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "class_name", "object_size"],
+              "properties": {
+                "id": {"type": "integer", "minimum": 1},
+                "class_name": {"type": "string", "minLength": 1},
+                "object_size": {"type": "integer", "minimum": 0}
+              }
+            }
+          },
+          "objects": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "type_id", "self_size", "reference_object_ids"],
+              "properties": {
+                "id": {"type": "integer", "minimum": 1},
+                "type_id": {"type": "integer", "minimum": 1},
+                "self_size": {"type": "integer", "minimum": 0},
+                "reference_object_ids": {
+                  "type": "array",
+                  "items": {"type": "integer", "minimum": 1}
+                }
+              }
+            }
+          },
+          "roots": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["root_type", "object_ids"],
+              "properties": {
+                "root_type": {
+                  "enum": [
+                    "ROOT_UNKNOWN", "ROOT_JNI_GLOBAL", "ROOT_JNI_LOCAL", "ROOT_JAVA_FRAME",
+                    "ROOT_NATIVE_STACK", "ROOT_STICKY_CLASS", "ROOT_THREAD_BLOCK", "ROOT_MONITOR_USED",
+                    "ROOT_THREAD_OBJECT", "ROOT_INTERNED_STRING", "ROOT_FINALIZING", "ROOT_DEBUGGER",
+                    "ROOT_REFERENCE_CLEANUP", "ROOT_VM_INTERNAL", "ROOT_JNI_MONITOR"
+                  ]
+                },
+                "object_ids": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "integer", "minimum": 1}
+                }
+              }
+            }
+          },
+          "context": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+          "kernel": {"type": "string", "minLength": 1},
+          "demangled_kernel": {"type": "string", "minLength": 1},
+          "arch": {"type": "string", "minLength": 1},
+          "grid": {"$ref": "#/$defs/computeDimensions"},
+          "workgroup": {"$ref": "#/$defs/computeDimensions"},
+          "args": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": {"type": "integer", "minimum": 0}
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"type": {"const": "managed-heap-graph"}}},
+            "then": {"required": ["process", "heap_bytes_allocated", "types", "objects", "roots"]}
+          },
+          {
+            "if": {"properties": {"type": {"const": "gpu-compute-kernel"}}},
+            "then": {
+              "required": [
+                "process", "duration_ns", "gpu_id", "context", "kernel",
+                "demangled_kernel", "arch", "grid", "workgroup", "args"
+              ]
+            }
+          },
+          {
+            "if": {"properties": {"type": {"const": "anr-event"}}},
+            "then": {"required": ["process", "thread", "target_process", "error_id", "subject"]}
+          },
+          {
+            "if": {"properties": {"type": {"const": "perf-sample"}}},
+            "then": {
+              "required": [
+                "process", "thread", "function_name", "module_name",
+                "sample_count", "sample_interval_ns"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "computeDimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "y": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "z": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      }
+    }
+  }
+}

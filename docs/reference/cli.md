@@ -70,6 +70,19 @@ smp resume <sessionId> --query "继续追问" --format ndjson
 
 `--format` 可选值：`text`、`json`、`ndjson`。
 
+## 应用更新
+
+```bash
+smp update check
+smp update check --format json
+```
+
+该命令检查 npm stable 版本并返回当前 build identity、检查时间、状态和明确升级
+命令。它只通知，不会自动安装、替换文件或修改当前进程。交互式 text 命令结束时
+可能在 stderr 显示每日一次、按目标版本去重的提醒；CI、重定向输出、
+`--format json` / `--json`、help、version 和 `update` 命令本身不会附加提醒。
+设置 `SMARTPERFETTO_UPDATE_CHECK=off` 可完全禁用应用更新检查。
+
 ## 配置与 Provider
 
 ```bash
@@ -102,8 +115,33 @@ Runtime 判断按实际选择的 provider/runtime 执行：
   `localhost` / `127.0.0.1` / `0.0.0.0` OpenAI-compatible endpoint。
 - Ollama provider 默认走 OpenAI-compatible runtime。
 
+设置 `SMARTPERFETTO_AI_ENABLED=false` 后，`smp doctor` 会显示 AI policy。
+`smp analyze`、`smp resume`、`smp provider test` 和 `smp capture android --analyze`
+会在 runtime/provider 检查前返回 `AI_DISABLED`；`smp query`、确定性 `smp skill`、
+`smp batch skill`、`smp capture config`、不带 `--analyze` 的 capture，以及
+`smp provider list` 仍可用。无效的 `SMARTPERFETTO_AI_ENABLED` 值会 fail closed，
+并在 doctor JSON 的 `aiPolicy.env.valid=false` 中暴露。
+
 第一轮 CLI 不提供 `provider add/edit`，涉及密钥写入的交互配置仍由 env 文件
 或后续安全交互设计处理。
+
+## Android Internals Knowledge Pack
+
+```bash
+smp knowledge-pack status
+smp knowledge-pack status --format json
+smp knowledge-pack update --check
+smp knowledge-pack update
+```
+
+`status` 展示当前 active、包内 bundled snapshot 和签名 channel 状态。
+`update --check` 只刷新并校验 TUF metadata，不安装内容；`update` 会在签名、
+版本、哈希和撤回检查通过后原子安装 stable Pack。离线时仍可使用随 npm、Docker、
+源码和 portable 产物一起分发的 bundled snapshot。分析引用只把出处、版本和
+snippet hash 投影到日志/SSE，正文片段不会作为 trace 证据。
+
+完整的许可证、更新和私有知识源边界见
+[Android Internals 知识包与私有知识库](../getting-started/android-internals-knowledge.md)。
 
 ## Trace 查询与 Skill
 
@@ -117,6 +155,53 @@ smp skill trace.perfetto-trace startup_slow_reasons --params '{"package":"com.ex
 
 `query` 和 `skill` 不需要启动 Web UI。`skill` 会加载 SmartPerfetto 内置
 YAML Skills 和 SQL fragments。
+
+## Batch Trace Skill
+
+```bash
+smp batch skill startup_analysis launch-a.pftrace launch-b.pftrace
+smp batch skill startup_analysis \
+  --trace-list traces.txt \
+  --params '{"package":"com.example"}' \
+  --concurrency 2 \
+  --format json \
+  --out batch-report.html \
+  --json-out batch-result.json
+```
+
+`smp batch skill` 在本机对多条 trace 运行同一个确定性 YAML Skill，不需要配置或调用
+LLM provider。CLI 输入是本机 trace 路径；`--trace-list` 文件按一行一个路径读取，
+空行和 `#` 注释会跳过。路径解析为绝对路径后会去重。
+
+输出格式支持 `text`、`json`、`ndjson`。`text` 和 `ndjson` 会为每条 trace 输出一个
+progress/result 事件，最终输出完整 `BatchTraceRunV1`。没有显式传 `--out` 或
+`--json-out` 时，CLI 会写入：
+
+```text
+~/.smartperfetto/
+└── batch-runs/<runId>/
+    ├── result.json
+    └── report.html
+```
+
+默认最多 100 条 trace，默认并发为 2，本地 CLI 最大并发为 4；可通过
+`SMARTPERFETTO_BATCH_TRACE_MAX_TRACES`、
+`SMARTPERFETTO_BATCH_TRACE_DEFAULT_CONCURRENCY` 和
+`SMARTPERFETTO_BATCH_TRACE_MAX_CLI_CONCURRENCY` 调整。标准 startup / scrolling
+指标会提升为 analysis-result comparison 可用的 metric key；无法映射的数字指标只保留
+为 batch-local metric，不会伪装成标准指标。
+
+退出码：
+
+| Code | 含义 |
+|---|---|
+| `0` | 所有 trace 完成 |
+| `1` | 至少一个 trace 失败，或整个 batch 失败 |
+| `2` | CLI 输入无效，例如没有 trace、`--params` 不是 JSON object、并发不是正整数 |
+
+第一版不支持 raw batch SQL、远程 worker、浏览器 UI 执行或自动创建
+analysis-result snapshot。需要把 batch 结果纳入多结果 comparison 时，使用
+workspace Batch Trace API 的显式 snapshot promotion / comparison bridge。
 
 ## Code-Aware Analysis
 
@@ -138,8 +223,12 @@ smp run trace.perfetto-trace \
 
 `metadata_only` 只把 `CodeRef` 元数据暴露给模型；源码正文不会进入 session、
 报告或导出。`provider_send` 只有在注册 codebase 时使用 `--send-to-provider`
-并且本次分析也选择 `--code-aware provider_send` 时才允许发送片段。不传
-`--codebase-id` 时，即使本机已有注册代码库，本次分析也按 trace-only 路径运行。
+并且本次分析也选择 `--code-aware provider_send` 时才允许发送片段。只传
+`--codebase-id` 会默认使用 `metadata_only`；`--code-aware off` 与 codebase ID
+组合会被拒绝。未传任何 codebase/knowledge source ID 时才是 trace-only。
+`--knowledge-source-id <id>` 可单独启用已授权的私有外部 RAG，也可与 codebase
+叠加。源码、私有 RAG 或 reference trace 会把显式 `fast` 解析为 `full`，避免
+轻量 runtime 静默丢失能力。
 完整说明见 [Code-Aware Analysis](../getting-started/code-aware-analysis.md)。
 
 ## 双 Trace 对比
@@ -184,12 +273,17 @@ CLI 文件存储在：
     ├── config.json
     ├── conclusion.md
     ├── report.html
+    ├── ui-action-proposals.json
     ├── transcript.jsonl
     ├── stream.jsonl
     └── turns/
         ├── 001.md
+        ├── 001.ui-action-proposals.json
         └── 001.html
 ```
+
+`ui-action-proposals.json` 只保存证据回链和 UI 提案元数据，用于报告/后续轮次
+追溯；CLI 不会自动执行跳转、打开表或固定证据。
 
 ## Android 采集
 
@@ -200,7 +294,11 @@ Perfetto 的 Android/Linux system tracing 路线：Android Q/API 29 及以上优
 
 ```bash
 smp capture presets
+smp capture suggest "debug startup jank" --app com.example.app --format json
+smp capture suggest "分析滑动掉帧，先不要真的抓取" --app com.example.app
+smp capture suggest "分析 Camera 打开到首帧预览延迟" --app com.example.camera
 smp capture config --preset startup --app com.example.app --duration 10 --out startup.pbtxt
+smp capture config --preset camera --app com.example.camera --duration 20
 smp capture config --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.pbtxt
 smp capture config --preset power --app com.example.app --duration 60 --out power.pbtxt
 
@@ -213,9 +311,18 @@ smp capture android --preset overview --app com.example.app --duration 10 --kill
 smp capture android --preset game --app com.example.game --duration 20 --out game.perfetto-trace --analyze --query "分析启动和帧节奏问题" --mode fast
 ```
 
-内置预设包括：`startup`、`scrolling`、`anr`、`game`、`memory`、`cpu`、
+内置预设包括：`startup`、`scrolling`、`camera`、`anr`、`game`、`memory`、`cpu`、
 `power`、`overview`、`full`。`power` 会开启 `android.power` 的 battery
 counters、power rails、suspend/wakeup 相关 ftrace 和 `android.network_packets`。
+`camera` 会采集 Camera/HAL/厂商 atrace 候选、Binder、scheduler、FrameTimeline，
+以及 DMA-BUF 或旧版 ION 事件；这些 tracepoint 都是可选的，会随 Android 版本、
+内核和厂商实现而变化。即使使用该预设，trace 仍可能缺少可移植的 Camera open、
+request/result、buffer 或预览 presentation 锚点。SmartPerfetto 会把这种情况报告为
+证据缺口，而不会编造“打开到首帧”耗时。
+`smp capture suggest` 是无副作用的采集建议入口：它只根据自然语言确定内置
+preset，返回 rationale、warning、推荐命令和同一 renderer 生成的 textproto
+预览；不会调用 LLM、ADB、tracebox，也不会录制设备。真正执行仍需要用户显式运行
+`smp capture android ...`。
 需要系统级 atrace category 而不是 app-scoped atrace tag
 时，可以显式传 `--app '*'`。`--categories` 可以把额外 atrace tag 注入到生成
 配置或已有 `ftrace_config` 中。生成配置会按 duration 自动放大主 buffer，规则约为

@@ -20,7 +20,7 @@ meta:
   description: "直接 OpenGL ES / EGL 渲染，用于游戏和自定义渲染引擎"
   icon: "gpu"
   family: graphics
-  doc_path: "rendering_pipelines/opengl_es.md"
+  doc_path: rendering_pipelines/S08_native_graphics_type.md
   # ----- Article-grounded signature (S08) -----
   s_article_ref: "S08"
   four_features:
@@ -63,53 +63,7 @@ detection:
     - thread: UnityMain        # Game Engine → GAME_ENGINE
 
 teaching:
-  title: "OpenGL ES 渲染管线"
-  summary: |
-    直接使用 OpenGL ES 和 EGL API 进行渲染。适用于自定义游戏引擎、
-    3D 应用等需要精细控制 GPU 的场景。通过 eglSwapBuffers 提交帧。
-    在新设备上也要考虑 ANGLE 作为可选后端的可能性，但不应假设所有 GLES 都会被强制翻译到 Vulkan。
-
-  mermaid: |
-    sequenceDiagram
-      participant App as App Thread
-      participant GL as GLThread
-      participant EGL as EGL Context
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over App,SF: 📍 OpenGL ES 渲染链路
-      GL->>EGL: eglMakeCurrent
-      activate GL
-      GL->>GL: glClear / glDraw*
-      GL->>GL: GPU 命令提交
-      GL->>EGL: eglSwapBuffers
-      EGL->>BQ: queueBuffer
-      deactivate GL
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer
-      SF->>SF: HWC 合成
-      deactivate SF
-
-      Note over App,SF: 🎮 传统 OpenGL ES 游戏/渲染引擎常用
-  thread_roles:
-    - thread: GLThread
-      role: "GL 渲染线程"
-      description: "执行 OpenGL 绘制命令"
-    - thread: SurfaceFlinger
-      role: "合成显示"
-      description: "latch Buffer 并提交到 HWC"
-
-  key_slices:
-    - name: "eglSwapBuffers"
-      thread: GLThread
-      description: "交换 Buffer，提交帧"
-    - name: "glDraw*"
-      thread: GLThread
-      description: "OpenGL 绘制调用"
-
+  source: "rendering_pipelines/S08_native_graphics_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

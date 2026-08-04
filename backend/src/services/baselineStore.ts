@@ -20,7 +20,8 @@
  *
  * Out of scope here (M1 / M2):
  * - Diff and regression-gate computation (`baselineDiffer.ts`).
- * - MCP tool registration (`lookup_baseline`, `compare_to_baseline`).
+ * - MCP read tools (`lookup_baseline`, `compare_baselines`) and any future
+ *   trace-vs-baseline tool.
  * - Express CRUD route.
  *
  * @module baselineStore
@@ -41,8 +42,11 @@ import {
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
   removeScopedKnowledgeRecord,
+  removeScopedKnowledgeRecordIf,
+  mutateScopedKnowledgeRecordWithSideEffect,
   upsertScopedKnowledgeRecord,
 } from './scopedKnowledgeStore';
+import {withFilesystemRegistryLock} from './filesystemRegistryLock';
 
 /** Minimum sample count enforced for `status='published'`. */
 export const BASELINE_PUBLISH_MIN_SAMPLES = 3;
@@ -94,14 +98,15 @@ export interface BaselineStoreListOptions {
 }
 
 /**
- * BaselineStore — local file-backed baseline storage. Single instance
- * per storage path is enough for M0; cross-process writers are not
- * supported (caller's responsibility).
+ * BaselineStore — local file-backed baseline storage. Filesystem mutations are
+ * serialized and reload inside the lease so multiple backend processes cannot
+ * overwrite each other's baselines.
  */
 export class BaselineStore {
   private readonly storagePath: string;
   private readonly baselines = new Map<string, BaselineRecord>();
   private loaded = false;
+  private loadError: Error | undefined;
 
   constructor(storagePath: string) {
     this.storagePath = storagePath;
@@ -109,20 +114,25 @@ export class BaselineStore {
 
   /** Idempotently load the on-disk store into memory. */
   load(): void {
-    if (this.loaded) return;
     this.loaded = true;
+    this.baselines.clear();
+    this.loadError = undefined;
     if (!fs.existsSync(this.storagePath)) return;
     try {
       const raw = fs.readFileSync(this.storagePath, 'utf-8');
       const parsed = JSON.parse(raw) as StorageEnvelope;
       if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.baselines)) {
+        this.loadError = new Error('Baseline store schema is invalid');
         return;
       }
       for (const b of parsed.baselines) {
         this.baselines.set(b.baselineId, b);
       }
-    } catch {
+    } catch (error) {
       // Corrupted JSON: empty cache, file preserved for inspection.
+      this.loadError = new Error(
+        `Baseline store is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -134,11 +144,26 @@ export class BaselineStore {
   addBaseline(record: BaselineRecord, scope?: KnowledgeScope): void {
     this.load();
     this.assertPublishInvariants(record);
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.baselines.set(record.baselineId, record);
-      this.persist();
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (filesystemWrites && databaseWrites) {
+      mutateScopedKnowledgeRecordWithSideEffect<BaselineRecord>(
+        KNOWLEDGE_KIND,
+        record.baselineId,
+        scope,
+        () => ({record, rowScope: BASELINE_ROW_SCOPE}),
+        (next, current) => this.mutateFilesystem(() => {
+          assertReplicaMatches('baseline', record.baselineId, current, this.baselines.get(record.baselineId));
+          this.baselines.set(record.baselineId, next);
+        }),
+        {createdAt: record.capturedAt, updatedAt: Date.now()},
+      );
+      return;
     }
-    if (enterpriseKnowledgeDbWritesEnabled()) {
+    if (filesystemWrites) {
+      this.mutateFilesystem(() => this.baselines.set(record.baselineId, record));
+    }
+    if (databaseWrites) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         record.baselineId,
@@ -168,14 +193,28 @@ export class BaselineStore {
 
   /** Remove a baseline. Returns whether anything was actually removed. */
   removeBaseline(baselineId: string, scope?: KnowledgeScope): boolean {
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (filesystemWrites && databaseWrites) {
+      const removed = removeScopedKnowledgeRecordIf<BaselineRecord>(
+        KNOWLEDGE_KIND,
+        baselineId,
+        scope,
+        () => true,
+        current => this.mutateFilesystem(() => {
+          assertReplicaMatches('baseline', baselineId, current, this.baselines.get(baselineId));
+          this.baselines.delete(baselineId);
+        }),
+      );
+      if (removed) return true;
+      return this.mutateFilesystem(() => this.baselines.delete(baselineId));
+    }
     let removed = false;
-    if (enterpriseKnowledgeDbWritesEnabled()) {
+    if (databaseWrites) {
       removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, baselineId, scope) || removed;
     }
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.load();
-      const had = this.baselines.delete(baselineId);
-      if (had) this.persist();
+    if (filesystemWrites) {
+      const had = this.mutateFilesystem(() => this.baselines.delete(baselineId));
       removed = had || removed;
     }
     return removed;
@@ -246,5 +285,31 @@ export class BaselineStore {
     };
     fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2), 'utf-8');
     fs.renameSync(tmp, this.storagePath);
+  }
+
+  private mutateFilesystem<T>(mutation: () => T): T {
+    return withFilesystemRegistryLock(
+      this.storagePath,
+      'baseline_store_busy',
+      () => {
+        this.load();
+        if (this.loadError) throw this.loadError;
+        const result = mutation();
+        this.persist();
+        return result;
+      },
+    );
+  }
+}
+
+function assertReplicaMatches<T>(
+  kind: string,
+  id: string,
+  databaseRecord: T | undefined,
+  filesystemRecord: T | undefined,
+): void {
+  if (databaseRecord === undefined || filesystemRecord === undefined) return;
+  if (JSON.stringify(databaseRecord) !== JSON.stringify(filesystemRecord)) {
+    throw new Error(`${kind} '${id}' has diverged database and filesystem replicas`);
   }
 }

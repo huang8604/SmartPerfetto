@@ -69,9 +69,14 @@ export function isPrivilegedRequestContext(context: RequestContext): boolean {
   return context.roles.includes('org_admin') || context.scopes.includes('*');
 }
 
-export function sendResourceNotFound(res: Response, error = 'Resource not found'): Response {
+export function sendResourceNotFound(
+  res: Response,
+  error = 'Resource not found',
+  code?: string,
+): Response {
   return res.status(404).json({
     success: false,
     error,
+    ...(code ? {code} : {}),
   });
 }

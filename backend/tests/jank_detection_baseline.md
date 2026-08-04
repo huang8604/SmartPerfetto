@@ -18,7 +18,7 @@
 
 ### 1. Heavy Jank Trace
 
-**Trace 文件**: `test-traces/app_aosp_scrolling_heavy_jank.pftrace`
+**Trace 文件**: `Trace/real/android-scroll-customer/trace.pftrace`
 
 | 指标 | 期望值 |
 |------|--------|
@@ -43,7 +43,7 @@
 
 ### 2. Light Jank Trace
 
-**Trace 文件**: `test-traces/app_aosp_scrolling_light.pftrace`
+**Trace 文件**: `Trace/real/android-scroll-standard/trace.pftrace`
 
 | 指标 | 期望值 |
 |------|--------|
@@ -141,10 +141,10 @@ SELECT * FROM jank_analysis;
 
 ```bash
 # Heavy jank trace
-./perfetto/out/ui/trace_processor_shell test-traces/app_aosp_scrolling_heavy_jank.pftrace --query-file /path/to/verify_jank.sql
+./perfetto/out/ui/trace_processor_shell Trace/real/android-scroll-customer/trace.pftrace --query-file /path/to/verify_jank.sql
 
 # Light jank trace
-./perfetto/out/ui/trace_processor_shell test-traces/app_aosp_scrolling_light.pftrace --query-file /path/to/verify_jank.sql
+./perfetto/out/ui/trace_processor_shell Trace/real/android-scroll-standard/trace.pftrace --query-file /path/to/verify_jank.sql
 ```
 
 预期输出应与上述基准数据匹配。

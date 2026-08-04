@@ -3,17 +3,18 @@
 # This file is part of SmartPerfetto. See LICENSE for details.
 
 # =============================================================================
-# Pipeline 4-Feature Scoring (S01 §4 特征分型综合评分)
+# Pipeline 4-Feature Scoring (兼容 ID；辅助证据轴)
 # =============================================================================
-# 标准化输出 4 特征分型分数：
+# 标准化输出 4 个辅助证据轴：
 # 1. Producer 线程数（应用进程主要 Producer 线程数量）
 # 2. Layer 数（SF 进程下 App 相关 layer 数量）
 # 3. queueBuffer 路径（BBQ→Transaction / Legacy / HOST_RESAMPLE / Software / SC 直推）
 # 4. 额外节奏点（Swappy / AChoreographer / setFrameRate / Camera HAL / Codec pacing）
 #
-# 这是 S01 总览的核心分型方法："4 维同时对得上，分型基本就定了"。
-# rendering_pipeline_detection 的 layer_signals/extra_rhythm_signals/bufferqueue_path_signals
-# 提供了基础信号，本 skill 把它们综合成分数+建议的分型结论。
+# 这些轴帮助解释 trace，但不是最新 S01 的规范分类法，也不能单独证明
+# 出图类型。必须再满足对应 S02-S14 文章的 Producer、Surface/layer 与
+# BufferQueue 最小证据集。rendering_pipeline_detection 提供基础信号，本
+# skill 只做兼容性的归一化汇总。
 # =============================================================================
 
 name: pipeline_4feature_scoring
@@ -23,8 +24,8 @@ category: rendering
 tier: B
 
 meta:
-  display_name: "Pipeline 4 特征分型综合评分"
-  description: "按 S01 §4 特征分型（Producer 线程数/Layer 数/queueBuffer 路径/额外节奏点）综合评分输出分型结论"
+  display_name: "Pipeline 4 轴辅助证据评分"
+  description: "归一化 Producer/Layer/BufferQueue/节奏证据；不能脱离 S02-S14 最小证据集单独定型"
   icon: "category"
   tags: [pipeline, classification, four-features, s01]
   s_article_ref: "S01"
@@ -272,7 +273,7 @@ steps:
           WHEN (SELECT cnt FROM swappy) > 0 THEN 'swappy_pacing'
           WHEN (SELECT cnt FROM achoreographer) > 0 THEN 'achoreographer'
           WHEN (SELECT cnt FROM engine_loop) > 0 THEN 'engine_main_loop'
-          WHEN (SELECT cnt FROM camera) > 0 THEN 'camera_sensor_trigger'
+          WHEN (SELECT cnt FROM camera) > 0 THEN 'camera_request_activity'
           WHEN (SELECT cnt FROM codec) > 0 THEN 'video_codec_pacing'
           WHEN (SELECT cnt FROM set_frame_rate) > 0 THEN 'set_frame_rate_voted'
           ELSE 'vsync_app_only'

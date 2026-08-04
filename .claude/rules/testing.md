@@ -9,8 +9,29 @@ npm run verify:pr
 ```
 
 This runs root quality checks, Rust checks, backend Skill/Strategy validation,
-typecheck, build, CLI package checks, core tests, trace-processor availability,
-and the 6-trace scene regression gate.
+typecheck, build, CLI package checks, core, architecture, Self-Evolution, and
+external issue-reporting tests, trace-processor availability, the constructed
+Trace SQL regression, and the 6-trace scene regression gate.
+
+## New Test Files Must Be Registered
+
+`test:core`, `test:architecture`, and `test:self-evolution` enumerate their
+targets; new subsystems may use a directory-scoped gate such as
+`test:external-issue-reporting`. `tsconfig.json` excludes
+`src/**/__tests__/**` and `src/**/*.test.ts`.
+Therefore `npm run typecheck` cannot catch a type break inside a test file, and
+an unregistered suite never runs in `verify:pr`.
+
+When adding a test file, register it in the matching `test:*` script in the same
+change, and make sure that script is reachable from `test:gate`. For a new
+subsystem, add a directory-scoped `test:<subsystem>` script and wire it into
+`test:gate` rather than listing files one by one. Verify with:
+
+```bash
+cd backend && npm run test:gate
+```
+
+A suite that is green locally but absent from `test:gate` counts as untested.
 
 ## Verification by Change Type
 
@@ -24,12 +45,16 @@ and the 6-trace scene regression gate.
 | MCP, memory, report, provider, session, or agent runtime | `cd backend && npm run test:scene-trace-regression` |
 | Skill YAML | `cd backend && npm run validate:skills` plus scene trace regression |
 | Strategy/template Markdown | `cd backend && npm run validate:strategies` plus scene trace regression |
+| Trace corpus, Skill/Strategy coverage, or generator | `npm run trace:regression`; also run the focused Node corpus tests for tooling changes |
+| SQL-bearing Skill or default backend gate wiring | `cd backend && npm run trace:sql-regression`; `npm run verify:pr` includes this gate |
 | Frontend generated types | `cd backend && npm run generate:frontend-types` plus relevant tests |
 | AI plugin UI | Browser verification in `start-dev.sh`, relevant `perfetto/ui` tests/typecheck, then `./scripts/update-frontend.sh` |
+| Self-Evolution control plane | `cd backend && npm run test:self-evolution` plus `npm run typecheck` and scene trace regression; add the AI plugin UI gate when the panel changes. That script covers RBAC/scope isolation, disabled and dependency fail-closed cases, and fixed validation + holdout replay selection. It is wired into `test:gate`, so `npm run verify:pr` runs it too |
+| Agent-assisted external issue reporting | `cd backend && npm run test:external-issue-reporting`, `npm run typecheck`, strategy validation, scene trace regression, AI plugin typecheck/unit tests, browser verification in `start-dev.sh`, and `./scripts/update-frontend.sh`; verify private/security fail-closed and that no GitHub write occurs |
 | Perfetto upstream sync, trace processor pin, SQL/stdlib index, or committed UI prebuild | Follow `.claude/rules/perfetto-sync.md`; normally `git diff --check`, `npm run check:frontend-prebuild`, `npm --prefix backend run cli:e2e`, scene trace regression, submodule remote reachability, and Skill/Strategy validation when those files changed |
 | Code-aware analysis, codebase registry, source ingestion, symbol resolution, or CodeRef report/export | `npm --prefix backend run verify:codebase-aware` plus `npm run verify:pr` before landing |
 | npm CLI package/release | `npm --prefix backend run cli:pack-check` plus isolated install smoke |
-| Portable packaging/release | Shell syntax/static checks, Node script syntax checks, launcher cross-compile, full package build, and package manifest verification |
+| Portable-impacting code or packaging | Focused launcher/packaging tests, shell and Node syntax/static checks, launcher cross-compile, full package build, package manifest verification, and `npm run verify:pr` before landing; exact-archive target-OS runtime smoke is additionally required for a public release |
 
 ## npm CLI Release Verification
 
@@ -59,8 +84,9 @@ the release process, run:
 ```bash
 bash -n scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
 shellcheck -x scripts/package-portable.sh scripts/release-portable.sh scripts/package-windows-exe.sh scripts/release-windows-exe.sh
-node --check scripts/sync-version.cjs scripts/verify-portable-package.cjs scripts/verify-windows-package.cjs
+node --check scripts/sync-version.cjs scripts/verify-portable-package.cjs scripts/verify-windows-package.cjs scripts/smoke-portable-archive.cjs
 npm run version:sync -- --check
+GO111MODULE=off go test ./scripts/portable-launcher
 GO111MODULE=off GOOS=windows GOARCH=amd64 go build -o /tmp/smartperfetto-launcher.exe ./scripts/portable-launcher
 GO111MODULE=off GOOS=darwin GOARCH=arm64 go build -o /tmp/SmartPerfetto-macos ./scripts/portable-launcher
 GO111MODULE=off GOOS=linux GOARCH=amd64 go build -o /tmp/SmartPerfetto-linux ./scripts/portable-launcher
@@ -69,13 +95,213 @@ node scripts/verify-portable-package.cjs \
   --asset "dist/portable/smartperfetto-v<version>-windows-x64.zip" \
   --target windows-x64 \
   --version "<version>" \
-  --commit "$(git rev-parse HEAD)"
+  --commit "$(git rev-parse HEAD)" \
+  --require-clean
+node scripts/verify-portable-package.cjs \
+  --asset "dist/portable/smartperfetto-v<version>-macos-arm64.zip" \
+  --target macos-arm64 \
+  --version "<version>" \
+  --commit "$(git rev-parse HEAD)" \
+  --require-clean
+node scripts/verify-portable-package.cjs \
+  --asset "dist/portable/smartperfetto-v<version>-linux-x64.tar.gz" \
+  --target linux-x64 \
+  --version "<version>" \
+  --commit "$(git rev-parse HEAD)" \
+  --require-clean
 ```
 
 For a clean public release, the package manifest must contain
 `gitDirty: false` and `gitCommit` equal to the release target commit. If testing
 the release script without uploading, use a fake `gh` shim or a draft release;
 do not rely on `--allow-dirty` for public release validation.
+Manifest schema v3 records the pinned `traceProcessor.sourceSha256` separately
+from the post-signing packaged `traceProcessor.sha256`; the verifier must bind
+the latter to the binary extracted from the exact archive.
+The bundled Node runtime version, archive filename, archive SHA-256, and final
+executable-content digest must exactly match `scripts/node-runtime-pin.env`.
+For macOS, the digest normalizes only code-signature-dependent Mach-O fields
+so Developer ID re-signing cannot hide changed executable content. Packaging
+must not resolve a moving `latest-v24.x` input.
+
+Cross-compilation, archive verification, and static signature checks do not
+prove target-platform startup. During code/PR work, report those results as
+contract/package verification. For a public portable release, additionally
+apply the exact-asset runtime gate below.
+
+## Exact Portable Archive Runtime Gate
+
+Build once from the exact clean release commit. On Windows, macOS, and Linux,
+extract the final archive that will be uploaded into a fresh temporary
+directory and test those exact bytes. macOS must use the zip recreated after
+notarization and stapling. Do not rebuild an archive after it passes this gate.
+
+Run this command once per target on the matching OS/architecture:
+
+```bash
+node scripts/smoke-portable-archive.cjs \
+  --asset "<final-archive>" \
+  --target "<windows-x64|macos-arm64|linux-x64>" \
+  --version "<version>" \
+  --commit "<release-commit>" \
+  --public-release \
+  --output-dir "dist/portable/smoke-evidence/<target>"
+```
+
+The command must reject host/target mismatches. Its static phase must reject
+absolute paths, traversal, cross-platform name collisions, symlinks, hard
+links, non-regular extracted entries, AppleDouble/macOS metadata entries, and
+any archive-tool diagnostics before trusting package contents. A Linux
+`tar.gz` built on macOS must therefore be free of PAX xattr records as observed
+by target-native GNU tar listing and extraction, not merely clean in its
+pre-archive staging tree. The verifier must enforce pre-extraction archive
+byte/entry/expanded-size/ratio budgets and listing/extraction deadlines.
+`--output-dir` must be a fresh path; never overwrite earlier smoke evidence.
+For local pre-commit runtime validation only, `--allow-dirty` may omit the
+clean-tree requirement. It must be incompatible with `--public-release`, and
+its evidence must never be accepted for promotion.
+
+Each target smoke must:
+
+1. Re-verify manifest version, `gitCommit`, `gitDirty: false`, target, and
+   bundled Node.js 24 from the extracted archive. Scan every packaged ELF or
+   Mach-O and require its GLIBC/minimum-system version to fit the manifest and
+   Info.plist declaration.
+2. Start the bundled launcher with isolated data/log directories and
+   non-conflicting ports.
+3. Poll backend and frontend health through explicit
+   `http://127.0.0.1:<port>/health`; do not use `localhost` as release evidence.
+   The smoke probe must bypass environment proxies through a target-supported
+   standard library HTTP client fixed to IPv4 loopback. Windows uses the
+   repository-owned Go gate helper built from the immutable gate commit
+   by the native job with the workflow-pinned Go toolchain. It is a separate
+   gate process, not a release asset. Its `net/http` probe must disable proxies,
+   redirects, compression, DNS fallback, and non-loopback dial targets; accept
+   only the validated URL and bounded timeout as arguments; and enforce strict
+   response-byte and wall-clock limits. The Node gate must validate that the
+   configured probe path is an absolute regular non-symlink `.exe`, pass a
+   sanitized environment, and terminate the process on cancellation or a hard
+   deadline. If direct child termination does not settle, invoke trusted
+   `System32\taskkill.exe /T /F` and fail within a second bounded deadline
+   unless process closure is confirmed. The same helper must use the native
+   Toolhelp32 process snapshot API for descendant evidence; it must not invoke
+   PowerShell, CIM, WMI, or release-archive code. Snapshot output must be
+   bounded and canonical, include the helper's own PID as a completeness
+   sentinel, and fail closed on empty, malformed, duplicate, partial, timed
+   out, or non-zero helper results. The Windows native job must test, build,
+   and execute the real fixed helper health and process contracts before
+   testing the archive.
+   macOS and Linux use Node's HTTP client with a private keep-alive agent per
+   attempt and destroy the agent, request, response, and socket on every
+   terminal path. All clients must enforce strict URL, response-byte,
+   process-output, and wall-clock budgets, and cancel and settle the peer
+   probe before launcher shutdown after any readiness failure. Record the
+   target-required client identifier in schema-v2 evidence and reject evidence
+   produced by another client. Do not maintain a release-only HTTP parser that
+   diverges from the launcher, browsers, and normal clients.
+4. Execute the bundled Node.js, Claude, and OpenCode version commands when
+   present, then run a minimal packaged `trace_processor_shell` operation.
+5. Use the launcher-supported shutdown control, require a zero/successful and
+   non-escalated shutdown receipt with platform containment
+   (`windows-job-object` or `service-process-groups`), and verify child
+   processes and listening ports are gone. Keep process-tree traversal in the
+   Node gate; the Windows helper emits only a strict full PID/PPID snapshot so
+   its own gate process cannot be mistaken for a launcher descendant.
+6. Preserve launcher/backend/frontend logs on failure.
+7. Atomically write a schema-v2 `smoke-summary.json` that binds the target-native host,
+   lifecycle receipt, and exact archive name, size, and SHA-256. Public release
+   promotion must re-hash the same archive and reject stale or edited evidence.
+
+For hosted smoke, the fixed gate checkout owns and executes the smoke client
+and evidence verifier. The immutable draft metadata and downloaded archive
+provide the release identity and product bytes; the native job must not create
+or execute a release checkout. Preserve the gate SHA and release commit as
+separate trust roots throughout planning, native execution, collection,
+attestation, and promotion.
+
+For the final macOS archive, also require:
+
+```bash
+codesign --verify --deep --strict --verbose=2 SmartPerfetto.app
+xcrun stapler validate SmartPerfetto.app
+spctl --assess --type execute -vv SmartPerfetto.app
+xcrun notarytool info <submission-id> \
+  --keychain-profile "$SMARTPERFETTO_MACOS_NOTARY_PROFILE"
+```
+
+The notarization result must be `Accepted` and preserved as the minimal
+`NOTARIZATION-RECEIPT.json` in the exact final archive, the ticket must be
+stapled, Gatekeeper must report `Notarized Developer ID`, and the extracted app
+must actually reach both health endpoints. The package verifier must
+independently check every Mach-O signature and required Node/Claude JIT
+entitlements; signing must not depend on file extension or executable mode.
+
+Use native or hosted target runners when local machines are unavailable. If a
+required runner cannot execute the exact archive, keep the GitHub release as a
+draft. Publishing with a known gap requires explicit user acceptance and must
+name the untested target; static verification is not a substitute.
+
+The hosted entry point is
+`.github/workflows/portable-exact-archive-smoke.yml`. Dispatch it only from the
+default branch and pass the numeric draft release ID. Its gate checkout is
+fixed to the dispatch SHA. The plan separately binds the draft's full target
+SHA (or the peeled tag commit once the tag exists), which must be an ancestor
+of the gate; the native job does not check out that commit. A fixed-gate
+download job fetches each target by immutable asset ID with native binary I/O,
+verifies size and digest, then re-fetches and re-binds the release. It
+preserves those opaque bytes as a short-lived Actions artifact; only then does
+the native smoke job restore and execute them. The smoke matrix must override
+default skipped-needs propagation:
+one target's failed download may fail that target, but must not suppress native
+smoke and diagnostic evidence for targets whose exact asset artifacts exist.
+GitHub currently requires `contents: write` for its Actions token to read a
+draft release and download draft assets. That grant must remain job-local to
+the prepare, download, and collect jobs; checkout must use
+`persist-credentials: false`, and `GH_TOKEN` is scoped only to trusted
+fixed-gate REST GET/download steps. The native smoke job must have at most
+`contents: read` and must never share a job with a write-capable repository
+token. A fresh collect job must fetch the unchanged draft before downloading
+target evidence, then use the fixed gate commit—without passing it a token—to
+validate each public smoke summary, release/asset identity, runner/run
+provenance, and prepared workflow context before changing the context to
+`verified`. The tested release code must never receive the write credential.
+
+`selection=windows-linux` and single-target selections produce partial
+diagnostic evidence and are never promotion evidence. Only a successful
+`selection=all` run can set `publicReleaseEligible: true`; it must include the
+signed, notarized, stapled macOS final zip. Per-target artifacts keep separate
+target roots, and the collect job preserves both failures and a combined
+attestation. The combined artifact exposes normalized
+`promotion-evidence/<target>/smoke-summary.json` and
+`workflow-context.json` only for targets whose release ID, asset ID, summary
+digest, runner host, gate SHA, and run identity all match. Hosted promotion
+must pass that downloaded `promotion-evidence/`, the sibling
+`portable-smoke-attestation.json`, and the producing run ID to
+`release:portable`. The promotion verifier re-fetches repository metadata, the
+completed Actions run, and the uniquely named combined artifact. It must bind
+the repository ID and default branch to GitHub's response, require the run gate
+SHA to equal the clean promotion checkout, verify GitHub's artifact SHA-256
+against the downloaded zip, and byte-compare the local evidence with the
+digest-verified artifact.
+
+For changes to this gate, run at minimum:
+
+```bash
+node --check scripts/portable-release-smoke-workflow.cjs
+node --check scripts/download-portable-release-asset.cjs
+node --check scripts/verify-portable-smoke-attestation.cjs
+node --check scripts/smoke-portable-archive.cjs
+GO111MODULE=off go test ./scripts/portable-health-probe
+GO111MODULE=off GOOS=windows GOARCH=amd64 go build -trimpath \
+  -ldflags="-s -w" -o /tmp/smartperfetto-windows-gate-helper.exe \
+  ./scripts/portable-health-probe
+node --test scripts/__tests__/portable-release-smoke-workflow.test.mjs \
+  scripts/__tests__/smoke-portable-archive.test.mjs \
+  scripts/__tests__/verify-portable-smoke-evidence.test.mjs \
+  scripts/__tests__/release-portable.test.mjs
+bash -n scripts/release-portable.sh
+shellcheck scripts/release-portable.sh
+```
 
 ## Canonical Scene Regression
 
@@ -96,6 +322,8 @@ The regression uses 6 canonical traces:
 | Customer scrolling | `scroll-demo-customer-scroll.pftrace` |
 | Flutter TextureView | `Scroll-Flutter-327-TextureView.pftrace` |
 | Flutter SurfaceView | `Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace` |
+
+The aliases above resolve through `Trace/catalog.json`; maintained source must not add paths to the retired flat fixture directory. The default backend gate runs `trace:sql-regression`, which materializes committed overlays without the Perfetto source submodule and executes every discovered Skill SQL contract through the production path, explicit read-only/context probes, or isolated state-changing branch probes. Skipped or unavailable SQL fails the gate. Full generator/release verification is `npm run trace:regression`. Its report keeps SQL execution coverage separate from assertion-backed semantic coverage and definition-only contracts; inventory assignment alone is not an execution or semantic pass.
 
 ## Focused Unit Tests
 
@@ -128,7 +356,7 @@ Startup:
 ```bash
 cd backend
 npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace ../test-traces/lacunh_heavy.pftrace \
+  --trace ../Trace/real/android-startup-heavy/trace.pftrace \
   --query "分析启动性能" \
   --output test-output/e2e-startup.json \
   --keep-session
@@ -166,7 +394,25 @@ cd backend
 OPENAI_API_KEY=... npm run verify:e2e:deepseek-scrolling
 ```
 
-Startup plus scrolling:
+M10 Agent-assisted external issue triage:
+
+```bash
+cd backend
+OPENAI_API_KEY=... npm run verify:e2e:deepseek-external-issue
+```
+
+This suite requires a persisted source-run provider snapshot, an actionable
+deterministic signal, a validated live-Agent review, and either an unsubmitted
+GitHub draft or an Agent decision that intentionally blocks public drafting.
+The verifier creates that deterministic signal inside its isolated user-data
+root by posting a negative conclusion rating through the production feedback
+API before requesting the opportunity; it does not inject a synthetic signal
+or write to GitHub.
+Also verify in browser that a durable public thumbs-down refreshes the same
+message into an explicit Agent-triage opportunity without invoking the Agent
+or opening GitHub automatically. It never calls the GitHub API.
+
+Complete real-provider matrix:
 
 ```bash
 cd backend
@@ -175,8 +421,8 @@ OPENAI_API_KEY=... npm run verify:e2e:deepseek
 
 For CI-backed real-provider validation, use the manual GitHub Actions workflow
 `Agent Deepseek E2E`. It requires the repository secret `DEEPSEEK_API_KEY` and
-accepts `suite=all|startup|scrolling`; keep it manual because it consumes
-provider quota and secrets.
+accepts `suite=all|startup|scrolling|external-issue|context`; keep it manual
+because it consumes provider quota and secrets.
 
 Flutter TextureView and SurfaceView must be verified separately because their
 rendering pipelines differ:
@@ -184,13 +430,13 @@ rendering pipelines differ:
 ```bash
 cd backend
 npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace "../test-traces/Scroll-Flutter-327-TextureView.pftrace" \
+  --trace "../Trace/real/flutter-scroll-texture-view/trace.pftrace" \
   --query "分析 Flutter 滑动性能" \
   --output test-output/e2e-flutter-textureview.json \
   --keep-session
 
 npx tsx src/scripts/verifyAgentSseScrolling.ts \
-  --trace "../test-traces/Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace" \
+  --trace "../Trace/real/flutter-scroll-surface-view/trace.pftrace" \
   --query "分析 Flutter 滑动性能" \
   --output test-output/e2e-flutter-surfaceview.json \
   --keep-session
@@ -202,13 +448,13 @@ Fast/full mode:
 cd backend
 npx tsx src/scripts/verifyAgentSseScrolling.ts \
   --mode fast \
-  --trace ../test-traces/scroll-demo-customer-scroll.pftrace \
+  --trace ../Trace/real/android-scroll-customer/trace.pftrace \
   --query "这个 trace 的应用包名和主要进程是什么？" \
   --output test-output/e2e-fast.json
 
 npx tsx src/scripts/verifyAgentSseScrolling.ts \
   --mode full \
-  --trace ../test-traces/scroll-demo-customer-scroll.pftrace \
+  --trace ../Trace/real/android-scroll-customer/trace.pftrace \
   --query "分析滑动性能" \
   --output test-output/e2e-full.json
 ```

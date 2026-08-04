@@ -62,12 +62,19 @@ final_report_contract:
         - ['self_ms', 'dur_ms', '耗时', '\d+(?:\.\d+)?\s*ms']
     - id: root_cause_references
       label: 根因编号引用
-      description: '关键根因需要引用 A1-A18、B1-B12 或 SRxx 编号，便于和启动知识库交叉核对。'
+      description: '关键根因只能引用启动知识库已有的 A1-A18、B1-B12，或工具实际返回的 SR09-SR20；禁止自创 SR01-SR08 或其他编号。'
       pattern_groups:
         - ['\bA(?:1[0-8]?|[2-9])\b', '\bB(?:1[0-2]?|[2-9])\b', 'SR(?:09|1[0-9]|20)(?!\d)']
     - id: audience_recommendations
       label: App/系统分层建议
       description: '优化建议必须区分 App 层和系统/平台/ROM 层。'
+      recovery_text:
+        zh:
+          - 'App 层：仅对已完成阶段证据直接指向的应用瓶颈实施优化。'
+          - '系统/平台层：若已完成阶段没有平台归因证据，保持为未验证并继续监测。'
+        en:
+          - 'App layer: optimize only application bottlenecks directly supported by completed-phase evidence.'
+          - 'System/Platform: when completed phases contain no platform-attribution evidence, keep that path unverified and monitor it.'
       pattern_groups:
         - ['App\s*层', '应用\s*层', 'App\s+layer']
         - ['系统\s*/\s*平台\s*层', '系统\s*层', '平台\s*层', 'ROM\s*层', 'System/Platform', 'platform\s+layer']
@@ -86,7 +93,7 @@ final_report_contract:
 phase_hints:
   - id: detail_breakdown
     keywords: ['detail', '详情', '分解', 'breakdown', '阶段', 'startup_detail', '耗时']
-    constraints: '必须用 Phase 1 的 ttid_ts/ttfd_ts 作为 startup_detail 的时间边界参数。使用 self_ms（排除子切片）而非 wall-time。'
+    constraints: '必须把 Phase 1 的 startup_id/start_ts/end_ts/dur_ms/package/startup_type 原样传给 startup_detail；TTID/TTFD 只能作为可选 ttid_ms/ttfd_ms，不能充当时间边界。使用 self_ms（排除子切片）而非 wall-time。'
     critical_tools: ['startup_detail']
     critical: false
   - id: critical_artifacts
@@ -125,14 +132,18 @@ plan_template:
     - id: startup_timing
       match_keywords: ['startup', 'ttid', 'ttfd', 'launch', '启动', 'startup_analysis']
       suggestion: '启动场景建议包含启动耗时测量阶段 (startup_analysis)'
-      required_expected_calls:
+      required_expected_call_alternatives:
         - tool: invoke_skill
+          skill_id: startup_analysis
+        - tool: compare_skill
           skill_id: startup_analysis
     - id: phase_breakdown
       match_keywords: ['phase', 'breakdown', 'block', '阶段', '分解', '阻塞', 'startup_detail']
       suggestion: '启动场景建议包含启动阶段分解和阻塞因素分析'
-      required_expected_calls:
+      required_expected_call_alternatives:
         - tool: invoke_skill
+          skill_id: startup_detail
+        - tool: compare_skill
           skill_id: startup_detail
     - id: startup_critical_artifacts
       match_keywords: ['artifact', 'fetch_artifact', 'critical_tasks', 'hot_slice_states', 'thread_blocking_graph', '关键数据', '关键任务', '阻塞关系']
@@ -142,22 +153,28 @@ plan_template:
     - id: launch_type_verdict
       match_keywords: ['type', 'cold', 'warm', 'hot', 'bindApplication', '类型', '冷启动', '温启动', '热启动', '判定']
       suggestion: '启动场景建议验证启动类型 (cold/warm/hot)：bindApplication 存在→冷启动，仅 performCreate→温启动'
-      required_expected_calls:
+      required_expected_call_alternatives:
         - tool: invoke_skill
+          skill_id: startup_analysis
+        - tool: compare_skill
           skill_id: startup_analysis
     - id: cold_start_slow_reasons
       trigger_keywords: ['cold', '冷启动', 'bindApplication', 'startup_slow_reasons', 'SR09', 'SR10', 'SR20']
       match_keywords: ['startup_slow_reasons', 'slow reason', '官方启动慢原因', 'SR09', 'SR10', 'SR20', 'dex2oat', 'baseline']
       suggestion: '冷启动或 bindApplication 证据出现时，计划必须包含 startup_slow_reasons 交叉验证；若数据不可用，执行阶段标记 skipped 并说明原因'
-      required_expected_calls:
+      required_expected_call_alternatives:
         - tool: invoke_skill
+          skill_id: startup_slow_reasons
+        - tool: compare_skill
           skill_id: startup_slow_reasons
     - id: q4_blocking_chain
       trigger_keywords: ['Q4', 'Sleeping', 'sleeping', '阻塞', 'blocking_chain', 'blocked_functions', 'futex', 'binder']
       match_keywords: ['blocking_chain_analysis', '阻塞链', '唤醒者', 'waker', 'blocked_functions']
       suggestion: '当计划涉及 Q4/Sleeping/阻塞解释时，必须声明 blocking_chain_analysis；若 trace 缺少阻塞信号，执行阶段标记 skipped 并说明'
-      required_expected_calls:
+      required_expected_call_alternatives:
         - tool: invoke_skill
+          skill_id: blocking_chain_analysis
+        - tool: compare_skill
           skill_id: blocking_chain_analysis
 ---
 
@@ -173,15 +190,15 @@ plan_template:
 - detail 是 informational：只指导如何执行，不能替代 invoke_skill / execute_sql / fetch_artifact 的 trace 证据。
 
 **Mandatory aspects**
-- startup_timing: 启动场景建议包含启动耗时测量阶段 (startup_analysis)  (required: invoke_skill(startup_analysis))
-- phase_breakdown: 启动场景建议包含启动阶段分解和阻塞因素分析  (required: invoke_skill(startup_detail))
+- startup_timing: 启动场景建议包含启动耗时测量阶段 (startup_analysis)  (required: invoke_skill(startup_analysis) or compare_skill(startup_analysis))
+- phase_breakdown: 启动场景建议包含启动阶段分解和阻塞因素分析  (required: invoke_skill(startup_detail) or compare_skill(startup_detail))
 - startup_critical_artifacts: 启动详情阶段必须计划获取 startup_detail 的关键 artifact（主线程状态、四象限、热点、关键任务/阻塞关系；缺失时阶段可 skipped+reason）  (required: fetch_artifact)
-- launch_type_verdict: 启动场景建议验证启动类型 (cold/warm/hot)：bindApplication 存在→冷启动，仅 performCreate→温启动  (required: invoke_skill(startup_analysis))
-- cold_start_slow_reasons: 冷启动或 bindApplication 证据出现时，计划必须包含 startup_slow_reasons 交叉验证；若数据不可用，执行阶段标记 skipped 并说明原因  (required: invoke_skill(startup_slow_reasons))
-- q4_blocking_chain: 当计划涉及 Q4/Sleeping/阻塞解释时，必须声明 blocking_chain_analysis；若 trace 缺少阻塞信号，执行阶段标记 skipped 并说明  (required: invoke_skill(blocking_chain_analysis))
+- launch_type_verdict: 启动场景建议验证启动类型 (cold/warm/hot)：bindApplication 存在→冷启动，仅 performCreate→温启动  (required: invoke_skill(startup_analysis) or compare_skill(startup_analysis))
+- cold_start_slow_reasons: 冷启动或 bindApplication 证据出现时，计划必须包含 startup_slow_reasons 交叉验证；若数据不可用，执行阶段标记 skipped 并说明原因  (required: invoke_skill(startup_slow_reasons) or compare_skill(startup_slow_reasons))
+- q4_blocking_chain: 当计划涉及 Q4/Sleeping/阻塞解释时，必须声明 blocking_chain_analysis；若 trace 缺少阻塞信号，执行阶段标记 skipped 并说明  (required: invoke_skill(blocking_chain_analysis) or compare_skill(blocking_chain_analysis))
 
 **Phase reminders**
-- detail_breakdown: 必须用 Phase 1 的 ttid_ts/ttfd_ts 作为 startup_detail 的时间边界参数。使用 self_ms（排除子切片）而非 wall-time。 工具: startup_detail
+- detail_breakdown: 必须把 Phase 1 的 startup_id/start_ts/end_ts/dur_ms/package/startup_type 原样传给 startup_detail；TTID/TTFD 只能作为可选 ttid_ms/ttfd_ms，不能充当时间边界。使用 self_ms（排除子切片）而非 wall-time。 工具: startup_detail
 - critical_artifacts: 此阶段不可跳过。必须获取关键 artifact（热点函数、阻塞调用、锁竞争）作为深钻输入。 工具: execute_sql, fetch_artifact
 - slow_reasons_validation: 冷启动必须调用 startup_slow_reasons 检查 DEX2OAT/baseline profile/debuggable 等官方因素。Q4(Sleeping) >25% 必须用 blocking_chain_analysis 追踪阻塞源。 工具: startup_slow_reasons, blocking_chain_analysis
 - webview_startup: 仅在架构检测或 trace 证据提示 WebView 时执行。SQL 必须说明正在验证 WebView/Chromium/V8/CrRendererMain 是否参与启动；若未命中 slice，应把 WebView 启动影响标为证据不足或可排除，而不是继续归到综合结论。 工具: execute_sql
@@ -203,6 +220,7 @@ plan_template:
 3. 对 startup_detail 的关键 artifact 使用 `fetch_artifact` 读取行数据；摘要或 detail 文本不能替代 artifact 证据。
 4. 冷启动/bindApplication 命中时补 `startup_slow_reasons`；Q4/Sleeping/blocked_functions 命中时补 `blocking_chain_analysis`。
 5. 最终报告必须包含启动类型+TTID/TTFD、阶段耗时/self_ms、根因编号、App/系统分层建议和证据边界。
+   根因编号只能来自启动知识库 A1-A18/B1-B12，或本轮工具结果明确返回的 SR09-SR20。禁止为了给自定义/合成负载分类而创建 SR01-SR08 或任何新编号；若合成负载没有精确映射，应明确写“无精确知识库编号”，并同时引用本轮实际命中的有效 SRxx 作为交叉验证而不是主根因。
 
 **Detail refs**
 - `startup:overview_timing`: startup_analysis/startup_detail 参数、启动类型、artifact 表。

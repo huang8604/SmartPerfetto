@@ -42,9 +42,12 @@ import {
   type KnowledgeScope,
   getScopedKnowledgeRecord,
   listScopedKnowledgeRecords,
+  mutateScopedKnowledgeRecordWithSideEffect,
   removeScopedKnowledgeRecord,
+  removeScopedKnowledgeRecordIf,
   upsertScopedKnowledgeRecord,
 } from './scopedKnowledgeStore';
+import {withFilesystemRegistryLock} from './filesystemRegistryLock';
 
 interface StorageEnvelope {
   schemaVersion: 1;
@@ -72,31 +75,47 @@ export interface ArchiveOptions {
   reason: string;
 }
 
+export interface CaseEvolutionFeedbackProjection {
+  candidateId: string;
+  supportingEvidence: number;
+  contradictingEvidence: number;
+  maintainerPromoted: boolean;
+  supported: boolean;
+  feedbackProjectionRejected: boolean;
+}
+
 /**
- * CaseLibrary — local file-backed case storage. Single instance per
- * storage path; cross-process writers explicitly out of scope (matches
- * ragStore / baselineStore / projectMemory).
+ * CaseLibrary — local file-backed case storage with a cross-process
+ * read-modify-write lease for every filesystem mutation.
  */
 export class CaseLibrary {
   private readonly storagePath: string;
   private readonly cases = new Map<string, CaseNode>();
   private loaded = false;
+  private loadError: Error | undefined;
 
   constructor(storagePath: string) {
     this.storagePath = storagePath;
   }
 
   load(): void {
-    if (this.loaded) return;
     this.loaded = true;
+    this.cases.clear();
+    this.loadError = undefined;
     if (!fs.existsSync(this.storagePath)) return;
     try {
       const raw = fs.readFileSync(this.storagePath, 'utf-8');
       const parsed = JSON.parse(raw) as StorageEnvelope;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.cases)) return;
+      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.cases)) {
+        this.loadError = new Error('Case library schema is invalid');
+        return;
+      }
       for (const c of parsed.cases) this.cases.set(c.caseId, c);
-    } catch {
+    } catch (error) {
       // Corrupted JSON: file preserved, in-memory cache stays empty.
+      this.loadError = new Error(
+        `Case library is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -113,11 +132,26 @@ export class CaseLibrary {
         `Use publishCase() to advance a case to 'published'; saveCase() rejects published records to keep the gate auditable`,
       );
     }
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.cases.set(record.caseId, record);
-      this.persist();
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (filesystemWrites && databaseWrites) {
+      mutateScopedKnowledgeRecordWithSideEffect<CaseNode>(
+        KNOWLEDGE_KIND,
+        record.caseId,
+        scope,
+        () => ({record, rowScope: caseRowScope(record.status)}),
+        (next, current) => this.mutateFilesystem(() => {
+          assertReplicaMatches('case', record.caseId, current, this.cases.get(record.caseId));
+          this.cases.set(record.caseId, next);
+        }),
+        {createdAt: record.createdAt, updatedAt: Date.now()},
+      );
+      return;
     }
-    if (enterpriseKnowledgeDbWritesEnabled()) {
+    if (filesystemWrites) {
+      this.mutateFilesystem(() => this.cases.set(record.caseId, record));
+    }
+    if (databaseWrites) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
         record.caseId,
@@ -142,14 +176,28 @@ export class CaseLibrary {
   }
 
   removeCase(caseId: string, scope?: KnowledgeScope): boolean {
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (filesystemWrites && databaseWrites) {
+      const removed = removeScopedKnowledgeRecordIf<CaseNode>(
+        KNOWLEDGE_KIND,
+        caseId,
+        scope,
+        () => true,
+        current => this.mutateFilesystem(() => {
+          assertReplicaMatches('case', caseId, current, this.cases.get(caseId));
+          this.cases.delete(caseId);
+        }),
+      );
+      if (removed) return true;
+      return this.mutateFilesystem(() => this.cases.delete(caseId));
+    }
     let removed = false;
-    if (enterpriseKnowledgeDbWritesEnabled()) {
+    if (databaseWrites) {
       removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, caseId, scope) || removed;
     }
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.load();
-      const had = this.cases.delete(caseId);
-      if (had) this.persist();
+    if (filesystemWrites) {
+      const had = this.mutateFilesystem(() => this.cases.delete(caseId));
       removed = had || removed;
     }
     return removed;
@@ -201,42 +249,45 @@ export class CaseLibrary {
         `Cannot publish case '${caseId}' without a reviewer signoff`,
       );
     }
-    const existing = enterpriseKnowledgeStoreEnabled()
-      ? getScopedKnowledgeRecord<CaseNode>(
-          KNOWLEDGE_KIND,
-          caseId,
-          scope,
-        )?.record
-      : this.cases.get(caseId);
-    if (!existing) {
-      throw new Error(`Cannot publish case '${caseId}': not found`);
-    }
-    if (existing.redactionState !== 'redacted') {
-      throw new Error(
-        `Cannot publish case '${caseId}': redactionState='${existing.redactionState}' (must be 'redacted')`,
-      );
-    }
-    const published: CaseNode = {
-      ...existing,
-      status: 'published',
-      curatedBy: trimmedReviewer,
-      curatedAt: opts.curatedAt ?? Date.now(),
+    const publish = (existing: CaseNode | undefined): CaseNode => {
+      if (!existing) throw new Error(`Cannot publish case '${caseId}': not found`);
+      if (existing.redactionState !== 'redacted') {
+        throw new Error(
+          `Cannot publish case '${caseId}': redactionState='${existing.redactionState}' (must be 'redacted')`,
+        );
+      }
+      return {
+        ...existing,
+        status: 'published',
+        curatedBy: trimmedReviewer,
+        curatedAt: opts.curatedAt ?? Date.now(),
+      };
     };
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.cases.set(caseId, published);
-      this.persist();
-    }
-    if (enterpriseKnowledgeDbWritesEnabled()) {
-      upsertScopedKnowledgeRecord(
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (databaseWrites) {
+      return mutateScopedKnowledgeRecordWithSideEffect<CaseNode>(
         KNOWLEDGE_KIND,
         caseId,
-        caseRowScope(published.status),
-        published,
         scope,
-        {createdAt: published.createdAt, updatedAt: published.curatedAt},
+        current => {
+          const next = publish(current);
+          return {record: next, rowScope: caseRowScope(next.status)};
+        },
+        (next, current) => {
+          if (!filesystemWrites) return;
+          this.mutateFilesystem(() => {
+            assertReplicaMatches('case', caseId, current, this.cases.get(caseId));
+            this.cases.set(caseId, next);
+          });
+        },
       );
     }
-    return published;
+    return this.mutateFilesystem(() => {
+      const next = publish(this.cases.get(caseId));
+      this.cases.set(caseId, next);
+      return next;
+    });
   }
 
   /**
@@ -256,40 +307,150 @@ export class CaseLibrary {
     if (!reason) {
       throw new Error(`archiveCase requires a non-empty reason`);
     }
-    const existing = enterpriseKnowledgeStoreEnabled()
-      ? getScopedKnowledgeRecord<CaseNode>(
-          KNOWLEDGE_KIND,
-          caseId,
-          scope,
-        )?.record
-      : this.cases.get(caseId);
-    if (!existing) {
-      throw new Error(`Cannot archive case '${caseId}': not found`);
-    }
-    const archived: CaseNode = {
-      ...existing,
-      ...makeSparkProvenance({
-        source: existing.source,
-        notes: `archived via archiveCase`,
-      }),
-      traceArtifactId: undefined,
-      traceUnavailableReason: reason,
+    const archive = (existing: CaseNode | undefined): CaseNode => {
+      if (!existing) throw new Error(`Cannot archive case '${caseId}': not found`);
+      return {
+        ...existing,
+        ...makeSparkProvenance({
+          source: existing.source,
+          notes: `archived via archiveCase`,
+        }),
+        traceArtifactId: undefined,
+        traceUnavailableReason: reason,
+      };
     };
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.cases.set(caseId, archived);
-      this.persist();
-    }
-    if (enterpriseKnowledgeDbWritesEnabled()) {
-      upsertScopedKnowledgeRecord(
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (databaseWrites) {
+      return mutateScopedKnowledgeRecordWithSideEffect<CaseNode>(
         KNOWLEDGE_KIND,
         caseId,
-        caseRowScope(archived.status),
-        archived,
         scope,
-        {createdAt: archived.createdAt, updatedAt: Date.now()},
+        current => {
+          const next = archive(current);
+          return {record: next, rowScope: caseRowScope(next.status)};
+        },
+        (next, current) => {
+          if (!filesystemWrites) return;
+          this.mutateFilesystem(() => {
+            assertReplicaMatches('case', caseId, current, this.cases.get(caseId));
+            this.cases.set(caseId, next);
+          });
+        },
       );
     }
-    return archived;
+    return this.mutateFilesystem(() => {
+      const next = archive(this.cases.get(caseId));
+      this.cases.set(caseId, next);
+      return next;
+    });
+  }
+
+  /**
+   * Update only Case Evolution evidence projection. Published governance is
+   * immutable here; non-published cases remember and restore their prior
+   * status when a reversible negative projection is later retracted.
+   */
+  applyCaseEvolutionFeedbackProjection(
+    caseId: string,
+    projection: CaseEvolutionFeedbackProjection,
+    scope?: KnowledgeScope,
+  ): CaseNode {
+    this.load();
+    const project = (existing: CaseNode | undefined): CaseNode => {
+      if (!existing) throw new Error(`Cannot project case '${caseId}': not found`);
+      if (!existing.knowledge) {
+        throw new Error(`Cannot project case '${caseId}': knowledge missing`);
+      }
+      const previousMarker =
+        existing.knowledge.context?.['caseEvolution.v1'];
+      const marker = previousMarker &&
+        typeof previousMarker === 'object' &&
+        !Array.isArray(previousMarker)
+        ? previousMarker as Record<string, unknown>
+        : {};
+      const previousStatus = marker.statusBeforeFeedbackProjection;
+      const statusBeforeProjection: CurationStatus | undefined =
+        previousStatus === 'draft' ||
+        previousStatus === 'reviewed' ||
+        previousStatus === 'private'
+          ? previousStatus
+          : undefined;
+      const {
+        statusBeforeFeedbackProjection: _statusBeforeFeedbackProjection,
+        supportedAt: previousSupportedAt,
+        ...markerWithoutPreviousStatus
+      } = marker;
+      const nextStatusBeforeProjection =
+        projection.feedbackProjectionRejected &&
+        existing.status !== 'published'
+          ? statusBeforeProjection ??
+            (existing.status === 'private' ? undefined : existing.status)
+          : undefined;
+      const nextStatus = existing.status === 'published'
+        ? 'published'
+        : projection.feedbackProjectionRejected
+          ? 'private'
+          : statusBeforeProjection && existing.status === 'private'
+            ? statusBeforeProjection
+            : existing.status;
+      return {
+        ...existing,
+        status: nextStatus,
+        knowledge: {
+          ...existing.knowledge,
+          context: {
+            ...existing.knowledge.context,
+            'caseEvolution.v1': {
+              ...markerWithoutPreviousStatus,
+              candidateId: projection.candidateId,
+              supportingEvidence: projection.supportingEvidence,
+              contradictingEvidence: projection.contradictingEvidence,
+              maintainerPromoted: projection.maintainerPromoted,
+              supported: projection.supported,
+              feedbackProjectionRejected:
+                projection.feedbackProjectionRejected,
+              ...(projection.supported
+                ? {
+                    supportedAt: typeof previousSupportedAt === 'number'
+                      ? previousSupportedAt
+                      : Date.now(),
+                  }
+                : {}),
+              ...(nextStatusBeforeProjection
+                ? {statusBeforeFeedbackProjection: nextStatusBeforeProjection}
+                : {}),
+            },
+          },
+        },
+      };
+    };
+
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    if (databaseWrites) {
+      return mutateScopedKnowledgeRecordWithSideEffect<CaseNode>(
+        KNOWLEDGE_KIND,
+        caseId,
+        scope,
+        current => {
+          const next = project(current);
+          return {record: next, rowScope: caseRowScope(next.status)};
+        },
+        (next, current) => {
+          if (!filesystemWrites) return;
+          this.mutateFilesystem(() => {
+            assertReplicaMatches('case', caseId, current, this.cases.get(caseId));
+            this.cases.set(caseId, next);
+          });
+        },
+      );
+    }
+    return this.mutateFilesystem(() => {
+      const next = project(this.cases.get(caseId));
+      this.cases.set(caseId, next);
+      return next;
+    });
   }
 
   /** Stats by status — useful for the admin dashboard. */
@@ -323,6 +484,32 @@ export class CaseLibrary {
     };
     fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2), 'utf-8');
     fs.renameSync(tmp, this.storagePath);
+  }
+
+  private mutateFilesystem<T>(mutation: () => T): T {
+    return withFilesystemRegistryLock(
+      this.storagePath,
+      'case_library_busy',
+      () => {
+        this.load();
+        if (this.loadError) throw this.loadError;
+        const result = mutation();
+        this.persist();
+        return result;
+      },
+    );
+  }
+}
+
+function assertReplicaMatches<T>(
+  kind: string,
+  id: string,
+  databaseRecord: T | undefined,
+  filesystemRecord: T | undefined,
+): void {
+  if (databaseRecord === undefined || filesystemRecord === undefined) return;
+  if (JSON.stringify(databaseRecord) !== JSON.stringify(filesystemRecord)) {
+    throw new Error(`${kind} '${id}' has diverged database and filesystem replicas`);
   }
 }
 

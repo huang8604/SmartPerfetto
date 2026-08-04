@@ -38,6 +38,8 @@ import type { ClaimSupportV1 } from '../../types/evidenceContract';
 import type { ClaimVerificationResult } from '../../types/claimVerification';
 import type { IdentityResolutionV1 } from '../../types/identityContract';
 import type { CodeAwareMode } from '../../services/codebase/codeAwareFeature';
+import type { AnalysisReceipt, UiActionProposalV1 } from '../../types/dataContract';
+import type {RunManifestAttributionSink} from '../../types/selfEvolution';
 
 // =============================================================================
 // Agent ID Constants
@@ -233,6 +235,10 @@ export interface AnalysisResult {
   terminationMessage?: string;
   /** Structured Smart Stage1 preview for the frontend main chat surface. */
   smartScenePreview?: SmartScenePreviewPayload;
+  /** User-visible quick-mode run receipt. Metadata only; never claim support evidence. */
+  quickRun?: QuickRunReceipt;
+  analysisReceipt?: AnalysisReceipt;
+  uiActionProposals?: UiActionProposalV1[];
 }
 
 export type AgentRuntimeAnalysisResult = AnalysisResult;
@@ -242,6 +248,10 @@ export type AgentRuntimeAnalysisResult = AnalysisResult;
 // =============================================================================
 
 export interface AnalysisOptions {
+  /** Internal, run-scoped attribution sink. Never sourced from request JSON. */
+  runManifestAttributionSink?: RunManifestAttributionSink;
+  /** Request/session-pinned presentation language. */
+  outputLanguage?: import('../../agentv3/outputLanguage').OutputLanguage;
   traceProcessorService?: any;
   packageName?: string;
   timeRange?: { start: number | string; end: number | string };
@@ -305,10 +315,12 @@ export interface AnalysisOptions {
    */
   referenceTraceId?: string;
 
+  tracePairContext?: import('../../agentv3/types').TracePairContext;
+
   /**
    * Analysis mode override from UI/CLI.
-   * - 'fast': force quick path (10 turns, lightweight MCP, skip verifier/sub-agents)
-   * - 'full': force full pipeline (60 turns, verifier, optional sub-agents)
+   * - 'fast': force quick path (target 5 turns, hard-cap protected)
+   * - 'full': force full pipeline (verifier, optional sub-agents)
    * - 'auto' or undefined: defer to queryComplexityClassifier
    */
   analysisMode?: 'fast' | 'full' | 'auto';
@@ -328,6 +340,12 @@ export interface AnalysisOptions {
   codeAwareMode?: CodeAwareMode;
   /** Explicit codebase allowlist for this analysis session. */
   codebaseIds?: string[];
+  /** Explicit external knowledge-source allowlist for this analysis session. */
+  knowledgeSourceIds?: string[];
+  /** Internal non-secret partition for source/RAG capability continuity. */
+  analysisContextFingerprint?: string;
+  /** Internal immutable public Knowledge Pack identity pinned to this session. */
+  androidInternalsPackPin?: import('../../services/androidInternalsPack/types').AndroidInternalsPackIdentity;
 
   /**
    * Enterprise persistence scope supplied by the route layer.
@@ -352,6 +370,63 @@ export interface TraceDataset {
   label: string;
   columns: string[];
   rows: unknown[][];
+  evidenceRefId?: string;
+  sourceToolCallId?: string;
+  queryHash?: string;
+  traceSide?: 'current' | 'reference';
+  paneSide?: import('../../agentv3/types').TracePaneSide;
+  traceId?: string;
+}
+
+export type QuickRunRequestedMode = 'fast' | 'auto' | 'full';
+export type QuickRunResolvedMode = 'quick' | 'full';
+export type QuickRunProfile = 'normal' | 'extended' | 'triage';
+export type QuickRunBudgetEnforcement = 'turn_cap' | 'timeout_only' | 'not_available';
+export type QuickRunStopReason =
+  | 'answered'
+  | 'needs_full'
+  | 'extended_answered'
+  | 'hard_cap'
+  | 'timeout'
+  | 'partial';
+export type QuickRunVerifierStatus = 'passed' | 'issues' | 'not_checked' | 'failed';
+
+export interface QuickRunTurnBudget {
+  targetTurns: number;
+  hardCapTurns: number;
+  extended: boolean;
+  enforcement: QuickRunBudgetEnforcement;
+}
+
+export interface QuickRunEvidenceCounts {
+  frontendPrequeryInjected: number;
+  frontendPrequeryCited: number;
+  currentRunDataEnvelopes: number;
+  citedEvidenceRefs: number;
+}
+
+export interface QuickRunContextInjectedCounts {
+  conversationTurns: number;
+  recentSqlResults: number;
+  sqlPitfallPairs: number;
+  patternHints: number;
+  negativePatternHints: number;
+  caseBackgroundCases: number;
+}
+
+export interface QuickRunReceipt {
+  requestedMode: QuickRunRequestedMode;
+  resolvedMode: QuickRunResolvedMode;
+  profile: QuickRunProfile;
+  targetTurns: number;
+  hardCapTurns: number;
+  actualTurns: number;
+  elapsedMs: number;
+  enforcement: QuickRunBudgetEnforcement;
+  stopReason: QuickRunStopReason;
+  evidence: QuickRunEvidenceCounts;
+  contextInjected: QuickRunContextInjectedCounts;
+  verifierStatus: QuickRunVerifierStatus;
 }
 
 // =============================================================================

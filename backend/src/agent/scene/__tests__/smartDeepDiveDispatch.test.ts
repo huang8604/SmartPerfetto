@@ -126,4 +126,21 @@ describe('buildSmartDeepDiveDispatch', () => {
     expect(dispatch?.query).toBe('按场景时间线分析这个 trace 的性能问题（智能分析已选中 1 个场景）');
     expect(dispatch?.traceContext?.[0].rows).toHaveLength(1);
   });
+
+  it('projects English dispatch text and scene labels without cached Chinese labels', () => {
+    const dispatch = buildSmartDeepDiveDispatch({
+      report: report([scene({id: 'scroll-0', sceneType: 'scroll', label: '滑动浏览 (1000ms)'})]),
+      selection: {scope: 'scene_types', sceneTypes: ['scroll'], label: '滑动'},
+      outputLanguage: 'en',
+    });
+
+    expect(dispatch?.query).toBe(
+      'Analyze scrolling performance (1 Smart Analysis scenes selected)',
+    );
+    expect(dispatch?.traceContext?.[0].label).toBe(
+      'Smart Analysis selected scene timeline',
+    );
+    expect(dispatch?.traceContext?.[0].rows[0][2]).toBe('Scroll');
+    expect(JSON.stringify(dispatch)).not.toMatch(/[\u4e00-\u9fff]/u);
+  });
 });

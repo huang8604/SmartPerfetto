@@ -8,10 +8,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'anthropic',
     displayName: 'Anthropic',
     requiredFields: ['connection.claudeApiKey'],
-    defaultModels: { primary: 'claude-sonnet-4-6', light: 'claude-haiku-4-5' },
+    defaultModels: { primary: 'claude-sonnet-5', light: 'claude-haiku-4-5' },
     availableModels: [
-      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', tier: 'primary' },
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', tier: 'primary' },
+      { id: 'claude-fable-5', name: 'Claude Fable 5', tier: 'primary' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', tier: 'primary' },
+      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', tier: 'primary' },
       { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', tier: 'light' },
     ],
   },
@@ -19,14 +20,15 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'bedrock',
     displayName: 'AWS Bedrock',
     requiredFields: [],
-    // Bedrock requires model IDs in the cross-region inference format
-    // (us.anthropic.<model>-<date>-v1:0). Anthropic-style short IDs like
-    // 'claude-sonnet-4-6' are rejected with 400 invalid model identifier.
+    // Bedrock requires Bedrock-native inference IDs. Anthropic-style short IDs
+    // like 'claude-sonnet-5' are rejected with 400 invalid model identifier.
     defaultModels: {
-      primary: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      primary: 'us.anthropic.claude-sonnet-5',
       light: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
     },
     availableModels: [
+      { id: 'us.anthropic.claude-sonnet-5', name: 'Claude Sonnet 5 (US geo)', tier: 'primary' },
+      { id: 'global.anthropic.claude-sonnet-5', name: 'Claude Sonnet 5 (global)', tier: 'primary' },
       { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', name: 'Claude Opus 4.5 (cross-region)', tier: 'primary' },
       { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', name: 'Claude Sonnet 4.5 (cross-region)', tier: 'primary' },
       { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', name: 'Claude Haiku 4.5 (cross-region)', tier: 'light' },
@@ -37,10 +39,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'vertex',
     displayName: 'Google Vertex AI',
     requiredFields: ['connection.gcpProjectId', 'connection.gcpRegion'],
-    defaultModels: { primary: 'claude-sonnet-4-6', light: 'claude-haiku-4-5' },
+    defaultModels: { primary: 'claude-sonnet-5', light: 'claude-haiku-4-5' },
     availableModels: [
-      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', tier: 'primary' },
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', tier: 'primary' },
+      { id: 'claude-fable-5', name: 'Claude Fable 5', tier: 'primary' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', tier: 'primary' },
+      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', tier: 'primary' },
       { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', tier: 'light' },
     ],
     defaultConnection: { gcpRegion: 'us-central1' },
@@ -66,10 +69,13 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'glm',
     displayName: 'GLM / Z.ai',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'glm-5.1', light: 'glm-4.5-air' },
+    defaultModels: { primary: 'glm-5-turbo', light: 'glm-4.7-flashx' },
     availableModels: [
-      { id: 'glm-5.1', name: 'GLM 5.1', tier: 'primary' },
-      { id: 'glm-4.5-air', name: 'GLM 4.5 Air', tier: 'light' },
+      { id: 'glm-5.2', name: 'GLM 5.2', tier: 'primary' },
+      { id: 'glm-5-turbo', name: 'GLM 5 Turbo', tier: 'primary' },
+      { id: 'glm-4.7', name: 'GLM 4.7', tier: 'primary' },
+      { id: 'glm-4.7-flashx', name: 'GLM 4.7 FlashX', tier: 'light' },
+      { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', tier: 'light' },
     ],
     defaultConnection: {
       agentRuntime: 'claude-agent-sdk',
@@ -82,9 +88,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'qwen',
     displayName: 'Qwen / Alibaba Cloud Model Studio',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'qwen3.6-plus', light: 'qwen3.6-flash' },
+    defaultModels: { primary: 'qwen3.7-plus', light: 'qwen3.6-flash' },
     availableModels: [
-      { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus', tier: 'primary' },
+      { id: 'qwen3.7-max', name: 'Qwen 3.7 Max', tier: 'primary' },
+      { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus', tier: 'primary' },
+      { id: 'qwen3.7', name: 'Qwen 3.7', tier: 'primary' },
       { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash', tier: 'light' },
     ],
     defaultConnection: {
@@ -101,7 +109,8 @@ export const officialTemplates: ProviderTemplate[] = [
     defaultModels: { primary: 'qwen3-coder-plus', light: 'qwen3-coder-plus' },
     availableModels: [
       { id: 'qwen3-coder-plus', name: 'Qwen 3 Coder Plus', tier: 'primary' },
-      { id: 'qwen3-max-2026-01-23', name: 'Qwen 3 Max', tier: 'primary' },
+      { id: 'qwen3.7-max', name: 'Qwen 3.7 Max', tier: 'primary' },
+      { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus', tier: 'primary' },
     ],
     defaultConnection: {
       agentRuntime: 'claude-agent-sdk',
@@ -129,8 +138,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'kimi',
     displayName: 'Kimi / Moonshot Platform',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'kimi-k2.5', light: 'kimi-k2.5' },
+    defaultModels: { primary: 'kimi-k2.7-code-highspeed', light: 'kimi-k2.7-code-highspeed' },
     availableModels: [
+      { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code', tier: 'primary' },
+      { id: 'kimi-k2.7-code-highspeed', name: 'Kimi K2.7 Code HighSpeed', tier: 'light' },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6', tier: 'primary' },
       { id: 'kimi-k2.5', name: 'Kimi K2.5', tier: 'primary' },
     ],
     defaultConnection: {
@@ -160,10 +172,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'minimax',
     displayName: 'MiniMax',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'MiniMax-M2.7', light: 'MiniMax-M2.7' },
+    defaultModels: { primary: 'MiniMax-M3', light: 'MiniMax-M3' },
     availableModels: [
+      { id: 'MiniMax-M3', name: 'MiniMax M3', tier: 'primary' },
       { id: 'MiniMax-M2.7', name: 'MiniMax M2.7', tier: 'primary' },
-      { id: 'MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed', tier: 'primary' },
+      { id: 'MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed', tier: 'light' },
     ],
     defaultConnection: {
       agentRuntime: 'claude-agent-sdk',
@@ -176,9 +189,11 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'xiaomi',
     displayName: 'Xiaomi MiMo Token Plan',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'mimo-v2.5-pro', light: 'mimo-v2.5-pro' },
+    defaultModels: { primary: 'mimo-v2.5-pro', light: 'mimo-v2.5' },
     availableModels: [
+      { id: 'mimo-v2.5-pro-ultraspeed', name: 'MiMo v2.5 Pro UltraSpeed', tier: 'primary' },
       { id: 'mimo-v2.5-pro', name: 'MiMo v2.5 Pro', tier: 'primary' },
+      { id: 'mimo-v2.5', name: 'MiMo v2.5', tier: 'light' },
     ],
     defaultConnection: {
       agentRuntime: 'claude-agent-sdk',
@@ -194,8 +209,10 @@ export const officialTemplates: ProviderTemplate[] = [
     defaultModels: { primary: 'tc-code-latest', light: 'tc-code-latest' },
     availableModels: [
       { id: 'tc-code-latest', name: 'TC Code Latest', tier: 'primary' },
-      { id: 'glm-5.1', name: 'GLM 5.1', tier: 'primary' },
-      { id: 'kimi-k2.5', name: 'Kimi K2.5', tier: 'primary' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', tier: 'primary' },
+      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', tier: 'light' },
+      { id: 'glm-5-turbo', name: 'GLM 5 Turbo', tier: 'primary' },
+      { id: 'kimi-k2.7-code-highspeed', name: 'Kimi K2.7 Code HighSpeed', tier: 'light' },
     ],
     defaultConnection: {
       agentRuntime: 'claude-agent-sdk',
@@ -211,6 +228,7 @@ export const officialTemplates: ProviderTemplate[] = [
     defaultModels: { primary: 'tc-code-latest', light: 'tc-code-latest' },
     availableModels: [
       { id: 'tc-code-latest', name: 'TC Code Latest', tier: 'primary' },
+      { id: 'hy3-preview', name: 'Hunyuan Hy3 Preview', tier: 'primary' },
       { id: 'hunyuan-2.0-thinking', name: 'Hunyuan 2.0 Think', tier: 'primary' },
     ],
     defaultConnection: {
@@ -242,6 +260,8 @@ export const officialTemplates: ProviderTemplate[] = [
     requiredFields: ['connection.apiKey'],
     defaultModels: { primary: 'deepseek-v3.2', light: 'deepseek-v3.2' },
     availableModels: [
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', tier: 'primary' },
+      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', tier: 'light' },
       { id: 'deepseek-v3.2', name: 'DeepSeek V3.2', tier: 'primary' },
       { id: 'qianfan-code-latest', name: 'Qianfan Code Latest', tier: 'primary' },
     ],
@@ -256,8 +276,9 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'stepfun',
     displayName: 'StepFun Step Plan',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'step-3.5-flash-2603', light: 'step-3.5-flash' },
+    defaultModels: { primary: 'step-3.7-flash', light: 'step-3.5-flash' },
     availableModels: [
+      { id: 'step-3.7-flash', name: 'Step 3.7 Flash', tier: 'primary' },
       { id: 'step-3.5-flash-2603', name: 'Step 3.5 Flash 2603', tier: 'primary' },
       { id: 'step-3.5-flash', name: 'Step 3.5 Flash', tier: 'light' },
     ],
@@ -273,10 +294,11 @@ export const officialTemplates: ProviderTemplate[] = [
     displayName: 'SiliconFlow',
     requiredFields: ['connection.apiKey'],
     defaultModels: {
-      primary: 'Qwen/Qwen3-235B-A22B-Thinking-2507',
+      primary: 'Qwen/Qwen3-235B-A22B-Instruct-2507',
       light: 'Qwen/Qwen3-30B-A3B-Instruct-2507',
     },
     availableModels: [
+      { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507', name: 'Qwen3 235B Instruct', tier: 'primary' },
       { id: 'Qwen/Qwen3-235B-A22B-Thinking-2507', name: 'Qwen3 235B Thinking', tier: 'primary' },
       { id: 'Qwen/Qwen3-30B-A3B-Instruct-2507', name: 'Qwen3 30B Instruct', tier: 'light' },
     ],
@@ -291,9 +313,13 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'huawei',
     displayName: 'Huawei Cloud ModelArts MaaS',
     requiredFields: ['connection.apiKey'],
-    defaultModels: { primary: 'deepseek-v3.2', light: 'qwen3-32b' },
+    defaultModels: { primary: 'deepseek-v4-pro', light: 'deepseek-v4-flash' },
     availableModels: [
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', tier: 'primary' },
+      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', tier: 'light' },
       { id: 'deepseek-v3.2', name: 'DeepSeek V3.2', tier: 'primary' },
+      { id: 'glm-5.2', name: 'GLM 5.2', tier: 'primary' },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6', tier: 'primary' },
       { id: 'qwen3-32b', name: 'Qwen3 32B', tier: 'light' },
     ],
     defaultConnection: {
@@ -307,10 +333,12 @@ export const officialTemplates: ProviderTemplate[] = [
     type: 'openai',
     displayName: 'OpenAI',
     requiredFields: ['connection.openaiApiKey'],
-    defaultModels: { primary: 'gpt-5.5', light: 'gpt-5.4-mini' },
+    defaultModels: { primary: 'gpt-5.4-mini', light: 'gpt-5.4-mini' },
     availableModels: [
       { id: 'gpt-5.5', name: 'GPT-5.5', tier: 'primary' },
+      { id: 'gpt-5.4', name: 'GPT-5.4', tier: 'primary' },
       { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', tier: 'light' },
+      { id: 'gpt-5.4-nano', name: 'GPT-5.4 Nano', tier: 'light' },
     ],
     defaultConnection: {
       openaiBaseUrl: 'https://api.openai.com/v1',

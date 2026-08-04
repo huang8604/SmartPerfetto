@@ -70,6 +70,16 @@ describe('CaseLibrary — basic CRUD', () => {
     lib.saveCase(makeCase({caseId: 'a', title: 'new'}));
     expect(lib.getCase('a')?.title).toBe('new');
   });
+
+  it('preserves writes from library instances created before either mutation', () => {
+    const first = new CaseLibrary(storagePath);
+    const second = new CaseLibrary(storagePath);
+
+    first.saveCase(makeCase({caseId: 'a'}));
+    second.saveCase(makeCase({caseId: 'b'}));
+
+    expect(new CaseLibrary(storagePath).listCases().map(item => item.caseId)).toEqual(['a', 'b']);
+  });
 });
 
 describe('CaseLibrary — saveCase rejects status=published', () => {
@@ -239,11 +249,13 @@ describe('CaseLibrary — persistence', () => {
     expect(lib2.getCase('a')).toBeDefined();
   });
 
-  it('survives corrupted JSON without losing the file', () => {
+  it('preserves corrupted JSON and refuses to overwrite it', () => {
     fs.writeFileSync(storagePath, 'not-json{', 'utf-8');
     const lib = new CaseLibrary(storagePath);
     expect(lib.getCase('a')).toBeUndefined();
     expect(fs.existsSync(storagePath)).toBe(true);
+    expect(() => lib.saveCase(makeCase({caseId: 'a'}))).toThrow(/unreadable/);
+    expect(fs.readFileSync(storagePath, 'utf-8')).toBe('not-json{');
   });
 
   it('getStats counts cases by status', () => {

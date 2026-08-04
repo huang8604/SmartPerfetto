@@ -3,6 +3,10 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import type { AgentRuntimeAnalysisResult } from '../agent/core/orchestratorTypes';
+import {
+  QUICK_TRIAGE_MAX_CHINESE_CHARS,
+  QUICK_TRIAGE_MAX_CLAIMS,
+} from '../agentv3/quickAnswerContract';
 import { assessFinalReportContractCompleteness } from './finalReportContractGate';
 
 export type FinalResultQualityIssueCode =
@@ -11,12 +15,20 @@ export type FinalResultQualityIssueCode =
   | 'process_narration_conclusion'
   | 'missing_final_report_heading'
   | 'sparse_unverified_conclusion'
+  | 'quick_full_report_shape'
+  | 'quick_verifier_failed'
   | 'scene_contract_incomplete'
+  | 'comparison_identity_incomplete'
   | 'kernel_blocking_claim_boundary';
 
 export interface FinalResultQualityIssue {
   code: FinalResultQualityIssueCode;
   message: string;
+}
+
+export interface FinalResultComparisonIdentity {
+  currentPackageName?: string;
+  referencePackageName?: string;
 }
 
 const FINAL_RESULT_QUALITY_GATE_MESSAGE =
@@ -169,6 +181,18 @@ export function hasDeliverableFinalReportHeading(text: string): boolean {
   return /(^|\n)\s{0,3}(?:#{1,3}\s*)?(?:(?:[^\n#]{0,40})?分析报告|综合结论|关键结论|最终结论|最终报告|根因分析|Final Conclusion|Final Report|Analysis Report|Root Cause)(?=\s|[：:。.!！?\n]|$)/i.test(text);
 }
 
+export function stripLeadingProcessNarrationFromFinalReport(text: string): string {
+  const conclusion = text.trim();
+  if (!looksLikeProcessNarrationConclusion(conclusion)) return conclusion;
+
+  const heading = conclusion.match(
+    /(^|\n)\s{0,3}(?:#{1,3}\s*)?(?:(?:[^\n#]{0,40})?分析报告|综合结论|关键结论|最终结论|最终报告|根因分析|Final Conclusion|Final Report|Analysis Report|Root Cause)(?=\s|[：:。.!！?\n]|$)/i,
+  );
+  if (heading?.index === undefined) return conclusion;
+  const headingStart = heading.index + (heading[1]?.length ?? 0);
+  return conclusion.slice(headingStart).trim();
+}
+
 export function looksLikeProcessNarrationConclusion(conclusion: string): boolean {
   const text = normalizeTextForQualityCheck(conclusion);
   if (!text) return false;
@@ -279,6 +303,40 @@ function hasEvidenceBackedArtifacts(result: AgentRuntimeAnalysisResult): boolean
   );
 }
 
+function isQuickRunResult(result: AgentRuntimeAnalysisResult): boolean {
+  return result.quickRun?.resolvedMode === 'quick';
+}
+
+function removeNegatedFullReportBoundaryText(text: string): string {
+  return text
+    .replace(
+      /(?:不(?:等同于|是|代表|应被视为)|并非|不能(?:作为|当作)?|不可(?:作为|当作)?|不是).{0,24}(?:完整|全面|全景).{0,40}(?:诊断|分析|报告)/g,
+      '',
+    )
+    .replace(
+      /(?:not|isn't|doesn't|should\s+not|cannot|can't).{0,30}(?:full|complete|comprehensive).{0,50}(?:diagnosis|analysis|report)/gi,
+      '',
+    );
+}
+
+function looksLikeOverExpandedQuickReport(
+  result: AgentRuntimeAnalysisResult,
+  conclusion: string,
+): boolean {
+  if (!isQuickRunResult(result)) return false;
+  const reportShapeText = removeNegatedFullReportBoundaryText(conclusion);
+  const headingCount = countMatches(reportShapeText, /(^|\n)\s{0,3}#{1,3}\s+\S/g);
+  const claimCount = result.conclusionContract?.claims?.length ?? 0;
+  const hasFullReportLanguage =
+    /(?:完整|全面|全景).{0,16}(?:诊断|分析|报告)|(?:full|complete|comprehensive).{0,20}(?:diagnosis|analysis|report)/i.test(reportShapeText) ||
+    /(^|\n)\s{0,3}#{1,3}\s*[^\n]{0,40}(?:完整诊断报告|完整分析报告|综合诊断报告|Full Report|Comprehensive Report)/i.test(reportShapeText);
+  const triageOverBudget = result.quickRun?.profile === 'triage' &&
+    reportShapeText.length > QUICK_TRIAGE_MAX_CHINESE_CHARS * 2;
+  const triageContractOverrun = result.quickRun?.profile === 'triage' &&
+    (headingCount > 2 || claimCount > QUICK_TRIAGE_MAX_CLAIMS);
+  return hasFullReportLanguage || triageOverBudget || triageContractOverrun || headingCount >= 6 || reportShapeText.length > 3600;
+}
+
 function assessKernelBlockingClaimBoundary(conclusion: string): FinalResultQualityIssue | undefined {
   const text = normalizeTextForQualityCheck(conclusion);
   const lower = text.toLowerCase();
@@ -287,10 +345,10 @@ function assessKernelBlockingClaimBoundary(conclusion: string): FinalResultQuali
   const claimsDStateAsIoRootCause =
     /(?:\bD-state\b|D\s*状态|D\/DK|不可中断睡眠|uninterruptible\s+sleep).{0,80}(?:io|i\/o|磁盘|存储|disk|storage).{0,80}(?:根因|证明|导致|阻塞|等待|瓶颈|卡顿|慢)/i.test(text) ||
     /(?:io|i\/o|磁盘|存储|disk|storage).{0,80}(?:根因|证明|导致|阻塞|等待|瓶颈|卡顿|慢).{0,80}(?:\bD-state\b|D\s*状态|D\/DK|不可中断睡眠|uninterruptible\s+sleep)/i.test(text);
-	  const hasDStateIoEvidence =
-	    /io_wait\s*(?:=|为|是)?\s*1/i.test(text) ||
-	    /(?:filemap|io_schedule|wait_on_page|folio_wait|submit_bio|blk_|ext4|f2fs|erofs|ufshcd|mmc_|dm_|fsync)/i.test(text) ||
-	    /(?:sqlite|file\s*i\/?o|文件\s*i\/?o|数据库|sharedpreferences).{0,40}(?:slice|trace|stack|调用栈|证据|耗时|ms)/i.test(text);
+  const hasDStateIoEvidence =
+    /io_wait\s*(?:=|为|是)?\s*1/i.test(text) ||
+    /(?:filemap|io_schedule|wait_on_page|folio_wait|submit_bio|blk_|ext4|f2fs|erofs|ufshcd|mmc_|dm_|fsync)/i.test(text) ||
+    /(?:sqlite|file\s*i\/?o|文件\s*i\/?o|数据库|sharedpreferences).{0,40}(?:slice|trace|stack|调用栈|证据|耗时|ms)/i.test(text);
   const qualifiesDStateBoundary =
     /(?:候选|不能|不可|不等于|无法|证据不足|ambiguous|candidate|not enough)/i.test(text);
   if (mentionsUninterruptibleState && claimsDStateAsIoRootCause && !hasDStateIoEvidence && !qualifiesDStateBoundary) {
@@ -338,8 +396,9 @@ export function assessFinalResultQuality(input: {
   result: AgentRuntimeAnalysisResult;
   query?: string;
   sceneType?: string;
+  comparisonIdentity?: FinalResultComparisonIdentity;
 }): FinalResultQualityIssue | undefined {
-  const { result, query, sceneType } = input;
+  const { result, query, sceneType, comparisonIdentity } = input;
   if (!result.success) return undefined;
 
   const conclusion = result.conclusion.trim();
@@ -371,7 +430,22 @@ export function assessFinalResultQuality(input: {
     };
   }
 
+  if (isQuickRunResult(result) && result.claimVerificationResult?.status === 'failed') {
+    return {
+      code: 'quick_verifier_failed',
+      message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} 快速模式当前断言未通过证据核对；不能作为已核验快速答案交付。`,
+    };
+  }
+
+  if (looksLikeOverExpandedQuickReport(result, conclusion)) {
+    return {
+      code: 'quick_full_report_shape',
+      message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} 快速模式只能交付局部事实或快速 triage；当前输出呈现完整报告形态，应切换完整模式重新分析。`,
+    };
+  }
+
   if (
+    !isQuickRunResult(result) &&
     looksLikeAnalysisQuery(query) &&
     hasReportStructureMarker(conclusion) &&
     !hasDeliverableFinalReportHeading(conclusion)
@@ -401,7 +475,13 @@ export function assessFinalResultQuality(input: {
     if (kernelBlockingIssue) return kernelBlockingIssue;
   }
 
-  if (looksLikeAnalysisQuery(query)) {
+  const comparisonIdentityIssue = assessFinalResultComparisonIdentity(
+    conclusion,
+    comparisonIdentity,
+  );
+  if (comparisonIdentityIssue) return comparisonIdentityIssue;
+
+  if (!isQuickRunResult(result) && looksLikeAnalysisQuery(query)) {
     const contractIssue = assessFinalReportContractCompleteness({
       conclusion,
       query,
@@ -422,10 +502,31 @@ export function assessFinalResultQuality(input: {
   return undefined;
 }
 
+export function assessFinalResultComparisonIdentity(
+  conclusion: string,
+  identity: FinalResultComparisonIdentity | undefined,
+): FinalResultQualityIssue | undefined {
+  if (!identity) return undefined;
+
+  const packageNames = [...new Set([
+    identity.currentPackageName?.trim(),
+    identity.referencePackageName?.trim(),
+  ].filter((packageName): packageName is string => Boolean(packageName)))];
+  const missingPackageNames = packageNames.filter(packageName => !conclusion.includes(packageName));
+  if (missingPackageNames.length === 0) return undefined;
+
+  return {
+    code: 'comparison_identity_incomplete',
+    message: `${FINAL_RESULT_QUALITY_GATE_MESSAGE} ` +
+      `双 Trace 对比结论必须显式写出两侧完整包名，不能只使用左侧/右侧或业务别名；缺失：${missingPackageNames.join('、')}。`,
+  };
+}
+
 export function applyFinalResultQualityGate(input: {
   result: AgentRuntimeAnalysisResult;
   query?: string;
   sceneType?: string;
+  comparisonIdentity?: FinalResultComparisonIdentity;
 }): FinalResultQualityIssue | undefined {
   const issue = assessFinalResultQuality(input);
   if (!issue) return undefined;

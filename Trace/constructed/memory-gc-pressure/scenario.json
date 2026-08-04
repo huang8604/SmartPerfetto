@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "clock": {
+    "anchor": "trace-middle",
+    "duration_ns": "1000000000"
+  },
+  "actors": {
+    "processes": [
+      {
+        "id": "app",
+        "name": "com.smartperfetto.fixture",
+        "uid": 10999
+      },
+      {
+        "id": "system",
+        "name": "system_server",
+        "uid": 1000
+      },
+      {
+        "id": "sf",
+        "name": "/system/bin/surfaceflinger",
+        "uid": 1000
+      }
+    ],
+    "threads": [
+      {
+        "id": "main",
+        "process": "app",
+        "name": "main",
+        "is_main": true
+      },
+      {
+        "id": "render",
+        "process": "app",
+        "name": "RenderThread"
+      },
+      {
+        "id": "game",
+        "process": "app",
+        "name": "GameThread"
+      },
+      {
+        "id": "rn-js",
+        "process": "app",
+        "name": "mqt_js"
+      },
+      {
+        "id": "rn-native",
+        "process": "app",
+        "name": "mqt_native_modules"
+      },
+      {
+        "id": "webview",
+        "process": "app",
+        "name": "CrRendererMain"
+      },
+      {
+        "id": "system-main",
+        "process": "system",
+        "name": "android.fg",
+        "is_main": true
+      },
+      {
+        "id": "sf-main",
+        "process": "sf",
+        "name": "surfaceflinger",
+        "is_main": true
+      }
+    ]
+  },
+  "signals": [
+    {
+      "type": "atrace-slice",
+      "at_ns": "10000000",
+      "duration_ns": "18000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto::CASE::memory-gc-pressure"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "40000000",
+      "duration_ns": "19000000",
+      "process": "app",
+      "thread": "render",
+      "name": "GC Young Concurrent"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "70000000",
+      "duration_ns": "20000000",
+      "process": "app",
+      "thread": "main",
+      "name": "HeapTrim"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "100000000",
+      "duration_ns": "21000000",
+      "process": "app",
+      "thread": "render",
+      "name": "memory pressure"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "250000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto.memory-gc-pressure.pressure",
+      "value": 73
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "300000000",
+      "duration_ns": "45000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "380000000",
+      "duration_ns": "20000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "process-stats",
+      "at_ns": "400000000",
+      "process": "app",
+      "vm_rss_kb": 102400,
+      "rss_anon_kb": 81920,
+      "rss_file_kb": 20480,
+      "rss_shmem_kb": 1024,
+      "vm_swap_kb": 1024,
+      "vm_hwm_kb": 122880,
+      "oom_score_adj": 200
+    },
+    {
+      "type": "process-stats",
+      "at_ns": "600000000",
+      "process": "app",
+      "vm_rss_kb": 174080,
+      "rss_anon_kb": 133120,
+      "rss_file_kb": 40960,
+      "rss_shmem_kb": 2048,
+      "vm_swap_kb": 4096,
+      "vm_hwm_kb": 184320,
+      "oom_score_adj": 900
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "620000000",
+      "duration_ns": "1000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SI$com.smartperfetto.fixture.LeakedActivity.onDestroy"
+    },
+    {
+      "type": "managed-heap-graph",
+      "at_ns": "650000000",
+      "process": "app",
+      "heap_bytes_allocated": "12582976",
+      "types": [
+        {
+          "id": 1,
+          "class_name": "com.smartperfetto.fixture.RootHolder",
+          "object_size": 64
+        },
+        {
+          "id": 2,
+          "class_name": "com.smartperfetto.fixture.LeakContainer",
+          "object_size": 8388608
+        },
+        {
+          "id": 3,
+          "class_name": "com.smartperfetto.fixture.LeakedActivity",
+          "object_size": 4194304
+        }
+      ],
+      "objects": [
+        {
+          "id": 1,
+          "type_id": 1,
+          "self_size": 64,
+          "reference_object_ids": [
+            2
+          ]
+        },
+        {
+          "id": 2,
+          "type_id": 2,
+          "self_size": 8388608,
+          "reference_object_ids": [
+            3
+          ]
+        },
+        {
+          "id": 3,
+          "type_id": 3,
+          "self_size": 4194304,
+          "reference_object_ids": []
+        }
+      ],
+      "roots": [
+        {
+          "root_type": "ROOT_JNI_GLOBAL",
+          "object_ids": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "type": "lmk-kill",
+      "at_ns": "700000000",
+      "duration_ns": "1000000",
+      "process": "app",
+      "thread": "main",
+      "kill_reason": 3,
+      "oom_score_adj": 900
+    }
+  ]
+}

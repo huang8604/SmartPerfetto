@@ -279,7 +279,10 @@ describe('system prompt token regression with real strategy files', () => {
     const sceneCore = parts.segments.find(segment => segment.label === 'scene_strategy_core');
     const reportContract = parts.segments.find(segment => segment.label === 'report_contract');
 
-    expect(parts.truncatedLabels).toEqual(['scene_strategy_core']);
+    expect(parts.truncatedLabels).toEqual(expect.arrayContaining(['scene_strategy_core']));
+    expect(parts.truncatedLabels.every(label => (
+      label === 'scene_strategy_core' || label === 'selection_context'
+    ))).toBe(true);
     expect(estimatePromptTokens(parts.fullPrompt)).toBeLessThanOrEqual(9_000);
     expect(sceneCore?.truncated).toBe(true);
     expect(sceneCore?.originalEstimatedTokens).toBeGreaterThan(sceneCore?.estimatedTokens ?? 0);
@@ -287,5 +290,23 @@ describe('system prompt token regression with real strategy files', () => {
     expect(reportContract?.truncatable).toBeFalsy();
     expect(parts.fullPrompt).toContain('Final Report Contract');
     expect(parts.fullPrompt).toContain('启动类型与 TTID/TTFD');
+  });
+
+  it.each([
+    ['zh-CN', '最终报告必须显式写出两侧完整包名'],
+    ['en', 'The final report must explicitly state the full package name for both sides'],
+  ] as const)('keeps the dual-trace identity delivery rule in the real %s prompt', (outputLanguage, rule) => {
+    const context = makeWorstCaseContext('scrolling');
+    context.outputLanguage = outputLanguage;
+    context.comparison = {
+      ...context.comparison!,
+      referencePackageName: 'com.example.reference',
+    };
+
+    const prompt = buildSystemPromptParts(context).fullPrompt;
+
+    expect(prompt).toContain('com.example.smartperfetto.demo');
+    expect(prompt).toContain('com.example.reference');
+    expect(prompt).toContain(rule);
   });
 });

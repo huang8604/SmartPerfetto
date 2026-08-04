@@ -17,7 +17,7 @@
  *   - candidateCriticalTools that aren't in the supplied registry (when one
  *     is provided)
  *
- * See docs/architecture/self-improving-design.md §13 (Phase Hints Template-Driven Patching).
+ * See docs/architecture/self-improving-design.md "组件级 Review 与 Patch 边界".
  */
 
 import * as fs from 'fs';

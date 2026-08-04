@@ -118,6 +118,19 @@ describe('BaselineStore — basic CRUD', () => {
     store.addBaseline(makeBaseline({baselineId: 'b1', sampleCount: 7}));
     expect(store.getBaseline('b1')?.sampleCount).toBe(7);
   });
+
+  it('preserves writes from store instances created before either mutation', () => {
+    const first = new BaselineStore(storagePath);
+    const second = new BaselineStore(storagePath);
+
+    first.addBaseline(makeBaseline({baselineId: 'b1'}));
+    second.addBaseline(makeBaseline({baselineId: 'b2'}));
+
+    expect(new BaselineStore(storagePath).listBaselines().map(item => item.baselineId)).toEqual([
+      'b1',
+      'b2',
+    ]);
+  });
 });
 
 describe('BaselineStore — publish invariants', () => {
@@ -242,13 +255,14 @@ describe('BaselineStore — persistence', () => {
     expect(parsed.baselines).toHaveLength(1);
   });
 
-  it('survives corrupted on-disk JSON without losing the file', () => {
+  it('preserves corrupted on-disk JSON and refuses to overwrite it', () => {
     fs.writeFileSync(storagePath, 'not-json{', 'utf-8');
     const store = new BaselineStore(storagePath);
     expect(store.getBaseline('b1')).toBeUndefined();
     expect(fs.existsSync(storagePath)).toBe(true);
-    store.addBaseline(makeBaseline({baselineId: 'b1'}));
-    expect(store.getBaseline('b1')).toBeDefined();
+    expect(() => store.addBaseline(makeBaseline({baselineId: 'b1'})))
+      .toThrow(/unreadable/);
+    expect(fs.readFileSync(storagePath, 'utf-8')).toBe('not-json{');
   });
 
   it('atomic write does not leave the temp file around', () => {

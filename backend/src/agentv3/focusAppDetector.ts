@@ -8,15 +8,28 @@ export interface DetectedFocusApp {
   packageName: string;
   totalDurationNs: number;
   switchCount: number;
+  scopeStartNs?: number;
+  scopeEndNs?: number;
+  evidenceRefId?: string;
+  evidenceRowIndex?: number;
 }
 
 export interface FocusAppDetectionResult {
   apps: DetectedFocusApp[];
   primaryApp?: string;
   method: 'battery_stats' | 'oom_adj' | 'frame_timeline' | 'none';
+  timeRange?: FocusAppTimeRange;
 }
 
-// System processes to exclude — they're often foreground context, not user apps.
+export interface FocusAppTimeRange {
+  startNs: number;
+  endNs: number;
+}
+
+export interface FocusAppDetectionOptions {
+  timeRange?: FocusAppTimeRange;
+}
+
 const SYSTEM_PROCESS_EXACT = new Set([
   'init',
   'surfaceflinger',
@@ -60,28 +73,85 @@ function isSystemProcess(name: string): boolean {
       lower.startsWith(`${prefix}:`));
 }
 
-/**
- * Detect foreground ("focus") apps from a Perfetto trace using cross-source SQL.
- *
- * Tier 1: android_battery_stats_event_slices — most reliable, tracks `battery_stats.top`
- * Tier 2: android_oom_adj_intervals — fallback, score <= 0 means foreground
- * Tier 3: FrameTimeline upid/layer evidence — useful when focus stats are absent
- */
+function normalizeTimeRange(timeRange?: FocusAppTimeRange): FocusAppTimeRange | undefined {
+  if (!timeRange) return undefined;
+  const startNs = Number(timeRange.startNs);
+  const endNs = Number(timeRange.endNs);
+  if (!Number.isFinite(startNs) || !Number.isFinite(endNs) || endNs <= startNs) {
+    return undefined;
+  }
+  return { startNs, endNs };
+}
+
+export function focusAppTimeRangeFromSelection(input?: {
+  kind?: string;
+  startNs?: number;
+  endNs?: number;
+  ts?: number;
+  dur?: number;
+}): FocusAppTimeRange | undefined {
+  if (!input) return undefined;
+  if (input.kind === 'area' && input.startNs !== undefined && input.endNs !== undefined) {
+    return normalizeTimeRange({ startNs: input.startNs, endNs: input.endNs });
+  }
+  if (input.kind === 'track_event' && input.ts !== undefined && input.dur !== undefined) {
+    return normalizeTimeRange({ startNs: input.ts, endNs: input.ts + input.dur });
+  }
+  return undefined;
+}
+
+function scopedDurationExpr(
+  timeRange: FocusAppTimeRange | undefined,
+  tsExpr: string,
+  durExpr: string,
+): string {
+  if (!timeRange) return durExpr;
+  return `MAX(0, MIN((${tsExpr}) + (${durExpr}), ${timeRange.endNs}) - MAX((${tsExpr}), ${timeRange.startNs}))`;
+}
+
+function scopedOverlapWhere(
+  timeRange: FocusAppTimeRange | undefined,
+  tsExpr: string,
+  durExpr: string,
+  unscopedWhere: string,
+): string {
+  if (!timeRange) return unscopedWhere;
+  return `${durExpr} > 0 AND (${tsExpr}) < ${timeRange.endNs} AND ((${tsExpr}) + (${durExpr})) > ${timeRange.startNs}`;
+}
+
+function withScope(apps: DetectedFocusApp[], timeRange: FocusAppTimeRange | undefined): DetectedFocusApp[] {
+  if (!timeRange) return apps;
+  return apps.map(app => ({
+    ...app,
+    scopeStartNs: timeRange.startNs,
+    scopeEndNs: timeRange.endNs,
+  }));
+}
+
 export async function detectFocusApps(
   traceProcessorService: TraceProcessorService,
   traceId: string,
+  options: FocusAppDetectionOptions = {},
 ): Promise<FocusAppDetectionResult> {
+  const timeRange = normalizeTimeRange(options.timeRange);
+  const batteryDuration = scopedDurationExpr(timeRange, 'ts', 'safe_dur');
+  const batteryWhere = scopedOverlapWhere(timeRange, 'ts', 'safe_dur', 'safe_dur > 50000000');
+  const oomDuration = scopedDurationExpr(timeRange, 'oa.ts', 'oa.dur');
+  const oomWhere = scopedOverlapWhere(timeRange, 'oa.ts', 'oa.dur', '1 = 1');
+  const frameDuration = scopedDurationExpr(timeRange, 'a.ts', 'a.dur');
+  const frameWhere = scopedOverlapWhere(timeRange, 'a.ts', 'a.dur', '1 = 1');
+
   // Tier 1: battery_stats.top
   try {
     const result = await traceProcessorService.query(traceId, `
         INCLUDE PERFETTO MODULE android.battery_stats;
         SELECT
           str_value AS package_name,
-          SUM(safe_dur) AS total_duration_ns,
+          SUM(${batteryDuration}) AS total_duration_ns,
           COUNT(*) AS switch_count
         FROM android_battery_stats_event_slices
         WHERE track_name = 'battery_stats.top'
-          AND safe_dur > 50000000
+          AND ${batteryWhere}
         GROUP BY str_value
         ORDER BY total_duration_ns DESC
         LIMIT 10
@@ -98,9 +168,10 @@ export async function detectFocusApps(
 
       if (apps.length > 0) {
         return {
-          apps,
+          apps: withScope(apps, timeRange),
           primaryApp: apps[0].packageName,
           method: 'battery_stats',
+          timeRange,
         };
       }
     }
@@ -122,15 +193,16 @@ export async function detectFocusApps(
               NULLIF(p.cmdline, ''),
               p.name
             ) AS package_name,
-            oa.dur
+            ${oomDuration} AS scoped_dur
           FROM android_oom_adj_intervals oa
           JOIN process p USING(upid)
           LEFT JOIN android_process_metadata m USING(upid)
           WHERE oa.score <= 0 AND oa.score > -900
+            AND ${oomWhere}
         )
         SELECT
           package_name,
-          SUM(dur) AS total_duration_ns,
+          SUM(scoped_dur) AS total_duration_ns,
           COUNT(*) AS switch_count
         FROM foreground_intervals
         WHERE package_name IS NOT NULL
@@ -151,9 +223,10 @@ export async function detectFocusApps(
 
       if (apps.length > 0) {
         return {
-          apps,
+          apps: withScope(apps, timeRange),
           primaryApp: apps[0].packageName,
           method: 'oom_adj',
+          timeRange,
         };
       }
     }
@@ -182,15 +255,16 @@ export async function detectFocusApps(
               NULLIF(p.cmdline, ''),
               p.name
             ) AS package_name,
-            a.dur
+            ${frameDuration} AS scoped_dur
           FROM actual_frame_timeline_slice a
           LEFT JOIN process p USING(upid)
           LEFT JOIN android_process_metadata m USING(upid)
           WHERE layer_name IS NOT NULL AND layer_name != ''
+            AND ${frameWhere}
         )
         SELECT
           package_name,
-          SUM(dur) AS total_duration_ns,
+          SUM(scoped_dur) AS total_duration_ns,
           COUNT(*) AS frame_count
         FROM frame_packages
         WHERE package_name IS NOT NULL AND package_name != ''
@@ -210,9 +284,10 @@ export async function detectFocusApps(
 
       if (apps.length > 0) {
         return {
-          apps,
+          apps: withScope(apps, timeRange),
           primaryApp: apps[0].packageName,
           method: 'frame_timeline',
+          timeRange,
         };
       }
     }
@@ -220,7 +295,7 @@ export async function detectFocusApps(
     console.warn('[FocusAppDetector] Tier 3 (frame_timeline) failed:', (err as Error).message);
   }
 
-  return { apps: [], method: 'none' };
+  return { apps: [], method: 'none', timeRange };
 }
 
 /** Human-readable duration for system prompt (e.g. "2.3s", "145ms") */

@@ -11,27 +11,40 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import agentRoutes from '../routes/agentRoutes';
+import ragAdminRoutes from '../routes/ragAdminRoutes';
 import skillRoutes from '../routes/skillRoutes';
 import traceProcessorRoutes from '../routes/traceProcessorRoutes';
 import { getTraceProcessorService } from '../services/traceProcessorService';
 import { resolveAgentRuntimeSelection } from '../agentRuntime';
 import { getOpenAIRuntimeDiagnostics, hasOpenAICredentials } from '../agentOpenAI';
+import type { TraceDataset } from '../agent/core/orchestratorTypes';
+import type {
+  SelectionContext,
+  TracePairContext,
+  TracePairLayout,
+  TraceSource,
+} from '../agentv3/types';
 import {
   DEFAULT_DEV_USER_ID,
   DEFAULT_TENANT_ID,
   DEFAULT_WORKSPACE_ID,
 } from '../middleware/auth';
 import { writeTraceMetadata } from '../services/traceMetadataStore';
+import {CodeLookupLedger} from '../services/codebase/codeLookupLedger';
+import {hasConcreteCodeReference} from '../services/codebase/codeReferenceContract';
+import {
+  privateProjectedSourceEventType,
+  successfulCodeLookupToolCounts,
+} from './agentSseVerificationEvidence';
 
 type CodeAwareMode = 'off' | 'metadata_only' | 'provider_send';
 type SmartAction = 'preview' | 'analyze';
 
 interface VerifyOptions {
   tracePath: string;
+  referenceTracePath?: string;
   query: string;
   timeoutMs: number;
-  maxRounds: number;
-  confidenceThreshold: number;
   outputPath?: string;
   keepSession: boolean;
   keepTrace: boolean;
@@ -40,6 +53,9 @@ interface VerifyOptions {
   analysisMode?: 'fast' | 'full' | 'auto';
   /** Analyze preset forwarded as options.preset to the backend. */
   preset?: 'smart';
+  /** Frontend-style pre-queried trace datasets forwarded as top-level traceContext. */
+  traceContext?: TraceDataset[];
+  selectionContext?: SelectionContext;
   /** Smart action forwarded as options.smartAction. Defaults to analyze for --mode smart CLI runs. */
   smartAction?: SmartAction;
   /** Smart scene selection forwarded as options.smartSelection. */
@@ -55,6 +71,12 @@ interface VerifyOptions {
   codeAwareMode?: CodeAwareMode;
   /** Registered codebases exposed to this verification run. */
   codebaseIds: string[];
+  /** Registered private knowledge sources exposed to this verification run. */
+  knowledgeSourceIds: string[];
+  /** Optional source root registered and indexed through the real admin API before analysis. */
+  setupCodebaseRoot?: string;
+  /** Optional Wiki root registered and indexed through the real admin API before analysis. */
+  setupKnowledgeRoot?: string;
   /**
    * undefined = use active Provider Manager profile if configured.
    * string = use that explicit provider.
@@ -77,16 +99,36 @@ interface VerifyOptions {
   requiredText: string[];
   /** Literal text that must not appear in a conclusion/analysis_completed event. */
   forbiddenText: string[];
+  /** Optional second-turn query sent to the same session after the first turn completes. */
+  followUpQuery?: string;
+  /** Literal text that must appear in the follow-up conclusion/analysis_completed event. */
+  followUpRequiredText: string[];
+  /** Tool names that must not be dispatched during the follow-up turn. */
+  followUpForbiddenTools: string[];
   /** Degraded fallback names that must not be emitted during the run. */
   forbiddenDegradedFallbacks: string[];
   /** Allow full-mode source/tool checks that intentionally do not emit data envelopes. */
   allowNoDataEnvelopes: boolean;
+  /** Require at least one data envelope even in quick mode. */
+  requireDataEnvelope: boolean;
+  /** Require analysis_completed.quickRun receipt metadata. */
+  requireQuickRun: boolean;
   /** Allow capability-limited preview runtimes that only prove routing/SSE/finalization. */
   allowCapabilityLimitedRuntime: boolean;
+  /** Require a real source-run-pinned external issue opportunity and Agent triage. */
+  requireExternalIssueTriage: boolean;
   /** Tool names that must be dispatched during the run. */
   requiredTools: string[];
+  /** Private lookup tools that must return at least one provenance-bearing chunk. */
+  requiredSuccessfulLookups: string[];
   /** Skill ids that must be dispatched through invoke_skill during the run. */
   requiredSkills: string[];
+  tracePairLayout: TracePairLayout;
+  tracePairWorkspaceOpen: boolean;
+  tracePairSplitPercent: number;
+  tracePairActiveTraceSide: TraceSource;
+  tracePairMaximizedTraceSide?: TraceSource;
+  tracePairMinimizedTraceSides: TraceSource[];
 }
 
 interface SseSummary {
@@ -134,6 +176,26 @@ interface SseSummary {
   analysisCompletedPartial?: boolean;
   analysisCompletedTerminationReason?: string;
   analysisCompletedTerminationMessage?: string;
+  externalIssueSource?: {
+    runId: string;
+    runManifestId: string;
+    resultSnapshotId?: string;
+  };
+  quickRun?: {
+    requestedMode?: string;
+    resolvedMode?: string;
+    profile?: string;
+    targetTurns?: number;
+    hardCapTurns?: number;
+    actualTurns?: number;
+    enforcement?: string;
+    stopReason?: string;
+    verifierStatus?: string;
+    frontendPrequeryInjected?: number;
+    frontendPrequeryCited?: number;
+    currentRunDataEnvelopes?: number;
+    citedEvidenceRefs?: number;
+  };
   requiredTextMatches: Record<string, boolean>;
   forbiddenTextMatches: Record<string, boolean>;
   /** Older SSE fields that may still appear in archived sessions/logs. */
@@ -143,23 +205,26 @@ interface SseSummary {
   directSkillCompletedCount: number;
   directSkillFindingCount: number;
   toolCallCounts: Record<string, number>;
+  successfulLookupCounts: Record<string, number>;
   skillCallCounts: Record<string, number>;
 }
 
-const DEFAULT_TRACE = '../test-traces/scroll-demo-customer-scroll.pftrace';
+const DEFAULT_TRACE = '../Trace/real/android-scroll-customer/trace.pftrace';
 const DEFAULT_QUERY = '分析滑动性能';
 
 function printUsage(): void {
   console.log('Usage: npx tsx src/scripts/verifyAgentSseScrolling.ts [options]');
   console.log('');
   console.log('Options:');
-  console.log('  --trace <path>                    Trace path (default: ../test-traces/scroll-demo-customer-scroll.pftrace)');
+  console.log('  --trace <path>                    Trace path (default: ../Trace/real/android-scroll-customer/trace.pftrace)');
+  console.log('  --reference-trace <path>          Reference trace path for raw dual-trace comparison');
   console.log('  --query <text>                    Analyze query (default: 分析滑动性能)');
   console.log('  --timeout-ms <number>             SSE timeout in ms (default: 600000)');
-  console.log('  --max-rounds <number>             Analysis max rounds (default: 3)');
-  console.log('  --confidence-threshold <number>   Analysis confidence threshold (default: 0.5)');
   console.log('  --mode <fast|full|auto|smart>     Override analysisMode, or use smart as shorthand for --preset smart');
   console.log('  --preset <smart>                  Forward preset to the backend');
+  console.log('  --trace-context-json <json|@file> Forward frontend-style traceContext datasets');
+  console.log('  --selection-context-json <json|@file>');
+  console.log('                                      Forward frontend-style selectionContext');
   console.log('  --smart-action <preview|analyze>  Smart action (default: analyze for --mode/--preset smart)');
   console.log('  --smart-scope <all|scene_types|scene_ids>');
   console.log('                                      Smart selection scope (default: all for analyze)');
@@ -169,6 +234,9 @@ function printUsage(): void {
   console.log('  --code-aware <off|metadata_only|provider_send>');
   console.log('                                      Forward codeAwareMode to the backend');
   console.log('  --codebase-id <id>                 Registered codebase id to expose; repeatable');
+  console.log('  --knowledge-source-id <id>         Registered private knowledge source id; repeatable');
+  console.log('  --setup-codebase-root <path>       Register and index an app-source root before analysis');
+  console.log('  --setup-knowledge-root <path>      Register and index an Android Internals Wiki root before analysis');
   console.log('  --provider-id <id|env|null>        Provider id, or env/null to ignore active providers');
   console.log('  --require-code-ref                 Require source-level code refs in conclusion/analysis_completed text');
   console.log('  --require-claim-verifier-ok        Require analysis_completed claim verifier to pass with no unsupported claims');
@@ -179,11 +247,28 @@ function printUsage(): void {
   console.log('                                      Fail if analysis_completed conclusion text exceeds this length');
   console.log('  --require-text <text>              Require literal text in conclusion/analysis_completed; repeatable');
   console.log('  --forbid-text <text>               Forbid literal text in conclusion/analysis_completed; repeatable');
+  console.log('  --follow-up-query <text>           Run a second turn against the same session');
+  console.log('  --follow-up-require-text <text>    Require literal text in follow-up conclusion; repeatable');
+  console.log('  --follow-up-forbid-tool <name>     Fail if follow-up dispatches this tool; repeatable');
   console.log('  --forbid-degraded-fallback <name>  Fail if a degraded event with this fallback is emitted; repeatable');
   console.log('  --require-tool <name>              Require an agent_task_dispatched tool call; repeatable');
+  console.log('  --require-successful-lookup <name> Require a successful provenance-bearing private lookup; repeatable');
   console.log('  --require-skill <skillId>          Require an invoke_skill call for a specific skillId; repeatable');
+  console.log('  --trace-pair-layout <horizontal|vertical>');
+  console.log('                                      Dual-trace visual layout metadata (default: horizontal)');
+  console.log('  --trace-pair-workspace-open        Mark both trace panes as visible in the same-page workspace');
+  console.log('  --trace-pair-split <number>        Primary pane split percent, clamped to 18..82 (default: 50)');
+  console.log('  --trace-pair-active <current|reference>');
+  console.log('                                      Active/focused trace pane (default: current)');
+  console.log('  --trace-pair-maximized <current|reference>');
+  console.log('                                      Mark one trace pane as maximized in tracePairContext');
+  console.log('  --trace-pair-minimized <current|reference>');
+  console.log('                                      Mark a trace pane as minimized; repeatable');
+  console.log('  --require-data-envelope            Require at least one SSE data envelope, including in fast mode');
+  console.log('  --require-quick-run                Require analysis_completed.quickRun receipt metadata');
   console.log('  --allow-no-data-envelopes          Do not require data envelopes in full mode');
   console.log('  --allow-capability-limited-runtime Do not require plan/tool/data events for preview runtime smoke tests');
+  console.log('  --require-external-issue-triage    Require source-run-pinned M10 opportunity and live Agent review');
   console.log('  --output <path>                   JSON report output path');
   console.log('  --require-conclusion-evidence     Fail unless analysis_completed conclusion has concrete evidence refs');
   console.log('  --keep-session                    Do not delete session after verification');
@@ -191,18 +276,51 @@ function printUsage(): void {
   console.log('  --help                            Show this help');
 }
 
+function parseTraceContextArg(value: string): TraceDataset[] {
+  const raw = value.startsWith('@')
+    ? fs.readFileSync(path.resolve(process.cwd(), value.slice(1)), 'utf8')
+    : value;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error('--trace-context-json must be a JSON array');
+  }
+  const datasets = parsed.filter((dataset): dataset is TraceDataset => {
+    if (!dataset || typeof dataset !== 'object' || Array.isArray(dataset)) return false;
+    const record = dataset as Partial<TraceDataset>;
+    return typeof record.label === 'string'
+      && Array.isArray(record.columns)
+      && record.columns.every((column) => typeof column === 'string')
+      && Array.isArray(record.rows)
+      && record.rows.every((row) => Array.isArray(row));
+  });
+  if (datasets.length === 0) {
+    throw new Error('--trace-context-json did not contain any valid datasets');
+  }
+  return datasets;
+}
+
+function parseSelectionContextArg(value: string): SelectionContext {
+  const raw = value.startsWith('@')
+    ? fs.readFileSync(path.resolve(process.cwd(), value.slice(1)), 'utf8')
+    : value;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--selection-context-json must be a JSON object');
+  }
+  return parsed as SelectionContext;
+}
+
 function parseArgs(argv: string[]): VerifyOptions {
   const options: VerifyOptions = {
     tracePath: path.resolve(process.cwd(), DEFAULT_TRACE),
     query: DEFAULT_QUERY,
     timeoutMs: 600_000,
-    maxRounds: 3,
-    confidenceThreshold: 0.5,
     keepSession: false,
     keepTrace: false,
     forceRefresh: false,
     requireConclusionEvidence: false,
     codebaseIds: [],
+    knowledgeSourceIds: [],
     requireCodeRef: false,
     requireClaimVerifierOk: false,
     requireNonPartial: false,
@@ -210,11 +328,22 @@ function parseArgs(argv: string[]): VerifyOptions {
     forbidProcessNarration: false,
     requiredText: [],
     forbiddenText: [],
+    followUpRequiredText: [],
+    followUpForbiddenTools: [],
     forbiddenDegradedFallbacks: [],
     allowNoDataEnvelopes: false,
+    requireDataEnvelope: false,
+    requireQuickRun: false,
     allowCapabilityLimitedRuntime: false,
+    requireExternalIssueTriage: false,
     requiredTools: [],
+    requiredSuccessfulLookups: [],
     requiredSkills: [],
+    tracePairLayout: 'horizontal',
+    tracePairWorkspaceOpen: false,
+    tracePairSplitPercent: 50,
+    tracePairActiveTraceSide: 'current',
+    tracePairMinimizedTraceSides: [],
   };
   let smartScope: 'all' | 'scene_types' | 'scene_ids' | undefined;
   const smartSceneTypes: string[] = [];
@@ -279,9 +408,24 @@ function parseArgs(argv: string[]): VerifyOptions {
       continue;
     }
 
+    if (arg === '--require-data-envelope') {
+      options.requireDataEnvelope = true;
+      continue;
+    }
+
+    if (arg === '--require-quick-run') {
+      options.requireQuickRun = true;
+      continue;
+    }
+
     if (arg === '--allow-capability-limited-runtime') {
       options.allowCapabilityLimitedRuntime = true;
       options.allowNoDataEnvelopes = true;
+      continue;
+    }
+
+    if (arg === '--require-external-issue-triage') {
+      options.requireExternalIssueTriage = true;
       continue;
     }
 
@@ -290,6 +434,15 @@ function parseArgs(argv: string[]): VerifyOptions {
         throw new Error('--trace requires a value');
       }
       options.tracePath = path.resolve(process.cwd(), next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--reference-trace') {
+      if (!next) {
+        throw new Error('--reference-trace requires a value');
+      }
+      options.referenceTracePath = path.resolve(process.cwd(), next);
       i += 1;
       continue;
     }
@@ -312,32 +465,6 @@ function parseArgs(argv: string[]): VerifyOptions {
         throw new Error(`Invalid --timeout-ms value: ${next}`);
       }
       options.timeoutMs = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (arg === '--max-rounds') {
-      if (!next) {
-        throw new Error('--max-rounds requires a value');
-      }
-      const parsed = Number.parseInt(next, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        throw new Error(`Invalid --max-rounds value: ${next}`);
-      }
-      options.maxRounds = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (arg === '--confidence-threshold') {
-      if (!next) {
-        throw new Error('--confidence-threshold requires a value');
-      }
-      const parsed = Number.parseFloat(next);
-      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-        throw new Error(`Invalid --confidence-threshold value: ${next}`);
-      }
-      options.confidenceThreshold = parsed;
       i += 1;
       continue;
     }
@@ -384,6 +511,24 @@ function parseArgs(argv: string[]): VerifyOptions {
       options.preset = 'smart';
       options.smartAction = options.smartAction ?? 'analyze';
       options.query = options.query === DEFAULT_QUERY ? '/smart' : options.query;
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-context-json') {
+      if (!next) {
+        throw new Error('--trace-context-json requires a value');
+      }
+      options.traceContext = parseTraceContextArg(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--selection-context-json') {
+      if (!next) {
+        throw new Error('--selection-context-json requires a value');
+      }
+      options.selectionContext = parseSelectionContextArg(next);
       i += 1;
       continue;
     }
@@ -464,6 +609,33 @@ function parseArgs(argv: string[]): VerifyOptions {
       continue;
     }
 
+    if (arg === '--knowledge-source-id') {
+      if (!next) {
+        throw new Error('--knowledge-source-id requires a value');
+      }
+      options.knowledgeSourceIds.push(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--setup-codebase-root') {
+      if (!next) {
+        throw new Error('--setup-codebase-root requires a value');
+      }
+      options.setupCodebaseRoot = path.resolve(process.cwd(), next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--setup-knowledge-root') {
+      if (!next) {
+        throw new Error('--setup-knowledge-root requires a value');
+      }
+      options.setupKnowledgeRoot = path.resolve(process.cwd(), next);
+      i += 1;
+      continue;
+    }
+
     if (arg === '--provider-id') {
       if (!next) {
         throw new Error('--provider-id requires a value');
@@ -491,6 +663,33 @@ function parseArgs(argv: string[]): VerifyOptions {
       continue;
     }
 
+    if (arg === '--follow-up-query') {
+      if (!next) {
+        throw new Error('--follow-up-query requires a value');
+      }
+      options.followUpQuery = next;
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--follow-up-require-text') {
+      if (!next) {
+        throw new Error('--follow-up-require-text requires a value');
+      }
+      options.followUpRequiredText.push(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--follow-up-forbid-tool') {
+      if (!next) {
+        throw new Error('--follow-up-forbid-tool requires a value');
+      }
+      options.followUpForbiddenTools.push(next);
+      i += 1;
+      continue;
+    }
+
     if (arg === '--forbid-degraded-fallback') {
       if (!next) {
         throw new Error('--forbid-degraded-fallback requires a value');
@@ -509,11 +708,80 @@ function parseArgs(argv: string[]): VerifyOptions {
       continue;
     }
 
+    if (arg === '--require-successful-lookup') {
+      if (!next) {
+        throw new Error('--require-successful-lookup requires a value');
+      }
+      options.requiredSuccessfulLookups.push(next);
+      i += 1;
+      continue;
+    }
+
     if (arg === '--require-skill') {
       if (!next) {
         throw new Error('--require-skill requires a value');
       }
       options.requiredSkills.push(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-pair-layout') {
+      if (!next) {
+        throw new Error('--trace-pair-layout requires a value');
+      }
+      if (next !== 'horizontal' && next !== 'vertical') {
+        throw new Error(`Invalid --trace-pair-layout value: ${next} (expected horizontal|vertical)`);
+      }
+      options.tracePairLayout = next;
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-pair-workspace-open') {
+      options.tracePairWorkspaceOpen = true;
+      continue;
+    }
+
+    if (arg === '--trace-pair-split') {
+      if (!next) {
+        throw new Error('--trace-pair-split requires a value');
+      }
+      const parsed = Number.parseFloat(next);
+      if (!Number.isFinite(parsed)) {
+        throw new Error(`Invalid --trace-pair-split value: ${next}`);
+      }
+      options.tracePairSplitPercent = parsed;
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-pair-active') {
+      if (!next) {
+        throw new Error('--trace-pair-active requires a value');
+      }
+      options.tracePairActiveTraceSide = parseTraceSourceArg(next, '--trace-pair-active');
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-pair-maximized') {
+      if (!next) {
+        throw new Error('--trace-pair-maximized requires a value');
+      }
+      options.tracePairMaximizedTraceSide = parseTraceSourceArg(next, '--trace-pair-maximized');
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--trace-pair-minimized') {
+      if (!next) {
+        throw new Error('--trace-pair-minimized requires a value');
+      }
+      const traceSide = parseTraceSourceArg(next, '--trace-pair-minimized');
+      if (!options.tracePairMinimizedTraceSides.includes(traceSide)) {
+        options.tracePairMinimizedTraceSides.push(traceSide);
+      }
       i += 1;
       continue;
     }
@@ -561,6 +829,11 @@ function parseArgs(argv: string[]): VerifyOptions {
   return options;
 }
 
+function parseTraceSourceArg(value: string, flag: string): TraceSource {
+  if (value === 'current' || value === 'reference') return value;
+  throw new Error(`Invalid ${flag} value: ${value} (expected current|reference)`);
+}
+
 function normalizeProviderIdArg(value: string): string | null {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'env' || normalized === 'null' || normalized === 'none' || normalized === 'default') {
@@ -584,6 +857,7 @@ function createVerificationApp(): express.Express {
   });
 
   app.use('/api/agent/v1', agentRoutes);
+  app.use('/api/rag', ragAdminRoutes);
   app.use('/api/trace-processor', traceProcessorRoutes);
   app.use('/api/skills', skillRoutes);
 
@@ -596,6 +870,65 @@ function createVerificationApp(): express.Express {
   });
 
   return app;
+}
+
+async function postJsonOrThrow(
+  baseUrl: string,
+  route: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${baseUrl}${route}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json() as Record<string, unknown>;
+  if (!response.ok || payload.success === false) {
+    throw new Error(`Context setup failed (${route}): ${JSON.stringify(payload)}`);
+  }
+  return payload;
+}
+
+async function setupAnalysisContext(baseUrl: string, options: VerifyOptions): Promise<void> {
+  if (options.setupCodebaseRoot) {
+    const registration = await postJsonOrThrow(baseUrl, '/api/rag/codebases/register', {
+      kind: 'app_source',
+      displayName: 'DeepSeek E2E App Source',
+      rootPath: options.setupCodebaseRoot,
+      sendToProvider: true,
+    });
+    const codebase = asRecord(registration.codebase);
+    const codebaseId = typeof codebase?.codebaseId === 'string' ? codebase.codebaseId : '';
+    if (!codebaseId) throw new Error('Context setup did not return a codebaseId');
+    await postJsonOrThrow(
+      baseUrl,
+      `/api/rag/codebases/${encodeURIComponent(codebaseId)}/reindex`,
+      {},
+    );
+    options.codebaseIds.push(codebaseId);
+    options.codeAwareMode ??= 'provider_send';
+  }
+
+  if (options.setupKnowledgeRoot) {
+    const registration = await postJsonOrThrow(baseUrl, '/api/rag/android-internals/sources', {
+      rootPath: options.setupKnowledgeRoot,
+      displayName: 'DeepSeek E2E Android Internals',
+      rightsAcknowledged: true,
+      sendToProvider: true,
+    });
+    const source = asRecord(registration.source);
+    const sourceId = typeof source?.sourceId === 'string' ? source.sourceId : '';
+    if (!sourceId) throw new Error('Context setup did not return a knowledge source id');
+    await postJsonOrThrow(
+      baseUrl,
+      `/api/rag/android-internals/sources/${encodeURIComponent(sourceId)}/reindex`,
+      {},
+    );
+    options.knowledgeSourceIds.push(sourceId);
+  }
+
+  options.codebaseIds = Array.from(new Set(options.codebaseIds));
+  options.knowledgeSourceIds = Array.from(new Set(options.knowledgeSourceIds));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -658,11 +991,92 @@ function hasProcessNarration(text: string): boolean {
     /(?:update_plan_phase|submit_plan|resolve_hypothesis|阶段状态更新|执行剩余阶段|继续执行剩余阶段|OpenAI plan|provider 未主动结束 stream|plan 未完成|plan 已完成)/i.test(compact);
 }
 
-function hasConcreteCodeReferences(text: string): boolean {
-  return /\b(?:chunkId|evidence_ref_id|source_ref)\b/i.test(text)
-    || /\b(?:resolve_symbol|lookup_app_source)\s*\(/i.test(text)
-    || (/\bfilePath\b/i.test(text) && /\blineRange\b/i.test(text))
-    || /\b[\w.-]+(?:\/[\w.-]+)+\.(?:kt|java|kts|xml|cpp|cc|c|h|hpp|m|mm|swift|rs|go|py|ts|tsx|js|jsx|sql|md)(?::(?:L)?\d+(?:-\d+)?|\s+L\d+(?:-\d+)?)\b/i.test(text);
+function clampTracePairSplitPercent(value: number): number {
+  if (!Number.isFinite(value)) return 50;
+  return Math.min(82, Math.max(18, Math.round(value)));
+}
+
+function isTracePairPaneLive(
+  options: VerifyOptions,
+  traceSide: TraceSource,
+): boolean {
+  if (!options.tracePairWorkspaceOpen) return traceSide === 'current';
+  if (
+    options.tracePairMaximizedTraceSide &&
+    options.tracePairMaximizedTraceSide !== traceSide
+  ) {
+    return false;
+  }
+  return !options.tracePairMinimizedTraceSides.includes(traceSide);
+}
+
+function buildTracePairContextForVerification(input: {
+  options: VerifyOptions;
+  traceId: string;
+  referenceTraceId: string;
+}): TracePairContext {
+  const { options, traceId, referenceTraceId } = input;
+  const primarySide = options.tracePairLayout === 'vertical' ? 'top' : 'left';
+  const referenceSide = options.tracePairLayout === 'vertical' ? 'bottom' : 'right';
+  const activeSide = options.tracePairActiveTraceSide === 'reference'
+    ? referenceSide
+    : primarySide;
+
+  return {
+    schemaVersion: 1,
+    layout: options.tracePairLayout,
+    primarySide,
+    referenceSide,
+    activeSide,
+    workspaceOpen: options.tracePairWorkspaceOpen,
+    splitPercent: clampTracePairSplitPercent(options.tracePairSplitPercent),
+    ...(options.tracePairMaximizedTraceSide
+      ? { maximizedTraceSide: options.tracePairMaximizedTraceSide }
+      : {}),
+    ...(options.tracePairMinimizedTraceSides.length > 0
+      ? { minimizedTraceSides: options.tracePairMinimizedTraceSides }
+      : {}),
+    aliases: {
+      left: 'current',
+      top: 'current',
+      primary: 'current',
+      main: 'current',
+      current: 'current',
+      '左': 'current',
+      '左侧': 'current',
+      '上': 'current',
+      '上方': 'current',
+      '主': 'current',
+      '当前': 'current',
+      right: 'reference',
+      bottom: 'reference',
+      reference: 'reference',
+      baseline: 'reference',
+      '右': 'reference',
+      '右侧': 'reference',
+      '下': 'reference',
+      '下方': 'reference',
+      '参考': 'reference',
+    },
+    panes: [
+      {
+        side: primarySide,
+        traceSide: 'current',
+        traceId,
+        traceName: path.basename(options.tracePath),
+        active: options.tracePairActiveTraceSide === 'current',
+        visualState: isTracePairPaneLive(options, 'current') ? 'live' : 'context_only',
+      },
+      {
+        side: referenceSide,
+        traceSide: 'reference',
+        traceId: referenceTraceId,
+        traceName: path.basename(options.referenceTracePath || 'reference.trace'),
+        active: options.tracePairActiveTraceSide === 'reference',
+        visualState: isTracePairPaneLive(options, 'reference') ? 'live' : 'context_only',
+      },
+    ],
+  };
 }
 
 interface TextChecks {
@@ -719,7 +1133,7 @@ function recordConclusionEvidence(
     summary.conclusionChars = Math.max(summary.conclusionChars, text.length);
     summary.conclusionHasConcreteEvidenceRefs ||= hasConcreteEvidenceReferences(text);
     summary.conclusionHasEvidenceIndex ||= hasEvidenceIndex(text);
-    summary.conclusionHasConcreteCodeRefs ||= hasConcreteCodeReferences(text);
+    summary.conclusionHasConcreteCodeRefs ||= hasConcreteCodeReference(text);
     return;
   }
 
@@ -731,7 +1145,7 @@ function recordConclusionEvidence(
   summary.analysisCompletedHasEvidenceIndex ||= hasEvidenceIndex(text);
   summary.analysisCompletedHasFinalReportHeading ||= hasFinalReportHeading(text);
   summary.analysisCompletedHasProcessNarration ||= hasProcessNarration(text);
-  summary.analysisCompletedHasConcreteCodeRefs ||= hasConcreteCodeReferences(text);
+  summary.analysisCompletedHasConcreteCodeRefs ||= hasConcreteCodeReference(text);
 }
 
 async function collectSseSummary(
@@ -739,6 +1153,7 @@ async function collectSseSummary(
   sessionId: string,
   timeoutMs: number,
   textChecks: TextChecks,
+  options: { runId?: string } = {},
 ): Promise<SseSummary> {
   const summary: SseSummary = {
     totalEvents: 0,
@@ -777,6 +1192,7 @@ async function collectSseSummary(
     directSkillCompletedCount: 0,
     directSkillFindingCount: 0,
     toolCallCounts: {},
+    successfulLookupCounts: {},
     skillCallCounts: {},
   };
 
@@ -786,7 +1202,10 @@ async function collectSseSummary(
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}/api/agent/v1/${sessionId}/stream`, {
+    const streamPath = options.runId
+      ? `/api/agent/v1/runs/${options.runId}/stream`
+      : `/api/agent/v1/${sessionId}/stream`;
+    const response = await fetch(`${baseUrl}${streamPath}`, {
       headers: { Accept: 'text/event-stream' },
       signal: controller.signal,
     });
@@ -843,9 +1262,26 @@ async function collectSseSummary(
 
           // --- agentv3 event counting ---
           switch (event) {
-            case 'progress':
+            case 'progress': {
               summary.progressCount += 1;
+              const sourceEventType = privateProjectedSourceEventType(payload);
+              if (sourceEventType === 'plan_submitted') {
+                summary.planSubmittedCount += 1;
+              } else if (sourceEventType === 'agent_response') {
+                summary.agentResponseCount += 1;
+              } else if (sourceEventType === 'degraded') {
+                summary.degradedCount += 1;
+                const fallback = typeof payload?.degradedFallback === 'string'
+                  ? payload.degradedFallback
+                  : undefined;
+                if (fallback) {
+                  summary.degradedFallbackCounts[fallback] =
+                    (summary.degradedFallbackCounts[fallback] ?? 0) + 1;
+                }
+                summary.degradedEvents.push(fallback ? {fallback} : {});
+              }
               break;
+            }
             case 'agent_task_dispatched':
               summary.agentTaskDispatchedCount += 1;
               if (typeof payload?.toolName === 'string') {
@@ -927,6 +1363,41 @@ async function collectSseSummary(
             if (typeof payload?.terminationMessage === 'string') {
               summary.analysisCompletedTerminationMessage = payload.terminationMessage;
             }
+            const receipt = asRecord(payload?.analysisReceipt);
+            const receiptOutputs = asRecord(receipt?.outputs);
+            if (
+              typeof receipt?.runId === 'string' &&
+              typeof receipt.runManifestId === 'string'
+            ) {
+              summary.externalIssueSource = {
+                runId: receipt.runId,
+                runManifestId: receipt.runManifestId,
+                ...(typeof receiptOutputs?.resultSnapshotId === 'string'
+                  ? {resultSnapshotId: receiptOutputs.resultSnapshotId}
+                  : {}),
+              };
+            }
+            if (payload?.quickRun && typeof payload.quickRun === 'object' && !Array.isArray(payload.quickRun)) {
+              const quickRun = payload.quickRun as Record<string, any>;
+              const evidence = quickRun.evidence && typeof quickRun.evidence === 'object'
+                ? quickRun.evidence as Record<string, any>
+                : {};
+              summary.quickRun = {
+                ...(typeof quickRun.requestedMode === 'string' ? { requestedMode: quickRun.requestedMode } : {}),
+                ...(typeof quickRun.resolvedMode === 'string' ? { resolvedMode: quickRun.resolvedMode } : {}),
+                ...(typeof quickRun.profile === 'string' ? { profile: quickRun.profile } : {}),
+                ...(typeof quickRun.targetTurns === 'number' ? { targetTurns: quickRun.targetTurns } : {}),
+                ...(typeof quickRun.hardCapTurns === 'number' ? { hardCapTurns: quickRun.hardCapTurns } : {}),
+                ...(typeof quickRun.actualTurns === 'number' ? { actualTurns: quickRun.actualTurns } : {}),
+                ...(typeof quickRun.enforcement === 'string' ? { enforcement: quickRun.enforcement } : {}),
+                ...(typeof quickRun.stopReason === 'string' ? { stopReason: quickRun.stopReason } : {}),
+                ...(typeof quickRun.verifierStatus === 'string' ? { verifierStatus: quickRun.verifierStatus } : {}),
+                ...(typeof evidence.frontendPrequeryInjected === 'number' ? { frontendPrequeryInjected: evidence.frontendPrequeryInjected } : {}),
+                ...(typeof evidence.frontendPrequeryCited === 'number' ? { frontendPrequeryCited: evidence.frontendPrequeryCited } : {}),
+                ...(typeof evidence.currentRunDataEnvelopes === 'number' ? { currentRunDataEnvelopes: evidence.currentRunDataEnvelopes } : {}),
+                ...(typeof evidence.citedEvidenceRefs === 'number' ? { citedEvidenceRefs: evidence.citedEvidenceRefs } : {}),
+              };
+            }
           }
 
           // --- Older SSE counting (backwards compat) ---
@@ -989,6 +1460,186 @@ async function collectSseSummary(
   return summary;
 }
 
+interface ExternalIssueE2eVerification {
+  checks: Record<string, boolean>;
+  passed: boolean;
+  summary: {
+    opportunityStatus?: string;
+    signalKinds: string[];
+    reviewSource?: string;
+    candidateDecisions: string[];
+    candidateOwnership: string[];
+    draftAttempted: boolean;
+    draftNotSubmitted?: boolean;
+    githubUrlIsHttps?: boolean;
+  };
+}
+
+async function verifyExternalIssueTriage(
+  baseUrl: string,
+  sessionId: string,
+  source: SseSummary['externalIssueSource'],
+): Promise<ExternalIssueE2eVerification> {
+  const summary: ExternalIssueE2eVerification['summary'] = {
+    signalKinds: [],
+    candidateDecisions: [],
+    candidateOwnership: [],
+    draftAttempted: false,
+  };
+  const checks: Record<string, boolean> = {
+    externalIssueSourcePersisted: Boolean(source),
+    externalIssueNegativeFeedbackStored: false,
+    externalIssueOpportunityAvailable: false,
+    externalIssueHasUserReportedInaccuracySignal: false,
+    externalIssueAgentReviewUsed: false,
+    externalIssueHasValidatedCandidates: false,
+    externalIssueDraftBoundaryVerified: false,
+  };
+  if (!source) {
+    return {checks, passed: false, summary};
+  }
+
+  const feedbackResponse = await postJsonResponse(
+    baseUrl,
+    `/api/agent/v1/${encodeURIComponent(sessionId)}/feedback`,
+    {
+      rating: 'negative',
+      runId: source.runId,
+      targetKind: 'conclusion',
+      targetId: source.runId,
+      source: 'api',
+      idempotencyKey: `external-issue-e2e:${source.runId}`,
+    },
+  );
+  checks.externalIssueNegativeFeedbackStored =
+    feedbackResponse.ok &&
+    feedbackResponse.payload.durableFeedbackStored === true;
+  if (!checks.externalIssueNegativeFeedbackStored) {
+    return {checks, passed: false, summary};
+  }
+
+  const opportunityResponse = await postJsonResponse(
+    baseUrl,
+    `/api/agent/v1/${encodeURIComponent(sessionId)}/external-issue/opportunity`,
+    source,
+  );
+  const opportunity = asRecord(opportunityResponse.payload.opportunity);
+  summary.opportunityStatus =
+    typeof opportunity?.status === 'string' ? opportunity.status : undefined;
+  summary.signalKinds = Array.isArray(opportunity?.signals)
+    ? opportunity.signals
+      .map(item => asRecord(item)?.kind)
+      .filter((kind): kind is string => typeof kind === 'string')
+    : [];
+  checks.externalIssueOpportunityAvailable =
+    opportunityResponse.ok && opportunity?.status === 'available';
+  checks.externalIssueHasUserReportedInaccuracySignal =
+    summary.signalKinds.includes('user_reported_inaccuracy');
+  if (!checks.externalIssueOpportunityAvailable) {
+    return {checks, passed: false, summary};
+  }
+
+  const reviewResponse = await postJsonResponse(
+    baseUrl,
+    `/api/agent/v1/${encodeURIComponent(sessionId)}/external-issue/review`,
+    source,
+  );
+  const review = asRecord(reviewResponse.payload.review);
+  const candidates = Array.isArray(review?.candidates)
+    ? review.candidates
+      .map(candidate => asRecord(candidate))
+      .filter((candidate): candidate is Record<string, unknown> => candidate !== null)
+    : [];
+  summary.reviewSource =
+    typeof review?.source === 'string' ? review.source : undefined;
+  summary.candidateDecisions = candidates
+    .map(candidate => candidate.decision)
+    .filter((decision): decision is string => typeof decision === 'string');
+  summary.candidateOwnership = candidates
+    .map(candidate => candidate.ownership)
+    .filter((ownership): ownership is string => typeof ownership === 'string');
+  checks.externalIssueAgentReviewUsed =
+    reviewResponse.ok && review?.source === 'agent';
+  checks.externalIssueHasValidatedCandidates =
+    candidates.length > 0 && candidates.length <= 3;
+  if (!checks.externalIssueAgentReviewUsed || candidates.length === 0) {
+    return {checks, passed: false, summary};
+  }
+
+  const readyCandidate = candidates.find(candidate =>
+    candidate.decision === 'report' || candidate.decision === 'needs_user_input');
+  if (!readyCandidate || typeof readyCandidate.candidateId !== 'string') {
+    checks.externalIssueDraftBoundaryVerified = summary.candidateDecisions.every(
+      decision => decision === 'needs_verification' || decision === 'not_reportable',
+    );
+    return {
+      checks,
+      passed: Object.values(checks).every(Boolean),
+      summary,
+    };
+  }
+
+  const questions = Array.isArray(readyCandidate.userQuestions)
+    ? readyCandidate.userQuestions
+      .map(question => asRecord(question))
+      .filter((question): question is Record<string, unknown> => question !== null)
+    : [];
+  const answers = questions
+    .filter(question => typeof question.questionId === 'string')
+    .map(question => ({
+      questionId: question.questionId,
+      answer: 'Reproduced by the isolated real-provider E2E run; no private trace content is attached.',
+    }));
+  summary.draftAttempted = true;
+  const draftResponse = await postJsonResponse(
+    baseUrl,
+    `/api/agent/v1/${encodeURIComponent(sessionId)}/external-issue/draft`,
+    {
+      ...source,
+      review,
+      candidateId: readyCandidate.candidateId,
+      answers,
+      sensitiveDataReviewed: true,
+    },
+  );
+  const draft = asRecord(draftResponse.payload.draft);
+  summary.draftNotSubmitted = draft?.notSubmitted === true;
+  summary.githubUrlIsHttps =
+    typeof draft?.githubUrl === 'string' &&
+    draft.githubUrl.startsWith('https://github.com/');
+  checks.externalIssueDraftBoundaryVerified =
+    draftResponse.ok &&
+    summary.draftNotSubmitted &&
+    summary.githubUrlIsHttps;
+  return {
+    checks,
+    passed: Object.values(checks).every(Boolean),
+    summary,
+  };
+}
+
+async function postJsonResponse(
+  baseUrl: string,
+  route: string,
+  body: Record<string, unknown>,
+): Promise<{
+  ok: boolean;
+  status: number;
+  payload: Record<string, unknown>;
+}> {
+  const response = await fetch(`${baseUrl}${route}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = await response.json() as Record<string, unknown>;
+  } catch {
+  }
+  return {ok: response.ok, status: response.status, payload};
+}
+
 function findSessionLogFile(sessionId: string): string | null {
   const logDir = path.resolve(process.cwd(), 'logs/sessions');
   if (!fs.existsSync(logDir)) {
@@ -1012,6 +1663,9 @@ async function main(): Promise<void> {
   if (!fs.existsSync(options.tracePath)) {
     throw new Error(`Trace file not found: ${options.tracePath}`);
   }
+  if (options.referenceTracePath && !fs.existsSync(options.referenceTracePath)) {
+    throw new Error(`Reference trace file not found: ${options.referenceTracePath}`);
+  }
 
   const runtimeSelection = resolveAgentRuntimeSelection(options.providerId);
   if (runtimeSelection.kind === 'openai-agents-sdk' && !hasOpenAICredentials(options.providerId)) {
@@ -1034,9 +1688,11 @@ async function main(): Promise<void> {
 
   const traceProcessorService = getTraceProcessorService();
   let traceId = '';
+  let referenceTraceId = '';
   let sessionId = '';
 
   try {
+    await setupAnalysisContext(baseUrl, options);
     traceId = await traceProcessorService.loadTraceFromFilePath(options.tracePath);
     await writeTraceMetadata({
       id: traceId,
@@ -1050,16 +1706,38 @@ async function main(): Promise<void> {
       userId: DEFAULT_DEV_USER_ID,
     });
 
+    let tracePairContext: TracePairContext | undefined;
+    if (options.referenceTracePath) {
+      referenceTraceId = await traceProcessorService.loadTraceFromFilePath(options.referenceTracePath);
+      await writeTraceMetadata({
+        id: referenceTraceId,
+        filename: path.basename(options.referenceTracePath),
+        size: fs.statSync(options.referenceTracePath).size,
+        uploadedAt: new Date().toISOString(),
+        status: 'ready',
+        path: traceProcessorService.getTraceFilePath(referenceTraceId),
+        tenantId: DEFAULT_TENANT_ID,
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        userId: DEFAULT_DEV_USER_ID,
+      });
+      tracePairContext = buildTracePairContextForVerification({
+        options,
+        traceId,
+        referenceTraceId,
+      });
+    }
+
     const startResponse = await fetch(`${baseUrl}/api/agent/v1/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         traceId,
         query: options.query,
+        ...(referenceTraceId ? { referenceTraceId } : {}),
         ...(options.providerId !== undefined ? { providerId: options.providerId } : {}),
+        ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+        ...(options.selectionContext ? { selectionContext: options.selectionContext } : {}),
         options: {
-          maxRounds: options.maxRounds,
-          confidenceThreshold: options.confidenceThreshold,
           ...(options.preset ? { preset: options.preset } : {}),
           ...(options.smartAction ? { smartAction: options.smartAction } : {}),
           ...(options.smartSelection ? { smartSelection: options.smartSelection } : {}),
@@ -1067,6 +1745,10 @@ async function main(): Promise<void> {
           ...(options.analysisMode ? { analysisMode: options.analysisMode } : {}),
           ...(options.codeAwareMode ? { codeAwareMode: options.codeAwareMode } : {}),
           ...(options.codebaseIds.length > 0 ? { codebaseIds: options.codebaseIds } : {}),
+          ...(options.knowledgeSourceIds.length > 0
+            ? { knowledgeSourceIds: options.knowledgeSourceIds }
+            : {}),
+          ...(tracePairContext ? { tracePairContext } : {}),
         },
       }),
     });
@@ -1081,18 +1763,25 @@ async function main(): Promise<void> {
       requiredText: options.requiredText,
       forbiddenText: options.forbiddenText,
     });
+    const auditedLookupCounts = successfulCodeLookupToolCounts(
+      CodeLookupLedger.restore(sessionId, 12_000, 2).getEntries(),
+    );
+    sse.successfulLookupCounts = auditedLookupCounts;
+    for (const [toolName, count] of Object.entries(auditedLookupCounts)) {
+      sse.toolCallCounts[toolName] = (sse.toolCallCounts[toolName] ?? 0) + count;
+    }
 
     // Quick-mode analyses skip plan submission. Architecture detection can still
     // be emitted by the deterministic prepass before the lightweight agent path.
-    // Don't use `agentResponseCount <= 3` — quick max_turns is 5, so a well-behaved
-    // quick run can legitimately emit up to ~5 agent_response events.
+    // Don't use agent_response count as a quick/full classifier. Quick has a
+    // 5-turn product target but a larger hard cap, and runtime adapters differ.
     const isQuickMode = sse.planSubmittedCount === 0;
 
     const smartMode = options.preset === 'smart';
     const capabilityLimitedRuntime = options.allowCapabilityLimitedRuntime;
     const requiredChecks = {
       hasProgressEvents: sse.progressCount > 0,
-      ...(smartMode || capabilityLimitedRuntime ? {} : { hasAgentResponses: sse.agentResponseCount > 0 }),
+      ...(smartMode || capabilityLimitedRuntime || isQuickMode ? {} : { hasAgentResponses: sse.agentResponseCount > 0 }),
       hasTerminalConclusionPayload: sse.conclusionCount > 0 || sse.analysisCompletedConclusionChars > 0,
       hasAnalysisCompletedEvent: sse.terminalEvent === 'analysis_completed' || sse.terminalEvent === 'end',
       hasNoSseErrors: sse.errorEvents.length === 0,
@@ -1105,6 +1794,12 @@ async function main(): Promise<void> {
         hasPlanSubmitted: sse.planSubmittedCount > 0,
         hasArchitectureDetected: sse.architectureDetectedCount > 0,
       };
+    const dualTraceChecks = options.referenceTracePath
+      ? {
+        hasReferenceTraceId: referenceTraceId.length > 0,
+        hasTracePairContext: Boolean(tracePairContext),
+      }
+      : {};
 
     // Mode expectation: if the caller pinned `--mode fast|full`, verify the backend honored it.
     // Catches regressions where a fast CLI flag silently falls back to the full pipeline (or vice versa).
@@ -1163,6 +1858,12 @@ async function main(): Promise<void> {
     const requiredToolChecks = Object.fromEntries(
       options.requiredTools.map((toolName) => [`requiresTool:${toolName}`, (sse.toolCallCounts[toolName] ?? 0) > 0]),
     );
+    const requiredSuccessfulLookupChecks = Object.fromEntries(
+      options.requiredSuccessfulLookups.map((toolName) => [
+        `requiresSuccessfulLookup:${toolName}`,
+        (sse.successfulLookupCounts[toolName] ?? 0) > 0,
+      ]),
+    );
     const requiredSkillChecks = Object.fromEntries(
       options.requiredSkills.map((skillId) => [`requiresSkill:${skillId}`, (sse.skillCallCounts[skillId] ?? 0) > 0]),
     );
@@ -1172,9 +1873,31 @@ async function main(): Promise<void> {
         (sse.degradedFallbackCounts[fallback] ?? 0) === 0,
       ]),
     );
+    const dataEnvelopeChecks = options.requireDataEnvelope
+      ? { hasRequiredDataEnvelope: sse.dataEnvelopeCount > 0 }
+      : {};
+    const quickRunChecks = options.requireQuickRun
+      ? {
+        hasQuickRunReceipt: Boolean(sse.quickRun),
+        quickRunResolvedQuick: sse.quickRun?.resolvedMode === 'quick',
+        quickRunHasTurnBudget:
+          typeof sse.quickRun?.targetTurns === 'number' &&
+          typeof sse.quickRun?.hardCapTurns === 'number' &&
+          (sse.quickRun?.targetTurns ?? 0) <= (sse.quickRun?.hardCapTurns ?? 0),
+      }
+      : {};
+    const externalIssueVerification = options.requireExternalIssueTriage
+      ? await verifyExternalIssueTriage(
+        baseUrl,
+        sessionId,
+        sse.externalIssueSource,
+      )
+      : undefined;
+    const externalIssueChecks = externalIssueVerification?.checks ?? {};
     const checks = {
       ...requiredChecks,
       ...fullModeChecks,
+      ...dualTraceChecks,
       ...modeExpectationChecks,
       ...conclusionEvidenceChecks,
       ...codeReferenceChecks,
@@ -1186,11 +1909,16 @@ async function main(): Promise<void> {
       ...requiredTextChecks,
       ...forbiddenTextChecks,
       ...requiredToolChecks,
+      ...requiredSuccessfulLookupChecks,
       ...requiredSkillChecks,
       ...degradedFallbackChecks,
+      ...dataEnvelopeChecks,
+      ...quickRunChecks,
+      ...externalIssueChecks,
     };
-    const passed = Object.values(requiredChecks).every(Boolean)
+    let passed = Object.values(requiredChecks).every(Boolean)
       && Object.values(modeExpectationChecks).every(Boolean)
+      && Object.values(dualTraceChecks).every(Boolean)
       && Object.values(conclusionEvidenceChecks).every(Boolean)
       && Object.values(codeReferenceChecks).every(Boolean)
       && Object.values(claimVerifierChecks).every(Boolean)
@@ -1201,21 +1929,111 @@ async function main(): Promise<void> {
       && Object.values(requiredTextChecks).every(Boolean)
       && Object.values(forbiddenTextChecks).every(Boolean)
       && Object.values(requiredToolChecks).every(Boolean)
+      && Object.values(requiredSuccessfulLookupChecks).every(Boolean)
       && Object.values(requiredSkillChecks).every(Boolean)
       && Object.values(degradedFallbackChecks).every(Boolean)
+      && Object.values(dataEnvelopeChecks).every(Boolean)
+      && Object.values(quickRunChecks).every(Boolean)
+      && Object.values(externalIssueChecks).every(Boolean)
       && (isQuickMode || Object.values(fullModeChecks).every(Boolean));
+    let followUpOutput: Record<string, unknown> | undefined;
+    if (options.followUpQuery) {
+      const followUpResponse = await fetch(`${baseUrl}/api/agent/v1/sessions/${sessionId}/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId,
+          query: options.followUpQuery,
+          ...(referenceTraceId ? { referenceTraceId } : {}),
+          ...(options.providerId !== undefined ? { providerId: options.providerId } : {}),
+          ...(options.selectionContext ? { selectionContext: options.selectionContext } : {}),
+          options: {
+            ...(options.analysisMode ? { analysisMode: options.analysisMode } : {}),
+            ...(options.codeAwareMode ? { codeAwareMode: options.codeAwareMode } : {}),
+            ...(options.codebaseIds.length > 0 ? { codebaseIds: options.codebaseIds } : {}),
+            ...(options.knowledgeSourceIds.length > 0
+              ? { knowledgeSourceIds: options.knowledgeSourceIds }
+              : {}),
+            ...(tracePairContext ? { tracePairContext } : {}),
+          },
+        }),
+      });
+      const followUpStartJson = (await followUpResponse.json()) as Record<string, unknown>;
+      if (
+        !followUpResponse.ok ||
+        typeof followUpStartJson.sessionId !== 'string' ||
+        typeof followUpStartJson.runId !== 'string'
+      ) {
+        throw new Error(`Follow-up analyze request failed: ${JSON.stringify(followUpStartJson)}`);
+      }
+
+      const followUpSse = await collectSseSummary(
+        baseUrl,
+        sessionId,
+        options.timeoutMs,
+        {
+          requiredText: options.followUpRequiredText,
+          forbiddenText: [],
+        },
+        { runId: followUpStartJson.runId },
+      );
+      const followUpIsQuickMode = followUpSse.planSubmittedCount === 0;
+      const followUpRequiredTextChecks = Object.fromEntries(
+        options.followUpRequiredText.map((text) => [
+          `followUpRequiresText:${text}`,
+          followUpSse.requiredTextMatches[text] === true,
+        ]),
+      );
+      const followUpForbiddenToolChecks = Object.fromEntries(
+        options.followUpForbiddenTools.map((toolName) => [
+          `followUpForbidsTool:${toolName}`,
+          (followUpSse.toolCallCounts[toolName] ?? 0) === 0,
+        ]),
+      );
+      const followUpChecks = {
+        hasFollowUpProgressEvents: followUpSse.progressCount > 0,
+        hasFollowUpTerminalConclusionPayload:
+          followUpSse.conclusionCount > 0 || followUpSse.analysisCompletedConclusionChars > 0,
+        hasFollowUpAnalysisCompletedEvent:
+          followUpSse.terminalEvent === 'analysis_completed' || followUpSse.terminalEvent === 'end',
+        hasFollowUpNoSseErrors: followUpSse.errorEvents.length === 0,
+        ...(options.analysisMode === 'fast' ? { followUpFastModeHonored: followUpIsQuickMode } : {}),
+        ...followUpRequiredTextChecks,
+        ...followUpForbiddenToolChecks,
+      };
+      const followUpPassed = Object.values(followUpChecks).every(Boolean);
+      passed = passed && followUpPassed;
+      followUpOutput = {
+        query: options.followUpQuery,
+        runId: followUpStartJson.runId,
+        checks: followUpChecks,
+        passed: followUpPassed,
+        summary: followUpSse,
+      };
+    }
     const sessionLogFile = findSessionLogFile(sessionId);
 
     const output = {
       timestamp: new Date().toISOString(),
       tracePath: options.tracePath,
+      referenceTracePath: options.referenceTracePath,
       query: options.query,
       preset: options.preset,
+      selectionContext: options.selectionContext,
+      analysisContext: {
+        codeAwareMode: options.codeAwareMode ?? 'off',
+        codebaseIds: options.codebaseIds,
+        knowledgeSourceIds: options.knowledgeSourceIds,
+      },
       traceId,
+      referenceTraceId: referenceTraceId || undefined,
+      tracePairContext,
       sessionId,
       checks,
       passed,
       summary: sse,
+      externalIssue: externalIssueVerification?.summary,
+      followUp: followUpOutput,
       sessionLogFile,
     };
 
@@ -1244,6 +2062,13 @@ async function main(): Promise<void> {
     if (traceId !== '' && !options.keepTrace) {
       try {
         await traceProcessorService.deleteTrace(traceId);
+      } catch {
+      }
+    }
+
+    if (referenceTraceId !== '' && !options.keepTrace) {
+      try {
+        await traceProcessorService.deleteTrace(referenceTraceId);
       } catch {
       }
     }

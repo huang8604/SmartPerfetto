@@ -216,6 +216,7 @@ describe('sqlIncludeInjector - completeness gate', () => {
   const NON_STDLIB_NAMES = new Set<string>([
     'list_stdlib_modules',
     'execute_sql', 'execute_sql_on', 'fetch_artifact', 'lookup_sql_schema',
+    'get_comparison_context', 'compare_skill',
     'invoke_skill', 'list_skills', 'query_perfetto_source',
     'ts', 'dur', 'name',
     'cpufreq',

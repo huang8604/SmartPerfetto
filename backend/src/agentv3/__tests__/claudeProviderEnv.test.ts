@@ -35,6 +35,7 @@ describe('createSdkEnv provider isolation', () => {
     model: 'base-claude-model',
     lightModel: 'base-claude-light',
     maxTurns: 60,
+    quickTargetTurns: 5,
     cwd: process.cwd(),
     effort: 'high',
     enableSubAgents: false,

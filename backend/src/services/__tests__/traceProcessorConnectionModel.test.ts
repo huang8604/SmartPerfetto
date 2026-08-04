@@ -20,6 +20,7 @@ describe('traceProcessorConnectionModel', () => {
     const scope = buildTraceProcessorDatabaseScope({
       traceId: 'trace-a',
       traceSide: 'reference',
+      paneSide: 'right',
       leaseId: 'lease-a',
       leaseMode: 'isolated',
     });
@@ -27,6 +28,7 @@ describe('traceProcessorConnectionModel', () => {
     expect(scope).toEqual({
       traceId: 'trace-a',
       traceSide: 'reference',
+      paneSide: 'right',
       processorKey: 'trace-a:lease:lease-a',
       isolation: 'isolated',
       leaseId: 'lease-a',
@@ -38,13 +40,16 @@ describe('traceProcessorConnectionModel', () => {
     const provenance = buildTraceProcessorQueryProvenance({
       traceId: 'ref-trace',
       traceSide: 'reference',
+      paneSide: 'bottom',
     });
 
     expect(provenance.traceSide).toBe('reference');
+    expect(provenance.paneSide).toBe('bottom');
     expect(provenance.traceId).toBe('ref-trace');
     expect(provenance.databaseScope).toMatchObject({
       traceId: 'ref-trace',
       traceSide: 'reference',
+      paneSide: 'bottom',
       processorKey: 'ref-trace',
       isolation: 'shared',
     });

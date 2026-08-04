@@ -133,9 +133,38 @@ export interface ClaudeAnalysisContext {
 /** Discriminator for which trace data belongs to in comparison mode. */
 export type TraceSource = 'current' | 'reference';
 
+export type TracePaneSide = 'left' | 'right' | 'top' | 'bottom';
+
+export type TracePairLayout = 'horizontal' | 'vertical';
+
+export interface TracePairPaneContext {
+  side: TracePaneSide;
+  traceSide: TraceSource;
+  traceId: string;
+  traceName?: string;
+  traceFingerprint?: string;
+  active?: boolean;
+  visualState?: 'live' | 'context_only';
+}
+
+export interface TracePairContext {
+  schemaVersion: 1;
+  layout: TracePairLayout;
+  primarySide: TracePaneSide;
+  referenceSide: TracePaneSide;
+  activeSide?: TracePaneSide;
+  workspaceOpen?: boolean;
+  splitPercent?: number;
+  maximizedTraceSide?: TraceSource;
+  minimizedTraceSides?: TraceSource[];
+  aliases?: Record<string, TraceSource>;
+  panes: TracePairPaneContext[];
+}
+
 /** Context for dual-trace comparison mode. Orthogonal to scene type. */
 export interface ComparisonContext {
   referenceTraceId: string;
+  tracePairContext?: TracePairContext;
   referencePackageName?: string;
   referenceFocusApps?: DetectedFocusApp[];
   referenceArchitecture?: ArchitectureInfo;
@@ -265,7 +294,7 @@ export interface AnalysisNote {
 export interface ExpectedCall {
   /** Short tool name without the MCP prefix (e.g. `invoke_skill`, `execute_sql`). */
   tool: string;
-  /** For `invoke_skill`, the required skillId. Other tools should leave this unset. */
+  /** For skill-like tools such as `invoke_skill` and `compare_skill`, the required skillId. */
   skillId?: string;
 }
 
@@ -344,6 +373,9 @@ function shortToolName(toolName: string): string {
 
 const INFORMATIONAL_TOOL_NAMES = new Set([
   'lookup_strategy_detail',
+  // Persists reasoning across turns; it does not collect trace evidence and
+  // cannot stand in for producing the final report.
+  'write_analysis_note',
 ]);
 
 export function isInformationalToolName(toolName: string): boolean {
@@ -366,6 +398,7 @@ export function formatExpectedCall(call: ExpectedCall): string {
 }
 
 export function expectedCallMatchesRecord(call: ExpectedCall, record: ToolCallRecord): boolean {
+  if (record.success === false) return false;
   const shortTool = shortToolName(record.toolName);
   if (!isEvidenceCapableToolName(call.tool) || !isEvidenceCapableToolName(shortTool)) return false;
   if (shortToolName(call.tool) !== shortTool) return false;
@@ -378,6 +411,7 @@ export function phaseMatchesExpectedCall(phase: PlanPhase, record: ToolCallRecor
 }
 
 export function phaseMatchesCall(phase: PlanPhase, record: ToolCallRecord): boolean {
+  if (record.success === false) return false;
   const shortTool = shortToolName(record.toolName);
   if (!isEvidenceCapableToolName(shortTool)) return false;
   const expectedToolSet = new Set(phase.expectedTools.map(shortToolName));
@@ -413,6 +447,10 @@ export function expectedToolNames(phase: PlanPhase): string[] {
 export interface ToolCallRecord {
   toolName: string;
   timestamp: number;
+  /** Explicit execution outcome when the runtime result exposed one. Failed calls remain auditable but never satisfy evidence gates. */
+  success?: boolean;
+  /** True only when a source lookup returned at least one locatable CodeRef; no source content is persisted here. */
+  returnedCodeReferences?: boolean;
   /** Phase ID this tool call was matched to (if any) */
   matchedPhaseId?: string;
   /**
@@ -422,7 +460,7 @@ export interface ToolCallRecord {
    * targets).
    */
   inputSummary?: string;
-  /** For `invoke_skill`: the skillId argument, lifted out for direct matching. */
+  /** For skill-like tools: the skillId argument, lifted out for direct matching. */
   skillId?: string;
   /** sha256(input) prefix — stable identifier across runs for the same call. */
   paramsHash?: string;
@@ -443,6 +481,8 @@ export type PatternStatus =
   | 'rejected'         // user explicitly rejected the conclusion
   | 'disputed'         // reverse feedback within 10s–24h window
   | 'disputed_late';   // reverse feedback >24h after first feedback
+
+export type PatternStatusMigrationSource = 'legacy_frozen' | 'native_v2';
 
 /**
  * Provenance fields linking an entry to the run that produced it.
@@ -485,8 +525,14 @@ export interface AnalysisPatternEntry {
    * skips cross-artifact deduplication.
    */
   failureModeHash?: string;
-  /** Lifecycle state. Defaults to 'confirmed' when absent (legacy entries). */
+  /** Deprecated effective-state mirror for compatibility with older readers. */
   status?: PatternStatus;
+  /** Lifecycle state owned by creation and auto-confirm, never by feedback. */
+  intrinsicStatus?: PatternStatus;
+  /** Reversible state derived from active FeedbackEvent rows. */
+  feedbackProjectionStatus?: PatternStatus;
+  /** Whether intrinsic state was frozen from legacy storage or created native. */
+  migrationSource?: PatternStatusMigrationSource;
   /** First feedback timestamp — used to choose the `disputed` vs `disputed_late` window. */
   firstFeedbackAt?: number;
   /** Most recent feedback timestamp. */
@@ -518,8 +564,11 @@ export interface NegativePatternEntry {
   matchCount: number;
   /** Stable failure-mode hash. See AnalysisPatternEntry.failureModeHash. */
   failureModeHash?: string;
-  /** Lifecycle state. Defaults to 'confirmed' when absent (legacy entries). */
+  /** Deprecated effective-state mirror for compatibility with older readers. */
   status?: PatternStatus;
+  intrinsicStatus?: PatternStatus;
+  feedbackProjectionStatus?: PatternStatus;
+  migrationSource?: PatternStatusMigrationSource;
   firstFeedbackAt?: number;
   lastFeedbackAt?: number;
   /** Provenance fields tying this entry to the originating run. */

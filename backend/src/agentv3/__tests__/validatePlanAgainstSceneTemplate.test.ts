@@ -136,6 +136,38 @@ describe('validatePlanAgainstSceneTemplate', () => {
     expect(result.missingAspectIds).toEqual(['root_cause_diagnosis']);
   });
 
+  it('accepts raw trace pair startup plans that use compare_skill instead of single-trace invoke_skill', () => {
+    const result = validatePlanAgainstSceneTemplate(
+      [
+        minimalPhase({
+          name: 'startup_timing',
+          goal: '使用 compare_skill startup_analysis 对比左右 Trace 的 TTID/TTFD 和启动类型',
+          expectedTools: ['compare_skill'],
+          expectedCalls: [{ tool: 'compare_skill', skillId: 'startup_analysis' }],
+        }),
+        minimalPhase({
+          name: 'phase_breakdown',
+          goal: '使用 compare_skill startup_detail 对比两侧启动阶段分解差异',
+          expectedTools: ['compare_skill', 'fetch_artifact'],
+          expectedCalls: [
+            { tool: 'compare_skill', skillId: 'startup_detail' },
+            { tool: 'fetch_artifact' },
+          ],
+        }),
+        minimalPhase({
+          name: 'launch_type_verdict',
+          goal: '基于 startup_analysis 证据验证两侧启动类型判定',
+          expectedTools: ['compare_skill'],
+          expectedCalls: [{ tool: 'compare_skill', skillId: 'startup_analysis' }],
+        }),
+      ],
+      'startup',
+    );
+
+    expect(result.warnings).toEqual([]);
+    expect(result.missingAspectIds).toEqual([]);
+  });
+
   it('enforces conditional aspects only when their trigger keywords appear in the plan', () => {
     const basePhases = [
       minimalPhase({
@@ -206,6 +238,36 @@ describe('validatePlanAgainstSceneTemplate', () => {
 
     expect(result.missingAspectIds).toContain('architecture_specific_jank');
     expect(result.nonWaivableMissingAspectIds).toEqual(['architecture_specific_jank']);
+    expect(result.missingAspectRequirements).toEqual([
+      expect.objectContaining({
+        aspectId: 'architecture_specific_jank',
+        requiredExpectedCalls: expect.arrayContaining([
+          { tool: 'invoke_skill', skillId: 'flutter_scrolling_analysis' },
+          { tool: 'invoke_skill', skillId: 'textureview_producer_frame_timing' },
+        ]),
+        alternativeExpectedCalls: [],
+      }),
+    ]);
+  });
+
+  it('does not accept generic SurfaceFlinger analysis for a detected TextureView pipeline', () => {
+    const result = validatePlanAgainstSceneTemplate([
+      minimalPhase({
+        name: 'TextureView 架构专项',
+        goal: '拆 HWUI host + SurfaceFlinger 合成链路',
+        expectedTools: ['invoke_skill'],
+        expectedCalls: [{ tool: 'invoke_skill', skillId: 'surfaceflinger_analysis' }],
+      }),
+    ], 'scrolling', undefined, { triggerContext: ['TEXTUREVIEW_STANDARD'] });
+
+    expect(result.missingAspectIds).toContain('architecture_specific_jank');
+    expect(result.missingAspectRequirements).toContainEqual(expect.objectContaining({
+      aspectId: 'architecture_specific_jank',
+      requiredExpectedCalls: [
+        { tool: 'invoke_skill', skillId: 'textureview_producer_frame_timing' },
+      ],
+      alternativeExpectedCalls: [],
+    }));
   });
 
   it('does not allow waivers to bypass non-waivable architecture expected calls', () => {

@@ -1,0 +1,324 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: gpu_compute_kernel_analysis
+version: "1.0"
+type: composite
+category: gpu
+tier: B
+
+meta:
+  display_name: "GPU Compute Kernel Analysis"
+  description: "Vendor-neutral GPU compute kernel timing and producer-provided launch configuration evidence"
+  icon: "memory"
+  tags: [gpu, compute, kernel, launch, workgroup, upstream]
+
+triggers:
+  keywords:
+    zh: [GPU compute, 计算内核, workgroup, grid size, 启动配置]
+    en: [gpu compute, compute kernel, workgroup, grid size, launch configuration]
+  patterns:
+    - ".*(GPU|gpu).*(compute|kernel|workgroup|grid).*"
+    - ".*(计算内核|启动配置|工作组).*"
+
+prerequisites:
+  modules:
+    - prelude.after_eof.events
+  required_tables:
+    - gpu_slice
+    - gpu_track
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Optional inclusive start timestamp in ns"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "Optional exclusive end timestamp in ns"
+  - name: ugpu
+    type: integer
+    required: false
+    description: "Optional host-unique GPU id"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 50
+    description: "Maximum kernel or launch rows, clamped to 200"
+
+steps:
+  - id: data_check
+    type: atomic
+    name: "GPU compute data availability"
+    display:
+      level: hidden
+    sql: |
+      WITH compute_rows AS (
+        SELECT s.arg_set_id
+        FROM gpu_slice AS s
+        JOIN gpu_track AS t ON s.track_id = t.id
+        WHERE s.render_stage_category = 2
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+          AND (${ugpu} IS NULL OR IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) = ${ugpu})
+      )
+      SELECT
+        COUNT(*) AS compute_rows,
+        SUM(CASE WHEN
+          EXTRACT_ARG(arg_set_id, 'launch.grid_size.x') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'launch.grid_size.y') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'launch.grid_size.z') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'launch.workgroup_size.x') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'launch.workgroup_size.y') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'launch.workgroup_size.z') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'registers_per_thread') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'shared_mem_static') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'shared_mem_dynamic') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'barriers_per_block') IS NOT NULL
+          OR EXTRACT_ARG(arg_set_id, 'waves_per_multiprocessor') IS NOT NULL
+          THEN 1 ELSE 0 END) AS launch_arg_rows
+      FROM compute_rows
+    save_as: data_check
+
+  - id: kernel_summary
+    type: atomic
+    name: "GPU compute kernel timing"
+    condition: "data_check.data[0]?.compute_rows > 0"
+    display:
+      level: key
+      layer: list
+      title: "GPU Compute Kernels"
+      columns:
+        - name: launch_id
+          label: "Launch"
+          type: number
+        - name: kernel
+          label: "Kernel"
+          type: string
+        - name: ugpu
+          label: "GPU"
+          type: number
+        - name: ts
+          label: "Timestamp"
+          type: timestamp
+          unit: ns
+        - name: dur_ns
+          label: "Duration"
+          type: duration
+          unit: ns
+        - name: compute_time_pct
+          label: "Compute Time Share"
+          type: percentage
+          format: percentage
+    sql: |
+      WITH kernels AS (
+        SELECT
+          s.id,
+          s.ts,
+          s.dur,
+          ROW_NUMBER() OVER (ORDER BY s.ts, s.id) AS launch_id,
+          IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) AS ugpu,
+          COALESCE(
+            CAST(EXTRACT_ARG(s.arg_set_id, 'kernel_demangled_name') AS TEXT),
+            CAST(EXTRACT_ARG(s.arg_set_id, 'kernel_name') AS TEXT),
+            s.name
+          ) AS kernel
+        FROM gpu_slice AS s
+        JOIN gpu_track AS t ON s.track_id = t.id
+        WHERE s.render_stage_category = 2
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+          AND (${ugpu} IS NULL OR IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) = ${ugpu})
+      ),
+      input AS (
+        SELECT MIN(MAX(COALESCE(${max_rows|50}, 50), 1), 200) AS max_rows
+      )
+      SELECT
+        launch_id,
+        kernel,
+        ugpu,
+        printf('%d', ts) AS ts,
+        dur AS dur_ns,
+        ROUND(100.0 * dur / NULLIF(SUM(dur) OVER (), 0), 2) AS compute_time_pct
+      FROM kernels
+      ORDER BY dur_ns DESC, launch_id
+      LIMIT (SELECT max_rows FROM input)
+    save_as: kernel_summary
+
+  - id: launch_configuration
+    type: atomic
+    name: "Producer-provided compute launch configuration"
+    optional: true
+    condition: "data_check.data[0]?.launch_arg_rows > 0"
+    display:
+      level: detail
+      layer: list
+      title: "GPU Compute Launch Configuration"
+      columns:
+        - name: launch_id
+          label: "Launch"
+          type: number
+        - name: kernel
+          label: "Kernel"
+          type: string
+        - name: grid_x
+          label: "Grid X"
+          type: number
+        - name: grid_y
+          label: "Grid Y"
+          type: number
+        - name: grid_z
+          label: "Grid Z"
+          type: number
+        - name: workgroup_x
+          label: "Workgroup X"
+          type: number
+        - name: workgroup_y
+          label: "Workgroup Y"
+          type: number
+        - name: workgroup_z
+          label: "Workgroup Z"
+          type: number
+        - name: workgroup_threads
+          label: "Threads / Workgroup"
+          type: number
+        - name: total_threads
+          label: "Total Threads"
+          type: number
+        - name: registers_per_thread
+          label: "Registers / Thread"
+          type: number
+        - name: shared_mem_static_bytes
+          label: "Static Shared Memory"
+          type: bytes
+        - name: shared_mem_dynamic_bytes
+          label: "Dynamic Shared Memory"
+          type: bytes
+        - name: barriers_per_block
+          label: "Barriers / Block"
+          type: number
+        - name: waves_per_multiprocessor
+          label: "Waves / Multiprocessor"
+          type: number
+    sql: |
+      WITH launches AS (
+        SELECT
+          s.id,
+          ROW_NUMBER() OVER (ORDER BY s.ts, s.id) AS launch_id,
+          COALESCE(
+            CAST(EXTRACT_ARG(s.arg_set_id, 'kernel_demangled_name') AS TEXT),
+            CAST(EXTRACT_ARG(s.arg_set_id, 'kernel_name') AS TEXT),
+            s.name
+          ) AS kernel,
+          EXTRACT_ARG(s.arg_set_id, 'launch.grid_size.x') AS grid_x,
+          EXTRACT_ARG(s.arg_set_id, 'launch.grid_size.y') AS grid_y,
+          EXTRACT_ARG(s.arg_set_id, 'launch.grid_size.z') AS grid_z,
+          EXTRACT_ARG(s.arg_set_id, 'launch.workgroup_size.x') AS workgroup_x,
+          EXTRACT_ARG(s.arg_set_id, 'launch.workgroup_size.y') AS workgroup_y,
+          EXTRACT_ARG(s.arg_set_id, 'launch.workgroup_size.z') AS workgroup_z,
+          EXTRACT_ARG(s.arg_set_id, 'registers_per_thread') AS registers_per_thread,
+          EXTRACT_ARG(s.arg_set_id, 'shared_mem_static') AS shared_mem_static_bytes,
+          EXTRACT_ARG(s.arg_set_id, 'shared_mem_dynamic') AS shared_mem_dynamic_bytes,
+          EXTRACT_ARG(s.arg_set_id, 'barriers_per_block') AS barriers_per_block,
+          EXTRACT_ARG(s.arg_set_id, 'waves_per_multiprocessor') AS waves_per_multiprocessor
+        FROM gpu_slice AS s
+        JOIN gpu_track AS t ON s.track_id = t.id
+        WHERE s.render_stage_category = 2
+          AND s.dur > 0
+          AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+          AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+          AND (${ugpu} IS NULL OR IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) = ${ugpu})
+      ),
+      input AS (
+        SELECT MIN(MAX(COALESCE(${max_rows|50}, 50), 1), 200) AS max_rows
+      )
+      SELECT
+        launch_id,
+        kernel,
+        grid_x,
+        grid_y,
+        grid_z,
+        workgroup_x,
+        workgroup_y,
+        workgroup_z,
+        CASE WHEN workgroup_x > 0 AND workgroup_y > 0 AND workgroup_z > 0
+               AND 1.0 * workgroup_x * workgroup_y * workgroup_z <= 9223372036854775807.0
+          THEN CAST(workgroup_x * workgroup_y * workgroup_z AS INTEGER) END AS workgroup_threads,
+        CASE WHEN grid_x > 0 AND grid_y > 0 AND grid_z > 0
+               AND workgroup_x > 0 AND workgroup_y > 0 AND workgroup_z > 0
+               AND 1.0 * grid_x * grid_y * grid_z * workgroup_x * workgroup_y * workgroup_z
+                 <= 9223372036854775807.0
+          THEN CAST(grid_x * grid_y * grid_z * workgroup_x * workgroup_y * workgroup_z AS INTEGER)
+        END AS total_threads,
+        registers_per_thread,
+        shared_mem_static_bytes,
+        shared_mem_dynamic_bytes,
+        barriers_per_block,
+        waves_per_multiprocessor
+      FROM launches
+      WHERE grid_x IS NOT NULL OR grid_y IS NOT NULL OR grid_z IS NOT NULL
+        OR workgroup_x IS NOT NULL OR workgroup_y IS NOT NULL OR workgroup_z IS NOT NULL
+        OR registers_per_thread IS NOT NULL OR shared_mem_static_bytes IS NOT NULL
+        OR shared_mem_dynamic_bytes IS NOT NULL OR barriers_per_block IS NOT NULL
+        OR waves_per_multiprocessor IS NOT NULL
+      ORDER BY launch_id
+      LIMIT (SELECT max_rows FROM input)
+    save_as: launch_configuration
+
+  - id: no_compute_contract
+    type: atomic
+    name: "No GPU compute kernels"
+    optional: true
+    condition: "data_check.data[0]?.compute_rows === 0"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU Compute Availability"
+      columns:
+        - name: status
+          label: "Status"
+          type: string
+        - name: limitation
+          label: "Limitation"
+          type: string
+    sql: |
+      SELECT
+        'no_compute_kernels' AS status,
+        'No positive-duration GPU render-stage rows were categorized as COMPUTE in the selected range.' AS limitation
+    save_as: no_compute_contract
+
+  - id: missing_launch_args_contract
+    type: atomic
+    name: "Compute launch arguments unavailable"
+    optional: true
+    condition: "data_check.data[0]?.compute_rows > 0 && data_check.data[0]?.launch_arg_rows === 0"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU Compute Launch Arguments"
+      columns:
+        - name: status
+          label: "Status"
+          type: string
+        - name: limitation
+          label: "Limitation"
+          type: string
+    sql: |
+      SELECT
+        'compute_kernels_without_launch_args' AS status,
+        'Compute kernels are present, but their producer did not emit grid, workgroup, or typed launch arguments.' AS limitation
+    save_as: missing_launch_args_contract
+
+output:
+  format: structured
+  fields:
+    - name: kernel_summary
+      description: "Positive-duration vendor-neutral GPU compute kernel timing evidence"
+    - name: launch_configuration
+      description: "Producer-provided grid, workgroup, register, shared-memory, barrier, and wave arguments"
+    - name: limitation_contract
+      description: "Explicit distinction between absent kernels and omitted launch metadata"

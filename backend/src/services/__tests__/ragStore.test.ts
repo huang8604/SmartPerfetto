@@ -6,13 +6,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import {describe, it, expect, beforeEach, afterEach} from '@jest/globals';
+import {describe, it, expect, beforeEach, afterEach, jest} from '@jest/globals';
 
-import {RagStore, ragStoreRequiresLicense} from '../ragStore';
+import {RagStore, getDefaultRagStore, ragStoreRequiresLicense} from '../ragStore';
 import type {RagChunk} from '../../types/sparkContracts';
 
 let tmpDir: string;
 let storagePath: string;
+const PRIVATE_SCOPE = {tenantId: 'tenant-a', workspaceId: 'workspace-a', userId: 'user-a'};
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rag-store-test-'));
@@ -37,6 +38,10 @@ function makeChunk(overrides: Partial<RagChunk> = {}): RagChunk {
 }
 
 describe('RagStore — basic CRUD', () => {
+  it('shares one default store between admin ingestion and runtime lookup', () => {
+    expect(getDefaultRagStore()).toBe(getDefaultRagStore());
+  });
+
   it('adds and reads back a chunk', () => {
     const store = new RagStore(storagePath);
     const chunk = makeChunk({chunkId: 'a'});
@@ -82,6 +87,16 @@ describe('RagStore — license gate', () => {
     ).toThrow(/license/i);
   });
 
+  it('rejects Android Internals Wiki chunks without a license', () => {
+    const store = new RagStore(storagePath);
+    expect(() =>
+      store.addChunk(makeChunk({
+        chunkId: 'wiki-a',
+        kind: 'android_internals_wiki' as RagChunk['kind'],
+      })),
+    ).toThrow(/license/i);
+  });
+
   it('accepts aosp chunks with Apache-2.0 license', () => {
     const store = new RagStore(storagePath);
     expect(() =>
@@ -112,14 +127,95 @@ describe('RagStore — persistence', () => {
   it('persists across instances at the same path', () => {
     const store1 = new RagStore(storagePath);
     store1.addChunk(makeChunk({chunkId: 'a', snippet: 'persisted'}));
+    store1.flush();
 
     const store2 = new RagStore(storagePath);
     expect(store2.getChunk('a')?.snippet).toBe('persisted');
   });
 
+  it('validates bulk storage incrementally and serializes the full corpus once at flush', () => {
+    const store = new RagStore(storagePath);
+    const serializeSpy = jest.spyOn(
+      store as unknown as {serializeWithinStorageBudget(chunks: readonly RagChunk[]): string},
+      'serializeWithinStorageBudget',
+    );
+
+    for (let batch = 0; batch < 4; batch++) {
+      store.addChunks(Array.from({length: 25}, (_, offset) => makeChunk({
+        chunkId: `bulk-${batch}-${offset}`,
+        snippet: `batch ${batch}, item ${offset}`,
+      })));
+    }
+
+    expect(serializeSpy).not.toHaveBeenCalled();
+    store.flush();
+    expect(serializeSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fs.readFileSync(storagePath, 'utf-8')).chunks).toHaveLength(100);
+  });
+
+  it('merges interleaved writers instead of overwriting a stale in-memory snapshot', () => {
+    const first = new RagStore(storagePath);
+    const second = new RagStore(storagePath);
+    first.addChunk(makeChunk({chunkId: 'first', snippet: 'first writer'}));
+    second.addChunk(makeChunk({chunkId: 'second', snippet: 'second writer'}));
+
+    first.flush();
+    second.flush();
+
+    expect(new RagStore(storagePath).listChunks().map(chunk => chunk.chunkId).sort())
+      .toEqual(['first', 'second']);
+  });
+
+  it('refreshes a warm reader after another instance adds and removes chunks', () => {
+    const reader = new RagStore(storagePath);
+    const writer = new RagStore(storagePath);
+    expect(reader.listChunks()).toEqual([]);
+
+    writer.addChunk(makeChunk({chunkId: 'cross-process', snippet: 'fresh'}));
+    writer.flush();
+    expect(reader.listChunks().map(chunk => chunk.chunkId)).toEqual(['cross-process']);
+
+    writer.removeChunk('cross-process');
+    expect(reader.listChunks()).toEqual([]);
+  });
+
+  it.each([
+    ['corrupted JSON', 'not-json{'],
+    ['an unsupported schema', JSON.stringify({schemaVersion: 99, chunks: []})],
+  ])('fails closed when a warm private reader sees %s', (_label, invalidContent) => {
+    const writer = new RagStore(storagePath);
+    writer.addChunk(makeChunk({
+      chunkId: 'private-warm-cache',
+      kind: 'android_internals_wiki',
+      uri: 'android-internals-wiki://source-a/private-warm-cache',
+      snippet: 'PRIVATE_WARM_CACHE_CANARY Handler callback',
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry',
+      knowledgeSourceId: 'source-a',
+      sourceGeneration: 'gen-1',
+    }), PRIVATE_SCOPE);
+    writer.flush();
+
+    const reader = new RagStore(storagePath);
+    const searchOptions = {
+      kinds: ['android_internals_wiki'] as RagChunk['kind'][],
+      knowledgeSourceIds: ['source-a'],
+      activeSourceGenerations: {'source-a': 'gen-1'},
+      scope: PRIVATE_SCOPE,
+    };
+    expect(reader.search('Handler', searchOptions).results).toHaveLength(1);
+
+    fs.writeFileSync(storagePath, invalidContent, 'utf-8');
+
+    expect(reader.search('Handler', searchOptions).results).toEqual([]);
+    expect(JSON.stringify(reader.listChunks({scope: PRIVATE_SCOPE})))
+      .not.toContain('PRIVATE_WARM_CACHE_CANARY');
+  });
+
   it('persisted file is valid JSON with schemaVersion 2', () => {
     const store = new RagStore(storagePath);
     store.addChunk(makeChunk({chunkId: 'a'}));
+    store.flush();
     const raw = fs.readFileSync(storagePath, 'utf-8');
     const parsed = JSON.parse(raw);
     expect(parsed.schemaVersion).toBe(2);
@@ -131,15 +227,55 @@ describe('RagStore — persistence', () => {
     expect(store.getChunk('a')).toBeUndefined();
   });
 
+  it('fails closed before reading an oversized local store', () => {
+    fs.writeFileSync(storagePath, 'x'.repeat(1_024), 'utf8');
+    const store = new RagStore(storagePath, {
+      localStorageMaxBytes: 128,
+    });
+
+    const result = store.search('anything');
+
+    expect(result.results).toEqual([]);
+    expect(result.unsupportedReason).toContain('local_rag_storage_budget_exceeded');
+  });
+
+  it('rejects a local write that would exceed the complete store chunk cap', () => {
+    const store = new RagStore(storagePath, {
+      localStorageMaxChunks: 2,
+    });
+    store.addChunks([
+      makeChunk({chunkId: 'bounded-1'}),
+      makeChunk({chunkId: 'bounded-2'}),
+    ]);
+
+    expect(() => store.addChunk(makeChunk({chunkId: 'bounded-3'})))
+      .toThrow('chunk count 3 exceeds 2');
+    expect(store.listChunks().map(chunk => chunk.chunkId))
+      .toEqual(['bounded-1', 'bounded-2']);
+  });
+
   it('survives a corrupted on-disk JSON without losing the file', () => {
     fs.writeFileSync(storagePath, 'not-json{', 'utf-8');
     const store = new RagStore(storagePath);
     expect(store.getChunk('a')).toBeUndefined();
     // Corrupted file is preserved for operator inspection.
     expect(fs.existsSync(storagePath)).toBe(true);
-    // After recovery the store still accepts new writes.
+    // Pending writes can be staged in memory but cannot overwrite the corrupt
+    // operator artifact until it is explicitly repaired.
     store.addChunk(makeChunk({chunkId: 'a'}));
     expect(store.getChunk('a')).toBeDefined();
+    expect(() => store.flush()).toThrow('rag_store_invalid_storage_requires_recovery');
+    expect(fs.readFileSync(storagePath, 'utf-8')).toBe('not-json{');
+  });
+
+  it('does not overwrite an unsupported schema during a later flush', () => {
+    const original = JSON.stringify({schemaVersion: 99, chunks: [{chunkId: 'operator-data'}]});
+    fs.writeFileSync(storagePath, original, 'utf-8');
+    const store = new RagStore(storagePath);
+
+    store.addChunk(makeChunk({chunkId: 'pending'}));
+    expect(() => store.flush()).toThrow('rag_store_invalid_storage_requires_recovery');
+    expect(fs.readFileSync(storagePath, 'utf-8')).toBe(original);
   });
 
   it('atomic write does not leave the temp file around on success', () => {
@@ -209,6 +345,45 @@ describe('RagStore — search', () => {
     expect(result.results[0].chunkId).toBe('b1');
   });
 
+  it('matches Chinese knowledge with Unicode-aware tokens', () => {
+    const store = new RagStore(storagePath);
+    store.addChunk(makeChunk({
+      chunkId: 'zh-handler',
+      title: 'Looper 与消息队列',
+      snippet: '主线程消息队列阻塞会推迟 Handler 分发',
+    }));
+
+    const result = store.search('消息队列阻塞');
+
+    expect(result.results[0]?.chunkId).toBe('zh-handler');
+  });
+
+  it.each([
+    ['camelCase', 'calculateFrameBudget'],
+    ['snake_case', 'calculate_frame_budget'],
+  ])('matches natural-language words against %s source identifiers', (_label, symbol) => {
+    const store = new RagStore(storagePath);
+    store.addChunk(makeChunk({
+      chunkId: `identifier-${_label}`,
+      snippet: 'unrelated implementation details',
+      symbol,
+    }));
+
+    expect(store.search('frame budget').results[0]?.chunkId).toBe(`identifier-${_label}`);
+  });
+
+  it('splits adjacent Latin and Han runs for mixed Android queries', () => {
+    const store = new RagStore(storagePath);
+    store.addChunk(makeChunk({
+      chunkId: 'mixed-handler',
+      title: 'Android消息队列',
+      snippet: 'Looper分发callback',
+    }));
+
+    expect(store.search('消息队列').results[0]?.chunkId).toBe('mixed-handler');
+    expect(store.search('Android').results[0]?.chunkId).toBe('mixed-handler');
+  });
+
   it('respects topK', () => {
     const store = new RagStore(storagePath);
     seed(store);
@@ -219,12 +394,166 @@ describe('RagStore — search', () => {
     expect(result.results).toHaveLength(1);
   });
 
+  it('bounds search amplification and rejects malformed search input', () => {
+    const store = new RagStore(storagePath);
+    for (let index = 0; index < 150; index++) {
+      store.addChunk(makeChunk({
+        chunkId: `bounded-${index}`,
+        snippet: `binder transaction candidate ${index}`,
+      }));
+    }
+
+    expect(store.search('binder transaction', {topK: 1_000_000_000}).results)
+      .toHaveLength(100);
+    expect(() => store.search('binder', {topK: Number.NaN})).toThrow('positive integer');
+    expect(() => store.search('binder', {topK: -1})).toThrow('positive integer');
+    expect(() => store.search('x'.repeat(8 * 1024 + 1))).toThrow('byte search limit');
+    expect(() => store.search('binder', {
+      codebaseIds: Array.from({length: 101}, (_, index) => `codebase-${index}`),
+    })).toThrow('item search limit');
+  });
+
   it('respects the kind filter', () => {
     const store = new RagStore(storagePath);
     seed(store);
     const result = store.search('composition', {kinds: ['aosp']});
     expect(result.results.length).toBeGreaterThan(0);
     expect(result.results.every(r => r.chunk?.kind === 'aosp')).toBe(true);
+  });
+
+  it('searches only the request-scoped active private knowledge generation', () => {
+    const store = new RagStore(storagePath);
+    const wiki = (overrides: Record<string, unknown>) => makeChunk({
+      kind: 'android_internals_wiki' as RagChunk['kind'],
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry' as RagChunk['registryOrigin'],
+      snippet: '消息队列 Handler callback',
+      ...(overrides as Partial<RagChunk>),
+    });
+    store.addChunk(
+      wiki({chunkId: 'old', knowledgeSourceId: 'source-a', sourceGeneration: 'gen-1'}),
+      PRIVATE_SCOPE,
+    );
+    store.addChunk(
+      wiki({chunkId: 'new', knowledgeSourceId: 'source-a', sourceGeneration: 'gen-2'}),
+      PRIVATE_SCOPE,
+    );
+    store.addChunk(
+      wiki({chunkId: 'other', knowledgeSourceId: 'source-b', sourceGeneration: 'gen-2'}),
+      PRIVATE_SCOPE,
+    );
+
+    const result = store.search('Handler', {
+      kinds: ['android_internals_wiki' as RagChunk['kind']],
+      knowledgeSourceIds: ['source-a'],
+      activeSourceGenerations: {'source-a': 'gen-2'},
+      scope: PRIVATE_SCOPE,
+    });
+
+    expect(result.results.map(hit => hit.chunkId)).toEqual(['new']);
+  });
+
+  it('removes every generation for one private knowledge source in one operation', () => {
+    const store = new RagStore(storagePath);
+    const wiki = (chunkId: string, sourceId: string, generation: string) => makeChunk({
+      chunkId,
+      kind: 'android_internals_wiki',
+      uri: `android-internals-wiki://${sourceId}/${chunkId}`,
+      snippet: 'Handler callback',
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry',
+      knowledgeSourceId: sourceId,
+      sourceGeneration: generation,
+    });
+    store.addChunk(wiki('old', 'source-a', 'gen-1'), PRIVATE_SCOPE);
+    store.addChunk(wiki('new', 'source-a', 'gen-2'), PRIVATE_SCOPE);
+    store.addChunk(wiki('other', 'source-b', 'gen-1'), PRIVATE_SCOPE);
+    store.flush();
+
+    expect(store.removeKnowledgeSourceChunks('source-a', PRIVATE_SCOPE)).toBe(2);
+    expect(store.listChunks({scope: PRIVATE_SCOPE}).map(chunk => chunk.chunkId)).toEqual(['other']);
+  });
+
+  it('removes only inactive generations for one private knowledge source', () => {
+    const store = new RagStore(storagePath);
+    const wiki = (chunkId: string, sourceId: string, generation: string) => makeChunk({
+      chunkId,
+      kind: 'android_internals_wiki',
+      uri: `android-internals-wiki://${sourceId}/${chunkId}`,
+      snippet: 'Handler callback',
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry',
+      knowledgeSourceId: sourceId,
+      sourceGeneration: generation,
+    });
+    store.addChunk(wiki('old', 'source-a', 'gen-1'), PRIVATE_SCOPE);
+    store.addChunk(wiki('active', 'source-a', 'gen-2'), PRIVATE_SCOPE);
+    store.addChunk(wiki('other', 'source-b', 'gen-1'), PRIVATE_SCOPE);
+    store.flush();
+
+    expect(store.removeInactiveKnowledgeSourceChunks('source-a', 'gen-2', PRIVATE_SCOPE)).toBe(1);
+    expect(store.listChunks({scope: PRIVATE_SCOPE}).map(chunk => chunk.chunkId)).toEqual([
+      'active',
+      'other',
+    ]);
+  });
+
+  it('removes only an exact private-chunk snapshot during fenced cleanup', () => {
+    const store = new RagStore(storagePath);
+    const wiki = (chunkId: string, sourceId: string, generation: string) => makeChunk({
+      chunkId,
+      kind: 'android_internals_wiki',
+      uri: `android-internals-wiki://${sourceId}/${chunkId}`,
+      snippet: 'Handler callback',
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry',
+      knowledgeSourceId: sourceId,
+      sourceGeneration: generation,
+    });
+    store.addChunk(wiki('snapshot-old', 'source-a', 'gen-1'), PRIVATE_SCOPE);
+    store.addChunk(wiki('later-active', 'source-a', 'gen-2'), PRIVATE_SCOPE);
+    store.addChunk(wiki('same-id-other-source', 'source-b', 'gen-1'), PRIVATE_SCOPE);
+    store.flush();
+    const persist = jest.spyOn(store as any, 'persist');
+
+    expect(store.removeKnowledgeSourceChunkIds(
+      'source-a',
+      ['snapshot-old', 'same-id-other-source'],
+      PRIVATE_SCOPE,
+    )).toBe(1);
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(store.listChunks({scope: PRIVATE_SCOPE}).map(chunk => chunk.chunkId)).toEqual([
+      'later-active',
+      'same-id-other-source',
+    ]);
+  });
+
+  it('fails closed across tenant, workspace, and user scope in the legacy store', () => {
+    const store = new RagStore(storagePath);
+    const chunk = makeChunk({
+      chunkId: 'private-a',
+      kind: 'android_internals_wiki',
+      uri: 'android-internals-wiki://source-a/private-a',
+      snippet: 'PRIVATE_SCOPE_CANARY Handler callback',
+      license: 'CC-BY-NC-SA-4.0',
+      registryOrigin: 'external_knowledge_registry',
+      knowledgeSourceId: 'source-a',
+      sourceGeneration: 'gen-1',
+    });
+    store.addChunk(chunk, PRIVATE_SCOPE);
+
+    const otherUser = {...PRIVATE_SCOPE, userId: 'user-b'};
+    expect(store.getChunk('private-a', PRIVATE_SCOPE)?.snippet).toContain('PRIVATE_SCOPE_CANARY');
+    expect(store.getChunk('private-a', otherUser)).toBeUndefined();
+    expect(store.getChunk('private-a')).toBeUndefined();
+    expect(store.listChunks({scope: otherUser})).toEqual([]);
+    expect(store.getStats(otherUser).android_internals_wiki.chunkCount).toBe(0);
+    expect(store.search('Handler', {
+      kinds: ['android_internals_wiki'],
+      knowledgeSourceIds: ['source-a'],
+      activeSourceGenerations: {'source-a': 'gen-1'},
+      scope: otherUser,
+    }).results).toEqual([]);
   });
 
   it('supports codebase metadata filters and rank tiers', () => {
@@ -236,11 +565,12 @@ describe('RagStore — search', () => {
       snippet: 'simulate async network load during startup',
       codebaseId: 'codebase-1',
       registryOrigin: 'codebase_registry',
+      sourceGeneration: 'codebase_1',
       filePath: 'launch-aosp/src/main/java/com/example/launch/aosp/MainActivity.kt',
       lineRange: {start: 22, end: 140},
       symbol: 'MainActivity',
       language: 'kotlin',
-    }));
+    }), PRIVATE_SCOPE);
     store.addChunk(makeChunk({
       chunkId: 'app-load',
       kind: 'app_source',
@@ -248,17 +578,20 @@ describe('RagStore — search', () => {
       snippet: 'Application init blocking load simulator',
       codebaseId: 'codebase-1',
       registryOrigin: 'codebase_registry',
+      sourceGeneration: 'codebase_1',
       filePath: 'launch-common/src/main/java/com/example/launch/common/LoadSimulator.kt',
       lineRange: {start: 1, end: 80},
       symbol: 'LoadSimulator',
       language: 'kotlin',
-    }));
+    }), PRIVATE_SCOPE);
 
     const result = store.search('startup load', {
       kinds: ['app_source'],
       codebaseIds: ['codebase-1'],
+      activeCodebaseGenerations: {'codebase-1': 'codebase_1'},
       symbolExact: 'MainActivity',
       languages: ['kotlin'],
+      scope: PRIVATE_SCOPE,
     });
 
     expect(result.results[0].chunkId).toBe('app-main');
@@ -311,6 +644,28 @@ describe('RagStore — search', () => {
     const result = store.search('completely unrelated zzzqxzqq');
     expect(result.unsupportedReason).toBeUndefined();
     expect(result.results).toHaveLength(0);
+  });
+
+  it('rejects an aggregate local selection before unbounded tokenization', () => {
+    const bounded = new RagStore(path.join(tmpDir, 'bounded-rag.json'), {
+      localSearchMaxChunks: 2,
+      localSearchMaxBytes: 1_024,
+      localStorageMaxChunks: 10,
+      localStorageMaxBytes: 1024 * 1024,
+    });
+    bounded.addChunks([0, 1, 2].map(index => ({
+      chunkId: `bounded-${index}`,
+      kind: 'project_memory' as const,
+      uri: `memory://bounded/${index}`,
+      snippet: `shared performance token ${index}`,
+      indexedAt: index + 1,
+    })));
+
+    const result = bounded.search('performance');
+
+    expect(result.results).toEqual([]);
+    expect(result.unsupportedReason).toContain('local_rag_search_budget_exceeded');
+    expect(result.unsupportedReason).toContain('select fewer codebases/knowledge sources');
   });
 
   it('search result carries spark provenance and the query string', () => {

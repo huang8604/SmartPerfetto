@@ -8,7 +8,7 @@ import * as path from 'path';
 
 import {afterEach, beforeEach, describe, expect, it} from '@jest/globals';
 
-import {CodebaseRegistry} from '../codebase/codebaseRegistry';
+import {activeCodebaseGeneration, CodebaseRegistry} from '../codebase/codebaseRegistry';
 import {PathSecurityGate} from '../codebase/pathSecurityGate';
 import {AospSourceIngester} from '../rag/aospSourceIngester';
 import {KernelSourceIngester} from '../rag/kernelSourceIngester';
@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 describe('KernelSourceIngester', () => {
-  it('indexes vendor-isolated kernel chunks with SPDX license and line metadata', () => {
+  it('indexes vendor-isolated kernel chunks with SPDX license and line metadata', async () => {
     fs.mkdirSync(path.join(sourceRoot, 'drivers/android'), {recursive: true});
     fs.writeFileSync(path.join(sourceRoot, 'drivers/android/binder.c'), [
       '// SPDX-License-Identifier: GPL-2.0-only',
@@ -52,7 +52,7 @@ describe('KernelSourceIngester', () => {
       sendToProvider: true,
     });
 
-    const result = new KernelSourceIngester(store, registry, gate).ingest(ref.codebaseId);
+    const result = await new KernelSourceIngester(store, registry, gate).ingest(ref.codebaseId);
 
     expect(result.errors).toHaveLength(0);
     expect(result.chunksAdded).toBeGreaterThan(0);
@@ -61,6 +61,10 @@ describe('KernelSourceIngester', () => {
       codebaseIds: [ref.codebaseId],
       vendor: 'mtk',
       pathPrefix: 'drivers/android',
+      activeCodebaseGenerations: {
+        [ref.codebaseId]: activeCodebaseGeneration(registry.get(ref.codebaseId)!),
+      },
+      scope: ref,
     });
     expect(search.results[0].chunk).toMatchObject({
       kind: 'kernel_source',
@@ -72,7 +76,7 @@ describe('KernelSourceIngester', () => {
     });
   });
 
-  it('fails closed when vendor or path filter is missing', () => {
+  it('fails closed when vendor or path filter is missing', async () => {
     const noVendor = registry.register({
       kind: 'kernel_source',
       displayName: 'kernel',
@@ -80,7 +84,8 @@ describe('KernelSourceIngester', () => {
       rootRealpath: sourceRoot,
       pathFilters: ['drivers/android'],
     });
-    expect(() => new KernelSourceIngester(store, registry, gate).ingest(noVendor.codebaseId)).toThrow(/requires vendor/);
+    await expect(new KernelSourceIngester(store, registry, gate).ingest(noVendor.codebaseId))
+      .rejects.toThrow(/requires vendor/);
 
     const noPathFilter = registry.register({
       kind: 'kernel_source',
@@ -89,12 +94,34 @@ describe('KernelSourceIngester', () => {
       rootRealpath: sourceRoot,
       vendor: 'mtk',
     });
-    expect(() => new KernelSourceIngester(store, registry, gate).ingest(noPathFilter.codebaseId)).toThrow(/requires pathFilters/);
+    await expect(new KernelSourceIngester(store, registry, gate).ingest(noPathFilter.codebaseId))
+      .rejects.toThrow(/requires pathFilters/);
   });
 });
 
 describe('AospSourceIngester', () => {
-  it('indexes registered AOSP/native source with codebase metadata', () => {
+  it('fails closed when licensed-source provenance is incomplete', async () => {
+    const noLicense = registry.register({
+      kind: 'aosp',
+      displayName: 'aosp-without-license',
+      rootPath: sourceRoot,
+      rootRealpath: sourceRoot,
+    });
+    await expect(new AospSourceIngester(store, registry, gate).ingest(noLicense.codebaseId))
+      .rejects.toThrow(/requires licenseTag/);
+
+    const noVendor = registry.register({
+      kind: 'oem_sdk',
+      displayName: 'oem-sdk-without-vendor',
+      rootPath: sourceRoot,
+      rootRealpath: sourceRoot,
+      licenseTag: 'LicenseRef-OEM-SDK',
+    });
+    await expect(new AospSourceIngester(store, registry, gate).ingest(noVendor.codebaseId))
+      .rejects.toThrow(/requires vendor/);
+  });
+
+  it('indexes registered AOSP/native source with codebase metadata', async () => {
     fs.mkdirSync(path.join(sourceRoot, 'frameworks/base/libs/hwui'), {recursive: true});
     fs.writeFileSync(path.join(sourceRoot, 'frameworks/base/libs/hwui/DrawFrameTask.cpp'), [
       'void DrawFrameTask::run() {',
@@ -113,21 +140,81 @@ describe('AospSourceIngester', () => {
       sendToProvider: true,
     });
 
-    const result = new AospSourceIngester(store, registry, gate).ingest(ref.codebaseId);
+    const result = await new AospSourceIngester(store, registry, gate).ingest(ref.codebaseId);
 
     expect(result.errors).toHaveLength(0);
     const hit = store.search('DrawFrameTask run', {
       kinds: ['aosp'],
       codebaseIds: [ref.codebaseId],
       buildId: 'build-aosp',
+      activeCodebaseGenerations: {
+        [ref.codebaseId]: activeCodebaseGeneration(registry.get(ref.codebaseId)!),
+      },
+      scope: ref,
     }).results[0].chunk;
+    expect(hit).toBeDefined();
     expect(hit).toMatchObject({
       kind: 'aosp',
       codebaseId: ref.codebaseId,
       registryOrigin: 'codebase_registry',
       filePath: 'frameworks/base/libs/hwui/DrawFrameTask.cpp',
-      commitHash: 'abc123',
+      commitProvenance: 'content_only',
     });
+    expect(hit!.commitHash).toBeUndefined();
+    expect(hit!.contentFingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 
+describe('native-picker root authorization', () => {
+  it('reuses the selected root for kernel and licensed-source reindex only', async () => {
+    fs.mkdirSync(path.join(sourceRoot, 'drivers/android'), {recursive: true});
+    fs.writeFileSync(
+      path.join(sourceRoot, 'drivers/android/binder.c'),
+      '// SPDX-License-Identifier: GPL-2.0-only\nint binder_native(void) { return 0; }\n',
+    );
+    fs.mkdirSync(path.join(sourceRoot, 'frameworks/base'), {recursive: true});
+    fs.writeFileSync(
+      path.join(sourceRoot, 'frameworks/base/Native.cpp'),
+      'void native_aosp(void) {}\n',
+    );
+    const selectedGate = new PathSecurityGate({
+      allowlistRoots: [path.join(tmpDir, 'configured-only')],
+    });
+    const kernel = registry.register({
+      kind: 'kernel_source',
+      displayName: 'Selected kernel',
+      rootPath: sourceRoot,
+      rootAuthorization: 'native_picker',
+      vendor: 'qualcomm',
+      pathFilters: ['drivers/android'],
+    });
+    const aosp = registry.register({
+      kind: 'aosp',
+      displayName: 'Selected AOSP',
+      rootPath: sourceRoot,
+      rootAuthorization: 'native_picker',
+      licenseTag: 'Apache-2.0',
+      pathFilters: ['frameworks/base'],
+    });
+
+    const kernelResult = await new KernelSourceIngester(
+      store,
+      registry,
+      selectedGate,
+    ).ingest(kernel.codebaseId);
+    expect(kernelResult.filesProcessed).toBe(1);
+    expect(kernelResult.chunksAdded).toBeGreaterThan(0);
+
+    const aospResult = await new AospSourceIngester(
+      store,
+      registry,
+      selectedGate,
+    ).ingest(aosp.codebaseId);
+    expect(aospResult.filesProcessed).toBe(1);
+    expect(aospResult.chunksAdded).toBeGreaterThan(0);
+    await expect(selectedGate.preview(sourceRoot)).resolves.toMatchObject({
+      blocked: true,
+      blockedReason: 'root_outside_allowlist',
+    });
+  });
+});

@@ -30,6 +30,7 @@ import type { IdentityResolutionV1 } from '../types/identityContract';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
 import type { CodeLookupSummary } from '../services/codebase/codeLookupLedger';
 import type { AgentRuntimeKind } from '../services/providerManager/types';
+import type {OutputLanguage} from './outputLanguage';
 
 export type ComparisonSourceKind = 'raw_trace_pair' | 'analysis_result_snapshots';
 
@@ -167,6 +168,16 @@ export interface OpenCodeSnapshotEngineState {
   opaque?: OpenCodeOpaqueState;
 }
 
+export interface QoderOpaqueState {
+  version: 1;
+  sdkSessionId?: string;
+  degradedReason?: ThirdPartyOpaqueDegradedReason;
+}
+
+export interface QoderSnapshotEngineState {
+  opaque?: QoderOpaqueState;
+}
+
 export type SnapshotEngineState =
   | {
       kind: 'claude-agent-sdk';
@@ -197,6 +208,15 @@ export type SnapshotEngineState =
       claude?: never;
       openai?: never;
       pi?: never;
+    }
+  | {
+      kind: 'qoder-agent-sdk';
+      provider: SnapshotEngineProviderState;
+      qoder: QoderSnapshotEngineState;
+      claude?: never;
+      openai?: never;
+      pi?: never;
+      opencode?: never;
     };
 
 interface EngineProviderStateInput {
@@ -259,6 +279,18 @@ export function createOpenCodeSnapshotEngineState(
     kind: 'opencode',
     provider: createSnapshotEngineProviderState(input),
     opencode: {
+      opaque: input.opaque,
+    },
+  };
+}
+
+export function createQoderSnapshotEngineState(
+  input: EngineProviderStateInput & QoderSnapshotEngineState = {},
+): SnapshotEngineState {
+  return {
+    kind: 'qoder-agent-sdk',
+    provider: createSnapshotEngineProviderState(input),
+    qoder: {
       opaque: input.opaque,
     },
   };
@@ -372,6 +404,23 @@ export function getOpenCodeSnapshotEngineState(
   };
 }
 
+export function getQoderSnapshotEngineState(
+  snapshot: Pick<SessionStateSnapshot, 'engineState'>,
+): QoderSnapshotEngineState | undefined {
+  if (snapshot.engineState?.kind !== 'qoder-agent-sdk') return undefined;
+  const opaque = snapshot.engineState.qoder.opaque;
+  if (!isRecord(opaque) || opaque.version !== 1) return undefined;
+  return {
+    opaque: {
+      version: 1,
+      sdkSessionId: typeof opaque.sdkSessionId === 'string' ? opaque.sdkSessionId : undefined,
+      degradedReason: typeof opaque.degradedReason === 'string'
+        ? opaque.degradedReason as ThirdPartyOpaqueDegradedReason
+        : undefined,
+    },
+  };
+}
+
 export function normalizeSessionStateSnapshot(
   snapshot: SessionStateSnapshot,
 ): SessionStateSnapshot {
@@ -457,6 +506,8 @@ export interface SessionStateSnapshot {
   snapshotTimestamp: number;
   sessionId: string;
   traceId: string;
+  /** Presentation language pinned to this session/runtime conversation. */
+  outputLanguage?: OutputLanguage;
   /** Reference trace ID for comparison mode — enables session restoration in dual-trace context */
   referenceTraceId?: string;
   /** Source model for comparison mode. Raw dual-trace sessions use raw_trace_pair. */
@@ -522,6 +573,12 @@ export interface SessionStateSnapshot {
   agentRuntimeProviderSnapshotHash?: string | null;
   /** Append-only provider/runtime continuity breaks that forced fresh SDK context. */
   continuityBreaks?: ProviderContinuityBreak[];
+  /** Authorization partition for source/RAG continuation. */
+  analysisContextFingerprint?: string;
+  /** Immutable public Knowledge Pack identity pinned to this analysis session. */
+  androidInternalsPackPin?: import('../services/androidInternalsPack/types').AndroidInternalsPackIdentity;
+  /** Public background citations, kept separate from current-trace evidence. */
+  backgroundKnowledgeReferences?: import('../types/sparkContracts').BackgroundKnowledgeReference[];
   /** Backend-session ancestry when a user-visible session had to bridge to a fresh backend session. */
   lineage?: SessionLineage;
   /** OpenAI Agents SDK history for cross-restart multi-turn continuation. */
@@ -538,7 +595,21 @@ export interface SessionStateSnapshot {
   codebaseSnapshot?: Array<{
     codebaseId: string;
     indexGeneration: number;
+    activeGeneration?: string;
+    contentFingerprint?: string;
+    indexedRevision?: string;
+    indexedDirty?: boolean;
+    commitProvenance?: 'clean_git_revision' | 'dirty_git_worktree' | 'content_only';
     consentHash?: string;
+  }>;
+  /** Explicit external knowledge allowlist and active provenance for this session. */
+  knowledgeSourceIds?: string[];
+  knowledgeSourceSnapshot?: Array<{
+    sourceId: string;
+    indexGeneration: number;
+    activeGeneration?: string;
+    contentFingerprint: string;
+    revision: string;
   }>;
   /** Append-only lookup ledger summary for this session. */
   codeLookupSummary?: CodeLookupSummary;
@@ -565,6 +636,8 @@ export interface SessionStateSnapshot {
  * that live in the AnalysisSession object.
  */
 export interface SessionFieldsForSnapshot {
+  /** Presentation language pinned to this session/runtime conversation. */
+  outputLanguage?: OutputLanguage;
   /** Reference trace ID for comparison mode session identity. */
   referenceTraceId?: string;
   /** Source model for comparison mode. */
@@ -588,14 +661,46 @@ export interface SessionFieldsForSnapshot {
   agentRuntimeProviderSnapshotHash?: string | null;
   /** Append-only provider/runtime continuity breaks that forced fresh SDK context. */
   continuityBreaks?: ProviderContinuityBreak[];
+  analysisContextFingerprint?: string;
+  androidInternalsPackPin?: SessionStateSnapshot['androidInternalsPackPin'];
+  backgroundKnowledgeReferences?: SessionStateSnapshot['backgroundKnowledgeReferences'];
   /** Backend-session ancestry when a user-visible session had to bridge to a fresh backend session. */
   lineage?: SessionLineage;
   codeAwareMode?: CodeAwareMode;
   codebaseIds?: string[];
   codebaseSnapshot?: SessionStateSnapshot['codebaseSnapshot'];
+  knowledgeSourceIds?: string[];
+  knowledgeSourceSnapshot?: SessionStateSnapshot['knowledgeSourceSnapshot'];
   codeLookupSummary?: CodeLookupSummary;
   runSequence: number;
   conversationOrdinal: number;
   activeRun?: SnapshotRunContext;
   lastRun?: SnapshotRunContext;
+}
+
+/** Third-party opaque transcripts are not durable for private source sessions. */
+export function sessionFieldsUsePrivateKnowledge(fields: SessionFieldsForSnapshot): boolean {
+  return Boolean(
+    fields.codebaseIds?.length ||
+    fields.knowledgeSourceIds?.length,
+  );
+}
+
+/**
+ * Private retrieval sessions persist only the verified product result and
+ * deterministic trace evidence. Intermediate model-authored state must not be
+ * replayable after a restart, regardless of the provider runtime in use.
+ */
+export function projectSessionFieldsForDurableSnapshot(
+  fields: SessionFieldsForSnapshot,
+): SessionFieldsForSnapshot {
+  if (!sessionFieldsUsePrivateKnowledge(fields)) return fields;
+  return {
+    ...fields,
+    comparisonReportSection: undefined,
+    conversationSteps: [],
+    agentDialogue: [],
+    agentResponses: [],
+    hypotheses: [],
+  };
 }

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "android-scroll-customer",
+  "kind": "real",
+  "title": "Android 16 customer scroll",
+  "description": "Existing customer scrolling fixture with multiple gesture and jank events.",
+  "scene": "scrolling",
+  "tags": ["android", "scrolling", "customer", "jank"],
+  "aliases": ["scroll-demo-customer-scroll.pftrace"],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "1015ba963c49cd57d08d8997c4c48027026f2d6e41f7eb72b4b1356e39f7af3a",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "16",
+    "api_level": 36,
+    "device": "OPPO PKH110",
+    "build_fingerprint": "OPPO/PKH110/OP5DC1L1:16/AP3A.240617.008/V.2a01376-7328d8-769621:user/release-keys",
+    "compatibility": {"min_api": 36, "max_api": 36}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/scroll-demo-customer-scroll.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

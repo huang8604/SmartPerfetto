@@ -80,6 +80,13 @@ describe('classifyScene with real strategy frontmatter', () => {
     expect(classifyScene('frame drop in this trace')).toBe('scrolling');
   });
 
+  it('keeps live raw trace-pair comparisons out of result-snapshot strategy routing', () => {
+    expect(classifyScene('对比两个 Trace 的启动速度差异')).toBe('startup');
+    expect(classifyScene('对比左右 Trace 的滑动 fps 差异')).toBe('scrolling');
+    expect(classifyScene('对比两个 Trace 的已有分析结果')).toBe('multi_trace_result_comparison');
+    expect(classifyScene('compare analysis results for two snapshots')).toBe('multi_trace_result_comparison');
+  });
+
   it('keeps scene-specific BufferQueue and graphics-memory queries on their stronger scenes', () => {
     expect(classifyScene('滑动卡顿里 BufferQueue release fence 等待')).toBe('scrolling');
     expect(classifyScene('启动阶段 queueBuffer release fence 等待')).toBe('startup');

@@ -1,6 +1,9 @@
 // backend/src/services/providerManager/providerService.ts
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {randomUUID} from 'crypto';
+import os from 'os';
+
 import { uuidv4 } from '../../utils/uuid';
 import logger from '../../utils/logger';
 import { ProviderStore } from './providerStore';
@@ -23,6 +26,12 @@ import {
   sharedKeyShouldUseClaudeAuthToken,
   supportsAgentRuntimeType,
 } from './providerRuntimeMatrix';
+import type {
+  ProviderMutationGenerationVectorV1,
+  ProviderMutationLease,
+  ProviderMutationOwner,
+  ProviderMutationScope,
+} from './providerMutationGeneration';
 
 const SENSITIVE_FIELDS: (keyof ProviderConfig['connection'])[] = [
   'apiKey',
@@ -31,11 +40,54 @@ const SENSITIVE_FIELDS: (keyof ProviderConfig['connection'])[] = [
   'openaiApiKey',
   'piAgentCoreModelJson',
   'openCodeModelJson',
+  'qoderAccessToken',
   'awsBearerToken',
   'awsAccessKeyId',
   'awsSecretAccessKey',
   'awsSessionToken',
 ];
+const ENDPOINT_FIELDS: (keyof ProviderConfig['connection'])[] = [
+  'baseUrl',
+  'claudeBaseUrl',
+  'openaiBaseUrl',
+];
+const NETWORK_CREDENTIAL_FIELDS: (keyof ProviderConfig['connection'])[] = [
+  'apiKey',
+  'claudeApiKey',
+  'claudeAuthToken',
+  'openaiApiKey',
+  'awsBearerToken',
+  'awsAccessKeyId',
+  'awsSecretAccessKey',
+  'awsSessionToken',
+];
+
+const ALLOWED_CUSTOM_ENV_OVERRIDES = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_REGION',
+  'AWS_DEFAULT_REGION',
+  'AWS_PROFILE',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'CLOUD_ML_REGION',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_AGENTS_PROTOCOL',
+]);
+
+function assertSafeCustomEnvOverrides(custom: ProviderConfig['custom']): void {
+  for (const key of Object.keys(custom?.envOverrides ?? {})) {
+    if (!ALLOWED_CUSTOM_ENV_OVERRIDES.has(key)) {
+      throw new Error(`Custom provider env override is not allowed: ${key}`);
+    }
+  }
+}
 
 function maskValue(value: string): string {
   if (value.length <= 8) return '****';
@@ -82,11 +134,55 @@ function maskProvider(p: ProviderConfig): ProviderConfig {
   };
 }
 
+function endpointOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return `invalid:${value.trim()}`;
+  }
+}
+
+function connectionEndpointOriginChanged(
+  existing: ProviderConfig['connection'],
+  input: Partial<ProviderConfig['connection']>,
+): boolean {
+  return ENDPOINT_FIELDS.some(field => {
+    const next = input[field];
+    return next !== undefined
+      && !String(next).startsWith('****')
+      && endpointOrigin(existing[field]) !== endpointOrigin(next);
+  });
+}
+
+function assertCredentialsReconfirmedForEndpointChange(
+  existing: ProviderConfig['connection'],
+  input: Partial<ProviderConfig['connection']>,
+): void {
+  if (!connectionEndpointOriginChanged(existing, input)) return;
+  for (const field of NETWORK_CREDENTIAL_FIELDS) {
+    if (!existing[field]) continue;
+    const replacement = input[field];
+    if (replacement === undefined || String(replacement).startsWith('****')) {
+      throw new Error(
+        `Provider endpoint origin changed; re-enter or clear credential field '${field}'`,
+      );
+    }
+  }
+}
+
 export class ProviderService {
   private store: ProviderStore;
+  private readonly mutationOwner: ProviderMutationOwner;
 
   constructor(filePath: string) {
     this.store = new ProviderStore(filePath);
+    this.mutationOwner = {
+      instanceId: randomUUID(),
+      pid: process.pid,
+      host: os.hostname(),
+    };
     this.store.load();
   }
 
@@ -123,6 +219,7 @@ export class ProviderService {
       throw new Error('models.primary and models.light are required');
     }
     this.assertRuntimeSupported(input.type, input.connection.agentRuntime);
+    assertSafeCustomEnvOverrides(input.custom);
 
     const now = new Date().toISOString();
     const provider: ProviderConfig = {
@@ -139,73 +236,127 @@ export class ProviderService {
       ...(input.custom ? { custom: input.custom } : {}),
     };
 
-    this.store.set(provider, scope);
-    return provider;
+    return this.runProviderMutation(
+      () => this.store.beginMutationForNewProvider(scope, this.mutationOwner),
+      () => {
+        this.store.set(provider, scope);
+        return provider;
+      },
+    );
   }
 
   update(id: string, input: ProviderUpdateInput, scope?: ProviderScope): ProviderConfig {
-    const existing = this.store.get(id, scope);
-    if (!existing) throw new Error(`Provider not found: ${id}`);
+    return this.runProviderMutation(
+      () => this.store.beginMutationForProvider(id, scope, this.mutationOwner),
+      () => {
+        const existing = this.store.get(id, scope);
+        if (!existing) throw new Error(`Provider not found: ${id}`);
 
-    const updated: ProviderConfig = {
-      ...existing,
-      updatedAt: new Date().toISOString(),
-    };
+        const updated: ProviderConfig = {
+          ...existing,
+          updatedAt: new Date().toISOString(),
+        };
 
-    if (input.name !== undefined) updated.name = input.name.trim();
-    if (input.models) updated.models = { ...existing.models, ...input.models };
-    if (input.connection) {
-      const merged = { ...existing.connection };
-      for (const [key, val] of Object.entries(input.connection)) {
-        if (val !== undefined && !String(val).startsWith('****')) {
-          (merged as any)[key] = val;
+        if (input.name !== undefined) updated.name = input.name.trim();
+        if (input.models) updated.models = { ...existing.models, ...input.models };
+        if (input.connection) {
+          assertCredentialsReconfirmedForEndpointChange(existing.connection, input.connection);
+          const merged = { ...existing.connection };
+          for (const [key, val] of Object.entries(input.connection)) {
+            if (val !== undefined && !String(val).startsWith('****')) {
+              (merged as any)[key] = val;
+            }
+          }
+          if (input.connection.agentRuntime !== undefined) {
+            this.assertRuntimeSupported(existing.type, merged.agentRuntime);
+          }
+          updated.connection = merged;
         }
-      }
-      if (input.connection.agentRuntime !== undefined) {
-        this.assertRuntimeSupported(existing.type, merged.agentRuntime);
-      }
-      updated.connection = merged;
-    }
-    if (input.tuning !== undefined) updated.tuning = input.tuning ?? undefined;
-    if (input.custom !== undefined) updated.custom = input.custom ?? undefined;
+        if (input.tuning !== undefined) updated.tuning = input.tuning ?? undefined;
+        if (input.custom !== undefined) {
+          assertSafeCustomEnvOverrides(input.custom ?? undefined);
+          updated.custom = input.custom ?? undefined;
+        }
 
-    this.store.set(updated, scope);
-    return updated;
+        this.store.set(updated, scope);
+        return updated;
+      },
+    );
   }
 
   delete(id: string, scope?: ProviderScope): void {
-    const existing = this.store.get(id, scope);
-    if (!existing) throw new Error(`Provider not found: ${id}`);
-    if (existing.isActive) throw new Error('Cannot delete the active provider. Deactivate or switch first.');
-    this.store.delete(id, scope);
+    this.runProviderMutation(
+      () => this.store.beginMutationForProvider(id, scope, this.mutationOwner),
+      () => {
+        const existing = this.store.get(id, scope);
+        if (!existing) throw new Error(`Provider not found: ${id}`);
+        if (existing.isActive) {
+          throw new Error('Cannot delete the active provider. Deactivate or switch first.');
+        }
+        this.store.delete(id, scope);
+      },
+    );
   }
 
   rotateSecret(id: string, scope?: ProviderScope): number {
-    const existing = this.store.get(id, scope);
-    if (!existing) throw new Error(`Provider not found: ${id}`);
-    const version = this.store.rotateSecret(id, scope);
-    if (version === undefined) {
-      throw new Error('Secret rotation is only available for the enterprise provider store');
-    }
-    return version;
+    return this.runProviderMutation(
+      () => this.store.beginMutationForProvider(id, scope, this.mutationOwner),
+      () => {
+        const existing = this.store.get(id, scope);
+        if (!existing) throw new Error(`Provider not found: ${id}`);
+        const version = this.store.rotateSecret(id, scope);
+        if (version === undefined) {
+          throw new Error('Secret rotation is only available for the enterprise provider store');
+        }
+        return version;
+      },
+    );
   }
 
   activate(id: string, scope?: ProviderScope): void {
-    const target = this.store.get(id, scope);
-    if (!target) throw new Error(`Provider not found: ${id}`);
+    this.runProviderMutation(
+      () => this.store.beginMutationForProvider(id, scope, this.mutationOwner),
+      () => {
+        const target = this.store.get(id, scope);
+        if (!target) throw new Error(`Provider not found: ${id}`);
 
-    const current = this.store.getActivePeer(id, scope);
-    if (current && current.id !== id) {
-      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
-    }
+        const current = this.store.getActivePeer(id, scope);
+        if (current && current.id !== id) {
+          this.store.set({
+            ...current,
+            isActive: false,
+            updatedAt: new Date().toISOString(),
+          }, scope);
+        }
 
-    this.store.set({ ...target, isActive: true, updatedAt: new Date().toISOString() }, scope);
+        this.store.set({
+          ...target,
+          isActive: true,
+          updatedAt: new Date().toISOString(),
+        }, scope);
+      },
+    );
   }
 
   deactivateAll(scope?: ProviderScope): void {
     const current = this.store.getActiveWriteScope(scope);
     if (current) {
-      this.store.set({ ...current, isActive: false, updatedAt: new Date().toISOString() }, scope);
+      this.runProviderMutation(
+        () => this.store.beginMutationForProvider(
+          current.id,
+          scope,
+          this.mutationOwner,
+        ),
+        () => {
+          const liveCurrent = this.store.getActiveWriteScope(scope);
+          if (!liveCurrent) return;
+          this.store.set({
+            ...liveCurrent,
+            isActive: false,
+            updatedAt: new Date().toISOString(),
+          }, scope);
+        },
+      );
     }
   }
 
@@ -236,6 +387,23 @@ export class ProviderService {
     return this.store.get(id, scope);
   }
 
+  getMutationGeneration(
+    scope?: ProviderScope,
+  ): ProviderMutationGenerationVectorV1 {
+    return this.store.readMutationGeneration(scope);
+  }
+
+  listInFlightMutations(scope?: ProviderScope): ProviderMutationLease[] {
+    return this.store.listInFlightMutations(scope);
+  }
+
+  recoverAbandonedMutation(
+    mutationId: string,
+    mutationScope: ProviderMutationScope,
+  ): boolean {
+    return this.store.recoverAbandonedMutation(mutationId, mutationScope);
+  }
+
   resolveAgentRuntime(provider?: ProviderConfig | null): AgentRuntimeKind {
     return resolveProviderAgentRuntime(provider);
   }
@@ -246,6 +414,27 @@ export class ProviderService {
 
   private assertRuntimeSupported(type: ProviderType, runtime?: unknown): void {
     assertAgentRuntimeSupported(type, runtime);
+  }
+
+  private runProviderMutation<T>(
+    begin: () => ProviderMutationLease,
+    operation: () => T,
+  ): T {
+    const lease = begin();
+    try {
+      const result = operation();
+      this.store.completeMutation(lease);
+      return result;
+    } catch (error) {
+      try {
+        this.store.completeMutation(lease);
+      } catch (completionError) {
+        const combined = new Error('provider_mutation_and_completion_failed');
+        Object.assign(combined, {operationError: error, completionError});
+        throw combined;
+      }
+      throw error;
+    }
   }
 
   resolveOpenAIProtocol(provider?: ProviderConfig | null): OpenAIProtocol {
@@ -270,7 +459,7 @@ export class ProviderService {
       logger.warn(
         'ProviderManager',
         `Bedrock provider "${providerName}": model "${model}" is not a valid Bedrock ID; ` +
-          `normalizing to "${normalized}". Set a Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-5-20250929-v1:0) to silence this.`,
+          `normalizing to "${normalized}". Set a Bedrock model ID (e.g. us.anthropic.claude-sonnet-5) to silence this.`,
       );
     }
     return normalized;
@@ -330,6 +519,18 @@ export class ProviderService {
     }
     if (provider.connection.openCodeSystemPrompt) {
       env.SMARTPERFETTO_OPENCODE_SYSTEM_PROMPT = provider.connection.openCodeSystemPrompt;
+    }
+  }
+
+  private applyQoderConnection(env: Record<string, string>, provider: ProviderConfig): void {
+    if (provider.connection.qoderAccessToken) {
+      env.QODER_PERSONAL_ACCESS_TOKEN = provider.connection.qoderAccessToken;
+    }
+    if (provider.connection.qoderCliPath) {
+      env.QODERCLI_PATH = provider.connection.qoderCliPath;
+    }
+    if (provider.connection.qoderSystemPrompt) {
+      env.SMARTPERFETTO_QODER_SYSTEM_PROMPT = provider.connection.qoderSystemPrompt;
     }
   }
 
@@ -414,6 +615,8 @@ export class ProviderService {
           this.applyPiAgentCoreConnection(env, provider);
         } else if (runtime === 'opencode') {
           this.applyOpenCodeConnection(env, provider);
+        } else if (runtime === 'qoder-agent-sdk') {
+          this.applyQoderConnection(env, provider);
         } else {
           this.applyClaudeAuth(env, provider);
           const baseUrl = this.getClaudeBaseUrl(provider);
@@ -432,6 +635,9 @@ export class ProviderService {
         env.OPENAI_MODEL = provider.models.primary;
         env.OPENAI_LIGHT_MODEL = provider.models.light;
       }
+    } else if (runtime === 'qoder-agent-sdk') {
+      env.QODER_MODEL = provider.connection.qoderModel || provider.models.primary;
+      env.QODER_LIGHT_MODEL = provider.models.light;
     } else if (runtime === 'openai-agents-sdk') {
       env.OPENAI_MODEL = provider.models.primary;
       env.OPENAI_LIGHT_MODEL = provider.models.light;
@@ -458,6 +664,10 @@ export class ProviderService {
     } else if (runtime === 'opencode') {
       // OpenCode tuning is runtime-specific and intentionally not mapped to
       // Claude/OpenAI loop knobs.
+    } else if (runtime === 'qoder-agent-sdk') {
+      if (provider.tuning?.maxTurns) env.QODER_MAX_TURNS = String(provider.tuning.maxTurns);
+      if (provider.tuning?.fullPerTurnMs) env.QODER_FULL_PER_TURN_MS = String(provider.tuning.fullPerTurnMs);
+      if (provider.tuning?.quickPerTurnMs) env.QODER_QUICK_PER_TURN_MS = String(provider.tuning.quickPerTurnMs);
     } else if (runtime === 'openai-agents-sdk') {
       if (provider.tuning?.maxTurns) env.OPENAI_MAX_TURNS = String(provider.tuning.maxTurns);
       if (provider.tuning?.fullPerTurnMs) env.OPENAI_FULL_PER_TURN_MS = String(provider.tuning.fullPerTurnMs);

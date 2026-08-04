@@ -42,6 +42,7 @@ import {
 import { Finding } from '../../types';
 import { ModelRouter } from '../../core/modelRouter';
 import { isPlainObject, isStringArray, LlmJsonSchema, parseLlmJson } from '../../../utils/llmJson';
+import logger from '../../../utils/logger';
 import {
   SkillExecutor,
   createSkillExecutor,
@@ -1710,7 +1711,7 @@ ${this.getToolDescriptionsForLLM()}
 
         // Log for debugging
         console.log(`[${this.config.id}] Executing dynamic SQL for: ${objective}`);
-        console.log(`[${this.config.id}] SQL: ${executableSql.slice(0, 200)}...`);
+        logger.sql(this.config.id, executableSql);
 
         // Emit event for tracking
         this.emit('sql_generated', {

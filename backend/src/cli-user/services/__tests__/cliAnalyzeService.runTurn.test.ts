@@ -28,19 +28,27 @@ const mockRunClaimVerification = jest.fn((_input: unknown): any => ({
   },
   identityResolutions: [],
 }));
+const mockCodebaseGet = jest.fn();
+const mockKnowledgeSourceGet = jest.fn();
+const mockPrepareSession = jest.fn();
+const mockRunManifestLifecycles: any[] = [];
 
 let mockPreparedSession: any;
 
 jest.mock('../../../assistant/application/agentAnalyzeSessionService', () => ({
   AgentAnalyzeSessionService: jest.fn().mockImplementation(() => ({
-    prepareSession: jest.fn(() => ({
-      sessionId: 'cli-session-quality',
-      session: mockPreparedSession,
-      isNewSession: true,
-    })),
+    prepareSession: (...args: unknown[]) => mockPrepareSession(...args),
   })),
   buildAgentQueryWithContinuityNotice: (query: string) => query,
 }));
+
+function defaultPreparedSessionResult() {
+  return {
+      sessionId: 'cli-session-quality',
+      session: mockPreparedSession,
+      isNewSession: true,
+  };
+}
 
 jest.mock('../../../services/sessionPersistenceService', () => ({
   SessionPersistenceService: {
@@ -69,8 +77,25 @@ jest.mock('../../../services/verifier/claimVerificationRunner', () => ({
   runClaimVerification: (input: unknown) => mockRunClaimVerification(input),
 }));
 
+jest.mock('../../../services/codebase/defaultCodebaseServices', () => ({
+  getDefaultCodebaseRegistry: () => ({get: mockCodebaseGet}),
+}));
+
+jest.mock('../../../services/externalKnowledgeSourceRegistry', () => ({
+  externalKnowledgeSourceHasActiveIndex: (source: {
+    activeGeneration?: string;
+    contentFingerprint?: string;
+    indexedChunkCount?: number;
+  }) => Boolean(
+    source.activeGeneration && source.contentFingerprint && (source.indexedChunkCount ?? 0) > 0
+  ),
+  getDefaultExternalKnowledgeSourceRegistry: () => ({get: mockKnowledgeSourceGet}),
+}));
+
 jest.mock('../../../agent/context/enhancedSessionContext', () => ({
   sessionContextManager: {
+    set: jest.fn(),
+    remove: jest.fn(),
     get: jest.fn(() => ({
       annotateLatestCompletedTurn: mockAnnotateLatestCompletedTurn,
     })),
@@ -81,12 +106,71 @@ jest.mock('../../../agentRuntime/runtimeSelection', () => ({
   resolveAgentRuntimeSelection: jest.fn(() => ({ kind: 'openai-agents-sdk' })),
 }));
 
+jest.mock('../../../services/skillPacks/workspaceSkillRegistryProvider', () => ({
+  getWorkspaceSkillRegistry: jest.fn(async () => ({registry: {}})),
+}));
+
+jest.mock('../../../services/selfEvolution/effectiveRuntimeRegistryProvider', () => ({
+  getEffectiveRuntimeRegistrySnapshot: jest.fn(async ({scope}: any) => ({
+    scope: {
+      tenantId: scope.tenantId,
+      workspaceId: scope.workspaceId,
+    },
+    overlayGeneration: 'builtin:registry-test',
+    skillRegistry: {},
+    strategyRegistry: {},
+  })),
+}));
+
+jest.mock('../../../services/selfEvolution/skillFingerprint', () => ({
+  buildSkillRegistryAttribution: jest.fn(() => ({
+    registryFingerprint: 'registry-test',
+    evolutionOverlayGeneration: 'builtin:registry-test',
+    skills: [],
+  })),
+}));
+
+jest.mock('../../../services/selfEvolution/runManifestLifecycle', () => ({
+  createRunManifestLifecycle: jest.fn((input: any) => {
+    const lifecycle: any = {
+      state: 'collecting',
+      builder: {
+        identity: {
+          runId: input.runId,
+          sessionId: input.sessionId,
+          scope: input.scope,
+        },
+      },
+      sealOnceAndPersist: jest.fn(() => {
+        lifecycle.state = 'persisted';
+        return {
+          runManifestId: 'manifest-cli-test',
+          runId: input.runId,
+        };
+      }),
+      dispose: jest.fn(() => {
+        lifecycle.state = 'disposed';
+      }),
+    };
+    mockRunManifestLifecycles.push(lifecycle);
+    return lifecycle;
+  }),
+  withRunManifestLifecycle: (_lifecycle: unknown, callback: () => unknown) => callback(),
+  currentRunManifestAttributionSink: () => undefined,
+}));
+
+const cliTurnBinding = {
+  turn: 1,
+  resolveCliTurnPath: (_sessionId: string, turn: number) => `/tmp/turns/${String(turn).padStart(3, '0')}.md`,
+};
+
 function makeSession(orchestrator: EventEmitter): any {
   return {
     sessionId: 'cli-session-quality',
     traceId: 'trace-cli',
     query: '分析启动慢',
     providerId: null,
+    runtimeKind: 'openai-agents-sdk',
     providerSnapshotHash: null,
     orchestrator,
     hypotheses: [],
@@ -105,6 +189,7 @@ function makeSession(orchestrator: EventEmitter): any {
 describe('CliAnalyzeService runTurn final quality gate', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRunManifestLifecycles.length = 0;
     mockRunClaimVerification.mockReturnValue({
       claimSupport: [],
       claimVerificationResult: {
@@ -120,6 +205,9 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
       },
       identityResolutions: [],
     });
+    mockCodebaseGet.mockReset();
+    mockKnowledgeSourceGet.mockReset();
+    mockPrepareSession.mockImplementation(() => defaultPreparedSessionResult());
     const orchestrator = new EventEmitter() as EventEmitter & {
       analyze: typeof mockAnalyze;
       getSdkSessionId: () => string;
@@ -147,17 +235,178 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
     });
   });
 
+  it('defaults codebase-only CLI analysis to private metadata mode', async () => {
+    mockCodebaseGet.mockReturnValue({
+      codebaseId: 'cb-cli',
+      indexGeneration: 3,
+      activeGeneration: 'codebase_3_test',
+      contentFingerprint: 'a'.repeat(64),
+      chunkCount: 1,
+      consent: {sendToProvider: false, consentHash: 'consent'},
+    });
+    mockAnalyze.mockImplementationOnce(async () => {
+      mockPreparedSession.orchestrator.emit('update', {
+        type: 'finding',
+        content: {message: 'CLI_PRIVATE_STREAM_CANARY'},
+        timestamp: Date.now(),
+      } satisfies StreamingUpdate);
+      return {
+        sessionId: 'cli-session-quality',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: '## 综合结论\n\n已完成。',
+        confidence: 0.9,
+        rounds: 1,
+        totalDurationMs: 1,
+      };
+    });
+    const events: StreamingUpdate[] = [];
+
+    const output = await new CliAnalyzeService().runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: '分析源码',
+      codebaseIds: ['cb-cli'],
+      onEvent: event => events.push(event),
+    });
+
+    const analyzeCall = mockAnalyze.mock.calls[0] as unknown[];
+    expect(analyzeCall[3]).toEqual(expect.objectContaining({
+      codeAwareMode: 'metadata_only',
+      codebaseIds: ['cb-cli'],
+    }));
+    expect(mockPreparedSession.codeAwareMode).toBe('metadata_only');
+    expect(mockPrepareSession).toHaveBeenCalledWith(expect.objectContaining({
+      options: expect.objectContaining({
+        codeAwareMode: 'metadata_only',
+        codebaseIds: ['cb-cli'],
+      }),
+    }));
+    expect(output.codeAwareMode).toBe('metadata_only');
+    expect(output.result.analysisReceipt?.outputs.cliTurnPath).toBeUndefined();
+    expect(JSON.stringify(events)).not.toContain('CLI_PRIVATE_STREAM_CANARY');
+  });
+
+  it.each([
+    ['source only', ['cb-cli'], undefined],
+    ['RAG only', undefined, ['wiki-cli']],
+    ['source and RAG', ['cb-cli'], ['wiki-cli']],
+  ] as const)('marks %s private before session preparation logs the query', async (
+    _label,
+    codebaseIds,
+    knowledgeSourceIds,
+  ) => {
+    mockCodebaseGet.mockReturnValue({
+      codebaseId: 'cb-cli',
+      indexGeneration: 3,
+      activeGeneration: 'codebase_3_test',
+      contentFingerprint: 'a'.repeat(64),
+      chunkCount: 1,
+      consent: {sendToProvider: false, consentHash: 'consent'},
+    });
+    mockKnowledgeSourceGet.mockReturnValue({
+      sourceId: 'wiki-cli',
+      indexGeneration: 2,
+      activeGeneration: 'knowledge_2_test',
+      contentFingerprint: 'b'.repeat(64),
+      indexedChunkCount: 1,
+      rightsAcknowledged: true,
+      sendToProvider: true,
+      consentedAt: Date.now(),
+    });
+
+    await new CliAnalyzeService().runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: 'PRIVATE_PREPARE_QUERY_CANARY',
+      ...(codebaseIds ? {codebaseIds: [...codebaseIds]} : {}),
+      ...(knowledgeSourceIds ? {knowledgeSourceIds: [...knowledgeSourceIds]} : {}),
+      onEvent: jest.fn(),
+    });
+
+    expect(mockPrepareSession).toHaveBeenCalledWith(expect.objectContaining({
+      query: 'PRIVATE_PREPARE_QUERY_CANARY',
+      options: expect.objectContaining({
+        ...(codebaseIds ? {
+          codeAwareMode: 'metadata_only',
+          codebaseIds: ['cb-cli'],
+        } : {codeAwareMode: 'off'}),
+        ...(knowledgeSourceIds ? {knowledgeSourceIds: ['wiki-cli']} : {}),
+      }),
+    }));
+  });
+
+  it('rejects codebase ids when code-aware mode is explicitly off', async () => {
+    await expect(new CliAnalyzeService().runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: 'do not use source',
+      codeAwareMode: 'off',
+      codebaseIds: ['cb-disabled'],
+      onEvent: jest.fn(),
+    })).rejects.toThrow('CODEBASE_IDS_REQUIRE_CODE_AWARE_MODE');
+    expect(mockAnalyze).not.toHaveBeenCalled();
+  });
+
+  it('rejects a selected codebase that has no active indexed generation', async () => {
+    mockCodebaseGet.mockReturnValue({
+      codebaseId: 'cb-unindexed',
+      indexGeneration: 1,
+      chunkCount: 0,
+      consent: {sendToProvider: false, consentHash: 'consent'},
+    });
+
+    await expect(new CliAnalyzeService().runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: 'analyze source',
+      codebaseIds: ['cb-unindexed'],
+      onEvent: jest.fn(),
+    })).rejects.toThrow('ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE');
+    expect(mockAnalyze).not.toHaveBeenCalled();
+  });
+
+  it('rejects an activated knowledge source whose generation contains no chunks', async () => {
+    mockKnowledgeSourceGet.mockReturnValue({
+      sourceId: 'wiki-empty',
+      indexGeneration: 2,
+      activeGeneration: 'knowledge_2_empty',
+      contentFingerprint: 'b'.repeat(64),
+      indexedChunkCount: 0,
+      rightsAcknowledged: true,
+      sendToProvider: true,
+    });
+
+    await expect(new CliAnalyzeService().runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: 'analyze with private knowledge',
+      knowledgeSourceIds: ['wiki-empty'],
+      onEvent: jest.fn(),
+    })).rejects.toThrow('未激活');
+    expect(mockAnalyze).not.toHaveBeenCalled();
+  });
+
   it('marks phase-summary runtime output partial across CLI result, session, report, and event stream', async () => {
     const service = new CliAnalyzeService();
     const events: StreamingUpdate[] = [];
 
     const output = await service.runTurn({
+      ...cliTurnBinding,
       traceId: 'trace-cli',
       query: '分析启动慢',
       onEvent: update => events.push(update),
     });
 
     expect(output.result.partial).toBe(true);
+    expect(output.result.analysisReceipt).toEqual(expect.objectContaining({
+      schemaVersion: 2,
+      runManifestId: 'manifest-cli-test',
+      outputs: expect.objectContaining({
+        cliTurnPath: '/tmp/turns/001.md',
+      }),
+    }));
     expect(output.result.confidence).toBe(0.55);
     expect(output.result.terminationMessage).toContain('最终结果质量闸门');
     expect(mockPreparedSession.result).toBe(output.result);
@@ -187,6 +436,27 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
         }),
       }),
     ]));
+    expect(mockRunManifestLifecycles[0]?.sealOnceAndPersist).toHaveBeenCalledWith({
+      turnCount: 1,
+    });
+  });
+
+  it('persists a zero-turn manifest before rethrowing a runtime failure', async () => {
+    mockAnalyze.mockRejectedValueOnce(new Error('cli runtime failure canary'));
+
+    const service = new CliAnalyzeService();
+    await expect(service.runTurn({
+      ...cliTurnBinding,
+      traceId: 'trace-cli',
+      query: '分析失败路径',
+      onEvent: jest.fn(),
+    })).rejects.toThrow('cli runtime failure canary');
+
+    expect(mockRunManifestLifecycles[0]?.sealOnceAndPersist).toHaveBeenCalledWith({
+      turnCount: 0,
+      closePendingSkillInvocationsAsErrors: true,
+    });
+    expect(mockRunManifestLifecycles[0]?.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces runtime metadata from canonical snapshot engineState', async () => {
@@ -226,6 +496,7 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
 
     const service = new CliAnalyzeService();
     const output = await service.runTurn({
+      ...cliTurnBinding,
       traceId: 'trace-cli',
       query: '分析启动慢',
       onEvent: jest.fn(),
@@ -234,6 +505,25 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
     expect(output.providerId).toBe('provider-from-engine');
     expect(output.agentRuntimeKind).toBe('openai-agents-sdk');
     expect(output.providerSnapshotHash).toBe('hash-from-engine');
+  });
+
+  it('persists the selected OpenAI-compatible model as CLI provenance', async () => {
+    const previousModel = process.env.OPENAI_MODEL;
+    process.env.OPENAI_MODEL = 'deepseek-provenance-test';
+    try {
+      const output = await new CliAnalyzeService().runTurn({
+        ...cliTurnBinding,
+        traceId: 'trace-cli',
+        query: '分析启动慢',
+        onEvent: jest.fn(),
+      });
+
+      expect(output.agentRuntimeKind).toBe('openai-agents-sdk');
+      expect(output.model).toBe('deepseek-provenance-test');
+    } finally {
+      if (previousModel === undefined) delete process.env.OPENAI_MODEL;
+      else process.env.OPENAI_MODEL = previousModel;
+    }
   });
 
   it('passes prepared continuity agentQuery to the runtime while preserving the user query for persistence', async () => {
@@ -247,6 +537,7 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
 
     const service = new CliAnalyzeService();
     await service.runTurn({
+      ...cliTurnBinding,
       traceId: 'trace-cli',
       query: '分析启动慢',
       onEvent: jest.fn(),
@@ -271,6 +562,7 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
 
     const service = new CliAnalyzeService();
     await service.runTurn({
+      ...cliTurnBinding,
       traceId: 'trace-cli',
       query: '继续分析',
       lineage,
@@ -333,6 +625,7 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
 
     const service = new CliAnalyzeService();
     const output = await service.runTurn({
+      ...cliTurnBinding,
       traceId: 'trace-cli',
       query: '分析启动慢',
       onEvent: jest.fn(),

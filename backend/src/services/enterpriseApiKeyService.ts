@@ -201,6 +201,9 @@ export class EnterpriseApiKeyService {
   }
 
   createApiKey(context: RequestContext, input: CreateEnterpriseApiKeyInput = {}): CreatedEnterpriseApiKey {
+    const canDelegateOrg = context.roles.includes('org_admin')
+      || context.scopes.includes('*')
+      || context.scopes.includes('api_key:delegate_org');
     const requestedTenantId = sanitizeId(input.tenantId);
     if (requestedTenantId && requestedTenantId !== context.tenantId) {
       throw new Error('tenantId must match the authenticated RequestContext');
@@ -209,12 +212,31 @@ export class EnterpriseApiKeyService {
     if (requestedWorkspaceId && requestedWorkspaceId !== context.workspaceId) {
       throw new Error('workspaceId must match the authenticated RequestContext');
     }
+    if (input.workspaceId === null && !canDelegateOrg) {
+      throw new Error('Only an org admin can create a tenant-wide API key');
+    }
+    if (input.ownerUserId === null) {
+      throw new Error('API keys must retain an accountable owner');
+    }
+    const requestedOwnerUserId = sanitizeId(input.ownerUserId) || context.userId;
+    if (requestedOwnerUserId !== context.userId && !canDelegateOrg) {
+      throw new Error('Only an org admin can create an API key for another user');
+    }
     const tenantId = context.tenantId;
     const workspaceId = input.workspaceId === null ? undefined : context.workspaceId;
-    const ownerUserId = input.ownerUserId === null
-      ? undefined
-      : this.existingUserId(tenantId, sanitizeId(input.ownerUserId) || context.userId);
+    const ownerUserId = this.existingUserId(tenantId, requestedOwnerUserId);
+    if (!ownerUserId) throw new Error('API key owner must be an active tenant user');
     const scopes = normalizeScopes(input.scopes);
+    if (!canDelegateOrg) {
+      if (scopes.includes('*')) {
+        throw new Error('Workspace administrators cannot delegate wildcard scope');
+      }
+      const callerScopes = new Set(context.scopes);
+      const unsupportedScope = scopes.find(scope => !callerScopes.has(scope));
+      if (unsupportedScope) {
+        throw new Error(`Cannot delegate scope not held by caller: ${unsupportedScope}`);
+      }
+    }
     const expiresAt = normalizeExpiresAt(input.expiresAt);
     const id = `ak_${crypto.randomUUID()}`;
     const secret = crypto.randomBytes(32).toString('base64url');
@@ -260,11 +282,19 @@ export class EnterpriseApiKeyService {
   }
 
   listApiKeys(context: RequestContext): EnterpriseApiKeyRecord[] {
+    if (this.canManageOrgKeys(context)) {
+      return this.db.prepare<unknown[], ApiKeyRow>(`
+        SELECT *
+        FROM api_keys
+        WHERE tenant_id = ?
+        ORDER BY created_at DESC
+      `).all(context.tenantId).map(rowToRecord);
+    }
     return this.db.prepare<unknown[], ApiKeyRow>(`
       SELECT *
       FROM api_keys
       WHERE tenant_id = ?
-        AND (workspace_id IS NULL OR workspace_id = ?)
+        AND workspace_id = ?
       ORDER BY created_at DESC
     `).all(context.tenantId, context.workspaceId).map(rowToRecord);
   }
@@ -320,13 +350,24 @@ export class EnterpriseApiKeyService {
   }
 
   private getRowForContext(context: RequestContext, id: string): ApiKeyRow | null {
+    if (this.canManageOrgKeys(context)) {
+      return this.db.prepare<unknown[], ApiKeyRow>(`
+        SELECT * FROM api_keys WHERE id = ? AND tenant_id = ?
+      `).get(id, context.tenantId) || null;
+    }
     return this.db.prepare<unknown[], ApiKeyRow>(`
       SELECT *
       FROM api_keys
       WHERE id = ?
         AND tenant_id = ?
-        AND (workspace_id IS NULL OR workspace_id = ?)
+        AND workspace_id = ?
     `).get(id, context.tenantId, context.workspaceId) || null;
+  }
+
+  private canManageOrgKeys(context: RequestContext): boolean {
+    return context.roles.includes('org_admin')
+      || context.scopes.includes('*')
+      || context.scopes.includes('api_key:delegate_org');
   }
 
   private existingUserId(tenantId: string, userId: string | undefined): string | undefined {

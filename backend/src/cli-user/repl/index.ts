@@ -253,7 +253,7 @@ function tryLoadSession(paths: CliPaths, sessionId: string): LoadedSession | nul
 async function handleLoad(ctx: ReplContext, tracePath: string): Promise<LoadedSession> {
   // /load kicks off the first turn with the generic catch-all query; the user
   // can follow up with a targeted /ask for real drilling.
-  assertAnalysisRuntimeReady();
+  assertAnalysisRuntimeReady({ aiFeature: 'agent_analyze' });
   const expanded = expandPath(tracePath);
   const r = await startSession(ctx, { tracePath: expanded, query: DEFAULT_ANALYSIS_QUERY });
   return refreshSession(ctx, r.sessionId);
@@ -267,6 +267,7 @@ async function handleAsk(
   assertAnalysisRuntimeReady({
     providerId: cs.config.providerId,
     runtimeOverride: cs.config.agentRuntimeKind,
+    aiFeature: 'agent_resume',
   });
   await continueSession(ctx, { sessionId: cs.sessionId, query });
   return refreshSession(ctx, cs.sessionId);

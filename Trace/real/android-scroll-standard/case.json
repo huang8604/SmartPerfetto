@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "android-scroll-standard",
+  "kind": "real",
+  "title": "Android 15 standard AOSP scroll",
+  "description": "Existing standard Android View scrolling fixture without pre-animation.",
+  "scene": "scrolling",
+  "tags": ["android", "scrolling", "aosp", "view"],
+  "aliases": ["scroll_Standard-AOSP-App-Without-PreAnimation.pftrace"],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "df7eebc5c6ff19b48331f8f1bca346612d86a5ae26eae202d46842a83f87a653",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "15",
+    "api_level": 35,
+    "device": "nubia pacific",
+    "build_fingerprint": "nubia/pacific/pacific:15/1.4.1.0/101:user/release-keys",
+    "compatibility": {"min_api": 35, "max_api": 35}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

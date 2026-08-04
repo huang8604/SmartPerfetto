@@ -48,6 +48,7 @@ export interface SqlResultMessageEntry {
   queryHash?: string;
   traceId?: string;
   traceSide?: string;
+  paneSide?: string;
   sql?: string;
   data: unknown;
   display?: unknown;

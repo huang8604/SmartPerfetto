@@ -6,24 +6,55 @@ export type OutputLanguage = 'zh-CN' | 'en';
 
 export const DEFAULT_OUTPUT_LANGUAGE: OutputLanguage = 'zh-CN';
 
+const OUTPUT_LANGUAGE_ALIASES = new Map<string, OutputLanguage>([
+  ['cn', 'zh-CN'],
+  ['chinese', 'zh-CN'],
+  ['en', 'en'],
+  ['english', 'en'],
+  ['simplified-chinese', 'zh-CN'],
+  ['simplified_chinese', 'zh-CN'],
+  ['zh', 'zh-CN'],
+]);
+
+function languageFromTag(value: string): OutputLanguage | undefined {
+  const tag = value.trim().toLowerCase().replace(/_/g, '-');
+  const alias = OUTPUT_LANGUAGE_ALIASES.get(tag);
+  if (alias) return alias;
+  if (tag.startsWith('en-')) return 'en';
+  if (tag.startsWith('zh-')) return 'zh-CN';
+  return undefined;
+}
+
 export function parseOutputLanguage(value: unknown): OutputLanguage {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return DEFAULT_OUTPUT_LANGUAGE;
 
-  if (['en', 'en-us', 'en_us', 'english'].includes(normalized)) {
-    return 'en';
+  if (!normalized.includes(',') && !normalized.includes(';')) {
+    const direct = languageFromTag(normalized);
+    if (direct) return direct;
   }
 
-  if ([
-    'zh',
-    'zh-cn',
-    'zh_cn',
-    'cn',
-    'chinese',
-    'simplified-chinese',
-    'simplified_chinese',
-  ].includes(normalized)) {
-    return 'zh-CN';
+  const accepted = normalized
+    .split(',')
+    .map((entry, index) => {
+      const [tag, ...parameters] = entry.trim().split(';');
+      const qualityParameter = parameters.find(parameter =>
+        parameter.trim().startsWith('q='));
+      const parsedQuality = qualityParameter
+        ? Number(qualityParameter.trim().slice(2))
+        : 1;
+      return {
+        index,
+        language: languageFromTag(tag),
+        quality: Number.isFinite(parsedQuality) ? parsedQuality : 0,
+      };
+    })
+    .filter(candidate => candidate.language && candidate.quality > 0)
+    .sort((left, right) =>
+      right.quality - left.quality || left.index - right.index);
+
+  if (accepted.length > 0) {
+    return accepted[0].language as OutputLanguage;
   }
 
   return DEFAULT_OUTPUT_LANGUAGE;

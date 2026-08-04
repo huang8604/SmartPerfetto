@@ -26,7 +26,7 @@ export const RUNTIME_ISOLATION_CHECKLIST = [
         file: 'backend/src/routes/__tests__/traceProcessorProxyRoutes.test.ts',
         patterns: [
           'proxies status and query bytes through the scoped lease',
-          'tunnels websocket upgrades to the leased trace processor port',
+          'tunnels API-key browser websocket upgrades with a scoped capability',
         ],
       },
       {

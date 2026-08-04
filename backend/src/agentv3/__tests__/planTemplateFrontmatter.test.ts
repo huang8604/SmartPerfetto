@@ -30,6 +30,17 @@ describe('plan_template frontmatter pipeline', () => {
       expect(aspect.matchKeywords.length).toBeGreaterThan(0);
       expect(aspect.suggestion.trim().length).toBeGreaterThan(0);
     }
+    const architectureAspect = tpl!.mandatoryAspects.find(
+      aspect => aspect.id === 'architecture_specific_jank',
+    );
+    expect(architectureAspect?.conditionalRequiredExpectedCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        triggerKeywords: expect.arrayContaining(['TextureView', 'TEXTUREVIEW_STANDARD']),
+        requiredExpectedCalls: [
+          { tool: 'invoke_skill', skillId: 'textureview_producer_frame_timing' },
+        ],
+      }),
+    ]));
   });
 
   it('returns null for scenes that have no frontmatter plan_template (e.g. general)', () => {

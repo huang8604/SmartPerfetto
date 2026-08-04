@@ -28,7 +28,6 @@ prerequisites:
     - thread
     - process
   modules:
-    - sched
     - linux.cpu.frequency
 
 

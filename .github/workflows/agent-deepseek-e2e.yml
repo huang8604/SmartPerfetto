@@ -12,6 +12,8 @@ on:
           - all
           - startup
           - scrolling
+          - external-issue
+          - context
 
 permissions:
   contents: read
@@ -25,10 +27,10 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -61,6 +63,12 @@ jobs:
               ;;
             scrolling)
               npm run verify:e2e:deepseek-scrolling
+              ;;
+            external-issue)
+              npm run verify:e2e:deepseek-external-issue
+              ;;
+            context)
+              npm run verify:e2e:deepseek-context
               ;;
             *)
               echo "Unsupported suite: ${{ inputs.suite }}"

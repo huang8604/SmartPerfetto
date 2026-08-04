@@ -19,8 +19,9 @@
  * Out of scope:
  * - GitHub / IM integration (§4.1 explicitly says "CI dry-run mode,
  *   no GitHub" for M1).
- * - MCP tool registration — `lookup_baseline` / `compare_to_baseline`
- *   land in M2.
+ * - Trace-vs-baseline extraction. The MCP read tools use `lookup_baseline`
+ *   and `compare_baselines`; a future `compare_to_baseline` would need a
+ *   trace metric extraction pipeline.
  *
  * @module baselineDiffer
  */

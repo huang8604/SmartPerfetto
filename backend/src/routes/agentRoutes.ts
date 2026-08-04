@@ -11,18 +11,22 @@
 import express from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import {randomUUID} from 'crypto';
 import {
   getTraceProcessorService,
   type TraceInfo,
   type TraceProcessorLeaseQueryContext,
 } from '../services/traceProcessorService';
-import {
-  createSessionLogger,
-  SessionLogger,
-} from '../services/sessionLogger';
+import { createSessionLogger, SessionLogger } from '../services/sessionLogger';
 import { getHTMLReportGenerator } from '../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../services/agentReportData';
 import { persistAgentTurn } from '../services/persistAgentSession';
+import {
+  buildAnalysisReceipt,
+  buildLegacyAnalysisReceipt,
+  type BuildAnalysisReceiptInput,
+} from '../services/analysisReceiptBuilder';
+import { deriveUiActionProposals } from '../services/uiActionProposalDeriver';
 import { buildRawTraceComparisonReportSection } from '../services/comparisonAppendixService';
 import { applyFinalResultQualityGate } from '../services/finalResultQualityGate';
 import {
@@ -31,7 +35,13 @@ import {
 } from '../services/agentResultNormalizer';
 import { reportStore, persistReport } from './reportRoutes';
 import { SessionPersistenceService } from '../services/sessionPersistenceService';
-import { authenticate, requireRequestContext, type RequestContext } from '../middleware/auth';
+import {
+  authenticate,
+  DEFAULT_TENANT_ID,
+  DEFAULT_WORKSPACE_ID,
+  requireRequestContext,
+  type RequestContext,
+} from '../middleware/auth';
 import {
   isOwnedByContext,
   ownersMatch,
@@ -40,32 +50,27 @@ import {
   type ResourceOwnerFields,
 } from '../services/resourceOwnership';
 import { hasRbacPermission, sendForbidden } from '../services/rbac';
+import { requireAiEnabledForHttp, sendAiDisabledErrorIfPresent } from './aiCapabilityPolicyHttp';
+import { AiDisabledError, assertAiFeatureEnabled } from '../services/aiCapabilityPolicy';
 import { readTraceMetadataForContext } from '../services/traceMetadataStore';
-import {
-  sessionContextManager,
-  EnhancedSessionContext,
-} from '../agent/context/enhancedSessionContext';
-import {
-  registerCoreTools,
-  StreamingUpdate,
-  AgentRuntimeAnalysisResult,
-  Hypothesis,
-} from '../agent';
+import { sessionContextManager, EnhancedSessionContext } from '../agent/context/enhancedSessionContext';
+import { registerCoreTools, StreamingUpdate, AgentRuntimeAnalysisResult, Hypothesis } from '../agent';
 import { getSharedModelRouter } from '../agent/core/modelRouterSingleton';
-import type { IOrchestrator } from '../agent/core/orchestratorTypes';
+import type { AnalysisOptions, IOrchestrator, TraceDataset } from '../agent/core/orchestratorTypes';
 import { resolveConclusionScene } from '../agent/core/conclusionSceneTemplates';
 import { DEEP_REASON_LABEL } from '../utils/analysisNarrative';
+import { localize, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
+import { diagnosticLogIdentity } from '../utils/logger';
 import { sanitizeNarrativeForClient } from './narrativeSanitizer';
 import { registerSceneReconstructRoutes } from './agentSceneReconstructRoutes';
 import { SceneStoryService } from '../agent/scene/sceneStoryService';
-import {
-  buildSmartSceneSelectionReport,
-} from '../agent/scene/buildSmartChatReport';
+import { buildSmartSceneSelectionReport } from '../agent/scene/buildSmartChatReport';
 import { buildSmartDeepDiveDispatch } from '../agent/scene/smartDeepDiveDispatch';
 import type { SceneAnalysisSelection, SceneReport } from '../agent/scene/types';
 import { SmartCancelBridge } from '../agent/scene/smartCancelBridge';
 import { FileSystemSceneReportStore } from '../services/sceneReport/sceneReportStore';
 import { SceneReportMemoryCache } from '../services/sceneReport/sceneReportMemoryCache';
+import {TtlLruCache} from '../services/ttlLruCache';
 import { FileSystemSceneJobArtifactStore } from '../services/sceneReport/sceneJobArtifactStore';
 import { computeTraceContentHash } from '../agent/scene/traceHash';
 import { probeTraceDuration } from '../agent/scene/sceneTraceDurationProbe';
@@ -79,10 +84,7 @@ import {
   buildTraceProcessorLeaseModeDecision,
   type TraceProcessorLeaseModeDecision,
 } from '../services/traceProcessorLeaseModeDecision';
-import {
-  evaluateAnalysisRunQuota,
-  type EnterpriseQuotaDecision,
-} from '../services/enterpriseQuotaPolicyService';
+import { evaluateAnalysisRunQuota, type EnterpriseQuotaDecision } from '../services/enterpriseQuotaPolicyService';
 import {
   evaluateTenantMutationPolicy,
   sendTenantMutationDeniedPayload,
@@ -92,15 +94,18 @@ import { TraceProcessorFactory } from '../services/workingTraceProcessor';
 import { registerAgentLogsRoutes } from './agentLogsRoutes';
 import { registerAgentQuickSceneRoutes } from './agentQuickSceneRoutes';
 import { registerAgentReportRoutes } from './agentReportRoutes';
+import { registerAgentExternalIssueRoutes } from './agentExternalIssueRoutes';
 import { registerAgentResumeRoutes } from './agentResumeRoutes';
 import { registerAgentSessionCatalogRoutes } from './agentSessionCatalogRoutes';
 import { registerTeachingRoutes } from './agentTeachingRoutes';
 import {
   AnalyzeOptionsError,
   normalizeAnalyzeOptions,
+  normalizeSelectionContext,
   type AnalyzeMode,
 } from './agent/normalizeAnalyzeOptions';
 import { finalizeAgentDrivenSession } from './agent/finalizeAgentDrivenSession';
+import { projectStateTimelineRunResult } from './agent/stateTimelineRunProjection';
 import { AssistantApplicationService } from '../assistant/application/assistantApplicationService';
 import { StreamProjector, SSE_RING_BUFFER_SIZE, type BufferedSseEvent } from '../assistant/stream/streamProjector';
 import {
@@ -130,16 +135,24 @@ import {
   type AnalyzeSessionRunContext,
 } from '../assistant/application/agentAnalyzeSessionService';
 import { buildAssistantResultContract } from '../assistant/contracts/assistantResultContract';
-import { persistCompletedAnalysisResultSnapshot } from '../services/analysisResultSnapshotPipeline';
+import {
+  persistCompletedAnalysisResultSnapshot,
+  resolveAnalysisResultSceneType,
+} from '../services/analysisResultSnapshotPipeline';
 import { runClaimVerification } from '../services/verifier/claimVerificationRunner';
+import {
+  getDefaultAndroidInternalsPackResolver,
+} from '../services/androidInternalsPack/androidInternalsPackResolver';
 // Agent-Driven Architecture v2.0 - Focus tracking
 import type { FocusInteraction } from '../agent/context/focusStore';
 // DataEnvelope types for v2.0 data contract
 import {
   createDataEnvelope,
   generateEventId,
+  type AnalysisCompletedEvent,
   type DataEnvelope,
 } from '../types/dataContract';
+import { buildTraceContextDataEnvelopes, decorateTraceContextDatasets } from '../agentRuntime/traceContextEvidence';
 import type { ConclusionContract } from '../agent/core/conclusionContract';
 import type { ClaimSupportV1 } from '../types/evidenceContract';
 import type { ClaimVerificationResult } from '../types/claimVerification';
@@ -149,19 +162,14 @@ import { skillRegistry, ensureSkillRegistryInitialized } from '../services/skill
 import type { ConversationTurn, Finding, Intent } from '../agent/types';
 import {
   validateFeedbackInput,
-  enrichFeedbackEntry,
-  type SessionLookup as FeedbackSessionLookup,
 } from '../agentv3/selfImprove/feedbackEnricher';
-import {
-  formatToolCallNarration,
-  looksLikeGenericToolMessage,
-} from '../agentv3/toolNarration';
-import { applyFeedbackToPattern } from '../agentv3/analysisPatternMemory';
+import { formatToolCallNarration, looksLikeGenericToolMessage } from '../agentv3/toolNarration';
+import {patternExistsForFeedback} from '../agentv3/analysisPatternMemory';
 import { backendLogPath } from '../runtimePaths';
 import { CaseLibrary } from '../services/caseLibrary';
 import { saveCaseCandidates } from '../services/caseEvolution/saveCaseCandidates';
 import { openCaseCandidateOutbox } from '../services/caseEvolution/caseCandidateOutbox';
-import { recordCaseCandidateFeedback } from '../services/caseEvolution/caseCandidateFeedback';
+import {caseCandidateKnowledgeScope} from '../services/caseEvolution/caseCandidateBuilder';
 import {
   attachCaseHitsToContractSync,
   projectEvidenceSignaturesByCluster,
@@ -174,11 +182,86 @@ import {
 } from '../services/caseEvolution/caseEvolutionConfig';
 import {
   knowledgeScopeFromRequestContext,
+  resolveKnowledgeScope,
   type KnowledgeScope,
 } from '../services/scopedKnowledgeStore';
+import { getDefaultCodebaseRegistry } from '../services/codebase/defaultCodebaseServices';
+import {codebaseHasActiveIndex} from '../services/codebase/codebaseRegistry';
+import {codeAwareFeatureEnabled} from '../services/codebase/codeAwareFeature';
+import {
+  externalKnowledgeSourceHasActiveIndex,
+  getDefaultExternalKnowledgeSourceRegistry,
+} from '../services/externalKnowledgeSourceRegistry';
+import {
+  registerPrivateAnalysisQueryForEcho,
+  revokeCodeAwareOutputGuards,
+} from '../services/security/codeAwareOutputRegistry';
+import {projectCodeAwareStreamingUpdate} from '../services/security/codeAwareStreamingUpdateProjection';
+import {
+  privateAnalysisFailureMessage,
+  privateAnalysisQueryMessage,
+  projectPrivateAnalysisReceipt,
+  projectPrivateAnalysisResult,
+  projectPrivateFindings,
+  projectPrivateConclusion,
+  projectPrivateStructuredValue,
+  projectPrivateTerminationMessage,
+  projectPrivateTerminationReason,
+  sessionUsesPrivateKnowledge,
+} from '../services/security/privateAnalysisProjection';
+import {
+  AnalysisContextAuthorizationChangedError,
+  assertCurrentAnalysisContextAuthorization,
+  buildAnalysisContextAuthorizationFingerprint,
+} from '../services/resolvedAnalysisContext';
+import {buildSmartDeepDiveAnalysisContext} from '../services/effectiveAnalysisMode';
 import type { CaseCandidateCaptureInput, CaseEvolutionConfig } from '../types/caseEvolution';
+import type { CaseEvolutionEngine } from '../types/caseEvolution';
+import type { AgentRuntimeKind } from '../agentRuntime/runtimeKinds';
+import {getWorkspaceSkillRegistry} from '../services/skillPacks/workspaceSkillRegistryProvider';
+import {buildSkillRegistryAttribution} from '../services/selfEvolution/skillFingerprint';
+import {
+  currentEffectiveSkillRegistry,
+  getEffectiveRuntimeRegistrySnapshot,
+  resolveEffectiveSkillRegistryForRuntime,
+} from '../services/selfEvolution/effectiveRuntimeRegistryProvider';
+import {
+  createRunManifestLifecycle,
+  disposeRunManifestLifecyclesForSession,
+  getActiveRunManifestLifecycle,
+  withRunManifestLifecycle,
+  type RunManifestLifecycle,
+} from '../services/selfEvolution/runManifestLifecycle';
+import {getRunManifestStore} from '../services/selfEvolution/runManifestStore';
+import {
+  FeedbackEventStore,
+  privateFeedbackStorePaths,
+} from '../services/selfEvolution/feedbackEventStore';
+import {
+  FeedbackProjectionService,
+} from '../services/selfEvolution/feedbackProjectionService';
+import {
+  getSelfEvolutionLifecycleSnapshot,
+} from '../services/selfEvolution/selfEvolutionLifecycle';
+import type {
+  AppendFeedbackEventInput,
+  RunManifestAttributionSink,
+  RunManifestScope,
+} from '../types/selfEvolution';
+import type {AnalysisReceipt} from '../types/dataContract';
 
-const COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION = 1;
+function configuredOutputLanguage(): OutputLanguage {
+  return parseOutputLanguage(process.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
+}
+
+function sessionOutputLanguage(
+  session?: {outputLanguage?: OutputLanguage} | null,
+): OutputLanguage {
+  return session?.outputLanguage ?? configuredOutputLanguage();
+}
+
+const COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION = 3;
+const PRIVATE_ANALYSIS_EVENT_PROJECTION_VERSION = 1;
 
 const router = express.Router();
 
@@ -201,10 +284,7 @@ function generateRequestId(): string {
 }
 
 function resolveRequestIdFromRequest(req: express.Request): string {
-  const headerId =
-    req.header(REQUEST_ID_HEADER) ||
-    req.header('x-correlation-id') ||
-    req.header('x-amzn-trace-id');
+  const headerId = req.header(REQUEST_ID_HEADER) || req.header('x-correlation-id') || req.header('x-amzn-trace-id');
   const bodyId =
     req.body && typeof req.body === 'object' && !Array.isArray(req.body)
       ? (req.body as Record<string, unknown>).requestId
@@ -226,10 +306,7 @@ function buildRunId(sessionId: string, sequence: number): string {
   return `run-${sessionId}-${sequence}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function sendAgentQuotaDenied(
-  res: express.Response,
-  decision: EnterpriseQuotaDecision,
-): express.Response {
+function sendAgentQuotaDenied(res: express.Response, decision: EnterpriseQuotaDecision): express.Response {
   return res.status(decision.httpStatus).json({
     success: false,
     code: decision.code,
@@ -298,9 +375,8 @@ function buildLeaseModeDecisionForTrace(
     estimatedSqlMs: options.estimatedSqlMs,
     heavySkill: options.heavySkill,
     longTask: options.longTask,
-    estimatedNewLeaseRssBytes: typeof options.traceSizeBytes === 'number'
-      ? estimateTraceProcessorRssBytes(options.traceSizeBytes)
-      : undefined,
+    estimatedNewLeaseRssBytes:
+      typeof options.traceSizeBytes === 'number' ? estimateTraceProcessorRssBytes(options.traceSizeBytes) : undefined,
     leases: store.listLeases(scope, { traceId }),
     processors: processorStats.processors,
     ramBudget: processorStats.ramBudget,
@@ -308,7 +384,7 @@ function buildLeaseModeDecisionForTrace(
 }
 
 function buildSessionObservability(
-  session: AnalysisSession
+  session: AnalysisSession,
 ): { runId: string; requestId: string; runSequence: number; status: string } | undefined {
   const run = session.activeRun || session.lastRun;
   if (!run) return undefined;
@@ -337,10 +413,7 @@ function registerSessionRun(session: AnalysisSession, run: AnalyzeSessionRunCont
   return registry[run.runId];
 }
 
-function resolveSessionRun(
-  session: AnalysisSession,
-  runId?: string,
-): AnalyzeSessionRunContext | undefined {
+function resolveSessionRun(session: AnalysisSession, runId?: string): AnalyzeSessionRunContext | undefined {
   if (runId) {
     if (session.activeRun?.runId === runId) return session.activeRun;
     if (session.lastRun?.runId === runId) return session.lastRun;
@@ -388,8 +461,9 @@ function buildStreamObservability(
 function startSessionRun(
   session: AnalysisSession,
   query: string,
-  requestId: string
-): AnalyzeSessionRunContext {
+  requestId: string,
+): AnalyzeSessionRunContext | undefined {
+  if (session.cancellationInFlightRunId) return undefined;
   const nextSequence = normalizeRunSequence(session.runSequence) + 1;
   session.runSequence = nextSequence;
 
@@ -405,13 +479,19 @@ function startSessionRun(
   session.lastRun = run;
   session.cancelState = { runId: run.runId, cancelled: false };
   registerSessionRun(session, run);
+  markSessionRunExecutionActive(session, run.runId);
 
   // Record query in cross-turn history (append-only, never overwritten)
   if (!session.queryHistory) session.queryHistory = [];
-  session.queryHistory.push({ turn: nextSequence, query, timestamp: Date.now() });
+  session.queryHistory.push({
+    turn: nextSequence,
+    query,
+    timestamp: Date.now(),
+  });
 
   // Inject turn boundary marker for multi-turn conversations
   if (nextSequence > 1) {
+    const outputLanguage = sessionOutputLanguage(session);
     session.conversationOrdinal = (Number.isFinite(session.conversationOrdinal) ? session.conversationOrdinal : 0) + 1;
     const boundaryOrdinal = session.conversationOrdinal;
     session.conversationSteps.push({
@@ -419,7 +499,11 @@ function startSessionRun(
       ordinal: boundaryOrdinal,
       phase: 'progress',
       role: 'system',
-      text: `── 第 ${nextSequence} 轮对话开始 ──`,
+      text: localize(
+        outputLanguage,
+        `── 第 ${nextSequence} 轮对话开始 ──`,
+        `── Conversation turn ${nextSequence} started ──`,
+      ),
       timestamp: Date.now(),
       sourceEventType: 'turn_boundary',
     });
@@ -437,10 +521,7 @@ function markSessionRunStatus(
 ): void {
   if (!runId) return;
   const completedAt =
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'quota_exceeded'
+    status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'quota_exceeded'
       ? Date.now()
       : undefined;
   const nextRun = updateRegisteredSessionRun(session, runId, {
@@ -455,10 +536,7 @@ function markSessionRunStatus(
   persistSessionRunState(session, status, error, runId);
 }
 
-function initializeCancelStateForRun(
-  session: AnalysisSession,
-  run: AnalyzeSessionRunContext,
-): void {
+function initializeCancelStateForRun(session: AnalysisSession, run: AnalyzeSessionRunContext): void {
   registerSessionRun(session, run);
   if (isSessionRunCancelled(session, run.runId)) {
     session.cancelState = {
@@ -475,24 +553,22 @@ function getSessionRunId(session: AnalysisSession): string | undefined {
   return session.activeRun?.runId || session.lastRun?.runId;
 }
 
+function getCompletedResultRunId(session: AnalysisSession, runId?: string): string | undefined {
+  return runId ?? getSessionRunId(session);
+}
+
 function isSessionRunCancelled(
   session: AnalysisSession,
   runId: string | undefined = getSessionRunId(session),
 ): boolean {
   return Boolean(
     runId &&
-    (
-      session.cancelledRuns?.[runId]?.cancelled ||
-      (session.cancelState?.runId === runId && session.cancelState.cancelled)
-    )
+    (session.cancelledRuns?.[runId]?.cancelled ||
+      (session.cancelState?.runId === runId && session.cancelState.cancelled)),
   );
 }
 
-function markSessionRunCancelled(
-  session: AnalysisSession,
-  runId: string,
-  reason: string,
-): void {
+function markSessionRunCancelled(session: AnalysisSession, runId: string, reason: string): void {
   if (!session.cancelledRuns) session.cancelledRuns = {};
   session.cancelledRuns[runId] = {
     cancelled: true,
@@ -507,17 +583,7 @@ function markSessionRunCancelled(
   markSessionRunStatus(session, 'cancelled', reason, runId);
 }
 
-function markCurrentRunCancelled(session: AnalysisSession, reason: string): string | undefined {
-  const runId = getSessionRunId(session);
-  if (!runId) return undefined;
-  markSessionRunCancelled(session, runId, reason);
-  return runId;
-}
-
-function setCurrentSessionRun(
-  session: AnalysisSession,
-  run: AnalyzeSessionRunContext,
-): AnalyzeSessionRunContext {
+function setCurrentSessionRun(session: AnalysisSession, run: AnalyzeSessionRunContext): AnalyzeSessionRunContext {
   session.activeRun = cloneRunContext(run);
   session.lastRun = cloneRunContext(run);
   registerSessionRun(session, run);
@@ -528,10 +594,39 @@ function isStaleRun(session: AnalysisSession, runId: string | undefined): boolea
   return Boolean(runId && !isCurrentRunOwner(session, runId));
 }
 
-async function abortSessionBestEffort(
+function markSessionRunExecutionActive(session: AnalysisSession, runId: string): void {
+  if (!session.executingRunIds) session.executingRunIds = new Set<string>();
+  session.executingRunIds.add(runId);
+}
+
+function isSessionRunExecutionActive(session: AnalysisSession, runId: string): boolean {
+  return session.executingRunIds?.has(runId) === true;
+}
+
+function clearCancellationInFlightIfSettled(
   session: AnalysisSession,
-  component: string,
-): Promise<void> {
+  runId: string,
+): void {
+  if (
+    session.cancellationInFlightRunId !== runId ||
+    session.cancellationAbortCompletedRunId !== runId ||
+    isSessionRunExecutionActive(session, runId)
+  ) {
+    return;
+  }
+  session.cancellationInFlightRunId = undefined;
+  session.cancellationAbortCompletedRunId = undefined;
+}
+
+function settleSessionRunExecution(session: AnalysisSession, runId: string): void {
+  session.executingRunIds?.delete(runId);
+  if (session.executingRunIds?.size === 0) {
+    session.executingRunIds = undefined;
+  }
+  clearCancellationInFlightIfSettled(session, runId);
+}
+
+async function abortSessionBestEffort(session: AnalysisSession, component: string): Promise<void> {
   if (typeof session.orchestrator.abortSession !== 'function') return;
   try {
     await session.orchestrator.abortSession(session.sessionId, session.referenceTraceId);
@@ -542,6 +637,20 @@ async function abortSessionBestEffort(
       error: message,
     });
   }
+}
+
+async function abortOwnedRunBestEffort(session: AnalysisSession, runId: string, component: string): Promise<boolean> {
+  if (session.cancellationInFlightRunId !== runId || !isCurrentRunOwner(session, runId)) {
+    session.logger.warn(component, 'Skipped session abort for a run that no longer owns cancellation', {
+      sessionId: session.sessionId,
+      runId,
+      activeRunId: session.activeRun?.runId,
+      cancellationInFlightRunId: session.cancellationInFlightRunId,
+    });
+    return false;
+  }
+  await abortSessionBestEffort(session, component);
+  return true;
 }
 
 function cleanupSessionBestEffort(sessionId: string, session: AnalysisSession, component: string): void {
@@ -564,13 +673,66 @@ function cleanupSessionBestEffort(sessionId: string, session: AnalysisSession, c
   }
 }
 
-async function abortAndCleanupSession(
-  sessionId: string,
-  session: AnalysisSession,
-  component: string,
-): Promise<void> {
+async function abortAndCleanupSession(sessionId: string, session: AnalysisSession, component: string): Promise<void> {
   await abortSessionBestEffort(session, component);
   cleanupSessionBestEffort(sessionId, session, component);
+  revokeCodeAwareOutputGuards(sessionId);
+  disposeRunManifestLifecyclesForSession(
+    runManifestScopeFromSession(session),
+    sessionId,
+  );
+}
+
+async function retireAuthorizationChangedSession(
+  sessionId: string,
+  session: AnalysisSession,
+  updateHandler: (update: StreamingUpdate) => void,
+): Promise<void> {
+  // Stop the event source before awaiting runtime cleanup. Cleanup may itself
+  // flush callbacks, so the output guard must also remain revoked throughout
+  // that asynchronous window.
+  session.orchestrator.off('update', updateHandler);
+  if (session.orchestratorUpdateHandler === updateHandler) {
+    session.orchestratorUpdateHandler = undefined;
+  }
+  revokeCodeAwareOutputGuards(sessionId);
+  sessionContextManager.remove(sessionId);
+  if (typeof session.orchestrator.cleanupSession === 'function') {
+    await Promise.resolve(session.orchestrator.cleanupSession(sessionId)).catch(() => undefined);
+  }
+}
+
+function scrubAuthorizationChangedSession(session: AnalysisSession): void {
+  const privateQuery = privateAnalysisQueryMessage(sessionOutputLanguage(session));
+  session.query = privateQuery;
+  session.agentQuery = privateQuery;
+  session.result = undefined;
+  session.error = undefined;
+  session.hypotheses = [];
+  session.scenes = undefined;
+  session.trackEvents = undefined;
+  session.sceneStoryReport = undefined;
+  session.stateTimeline = undefined;
+  session.laneAvailability = undefined;
+  session.agentDialogue = [];
+  session.dataEnvelopes = [];
+  session.agentResponses = [];
+  session.claimSupport = undefined;
+  session.claimVerificationResult = undefined;
+  session.identityResolutions = undefined;
+  session.conversationSteps = [];
+  session.queryHistory = [];
+  session.conclusionHistory = [];
+  session.comparisonReportSection = undefined;
+  session.codebaseIds = undefined;
+  session.knowledgeSourceIds = undefined;
+  session.analysisContextFingerprint = undefined;
+  session.activeRun = undefined;
+  session.lastRun = undefined;
+  session.runRegistry = undefined;
+  session.runSseState = undefined;
+  session.sseEventBuffer = [];
+  session.sseEventSeq = 0;
 }
 
 function appendCancellationTerminalEvents(
@@ -579,26 +741,33 @@ function appendCancellationTerminalEvents(
   runId?: string,
 ): BufferedSseEvent[] {
   const observability = buildStreamObservability(session, runId);
-  const cancelled = appendAndPersistReplayableSessionEvent(session, 'analysis_cancelled', {
-    type: 'analysis_cancelled',
-    architecture: 'agent-driven',
-    ...observability,
-    message: reason,
-    reason,
-    terminalRunStatus: 'cancelled',
-    timestamp: Date.now(),
-  }, runId);
-  const end = appendAndPersistReplayableSessionEvent(session, 'end', {
-    timestamp: Date.now(),
-    ...observability,
-  }, runId);
+  const cancelled = appendAndPersistReplayableSessionEvent(
+    session,
+    'analysis_cancelled',
+    {
+      type: 'analysis_cancelled',
+      architecture: 'agent-driven',
+      ...observability,
+      message: reason,
+      reason,
+      terminalRunStatus: 'cancelled',
+      timestamp: Date.now(),
+    },
+    runId,
+  );
+  const end = appendAndPersistReplayableSessionEvent(
+    session,
+    'end',
+    {
+      timestamp: Date.now(),
+      ...observability,
+    },
+    runId,
+  );
   return [cancelled, end];
 }
 
-function findCancellationTerminalEvents(
-  events: readonly BufferedSseEvent[],
-  runId?: string,
-): BufferedSseEvent[] {
+function findCancellationTerminalEvents(events: readonly BufferedSseEvent[], runId?: string): BufferedSseEvent[] {
   let cancelledIndex = -1;
   for (let index = events.length - 1; index >= 0; index--) {
     if (
@@ -610,23 +779,19 @@ function findCancellationTerminalEvents(
     }
   }
   if (cancelledIndex < 0) return [];
-  const endIndex = events.findIndex((event, index) =>
-    index > cancelledIndex &&
-    event.eventType === 'end' &&
-    (!runId || !event.runId || event.runId === runId)
+  const endIndex = events.findIndex(
+    (event, index) =>
+      index > cancelledIndex && event.eventType === 'end' && (!runId || !event.runId || event.runId === runId),
   );
   if (endIndex < 0) return [];
   return events.slice(cancelledIndex, endIndex + 1);
 }
 
-function getCancellationTerminalEvents(
-  session: AnalysisSession,
-  reason: string,
-  runId?: string,
-): BufferedSseEvent[] {
-  const buffer = runId && !isCurrentRunOwner(session, runId)
-    ? getRunSseReplayState(session, runId).sseEventBuffer
-    : session.sseEventBuffer;
+function getCancellationTerminalEvents(session: AnalysisSession, reason: string, runId?: string): BufferedSseEvent[] {
+  const buffer =
+    runId && !isCurrentRunOwner(session, runId)
+      ? getRunSseReplayState(session, runId).sseEventBuffer
+      : session.sseEventBuffer;
   const buffered = findCancellationTerminalEvents(buffer, runId);
   if (buffered.length > 0) return buffered;
 
@@ -643,29 +808,81 @@ function writeSessionEventsToClient(res: express.Response, events: readonly Buff
   }
 }
 
+type CancelSessionRunResult = {
+  session: AnalysisSession;
+  runId: string;
+  runStatus?: AnalyzeSessionRunContext['status'];
+  outcome: 'cancelled' | 'already_cancelled' | 'run_not_found' | 'run_not_active' | 'run_not_cancellable';
+  reason?: string;
+};
+
 async function cancelSessionRun(
   sessionId: string,
+  runId: string,
   reason = 'Analysis cancelled by user',
-): Promise<AnalysisSession | undefined> {
+): Promise<CancelSessionRunResult | undefined> {
   const session = assistantAppService.getSession(sessionId);
   if (!session) return undefined;
 
-  if (session.status === 'cancelled') {
-    return session;
+  const targetRun = resolveSessionRun(session, runId);
+  if (!targetRun) {
+    return {
+      session,
+      runId,
+      outcome: 'run_not_found',
+    };
+  }
+  if (isSessionRunCancelled(session, runId) || targetRun.status === 'cancelled') {
+    return {
+      session,
+      runId,
+      runStatus: 'cancelled',
+      outcome: 'already_cancelled',
+      reason: session.cancelledRuns?.[runId]?.reason || targetRun.error || reason,
+    };
+  }
+  if (!isCurrentRunOwner(session, runId)) {
+    return {
+      session,
+      runId,
+      runStatus: targetRun.status,
+      outcome: 'run_not_active',
+    };
   }
   if (
-    session.status !== 'pending' &&
-    session.status !== 'running' &&
-    session.status !== 'awaiting_user'
+    (targetRun.status !== 'pending' && targetRun.status !== 'running') ||
+    (session.status !== 'pending' && session.status !== 'running' && session.status !== 'awaiting_user')
   ) {
-    return session;
+    return {
+      session,
+      runId,
+      runStatus: targetRun.status,
+      outcome: 'run_not_cancellable',
+    };
   }
 
-  const runId = markCurrentRunCancelled(session, reason);
+  session.cancellationInFlightRunId = runId;
+  session.cancellationAbortCompletedRunId = undefined;
+  markSessionRunCancelled(session, runId, reason);
   const smartCancelled = smartCancelBridge.cancel(sessionId, runId);
   if (smartCancelled) smartCancelBridge.tryClaimTerminal(sessionId, runId);
   const sceneCancelled = sceneStoryService.cancel(sessionId, runId);
-  await abortSessionBestEffort(session, 'AgentRoutes');
+  try {
+    await abortOwnedRunBestEffort(session, runId, 'AgentRoutes');
+  } finally {
+    if (session.cancellationInFlightRunId === runId) {
+      session.cancellationAbortCompletedRunId = runId;
+      clearCancellationInFlightIfSettled(session, runId);
+    }
+  }
+  const runManifestLifecycle = getActiveRunManifestLifecycle(
+    runManifestScopeFromSession(session),
+    sessionId,
+    runId,
+  );
+  if (runManifestLifecycle) {
+    finalizeHttpRunManifestLifecycle(session, runManifestLifecycle);
+  }
 
   const terminalEvents = appendCancellationTerminalEvents(session, reason, runId);
   const terminalClients = filterSseClientsForRun(session.sseClients, runId);
@@ -677,7 +894,7 @@ async function cancelSessionRun(
       // client may already be closed
     }
   }
-  session.sseClients = session.sseClients.filter(client => !terminalClients.includes(client));
+  session.sseClients = session.sseClients.filter((client) => !terminalClients.includes(client));
   session.lastActivityAt = Date.now();
   session.logger.info('AgentRoutes', 'Session cancelled by user', {
     sessionId,
@@ -685,7 +902,65 @@ async function cancelSessionRun(
     smartCancelled,
     sceneCancelled,
   });
-  return session;
+  return {
+    session,
+    runId,
+    runStatus: 'cancelled',
+    outcome: 'cancelled',
+    reason,
+  };
+}
+
+function readRequiredCancellationRunId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const runId = value.trim();
+  return runId ? runId : undefined;
+}
+
+function sendCancelSessionRunResult(res: express.Response, result: CancelSessionRunResult): express.Response {
+  const { session, runId, runStatus, outcome, reason } = result;
+  switch (outcome) {
+    case 'cancelled':
+    case 'already_cancelled':
+      return res.json({
+        success: true,
+        sessionId: session.sessionId,
+        runId,
+        status: 'cancelled',
+        sessionStatus: session.status,
+        outcome,
+        reason,
+      });
+    case 'run_not_found':
+      return res.status(404).json({
+        success: false,
+        sessionId: session.sessionId,
+        runId,
+        code: 'RUN_NOT_FOUND',
+        error: 'Run not found in session',
+      });
+    case 'run_not_active':
+      return res.status(409).json({
+        success: false,
+        sessionId: session.sessionId,
+        runId,
+        code: 'RUN_NOT_ACTIVE',
+        error: 'Run no longer owns the active session analysis',
+        status: runStatus,
+        activeRunId: session.activeRun?.runId,
+        sessionStatus: session.status,
+      });
+    case 'run_not_cancellable':
+      return res.status(409).json({
+        success: false,
+        sessionId: session.sessionId,
+        runId,
+        code: 'RUN_NOT_CANCELLABLE',
+        error: 'Run is already terminal',
+        status: runStatus,
+        sessionStatus: session.status,
+      });
+  }
 }
 
 // Attach/echo requestId for all agent endpoints.
@@ -728,14 +1003,22 @@ interface AnalysisSession {
   userId?: string;
   /** Provider Manager profile used for this SDK session. null means env/default fallback is pinned. */
   providerId?: string | null;
+  /** SDK runtime pinned together with the provider snapshot for this session. */
+  runtimeKind?: AgentRuntimeKind;
+  /** Presentation language pinned to this runtime conversation. */
+  outputLanguage?: OutputLanguage;
   /** Non-secret ProviderSnapshot hash used to decide whether SDK session state can be reused. */
   providerSnapshotHash?: string | null;
   providerSnapshotChanged?: boolean;
   providerSnapshotChangeReason?: string;
   agentQuery?: string;
+  analysisMode?: AnalyzeMode;
   continuityBreaks?: import('../agentv3/sessionStateSnapshot').ProviderContinuityBreak[];
   codeAwareMode?: import('../services/codebase/codeAwareFeature').CodeAwareMode;
   codebaseIds?: string[];
+  knowledgeSourceIds?: string[];
+  analysisContextFingerprint?: string;
+  androidInternalsPackPin?: import('../services/androidInternalsPack/types').AndroidInternalsPackIdentity;
   /** Reference trace ID for comparison mode (dual-trace analysis) */
   referenceTraceId?: string;
   comparisonSource?: 'raw_trace_pair' | 'analysis_result_snapshots';
@@ -782,33 +1065,155 @@ interface AnalysisSession {
   activeRun?: AnalyzeSessionRunContext;
   lastRun?: AnalyzeSessionRunContext;
   cancelState?: { runId: string; cancelled: boolean; reason?: string };
+  cancellationInFlightRunId?: string;
+  cancellationAbortCompletedRunId?: string;
+  executingRunIds?: Set<string>;
   runRegistry?: Record<string, AnalyzeSessionRunContext>;
   cancelledRuns?: Record<string, CancelledRunRecord>;
   runSseState?: Record<string, RunScopedSseReplayState>;
   /** Cross-turn query history — appended on each turn, never overwritten */
   queryHistory: Array<{ turn: number; query: string; timestamp: number }>;
   /** Cross-turn conclusion history — appended after each turn completes */
-  conclusionHistory: Array<{ turn: number; conclusion: string; confidence: number; timestamp: number }>;
+  conclusionHistory: Array<{
+    turn: number;
+    conclusion: string;
+    confidence: number;
+    timestamp: number;
+  }>;
   /** F3: Monotonic SSE event counter for replay on reconnect */
   sseEventSeq: number;
   /** F3: Ring buffer of recent SSE events for replay on reconnect */
   sseEventBuffer: import('../assistant/stream/streamProjector').BufferedSseEvent[];
 }
+
 const assistantAppService = new AssistantApplicationService<AnalysisSession>();
 const streamProjector = new StreamProjector();
 const smartCancelBridge = new SmartCancelBridge();
 
-function agentEventScopeFromSession(
+function normalizeReceiptAnalysisMode(value: unknown): AnalyzeMode | undefined {
+  return value === 'fast' || value === 'full' || value === 'auto' ? value : undefined;
+}
+
+function runManifestScopeFromSession(session: AnalysisSession): RunManifestScope {
+  return {
+    tenantId: session.tenantId ?? DEFAULT_TENANT_ID,
+    workspaceId: session.workspaceId ?? DEFAULT_WORKSPACE_ID,
+  };
+}
+
+async function createHttpRunManifestLifecycle(
+  session: AnalysisSession,
+  run: AnalyzeSessionRunContext,
+  options: {
+    analysisMode?: AnalyzeMode;
+    referenceTraceId?: string;
+  },
+): Promise<RunManifestLifecycle> {
+  if (!session.runtimeKind) {
+    throw new Error(`run_manifest_runtime_missing:${run.runId}`);
+  }
+  const scope = runManifestScopeFromSession(session);
+  const runtimeRegistrySnapshot = await getEffectiveRuntimeRegistrySnapshot({
+    scope: {
+      ...scope,
+      userId: session.userId,
+    },
+  });
+  const skillRegistryAttribution = buildSkillRegistryAttribution(
+    runtimeRegistrySnapshot.skillRegistry,
+  );
+  return createRunManifestLifecycle({
+    runId: run.runId,
+    sessionId: session.sessionId,
+    scope,
+    userId: session.userId,
+    startedAt: run.startedAt,
+    runtime: session.runtimeKind,
+    providerId: session.providerId ?? null,
+    ...(session.providerSnapshotHash
+      ? {providerSnapshotHash: session.providerSnapshotHash}
+      : {}),
+    outputLanguage: sessionOutputLanguage(session),
+    analysisMode: options.analysisMode ?? session.analysisMode ?? 'auto',
+    referenceTraceId: options.referenceTraceId ?? session.referenceTraceId,
+    skillRegistry: skillRegistryAttribution,
+    runtimeRegistrySnapshot,
+  });
+}
+
+function sealHttpRunManifest(
+  session: AnalysisSession,
+  lifecycle: RunManifestLifecycle,
+  options: {
+    closePendingSkillInvocationsAsErrors?: boolean;
+  } = {},
+): void {
+  if (lifecycle.state !== 'collecting') return;
+  const run = resolveSessionRun(session, lifecycle.identity.runId);
+  const resultTurns =
+    session.result &&
+    (run?.status === 'completed' || run?.status === 'quota_exceeded')
+      ? session.result.rounds
+      : 0;
+  lifecycle.sealOnceAndPersist({
+    scene: {
+      sceneType: resolveAnalysisResultSceneType(
+        session.query,
+        session.dataEnvelopes,
+      ),
+      architecture: resolveCaseEvolutionArchitectureType(
+        session,
+        session.traceId,
+      ),
+    },
+    turnCount: Number.isSafeInteger(resultTurns) && resultTurns >= 0
+      ? resultTurns
+      : 0,
+    closePendingSkillInvocationsAsErrors:
+      options.closePendingSkillInvocationsAsErrors,
+  });
+}
+
+function sealCompletedHttpRunManifest(
+  session: AnalysisSession,
+  lifecycle: RunManifestLifecycle,
+  runId: string,
+): void {
+  const run = resolveSessionRun(session, runId);
+  if (
+    !session.result ||
+    (run?.status !== 'completed' && run?.status !== 'quota_exceeded')
+  ) {
+    return;
+  }
+  sealHttpRunManifest(session, lifecycle);
+}
+
+function finalizeHttpRunManifestLifecycle(
+  session: AnalysisSession,
+  lifecycle: RunManifestLifecycle,
+): void {
+  try {
+    sealHttpRunManifest(session, lifecycle, {
+      closePendingSkillInvocationsAsErrors: true,
+    });
+  } catch (error) {
+    session.logger.error(
+      'RunManifest',
+      'Failed to persist terminal run manifest',
+      error,
+    );
+  } finally {
+    lifecycle.dispose();
+  }
+}
+
+function baseAgentEventScopeFromSession(
   session: AnalysisSession,
   runId?: string,
 ): AgentEventPersistenceScope | null {
   const run = resolveSessionRun(session, runId);
-  if (
-    !resolveFeatureConfig().enterprise ||
-    !session.tenantId ||
-    !session.workspaceId ||
-    !run?.runId
-  ) {
+  if (!session.tenantId || !session.workspaceId || !run?.runId) {
     return null;
   }
   return {
@@ -818,14 +1223,22 @@ function agentEventScopeFromSession(
     sessionId: session.sessionId,
     runId: run.runId,
     traceId: session.traceId,
-    query: run.query || session.query,
+    query: sessionUsesPrivateKnowledge(session)
+      ? privateAnalysisQueryMessage(sessionOutputLanguage(session))
+      : run.query || session.query,
   };
 }
 
-function analysisRunScopeFromSession(
+function agentEventScopeFromSession(
   session: AnalysisSession,
   runId?: string,
-): AnalysisRunPersistenceScope | null {
+): AgentEventPersistenceScope | null {
+  return resolveFeatureConfig().enterprise
+    ? baseAgentEventScopeFromSession(session, runId)
+    : null;
+}
+
+function analysisRunScopeFromSession(session: AnalysisSession, runId?: string): AnalysisRunPersistenceScope | null {
   return agentEventScopeFromSession(session, runId);
 }
 
@@ -838,8 +1251,11 @@ function persistSessionRunState(
   const scope = analysisRunScopeFromSession(session, runId);
   if (!scope) return;
   try {
+    const durableError = error && sessionUsesPrivateKnowledge(session)
+      ? privateAnalysisFailureMessage(sessionOutputLanguage(session))
+      : error;
     persistAnalysisRunState(scope, status, {
-      error,
+      error: durableError,
       updateSessionStatus: shouldUpdateSessionStatusForRun(session, scope.runId),
     });
   } catch (persistError) {
@@ -878,12 +1294,7 @@ function isPersistedSessionRunFresh(session: AnalysisSession, now: number): bool
   const scope = analysisRunScopeFromSession(session);
   if (!scope) return false;
   try {
-    return isAnalysisRunHeartbeatFresh(
-      scope,
-      scope.runId,
-      now,
-      AGENT_RUN_HEARTBEAT_MAX_STALE_MS,
-    );
+    return isAnalysisRunHeartbeatFresh(scope, scope.runId, now, AGENT_RUN_HEARTBEAT_MAX_STALE_MS);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     session.logger.warn('AnalysisRun', 'Failed to inspect persisted run heartbeat', {
@@ -895,15 +1306,19 @@ function isPersistedSessionRunFresh(session: AnalysisSession, now: number): bool
   }
 }
 
-function persistBufferedAgentEvent(
-  session: AnalysisSession,
-  event: SerializedAgentEvent,
-  runId?: string,
-): void {
-  const scope = agentEventScopeFromSession(session, runId);
+function persistBufferedAgentEvent(session: AnalysisSession, event: SerializedAgentEvent, runId?: string): void {
+  const scope = agentEventScopeFromSession(session, runId) ??
+    (
+      event.eventType === 'analysis_completed'
+        ? baseAgentEventScopeFromSession(session, runId)
+        : null
+    );
   if (!scope) return;
   try {
-    persistSerializedAgentEvent(scope, event, {
+    const durableEvent = sessionUsesPrivateKnowledge(session)
+      ? sanitizePersistedAnalysisCompletedEvent(session, event)
+      : event;
+    persistSerializedAgentEvent(scope, durableEvent, {
       updateSessionStatus: shouldUpdateSessionStatusForRun(session, scope.runId),
     });
   } catch (error) {
@@ -931,26 +1346,39 @@ function sanitizePersistedAnalysisCompletedEvent(
   event: SerializedAgentEvent,
 ): SerializedAgentEvent {
   if (event.eventType !== 'analysis_completed') return event;
+  const privateKnowledge = sessionUsesPrivateKnowledge(session);
 
   let payload: any;
   try {
     payload = JSON.parse(event.eventData || '{}');
   } catch {
-    return event;
+    if (!privateKnowledge) return event;
+    const language = sessionOutputLanguage(session);
+    return {
+      ...event,
+      eventData: JSON.stringify({
+        data: projectPrivateAnalysisResult(session.sessionId, {
+          sessionId: session.sessionId,
+          success: false,
+          findings: [],
+          hypotheses: [],
+          conclusion: '',
+          confidence: 0,
+          rounds: 0,
+          totalDurationMs: 0,
+          uiActionProposals: [],
+        }, language),
+      }),
+    };
   }
-  const data = payload?.data && typeof payload.data === 'object'
-    ? payload.data
-    : payload;
-  const conclusion = typeof data?.conclusion === 'string'
-    ? data.conclusion
-    : typeof data?.answer === 'string'
-      ? data.answer
-      : '';
-  if (!conclusion.trim()) return event;
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+  const conclusion =
+    typeof data?.conclusion === 'string' ? data.conclusion : typeof data?.answer === 'string' ? data.answer : '';
+  if (!conclusion.trim() && !privateKnowledge) return event;
 
   const result: AgentRuntimeAnalysisResult = {
     sessionId: session.sessionId,
-    success: data?.success !== false,
+    success: data?.success !== false && Boolean(conclusion.trim()),
     findings: Array.isArray(data?.findings) ? data.findings : [],
     hypotheses: Array.isArray(data?.hypotheses) ? data.hypotheses : [],
     conclusion,
@@ -964,21 +1392,120 @@ function sanitizePersistedAnalysisCompletedEvent(
     claimSupport: data?.claimSupport,
     claimVerificationResult: data?.claimVerificationResult,
     identityResolutions: data?.identityResolutions,
+    quickRun: data?.quickRun,
+    analysisReceipt: data?.analysisReceipt,
+    uiActionProposals: data?.uiActionProposals,
   };
 
   const issue = applyFinalResultQualityGate({ result, query: session.query });
-  if (!issue) return event;
+  if (!issue && !privateKnowledge) return event;
+  const outputLanguage = sessionOutputLanguage(session);
+  const trustedPrivateProjection = privateKnowledge &&
+    data?.privateProjectionVersion === PRIVATE_ANALYSIS_EVENT_PROJECTION_VERSION;
+  const resultForProjection = privateKnowledge && !trustedPrivateProjection
+    ? {
+        ...result,
+        success: false,
+        findings: [],
+        hypotheses: [],
+        conclusion: '',
+        conclusionContract: undefined,
+        claimSupport: undefined,
+        claimVerificationResult: undefined,
+        identityResolutions: undefined,
+        uiActionProposals: [],
+      }
+    : result;
+  const durableResult = privateKnowledge
+    ? projectPrivateAnalysisResult(session.sessionId, resultForProjection, outputLanguage)
+    : resultForProjection;
 
-  const nextData = {
-    ...data,
-    confidence: result.confidence,
-    partial: result.partial,
-    terminationReason: result.terminationReason,
-    terminationMessage: result.terminationMessage,
-  };
-  const nextPayload = payload?.data && typeof payload.data === 'object'
-    ? { ...payload, data: nextData }
-    : { ...payload, ...nextData };
+  const nextData = privateKnowledge
+    ? {
+        privateProjectionVersion: PRIVATE_ANALYSIS_EVENT_PROJECTION_VERSION,
+        ...(typeof data?.success === 'boolean' ? {success: durableResult.success} : {}),
+        conclusion: durableResult.conclusion,
+        ...(Object.prototype.hasOwnProperty.call(data, 'answer')
+          ? {answer: durableResult.conclusion}
+          : {}),
+        conclusionContract: durableResult.conclusionContract,
+        claimSupport: durableResult.claimSupport,
+        claimVerificationResult: durableResult.claimVerificationResult,
+        identityResolutions: durableResult.identityResolutions,
+        findings: durableResult.findings,
+        hypotheses: durableResult.hypotheses,
+        uiActionProposals: durableResult.uiActionProposals,
+        smartScenePreview: trustedPrivateProjection && data.smartScenePreview
+          ? projectPrivateStructuredValue(session.sessionId, data.smartScenePreview)
+          : undefined,
+        conversationTimeline: [],
+        agentDialogueCount: 0,
+        conversationTimelineCount: 0,
+        comparisonReportSection: trustedPrivateProjection && data.comparisonReportSection
+          ? projectPrivateStructuredValue(session.sessionId, data.comparisonReportSection)
+          : undefined,
+        resultContract: trustedPrivateProjection && data.resultContract
+          ? projectPrivateStructuredValue(session.sessionId, data.resultContract)
+          : undefined,
+        analysisReceipt: projectPrivateAnalysisReceipt(durableResult.analysisReceipt),
+        confidence: durableResult.confidence,
+        rounds: durableResult.rounds,
+        totalDurationMs: durableResult.totalDurationMs,
+        partial: durableResult.partial,
+        terminationReason: durableResult.terminationReason,
+        terminationMessage: durableResult.terminationMessage,
+        quickRun: durableResult.quickRun
+          ? projectPrivateStructuredValue(session.sessionId, durableResult.quickRun)
+          : undefined,
+        reportUrl: typeof data?.reportUrl === 'string' &&
+            /^\/api\/reports\/[A-Za-z0-9._~-]+$/.test(data.reportUrl)
+          ? data.reportUrl
+          : undefined,
+        resultSnapshotId: typeof data?.resultSnapshotId === 'string'
+          ? data.resultSnapshotId.slice(0, 160)
+          : undefined,
+        terminalRunStatus: data?.terminalRunStatus === 'quota_exceeded'
+          ? 'quota_exceeded'
+          : 'completed',
+        observability: data?.observability && typeof data.observability === 'object'
+          ? {
+              ...(typeof data.observability.runId === 'string'
+                ? {runId: data.observability.runId.slice(0, 160)}
+                : {}),
+              ...(typeof data.observability.requestId === 'string'
+                ? {requestId: data.observability.requestId.slice(0, 160)}
+                : {}),
+              ...(typeof data.observability.runSequence === 'number'
+                ? {runSequence: data.observability.runSequence}
+                : {}),
+            }
+          : undefined,
+      }
+    : {
+        ...data,
+        confidence: durableResult.confidence,
+        partial: durableResult.partial,
+        terminationReason: durableResult.terminationReason,
+        terminationMessage: durableResult.terminationMessage,
+        quickRun: durableResult.quickRun,
+      };
+  const nextPayload = privateKnowledge
+    ? {
+        type: 'analysis_completed',
+        ...(payload?.architecture === 'agent-driven' ? {architecture: 'agent-driven'} : {}),
+        ...(typeof payload?.runId === 'string' ? {runId: payload.runId.slice(0, 160)} : {}),
+        ...(typeof payload?.requestId === 'string'
+          ? {requestId: payload.requestId.slice(0, 160)}
+          : {}),
+        ...(typeof payload?.runSequence === 'number'
+          ? {runSequence: payload.runSequence}
+          : {}),
+        data: nextData,
+        timestamp: typeof payload?.timestamp === 'number' ? payload.timestamp : event.createdAt,
+      }
+    : payload?.data && typeof payload.data === 'object'
+      ? {...payload, data: nextData}
+      : {...payload, ...nextData};
   return {
     ...event,
     eventData: JSON.stringify(nextPayload),
@@ -1034,18 +1561,19 @@ function appendReplayableRunEvent(
   payload: unknown,
   runId?: string,
 ): BufferedSseEvent {
-  const replayState =
-    runId && !isCurrentRunOwner(session, runId)
-      ? getRunSseReplayState(session, runId)
-      : session;
+  const replayState = runId && !isCurrentRunOwner(session, runId) ? getRunSseReplayState(session, runId) : session;
   const event = appendReplayableSseEvent(replayState, eventType, payload);
   if (runId) event.runId = runId;
-  persistBufferedAgentEvent(session, {
-    cursor: event.seqId,
-    eventType: event.eventType,
-    eventData: event.eventData,
-    createdAt: Date.now(),
-  }, runId);
+  persistBufferedAgentEvent(
+    session,
+    {
+      cursor: event.seqId,
+      eventType: event.eventType,
+      eventData: event.eventData,
+      createdAt: Date.now(),
+    },
+    runId,
+  );
   return event;
 }
 
@@ -1076,38 +1604,35 @@ function writeBufferedSessionEvent(res: express.Response, event: BufferedSseEven
   res.write(`data: ${event.eventData}\n\n`);
 }
 
-function loadPersistedCompletedAnalysisSseEvents(
-  session: AnalysisSession,
-  runId?: string,
-): BufferedSseEvent[] {
+function loadPersistedCompletedAnalysisSseEvents(session: AnalysisSession, runId?: string): BufferedSseEvent[] {
   const scope = agentEventScopeFromSession(session, runId);
   if (!scope) return [];
   const events = listSerializedAgentEventsAfter(scope, scope.runId, 0)
-    .filter(event =>
-      event.eventType === 'snapshot_created' ||
-      event.eventType === 'analysis_completed' ||
-      event.eventType === 'analysis_cancelled' ||
-      event.eventType === 'scene_reconstruction_completed' ||
-      event.eventType === 'end')
-    .map(event => sanitizePersistedAnalysisCompletedEvent(session, event))
-    .map(event => ({
+    .filter(
+      (event) =>
+        event.eventType === 'snapshot_created' ||
+        event.eventType === 'progress' ||
+        event.eventType === 'analysis_completed' ||
+        event.eventType === 'analysis_cancelled' ||
+        event.eventType === 'scene_reconstruction_completed' ||
+        event.eventType === 'end',
+    )
+    .map((event) => sanitizePersistedAnalysisCompletedEvent(session, event))
+    .map((event) => ({
       seqId: event.cursor,
       eventType: event.eventType,
       eventData: event.eventData,
       runId: scope.runId,
     }));
-  const hasCompletedTerminal = events.some(event => event.eventType === 'analysis_completed');
-  const hasCancelledTerminal = events.some(event => event.eventType === 'analysis_cancelled');
-  if ((!hasCompletedTerminal && !hasCancelledTerminal) ||
-      !events.some(event => event.eventType === 'end')) {
+  const hasCompletedTerminal = events.some((event) => event.eventType === 'analysis_completed');
+  const hasCancelledTerminal = events.some((event) => event.eventType === 'analysis_cancelled');
+  if ((!hasCompletedTerminal && !hasCancelledTerminal) || !events.some((event) => event.eventType === 'end')) {
     return [];
   }
   const replayState =
-    runId && !isCurrentRunOwner(session, scope.runId)
-      ? getRunSseReplayState(session, scope.runId)
-      : session;
-  replayState.sseEventSeq = Math.max(replayState.sseEventSeq || 0, ...events.map(event => event.seqId));
-  const existing = new Set(replayState.sseEventBuffer.map(event => `${event.seqId}:${event.eventType}`));
+    runId && !isCurrentRunOwner(session, scope.runId) ? getRunSseReplayState(session, scope.runId) : session;
+  replayState.sseEventSeq = Math.max(replayState.sseEventSeq || 0, ...events.map((event) => event.seqId));
+  const existing = new Set(replayState.sseEventBuffer.map((event) => `${event.seqId}:${event.eventType}`));
   for (const event of events) {
     const key = `${event.seqId}:${event.eventType}`;
     if (!existing.has(key)) replayState.sseEventBuffer.push(event);
@@ -1116,6 +1641,12 @@ function loadPersistedCompletedAnalysisSseEvents(
     replayState.sseEventBuffer.splice(0, replayState.sseEventBuffer.length - SSE_RING_BUFFER_SIZE);
   }
   return events;
+}
+
+function latestBufferedProgressEvent(session: AnalysisSession, runId?: string): BufferedSseEvent | undefined {
+  const replayState = runId && !isCurrentRunOwner(session, runId) ? session.runSseState?.[runId] : session;
+  const buffer = replayState?.sseEventBuffer ?? [];
+  return [...buffer].reverse().find((event) => event.eventType === 'progress' && (!runId || event.runId === runId));
 }
 
 type TurnHistorySource = 'memory' | 'persistence';
@@ -1132,8 +1663,7 @@ function resolveSessionContextForReview(sessionId: string): ResolvedSessionConte
   const activeSession = assistantAppService.getSession(sessionId);
   if (activeSession) {
     const activeContext =
-      sessionContextManager.get(sessionId, activeSession.traceId) ||
-      sessionContextManager.get(sessionId);
+      sessionContextManager.get(sessionId, activeSession.traceId) || sessionContextManager.get(sessionId);
     if (activeContext) {
       return {
         context: activeContext,
@@ -1220,11 +1750,20 @@ function isResolvedSessionAccessible(req: express.Request, resolved: ResolvedSes
   return isOwnedByContext(resolved, requireRequestContext(req));
 }
 
-async function ensureTraceAccessible(req: express.Request, res: express.Response, traceId: string): Promise<boolean> {
+async function ensureTraceAccessible(
+  req: express.Request,
+  res: express.Response,
+  traceId: string,
+  code = 'TRACE_NOT_UPLOADED',
+): Promise<boolean> {
   const context = requireRequestContext(req);
   const metadata = await readTraceMetadataForContext(traceId, context);
   if (!metadata) {
-    sendResourceNotFound(res, 'Trace not found in backend');
+    res.status(404).json({
+      success: false,
+      error: 'Trace not found in backend',
+      code,
+    });
     return false;
   }
   return true;
@@ -1238,6 +1777,67 @@ function requestedSessionIsVisible(sessionId: string, context: RequestContext): 
 
   const persistedSession = SessionPersistenceService.getInstance().getSession(sessionId);
   return !persistedSession || isOwnedByContext(persistedSession.metadata, context);
+}
+
+function sendRunStartConflictIfNeeded(res: express.Response, session: AnalysisSession | undefined): boolean {
+  if (!session) return false;
+  if (session.cancellationInFlightRunId) {
+    res.status(409).json({
+      success: false,
+      code: 'CANCELLATION_IN_PROGRESS',
+      error: 'The current run is still stopping',
+      sessionId: session.sessionId,
+      runId: session.cancellationInFlightRunId,
+    });
+    return true;
+  }
+  const activeRun = session.activeRun;
+  if (session.status === 'awaiting_user' || activeRun?.status === 'pending' || activeRun?.status === 'running') {
+    res.status(409).json({
+      success: false,
+      code: 'RUN_ALREADY_ACTIVE',
+      error: 'The session already has an active run',
+      sessionId: session.sessionId,
+      runId: activeRun?.runId,
+    });
+    return true;
+  }
+  return false;
+}
+
+function normalizeRouteReferenceTraceId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function resolveVisibleSessionReferenceTraceIdForTrace(
+  sessionId: string | undefined,
+  traceId: string,
+  context: RequestContext,
+): string | undefined {
+  if (!sessionId) return undefined;
+
+  const activeSession = assistantAppService.getSession(sessionId);
+  if (activeSession) {
+    if (activeSession.traceId !== traceId || !isOwnedByContext(activeSession, context)) {
+      return undefined;
+    }
+    return normalizeRouteReferenceTraceId(activeSession.referenceTraceId);
+  }
+
+  const persistenceService = SessionPersistenceService.getInstance();
+  const persistedSession = persistenceService.getSession(sessionId);
+  if (
+    !persistedSession ||
+    persistedSession.traceId !== traceId ||
+    !isOwnedByContext(persistedSession.metadata, context)
+  ) {
+    return undefined;
+  }
+  return (
+    normalizeRouteReferenceTraceId(persistedSession.metadata?.referenceTraceId) ??
+    normalizeRouteReferenceTraceId(persistedSession.metadata?.sessionStateSnapshot?.referenceTraceId) ??
+    normalizeRouteReferenceTraceId(persistenceService.loadSessionStateSnapshot(sessionId)?.referenceTraceId)
+  );
 }
 
 function buildTurnSeverityCounts(turn: ConversationTurn): Record<string, number> {
@@ -1263,9 +1863,7 @@ function buildTurnSeverityCounts(turn: ConversationTurn): Record<string, number>
 }
 
 function toJsonSafe<T>(value: T): T {
-  return JSON.parse(
-    JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? v.toString() : v))
-  ) as T;
+  return JSON.parse(JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? v.toString() : v))) as T;
 }
 
 function buildDisplayTurnResult(turn: ConversationTurn): ConversationTurn['result'] {
@@ -1299,34 +1897,46 @@ function buildDisplayTurnResult(turn: ConversationTurn): ConversationTurn['resul
   };
 }
 
-function buildTurnSummary(turn: ConversationTurn) {
+function buildTurnSummary(
+  turn: ConversationTurn,
+  privateSessionId?: string,
+  outputLanguage: OutputLanguage = configuredOutputLanguage(),
+) {
   const displayResult = buildDisplayTurnResult(turn);
-  const confidence =
-    typeof displayResult?.confidence === 'number'
-      ? displayResult.confidence
-      : undefined;
-  const sanitizedConclusion = typeof displayResult?.message === 'string'
-    ? normalizeNarrativeForClient(displayResult.message)
-    : '';
-  const conclusionPreview = sanitizedConclusion
-    ? sanitizedConclusion.replace(/\s+/g, ' ').slice(0, 240)
-    : undefined;
+  const projectedMessage = privateSessionId && displayResult
+    ? projectPrivateConclusion({
+        sessionId: privateSessionId,
+        conclusion: displayResult.message,
+        success: displayResult.success !== false,
+        language: outputLanguage,
+      })
+    : displayResult?.message;
+  const confidence = typeof displayResult?.confidence === 'number' ? displayResult.confidence : undefined;
+  const sanitizedConclusion =
+    typeof projectedMessage === 'string' ? normalizeNarrativeForClient(projectedMessage) : '';
+  const conclusionPreview = sanitizedConclusion ? sanitizedConclusion.replace(/\s+/g, ' ').slice(0, 240) : undefined;
 
   return {
     turnId: turn.id,
     turnIndex: turn.turnIndex,
     timestamp: turn.timestamp,
-    query: turn.query,
-    intent: {
-      primaryGoal: turn.intent?.primaryGoal || '',
-      followUpType: turn.intent?.followUpType || 'initial',
-      aspects: Array.isArray(turn.intent?.aspects) ? turn.intent.aspects : [],
-    },
+    query: privateSessionId ? privateAnalysisQueryMessage(outputLanguage) : turn.query,
+    intent: privateSessionId
+      ? {primaryGoal: '', followUpType: 'initial', aspects: []}
+      : {
+          primaryGoal: turn.intent?.primaryGoal || '',
+          followUpType: turn.intent?.followUpType || 'initial',
+          aspects: Array.isArray(turn.intent?.aspects) ? turn.intent.aspects : [],
+        },
     completed: !!turn.completed,
     success: typeof displayResult?.success === 'boolean' ? displayResult.success : null,
     partial: displayResult?.partial === true,
-    terminationReason: displayResult?.terminationReason,
-    terminationMessage: displayResult?.terminationMessage,
+    terminationReason: privateSessionId
+      ? projectPrivateTerminationReason(displayResult?.terminationReason)
+      : displayResult?.terminationReason,
+    terminationMessage: privateSessionId
+      ? projectPrivateTerminationMessage(displayResult?.terminationMessage, outputLanguage)
+      : displayResult?.terminationMessage,
     confidence,
     findingCount: Array.isArray(turn.findings) ? turn.findings.length : 0,
     severityCounts: buildTurnSeverityCounts(turn),
@@ -1334,22 +1944,40 @@ function buildTurnSummary(turn: ConversationTurn) {
   };
 }
 
-function buildTurnDetail(turn: ConversationTurn) {
-  const summary = buildTurnSummary(turn);
+function buildTurnDetail(
+  turn: ConversationTurn,
+  privateSessionId?: string,
+  outputLanguage: OutputLanguage = configuredOutputLanguage(),
+) {
+  const summary = buildTurnSummary(turn, privateSessionId, outputLanguage);
   const displayResult = buildDisplayTurnResult(turn);
   return {
     ...summary,
-    intent: toJsonSafe(turn.intent),
+    intent: privateSessionId ? summary.intent : toJsonSafe(turn.intent),
     result: displayResult
-      ? toJsonSafe({
-          ...displayResult,
-          message:
-            typeof displayResult.message === 'string'
-              ? normalizeNarrativeForClient(displayResult.message)
-              : displayResult.message,
-        })
+      ? toJsonSafe(privateSessionId
+          ? projectPrivateAnalysisResult(privateSessionId, {
+              sessionId: turn.id,
+              success: displayResult.success !== false,
+              findings: Array.isArray(turn.findings) ? turn.findings : [],
+              hypotheses: [],
+              conclusion: displayResult.message ?? '',
+              confidence: displayResult.confidence ?? 0.5,
+              rounds: 1,
+              totalDurationMs: 0,
+              partial: displayResult.partial === true,
+              terminationReason: displayResult.terminationReason as AgentRuntimeAnalysisResult['terminationReason'],
+              terminationMessage: displayResult.terminationMessage,
+              conclusionContract: displayResult.conclusionContract as ConclusionContract | undefined,
+              claimSupport: displayResult.claimSupport,
+              claimVerificationResult: displayResult.claimVerificationResult,
+              identityResolutions: displayResult.identityResolutions,
+            }, outputLanguage)
+          : displayResult)
       : null,
-    findings: toJsonSafe(turn.findings || []),
+    findings: toJsonSafe(privateSessionId
+      ? projectPrivateFindings(privateSessionId, turn.findings || [])
+      : turn.findings || []),
   };
 }
 
@@ -1366,20 +1994,18 @@ function getLastCompletedTurn(context: EnhancedSessionContext): ConversationTurn
 
 function buildRecoveredResultFromContext(
   sessionId: string,
-  context: EnhancedSessionContext
+  context: EnhancedSessionContext,
 ): AgentRuntimeAnalysisResult | null {
   const turn = getLastCompletedTurn(context);
   if (!turn || !turn.result) {
     return null;
   }
 
-  const conclusion = typeof turn.result.message === 'string' && turn.result.message.trim().length > 0
-    ? turn.result.message
-    : `已恢复会话历史。可通过 /api/agent/v1/${sessionId}/turns 查看历史轮次。`;
-  const confidence =
-    typeof turn.result.confidence === 'number'
-      ? turn.result.confidence
-      : 0.5;
+  const conclusion =
+    typeof turn.result.message === 'string' && turn.result.message.trim().length > 0
+      ? turn.result.message
+      : `已恢复会话历史。可通过 /api/agent/v1/${sessionId}/turns 查看历史轮次。`;
+  const confidence = typeof turn.result.confidence === 'number' ? turn.result.confidence : 0.5;
 
   return {
     sessionId,
@@ -1412,8 +2038,7 @@ function annotateRecoveredResultQuality(
   });
   if (!issue) return;
 
-  const context = sessionContextManager.get(sessionId, session.traceId) ||
-    sessionContextManager.get(sessionId);
+  const context = sessionContextManager.get(sessionId, session.traceId) || sessionContextManager.get(sessionId);
   context?.annotateLatestCompletedTurn({
     success: result.success,
     findings: result.findings,
@@ -1429,7 +2054,10 @@ function annotateRecoveredResultQuality(
   });
 }
 
-function recoverResultForSessionIfNeeded(sessionId: string, session: AnalysisSession): AgentRuntimeAnalysisResult | null {
+function recoverResultForSessionIfNeeded(
+  sessionId: string,
+  session: AnalysisSession,
+): AgentRuntimeAnalysisResult | null {
   if (session.result) {
     annotateRecoveredResultQuality(sessionId, session, session.result);
     return session.result;
@@ -1581,7 +2209,7 @@ function setSseClientRunScope(client: express.Response, runId?: string): void {
 
 function filterSseClientsForRun(clients: express.Response[], runId?: string): express.Response[] {
   if (!runId) return clients;
-  return clients.filter(client => {
+  return clients.filter((client) => {
     const scopedRunId = (client as RunScopedSseClient)[RUN_SCOPED_SSE_CLIENT_ID];
     return !scopedRunId || scopedRunId === runId;
   });
@@ -1607,14 +2235,11 @@ function ensureToolsRegistered() {
 }
 
 function isDedicatedSceneReplayRequest(query: string): boolean {
-  const q = String(query || '').trim().toLowerCase();
+  const q = String(query || '')
+    .trim()
+    .toLowerCase();
   if (!q) return false;
-  return (
-    q === '/scene' ||
-    q.includes('场景还原') ||
-    q.includes('scene reconstruction') ||
-    q.includes('scene replay')
-  );
+  return q === '/scene' || q.includes('场景还原') || q.includes('scene reconstruction') || q.includes('scene replay');
 }
 
 // ============================================================================
@@ -1650,6 +2275,10 @@ async function handleAnalyzeRequest(
   res: express.Response,
   requestedSessionIdOverride?: string,
 ): Promise<void> {
+  let executionSession: AnalysisSession | undefined;
+  let executionRunId: string | undefined;
+  let executionRunManifestLifecycle: RunManifestLifecycle | undefined;
+  let executionHandedOff = false;
   try {
     const requestId = getRequestId(req);
     const requestContext = requireRequestContext(req);
@@ -1664,8 +2293,18 @@ async function handleAnalyzeRequest(
       providerId,
     } = req.body;
     const requestedSessionId = requestedSessionIdOverride || bodyRequestedSessionId;
+    const earlyOutputLanguage: OutputLanguage = rawOptions &&
+      typeof rawOptions === 'object' &&
+      !Array.isArray(rawOptions) &&
+      (rawOptions.outputLanguage === 'en' || rawOptions.outputLanguage === 'zh-CN')
+      ? rawOptions.outputLanguage
+      : configuredOutputLanguage();
     if (!hasRbacPermission(requestContext, 'agent:run')) {
       sendForbidden(res, 'Starting analysis requires agent:run permission');
+      return;
+    }
+
+    if (!requireAiEnabledForHttp(res, 'agent_analyze')) {
       return;
     }
 
@@ -1678,7 +2317,8 @@ async function handleAnalyzeRequest(
     if (!traceId) {
       res.status(400).json({
         success: false,
-        error: 'traceId is required',
+        code: 'TRACE_ID_REQUIRED',
+        error: localize(earlyOutputLanguage, '缺少 traceId', 'traceId is required'),
       });
       return;
     }
@@ -1686,7 +2326,8 @@ async function handleAnalyzeRequest(
     if (!query) {
       res.status(400).json({
         success: false,
-        error: 'query is required',
+        code: 'QUERY_REQUIRED',
+        error: localize(earlyOutputLanguage, '缺少 query', 'query is required'),
       });
       return;
     }
@@ -1695,83 +2336,264 @@ async function handleAnalyzeRequest(
       res.status(400).json({
         success: false,
         code: 'SCENE_REPLAY_SEPARATED',
-        error: '场景还原已独立为专用功能',
-        hint: '请使用 /scene 命令（前端）或 POST /api/agent/v1/scene-reconstruct（后端）',
+        error: localize(
+          earlyOutputLanguage,
+          '场景还原已独立为专用功能',
+          'Scene reconstruction is available as a dedicated feature',
+        ),
+        hint: localize(
+          earlyOutputLanguage,
+          '请使用 /scene 命令（前端）或 POST /api/agent/v1/scene-reconstruct（后端）',
+          'Use the /scene command in the UI or POST /api/agent/v1/scene-reconstruct',
+        ),
       });
       return;
     }
 
+    const inheritedReferenceTraceId = resolveVisibleSessionReferenceTraceIdForTrace(
+      requestedSessionId,
+      traceId,
+      requestContext,
+    );
     let options: ReturnType<typeof normalizeAnalyzeOptions>;
     try {
       options = normalizeAnalyzeOptions(rawOptions, {
         endpoint: requestedSessionIdOverride ? '/sessions/:id/runs' : '/analyze',
-        hasReferenceTraceId: !!referenceTraceId,
+        hasReferenceTraceId: !!referenceTraceId || !!inheritedReferenceTraceId,
+        ...(typeof traceId === 'string' ? { traceId } : {}),
+        ...(typeof referenceTraceId === 'string'
+          ? { referenceTraceId }
+          : typeof inheritedReferenceTraceId === 'string'
+            ? { referenceTraceId: inheritedReferenceTraceId }
+            : {}),
       });
     } catch (error: any) {
       if (error instanceof AnalyzeOptionsError) {
+        const requestedErrorLanguage = rawOptions && typeof rawOptions === 'object' &&
+          !Array.isArray(rawOptions) && rawOptions.outputLanguage === 'en'
+          ? 'en'
+          : rawOptions && typeof rawOptions === 'object' &&
+              !Array.isArray(rawOptions) && rawOptions.outputLanguage === 'zh-CN'
+            ? 'zh-CN'
+            : configuredOutputLanguage();
         res.status(error.httpStatus).json({
           success: false,
-          error: error.message,
+          error: analyzeOptionsErrorMessage(error, requestedErrorLanguage),
           code: error.code,
         });
         return;
       }
       throw error;
     }
+    const requestOutputLanguage = options.outputLanguage ?? configuredOutputLanguage();
+
+    if (options.codebaseIds?.length && !codeAwareFeatureEnabled()) {
+      res.status(409).json({
+        success: false,
+        code: 'FEATURE_DISABLED',
+        error: localize(
+          requestOutputLanguage,
+          '此后端已禁用注册源码分析',
+          'Registered source analysis is disabled on this backend',
+        ),
+      });
+      return;
+    }
+    if (options.codebaseIds?.length || options.knowledgeSourceIds?.length) {
+      if (!hasRbacPermission(requestContext, 'codebase:read')) {
+        sendForbidden(res, localize(
+          requestOutputLanguage,
+          '使用已注册分析上下文需要 codebase:read 权限',
+          'Using registered analysis context requires codebase:read permission',
+        ));
+        return;
+      }
+    }
+    if (options.codebaseIds?.length) {
+      const codebaseScope = knowledgeScopeFromRequestContext(requestContext);
+      const codebaseRegistry = getDefaultCodebaseRegistry();
+      const codebases = options.codebaseIds.map(codebaseId =>
+        codebaseRegistry.get(codebaseId, codebaseScope));
+      if (codebases.some(codebase => !codebase)) {
+        sendResourceNotFound(
+          res,
+          localize(
+            requestOutputLanguage,
+            '未找到一个或多个所选源码库',
+            'One or more selected codebases were not found',
+          ),
+          'ANALYSIS_CONTEXT_CODEBASE_NOT_FOUND',
+        );
+        return;
+      }
+      if (codebases.some(codebase => !codebase || !codebaseHasActiveIndex(codebase))) {
+        res.status(409).json({
+          success: false,
+          code: 'ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE',
+          error: localize(
+            requestOutputLanguage,
+            '一个或多个所选源码库没有可用的活动索引代际',
+            'One or more selected codebases have no active indexed source generation',
+          ),
+        });
+        return;
+      }
+      if (
+        options.codeAwareMode === 'provider_send' &&
+        codebases.some(codebase => !codebase?.consent.sendToProvider)
+      ) {
+        res.status(409).json({
+          success: false,
+          code: 'ANALYSIS_CONTEXT_CODEBASE_NOT_CONSENTED',
+          error: localize(
+            requestOutputLanguage,
+            '完整源码分析要求每个所选源码库都明确授权发送给模型服务',
+            'Full source analysis requires explicit provider-send consent for every selected codebase',
+          ),
+        });
+        return;
+      }
+    }
+    if (options.knowledgeSourceIds?.length) {
+      const knowledgeScope = knowledgeScopeFromRequestContext(requestContext);
+      const knowledgeRegistry = getDefaultExternalKnowledgeSourceRegistry();
+      const sources = options.knowledgeSourceIds.map(sourceId =>
+        knowledgeRegistry.get(sourceId, knowledgeScope));
+      if (sources.some(source => !source)) {
+        sendResourceNotFound(
+          res,
+          localize(
+            requestOutputLanguage,
+            '未找到一个或多个所选知识源',
+            'One or more selected knowledge sources were not found',
+          ),
+          'ANALYSIS_CONTEXT_SOURCE_NOT_FOUND',
+        );
+        return;
+      }
+      if (sources.some(source =>
+        !source?.rightsAcknowledged ||
+        !source.sendToProvider ||
+        !externalKnowledgeSourceHasActiveIndex(source))) {
+        res.status(409).json({
+          success: false,
+          code: 'ANALYSIS_CONTEXT_SOURCE_UNAVAILABLE',
+          error: localize(
+            requestOutputLanguage,
+            '一个或多个知识源未激活，或尚未授权给模型服务使用',
+            'One or more knowledge sources are inactive or not consented for provider use',
+          ),
+        });
+        return;
+      }
+    }
 
     if (requestedSessionId && !requestedSessionIsVisible(requestedSessionId, requestContext)) {
       sendResourceNotFound(res, 'Session not found');
       return;
     }
-
-    // Validate selectionContext — strip invalid payloads silently instead of rejecting
-    let selectionContext: typeof rawSelectionContext | undefined;
-    if (rawSelectionContext && typeof rawSelectionContext === 'object') {
-      const sc = rawSelectionContext;
-      if (sc.kind === 'area' && typeof sc.startNs === 'number' && typeof sc.endNs === 'number') {
-        selectionContext = sc;
-      } else if (sc.kind === 'track_event' && typeof sc.eventId === 'number' && typeof sc.ts === 'number') {
-        selectionContext = sc;
+    const liveRequestedSession = requestedSessionId
+      ? assistantAppService.getSession(requestedSessionId)
+      : undefined;
+    let validatedSmartPreviewReport: SceneReport | undefined;
+    if (
+      options.preset === 'smart' &&
+      options.smartAction === 'analyze' &&
+      smartSelectionReportId(options.smartSelection)
+    ) {
+      try {
+        validatedSmartPreviewReport = await resolveSmartPreviewReportForSelection({
+          session: (liveRequestedSession ?? {sceneStoryReport: undefined}) as AnalysisSession,
+          selection: options.smartSelection,
+          traceId,
+          owner: ownerFieldsFromContext(requestContext),
+        }) ?? undefined;
+      } catch (error) {
+        if (error instanceof SmartPreviewSelectionError) {
+          res.status(409).json({
+            success: false,
+            error: smartPreviewSelectionErrorMessage(
+              requestOutputLanguage,
+              error.reportId,
+            ),
+            code: error.code,
+          });
+          return;
+        }
+        throw error;
       }
-      // Otherwise: invalid kind or missing required fields — selectionContext stays undefined
+    }
+
+    let selectionContext: ReturnType<typeof normalizeSelectionContext>;
+    try {
+      selectionContext = normalizeSelectionContext(rawSelectionContext);
+    } catch (error) {
+      if (error instanceof AnalyzeOptionsError) {
+        res.status(error.httpStatus).json({
+          success: false,
+          code: error.code,
+          error: analyzeOptionsErrorMessage(error, requestOutputLanguage),
+        });
+        return;
+      }
+      throw error;
     }
 
     // Verify trace exists
     const traceProcessorService = getTraceProcessorService();
-    if (!await ensureTraceAccessible(req, res, traceId)) {
+    if (!(await ensureTraceAccessible(req, res, traceId))) {
       return;
     }
     const trace = await traceProcessorService.getOrLoadTrace(traceId);
     if (!trace) {
       res.status(404).json({
         success: false,
-        error: 'Trace not found in backend',
-        hint: 'Please upload the trace to the backend first',
+        error: localize(requestOutputLanguage, '后端中未找到 trace', 'Trace not found in backend'),
+        hint: localize(
+          requestOutputLanguage,
+          '请先将 trace 上传到后端',
+          'Please upload the trace to the backend first',
+        ),
         code: 'TRACE_NOT_UPLOADED',
       });
       return;
     }
 
-    const validateReferenceTraceForRun = async (
-      candidateReferenceTraceId: string,
-    ): Promise<TraceInfo | null> => {
+    const validateReferenceTraceForRun = async (candidateReferenceTraceId: string): Promise<TraceInfo | null> => {
       if (candidateReferenceTraceId === traceId) {
         res.status(400).json({
           success: false,
-          error: 'referenceTraceId must be different from traceId',
+          error: localize(
+            requestOutputLanguage,
+            'referenceTraceId 必须与 traceId 不同',
+            'referenceTraceId must be different from traceId',
+          ),
           code: 'SAME_TRACE_COMPARISON',
         });
         return null;
       }
-      if (!await ensureTraceAccessible(req, res, candidateReferenceTraceId)) {
+      if (!(await ensureTraceAccessible(
+        req,
+        res,
+        candidateReferenceTraceId,
+        'REFERENCE_TRACE_NOT_UPLOADED',
+      ))) {
         return null;
       }
       const refTrace = await traceProcessorService.getOrLoadTrace(candidateReferenceTraceId);
       if (!refTrace) {
         res.status(404).json({
           success: false,
-          error: 'Reference trace not found in backend',
-          hint: 'Please upload the reference trace to the backend first',
+          error: localize(
+            requestOutputLanguage,
+            '后端中未找到对比 trace',
+            'Reference trace not found in backend',
+          ),
+          hint: localize(
+            requestOutputLanguage,
+            '请先将对比 trace 上传到后端',
+            'Please upload the reference trace to the backend first',
+          ),
           code: 'REFERENCE_TRACE_NOT_UPLOADED',
         });
         return null;
@@ -1801,12 +2623,27 @@ async function handleAnalyzeRequest(
       createSessionLogger,
       sessionPersistenceService: SessionPersistenceService.getInstance(),
       buildRecoveredResultFromContext,
+      onSessionSecurityCleanup: revokeCodeAwareOutputGuards,
     });
 
     let sessionId: string;
     let preparedSession: AnalysisSession | undefined;
     let isNewSession = true;
+    if (sendRunStartConflictIfNeeded(res, liveRequestedSession)) return;
     try {
+      const analysisContextFingerprint = buildAnalysisContextAuthorizationFingerprint(
+        options,
+        knowledgeScopeFromRequestContext(requestContext),
+      );
+      (options as AnalysisOptions).analysisContextFingerprint = analysisContextFingerprint;
+      const availablePack = getDefaultAndroidInternalsPackResolver().resolve();
+      if (availablePack) {
+        (options as AnalysisOptions).androidInternalsPackPin = {
+          contentVersion: availablePack.contentVersion,
+          contentFingerprint: availablePack.contentFingerprint,
+          sourceRevision: availablePack.sourceRevision,
+        };
+      }
       const prepared = analyzeSessionService.prepareSession({
         traceId,
         query,
@@ -1819,9 +2656,15 @@ async function handleAnalyzeRequest(
           userId: requestContext.userId,
         },
         options,
+        analysisContextFingerprint,
       });
       sessionId = prepared.sessionId;
       preparedSession = prepared.session as AnalysisSession;
+      preparedSession.analysisContextFingerprint = analysisContextFingerprint;
+      preparedSession.androidInternalsPackPin ??=
+        (options as AnalysisOptions).androidInternalsPackPin;
+      (options as AnalysisOptions).androidInternalsPackPin =
+        preparedSession.androidInternalsPackPin;
       isNewSession = prepared.isNewSession;
       if (isNewSession) {
         assignSessionOwner(preparedSession, requestContext);
@@ -1842,10 +2685,12 @@ async function handleAnalyzeRequest(
       throw error;
     }
 
-    const blockedStrategyIds = Array.from(new Set([
-      ...SCENE_STRATEGY_IDS,
-      ...(Array.isArray(options.blockedStrategyIds) ? options.blockedStrategyIds : []),
-    ]));
+    const blockedStrategyIds = Array.from(
+      new Set([
+        ...SCENE_STRATEGY_IDS,
+        ...(Array.isArray(options.blockedStrategyIds) ? options.blockedStrategyIds : []),
+      ]),
+    );
     const sessionForRun = preparedSession || assistantAppService.getSession(sessionId);
     if (!sessionForRun) {
       throw new Error(`Session ${sessionId} not found after preparation`);
@@ -1862,46 +2707,106 @@ async function handleAnalyzeRequest(
     }
     sessionForRun.codeAwareMode = options.codeAwareMode;
     sessionForRun.codebaseIds = Array.isArray(options.codebaseIds) ? options.codebaseIds : undefined;
+    sessionForRun.knowledgeSourceIds = Array.isArray(options.knowledgeSourceIds)
+      ? options.knowledgeSourceIds
+      : undefined;
+    if (sessionUsesPrivateKnowledge(sessionForRun)) {
+      registerPrivateAnalysisQueryForEcho(sessionId, query);
+    }
+    if (validatedSmartPreviewReport) {
+      sessionForRun.sceneStoryReport = validatedSmartPreviewReport;
+    }
 
+    if (sendRunStartConflictIfNeeded(res, sessionForRun)) return;
     const runContext = startSessionRun(sessionForRun, query, requestId);
+    if (!runContext) {
+      sendRunStartConflictIfNeeded(res, sessionForRun);
+      return;
+    }
+    executionSession = sessionForRun;
+    executionRunId = runContext.runId;
     sessionForRun.logger.setMetadata({
       requestId: runContext.requestId,
       runId: runContext.runId,
       runSequence: runContext.sequence,
     });
+    const runManifestLifecycle = await createHttpRunManifestLifecycle(
+      sessionForRun,
+      runContext,
+      {
+        analysisMode: options.analysisMode,
+        referenceTraceId: effectiveReferenceTraceId,
+      },
+    );
+    executionRunManifestLifecycle = runManifestLifecycle;
 
     if (options.preset === 'smart') {
-      runSmartAnalysis(sessionId, query, traceId, {
-        runContext,
-        traceProcessorService,
-        smartAction: options.smartAction ?? 'preview',
-        smartSelection: options.smartSelection,
-        forceRefresh: options.forceRefresh === true,
-        analysisMode: options.analysisMode,
-        blockedStrategyIds,
-        owner: ownerFieldsFromContext(requestContext),
-        knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
-      }).catch((error) => {
-        const session = assistantAppService.getSession(sessionId);
-        if (session) {
-          if (isSessionRunCancelled(session, runContext.runId) || isStaleRun(session, runContext.runId)) {
-            session.logger.info('AgentRoutes', 'Ignoring smart analysis failure after cancellation', {
+      const smartAnalysisPromise = withRunManifestLifecycle(
+        runManifestLifecycle,
+        () => runSmartAnalysis(sessionId, query, traceId, {
+          runContext,
+          traceProcessorService,
+          smartAction: options.smartAction ?? 'preview',
+          smartSelection: options.smartSelection,
+          forceRefresh: options.forceRefresh === true,
+          analysisMode: options.analysisMode,
+          blockedStrategyIds,
+          owner: ownerFieldsFromContext(requestContext),
+          knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
+          codeAwareMode: options.codeAwareMode,
+          codebaseIds: options.codebaseIds,
+          knowledgeSourceIds: options.knowledgeSourceIds,
+          runManifestAttributionSink: runManifestLifecycle.builder,
+        }),
+      )
+        .then(() => {
+          sealCompletedHttpRunManifest(
+            sessionForRun,
+            runManifestLifecycle,
+            runContext.runId,
+          );
+        })
+        .catch((error) => {
+          const session = assistantAppService.getSession(sessionId);
+          if (session) {
+            const privateKnowledge = sessionUsesPrivateKnowledge(session);
+            const publicErrorMessage = privateKnowledge
+              ? privateAnalysisFailureMessage(sessionOutputLanguage(session))
+              : error.message;
+            if (isSessionRunCancelled(session, runContext.runId) || isStaleRun(session, runContext.runId)) {
+              session.logger.info('AgentRoutes', 'Ignoring smart analysis failure after cancellation', {
+                sessionId,
+                runId: runContext.runId,
+                error: privateKnowledge ? publicErrorMessage : error?.message || String(error),
+              });
+              return;
+            }
+            session.logger.error(
+              'AgentRoutes',
+              'Smart analysis failed',
+              privateKnowledge ? new Error(publicErrorMessage) : error,
+            );
+            session.status = 'failed';
+            session.error = publicErrorMessage;
+            markSessionRunStatus(session, 'failed', publicErrorMessage, runContext.runId);
+            broadcastToAgentDrivenClients(
               sessionId,
-              runId: runContext.runId,
-              error: error?.message || String(error),
-            });
-            return;
+              {
+                type: 'error',
+                content: { message: publicErrorMessage, error: publicErrorMessage },
+                timestamp: Date.now(),
+              },
+              runContext.runId,
+            );
           }
-          session.logger.error('AgentRoutes', 'Smart analysis failed', error);
-          session.status = 'failed';
-          session.error = error.message;
-          markSessionRunStatus(session, 'failed', error.message, runContext.runId);
-          broadcastToAgentDrivenClients(sessionId, {
-            type: 'error',
-            content: { message: error.message, error: error.message },
-            timestamp: Date.now(),
-          }, runContext.runId);
-        }
+        });
+      executionHandedOff = true;
+      void smartAnalysisPromise.finally(() => {
+        finalizeHttpRunManifestLifecycle(
+          sessionForRun,
+          runManifestLifecycle,
+        );
+        settleSessionRunExecution(sessionForRun, runContext.runId);
       });
 
       res.json({
@@ -1931,15 +2836,10 @@ async function handleAnalyzeRequest(
     if (enterpriseLeasesEnabled()) {
       try {
         const scope = leaseScopeFromRequestContext(requestContext);
-        agentRunLeaseDecision = buildLeaseModeDecisionForTrace(
-          scope,
-          traceId,
-          'agent_run',
-          {
-            analysisMode: options.analysisMode,
-            traceSizeBytes: trace.size,
-          },
-        );
+        agentRunLeaseDecision = buildLeaseModeDecisionForTrace(scope, traceId, 'agent_run', {
+          analysisMode: options.analysisMode,
+          traceSizeBytes: trace.size,
+        });
         agentRunLease = getTraceProcessorLeaseStore().acquireHolder(
           scope,
           traceId,
@@ -1964,7 +2864,9 @@ async function handleAnalyzeRequest(
           try {
             getTraceProcessorLeaseStore().markFailed(leaseScopeFromRequestContext(requestContext), agentRunLease.id);
           } catch (markFailedError: any) {
-            console.warn(`[AgentRoutes] Failed to mark agent_run lease ${agentRunLease.id} failed: ${markFailedError.message}`);
+            console.warn(
+              `[AgentRoutes] Failed to mark agent_run lease ${agentRunLease.id} failed: ${markFailedError.message}`,
+            );
           }
         }
         if (!isSessionRunCancelled(sessionForRun, runContext.runId) && !isStaleRun(sessionForRun, runContext.runId)) {
@@ -1980,7 +2882,9 @@ async function handleAnalyzeRequest(
         return;
       }
 
-      if (effectiveReferenceTraceId) {
+      const currentLeaseRunIsActive =
+        !isSessionRunCancelled(sessionForRun, runContext.runId) && !isStaleRun(sessionForRun, runContext.runId);
+      if (effectiveReferenceTraceId && currentLeaseRunIsActive) {
         try {
           const scope = leaseScopeFromRequestContext(requestContext);
           referenceAgentRunLeaseDecision = buildLeaseModeDecisionForTrace(
@@ -2020,9 +2924,14 @@ async function handleAnalyzeRequest(
         } catch (leaseError: any) {
           if (referenceAgentRunLease) {
             try {
-              getTraceProcessorLeaseStore().markFailed(leaseScopeFromRequestContext(requestContext), referenceAgentRunLease.id);
+              getTraceProcessorLeaseStore().markFailed(
+                leaseScopeFromRequestContext(requestContext),
+                referenceAgentRunLease.id,
+              );
             } catch (markFailedError: any) {
-              console.warn(`[AgentRoutes] Failed to mark reference agent_run lease ${referenceAgentRunLease.id} failed: ${markFailedError.message}`);
+              console.warn(
+                `[AgentRoutes] Failed to mark reference agent_run lease ${referenceAgentRunLease.id} failed: ${markFailedError.message}`,
+              );
             }
           }
           if (agentRunLease) {
@@ -2034,7 +2943,9 @@ async function handleAnalyzeRequest(
                 runContext.runId,
               );
             } catch (releaseError: any) {
-              console.warn(`[AgentRoutes] Failed to release current agent_run lease after reference lease failure ${agentRunLease.id}: ${releaseError.message}`);
+              console.warn(
+                `[AgentRoutes] Failed to release current agent_run lease after reference lease failure ${agentRunLease.id}: ${releaseError.message}`,
+              );
             }
           }
           if (!isSessionRunCancelled(sessionForRun, runContext.runId) && !isStaleRun(sessionForRun, runContext.runId)) {
@@ -2059,54 +2970,98 @@ async function handleAnalyzeRequest(
         )
       : undefined;
 
-    runAgentDrivenAnalysis(sessionId, query, traceId, {
-      ...options,
-      selectionContext,
-      blockedStrategyIds,
-      traceProcessorService,
-      runContext,
-      referenceTraceId: effectiveReferenceTraceId,
-      traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
-      providerId: sessionForRun.providerId !== undefined ? sessionForRun.providerId : providerId,
-      knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
-      traceProcessorLease: agentRunLease
-        ? {
-          traceId,
-          leaseId: agentRunLease.id,
-          mode: agentRunLease.mode,
-          leaseScope: leaseScopeFromRequestContext(requestContext),
-        }
-        : undefined,
-      referenceTraceProcessorLease: referenceAgentRunLease && effectiveReferenceTraceId
-        ? {
-          traceId: effectiveReferenceTraceId,
-          leaseId: referenceAgentRunLease.id,
-          mode: referenceAgentRunLease.mode,
-          leaseScope: leaseScopeFromRequestContext(requestContext),
-        }
-        : undefined,
-    }).catch((error) => {
-      const session = assistantAppService.getSession(sessionId);
-      if (session) {
-        if (isSessionRunCancelled(session, runContext.runId) || isStaleRun(session, runContext.runId)) {
-          session.logger.info('AgentRoutes', 'Ignoring agent-driven analysis failure after cancellation', {
-            sessionId,
-            runId: runContext.runId,
-            error: error?.message || String(error),
-          });
-          return;
-        }
-        session.logger.error('AgentRoutes', 'Agent-driven analysis failed', error);
-        session.status = 'failed';
-        session.error = error.message;
-        markSessionRunStatus(session, 'failed', error.message, runContext.runId);
-        broadcastToAgentDrivenClients(sessionId, {
-          type: 'error',
-          content: { message: error.message, error: error.message },
-          timestamp: Date.now(),
-        }, runContext.runId);
-      }
-    }).finally(() => {
+    const sessionRunIsInactive =
+      isSessionRunCancelled(sessionForRun, runContext.runId) || isStaleRun(sessionForRun, runContext.runId);
+    if (sessionRunIsInactive) {
+      sessionForRun.logger.info('AgentRoutes', 'Skipping agent-driven analysis for inactive run', {
+        sessionId,
+        runId: runContext.runId,
+      });
+    }
+    let analysisPromise: Promise<void> = Promise.resolve();
+    if (!sessionRunIsInactive) {
+      analysisPromise = withRunManifestLifecycle(
+        runManifestLifecycle,
+        () => runAgentDrivenAnalysis(sessionId, query, traceId, {
+          ...options,
+          selectionContext,
+          blockedStrategyIds,
+          traceProcessorService,
+          runContext,
+          referenceTraceId: effectiveReferenceTraceId,
+          traceContext: traceContext && traceContext.length > 0 ? traceContext : undefined,
+          providerId: sessionForRun.providerId !== undefined ? sessionForRun.providerId : providerId,
+          knowledgeScope: knowledgeScopeFromRequestContext(requestContext),
+          runManifestAttributionSink: runManifestLifecycle.builder,
+          traceProcessorLease: agentRunLease
+            ? {
+                traceId,
+                leaseId: agentRunLease.id,
+                mode: agentRunLease.mode,
+                leaseScope: leaseScopeFromRequestContext(requestContext),
+              }
+            : undefined,
+          referenceTraceProcessorLease:
+            referenceAgentRunLease && effectiveReferenceTraceId
+              ? {
+                  traceId: effectiveReferenceTraceId,
+                  leaseId: referenceAgentRunLease.id,
+                  mode: referenceAgentRunLease.mode,
+                  leaseScope: leaseScopeFromRequestContext(requestContext),
+                }
+              : undefined,
+        }),
+      )
+        .then(() => {
+          sealCompletedHttpRunManifest(
+            sessionForRun,
+            runManifestLifecycle,
+            runContext.runId,
+          );
+        })
+        .catch((error) => {
+          const session = assistantAppService.getSession(sessionId);
+          if (session) {
+            const privateKnowledge = sessionUsesPrivateKnowledge(session);
+            const publicErrorMessage = privateKnowledge
+              ? privateAnalysisFailureMessage(sessionOutputLanguage(session))
+              : error?.message || String(error);
+            if (isSessionRunCancelled(session, runContext.runId) || isStaleRun(session, runContext.runId)) {
+              session.logger.info('AgentRoutes', 'Ignoring agent-driven analysis failure after cancellation', {
+                sessionId,
+                runId: runContext.runId,
+                error: publicErrorMessage,
+              });
+              return;
+            }
+            session.logger.error(
+              'AgentRoutes',
+              'Agent-driven analysis failed',
+              privateKnowledge ? new Error(publicErrorMessage) : error,
+            );
+            session.status = 'failed';
+            session.error = publicErrorMessage;
+            markSessionRunStatus(session, 'failed', publicErrorMessage, runContext.runId);
+            broadcastToAgentDrivenClients(
+              sessionId,
+              {
+                type: 'error',
+                content: {message: publicErrorMessage, error: publicErrorMessage},
+                timestamp: Date.now(),
+              },
+              runContext.runId,
+            );
+          }
+        });
+    }
+    analysisPromise = analysisPromise.finally(() => {
+      finalizeHttpRunManifestLifecycle(
+        sessionForRun,
+        runManifestLifecycle,
+      );
+    });
+    executionHandedOff = true;
+    void analysisPromise.finally(() => {
       if (agentRunLease) {
         try {
           getTraceProcessorLeaseStore().releaseHolder(
@@ -2128,9 +3083,12 @@ async function handleAnalyzeRequest(
             `${runContext.runId}:reference`,
           );
         } catch (releaseError: any) {
-          console.warn(`[AgentRoutes] Failed to release reference agent_run lease ${referenceAgentRunLease.id}: ${releaseError.message}`);
+          console.warn(
+            `[AgentRoutes] Failed to release reference agent_run lease ${referenceAgentRunLease.id}: ${releaseError.message}`,
+          );
         }
       }
+      settleSessionRunExecution(sessionForRun, runContext.runId);
     });
 
     res.json({
@@ -2163,11 +3121,24 @@ async function handleAnalyzeRequest(
       },
     });
   } catch (error: any) {
+    if (sendAiDisabledErrorIfPresent(res, error)) {
+      return;
+    }
     console.error('[AgentRoutes] Analyze error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Agent analysis failed',
     });
+  } finally {
+    if (!executionHandedOff && executionSession && executionRunId) {
+      if (executionRunManifestLifecycle) {
+        finalizeHttpRunManifestLifecycle(
+          executionSession,
+          executionRunManifestLifecycle,
+        );
+      }
+      settleSessionRunExecution(executionSession, executionRunId);
+    }
   }
 }
 
@@ -2197,25 +3168,21 @@ router.post('/sessions/:sessionId/runs', async (req, res) => {
  * - error: Error occurred
  * - end: Stream ended
  */
-function resolveReplayBufferForStream(
-  session: AnalysisSession,
-  runId?: string,
-): BufferedSseEvent[] {
+function resolveReplayBufferForStream(session: AnalysisSession, runId?: string): BufferedSseEvent[] {
   const targetRunId = runId || getSessionRunId(session);
   if (runId && !isCurrentRunOwner(session, runId)) {
     const byKey = new Map<string, BufferedSseEvent>();
     for (const event of [
-      ...session.sseEventBuffer.filter(candidate => candidate.runId === runId),
-      ...getRunSseReplayState(session, runId).sseEventBuffer.filter(candidate => candidate.runId === runId),
+      ...session.sseEventBuffer.filter((candidate) => candidate.runId === runId),
+      ...getRunSseReplayState(session, runId).sseEventBuffer.filter((candidate) => candidate.runId === runId),
     ]) {
       byKey.set(`${event.seqId}:${event.eventType}:${event.runId || ''}`, event);
     }
-    return Array.from(byKey.values())
-      .sort((a, b) => a.seqId - b.seqId);
+    return Array.from(byKey.values()).sort((a, b) => a.seqId - b.seqId);
   }
   const source = session.sseEventBuffer;
   if (!targetRunId) return source;
-  return source.filter(event => !event.runId || event.runId === targetRunId);
+  return source.filter((event) => !event.runId || event.runId === targetRunId);
 }
 
 function handleSessionStream(
@@ -2236,26 +3203,20 @@ function handleSessionStream(
 
   // Check for Last-Event-ID (reconnect replay support). The header is the
   // canonical fetch-stream path; the query param is kept for older clients.
-  const lastEventId = parseLastEventId(
-    req.headers['last-event-id'],
-    req.query.lastEventId
-  );
+  const lastEventId = parseLastEventId(req.headers['last-event-id'], req.query.lastEventId);
 
   streamProjector.setSseHeaders(res);
   streamProjector.sendConnected(res, {
     sessionId,
     status: streamStatus,
     traceId: session.traceId,
-    query: session.query,
+    query: connectedStreamQuery(session, streamRun),
     architecture: 'agent-driven',
     timestamp: Date.now(),
     ...buildStreamObservability(session, streamRunId),
   });
 
-  if (
-    lastEventId !== null &&
-    (streamStatus === 'completed' || streamStatus === 'quota_exceeded')
-  ) {
+  if (lastEventId !== null && (streamStatus === 'completed' || streamStatus === 'quota_exceeded')) {
     recoverResultForSessionIfNeeded(sessionId, session);
     if (session.result) {
       sendAgentDrivenResult(res, session, streamRunId);
@@ -2264,6 +3225,16 @@ function handleSessionStream(
     }
   }
 
+  const shouldReplayInitialSessionBuffer =
+    lastEventId === null &&
+    !streamRunId &&
+    (streamStatus === 'pending' ||
+      streamStatus === 'running' ||
+      streamStatus === 'awaiting_user' ||
+      streamStatus === 'completed' ||
+      streamStatus === 'quota_exceeded' ||
+      streamStatus === 'failed' ||
+      streamStatus === 'cancelled');
   const persistedReplayFrom = streamRunId && lastEventId === null ? 0 : lastEventId;
   let ringReplayAfter = persistedReplayFrom;
   if (persistedReplayFrom !== null) {
@@ -2272,7 +3243,7 @@ function handleSessionStream(
     if (persistedReplay.replayed > 0) {
       console.log(
         `[AgentRoutes] Replayed ${persistedReplay.replayed} persisted SSE events for ${sessionId} ` +
-        `(after seqId ${persistedReplayFrom})`
+          `(after seqId ${persistedReplayFrom})`,
       );
     }
     if (persistedReplay.includesTerminal) {
@@ -2281,17 +3252,22 @@ function handleSessionStream(
     }
   }
 
-  // Replay missed events from the ring buffer if reconnecting.
+  if (ringReplayAfter === null && shouldReplayInitialSessionBuffer) {
+    ringReplayAfter = 0;
+  }
+
   const replayBuffer = resolveReplayBufferForStream(session, streamRunId);
   if (ringReplayAfter !== null && replayBuffer.length > 0) {
     const replayState = {
-      sseEventSeq: Math.max(0, ...replayBuffer.map(event => event.seqId)),
+      sseEventSeq: Math.max(0, ...replayBuffer.map((event) => event.seqId)),
       sseEventBuffer: replayBuffer,
     };
     const replayIncludesTerminal = hasTerminalReplayAfter(replayState, ringReplayAfter);
     const replayed = streamProjector.replayBufferedEvents(res, replayBuffer, ringReplayAfter);
     if (replayed > 0) {
-      console.log(`[AgentRoutes] Replayed ${replayed} missed SSE events for ${sessionId} (after seqId ${ringReplayAfter})`);
+      console.log(
+        `[AgentRoutes] Replayed ${replayed} missed SSE events for ${sessionId} (after seqId ${ringReplayAfter})`,
+      );
     }
     if (replayIncludesTerminal) {
       res.end();
@@ -2383,6 +3359,15 @@ function handleSessionStream(
   streamProjector.bindKeepAlive(req, res);
 }
 
+function connectedStreamQuery(
+  session: AnalysisSession,
+  streamRun?: AnalyzeSessionRunContext,
+): string {
+  return sessionUsesPrivateKnowledge(session)
+    ? privateAnalysisQueryMessage(sessionOutputLanguage(session))
+    : streamRun?.query ?? session.query;
+}
+
 router.get('/:sessionId/stream', (req, res) => {
   handleSessionStream(req, res, req.params.sessionId);
 });
@@ -2409,7 +3394,9 @@ router.get('/:sessionId/status', (req, res) => {
     sessionId,
     status: session.status,
     traceId: session.traceId,
-    query: session.query,
+    query: sessionUsesPrivateKnowledge(session)
+      ? privateAnalysisQueryMessage(sessionOutputLanguage(session))
+      : session.query,
     createdAt: session.createdAt,
     observability: buildSessionObservability(session),
   };
@@ -2430,47 +3417,77 @@ router.get('/:sessionId/status', (req, res) => {
           existingContract: recoveredResult.conclusionContract as ConclusionContract | undefined,
           mode: recoveredResult.rounds > 1 ? 'focused_answer' : 'initial_report',
           sceneId: sceneIdHint,
-        }) ||
-        undefined;
-      const qualityArtifacts = recoveredResult.claimSupport &&
-        recoveredResult.claimVerificationResult &&
-        recoveredResult.identityResolutions
-        ? {
-          claimSupport: recoveredResult.claimSupport,
-          claimVerificationResult: recoveredResult.claimVerificationResult,
-          identityResolutions: recoveredResult.identityResolutions,
-        }
-        : ensureAnalysisQualityArtifacts(session, conclusionContract, recoveredResult);
+        }) || undefined;
+      const qualityArtifacts =
+        recoveredResult.claimSupport && recoveredResult.claimVerificationResult && recoveredResult.identityResolutions
+          ? {
+              claimSupport: recoveredResult.claimSupport,
+              claimVerificationResult: recoveredResult.claimVerificationResult,
+              identityResolutions: recoveredResult.identityResolutions,
+            }
+          : ensureAnalysisQualityArtifacts(session, conclusionContract, recoveredResult);
       const completedPayload = ensureCompletedAnalysisResultPayload(session);
       const finalArtifacts = completedPayload?.finalArtifacts;
-      const normalizedCompletedConclusion = completedPayload?.normalizedConclusion || conclusion;
-      const normalizedCompletedContract =
-        completedPayload?.normalizedConclusionContract || conclusionContract;
+      const rawCompletedConclusion = completedPayload?.normalizedConclusion || conclusion;
+      const normalizedCompletedContract = completedPayload?.normalizedConclusionContract || conclusionContract;
+      const privateKnowledge = sessionUsesPrivateKnowledge(session);
+      const outputLanguage = sessionOutputLanguage(session);
+      const normalizedCompletedConclusion = privateKnowledge
+        ? projectPrivateConclusion({
+            sessionId,
+            conclusion: rawCompletedConclusion,
+            success: recoveredResult.success,
+            language: outputLanguage,
+          })
+        : rawCompletedConclusion;
+      const projectedCompletedContract = privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, normalizedCompletedContract)
+        : normalizedCompletedContract;
+      const projectedQualityArtifacts = privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, qualityArtifacts)
+        : qualityArtifacts;
+      const projectedFindings = privateKnowledge
+        ? projectPrivateStructuredValue(sessionId, clientFindings)
+        : clientFindings;
       response.result = {
         answer: normalizedCompletedConclusion,
         conclusion: normalizedCompletedConclusion,
-        conclusionContract: normalizedCompletedContract,
-        claimSupport: qualityArtifacts.claimSupport,
-        claimVerificationResult: qualityArtifacts.claimVerificationResult,
-        identityResolutions: qualityArtifacts.identityResolutions,
+        conclusionContract: projectedCompletedContract,
+        claimSupport: projectedQualityArtifacts.claimSupport,
+        claimVerificationResult: projectedQualityArtifacts.claimVerificationResult,
+        identityResolutions: projectedQualityArtifacts.identityResolutions,
         confidence: recoveredResult.confidence,
         totalDurationMs: recoveredResult.totalDurationMs,
         rounds: recoveredResult.rounds,
         partial: recoveredResult.partial,
-        terminationReason: recoveredResult.terminationReason,
-        terminationMessage: recoveredResult.terminationMessage,
+        terminationReason: privateKnowledge
+          ? projectPrivateTerminationReason(recoveredResult.terminationReason)
+          : recoveredResult.terminationReason,
+        terminationMessage: privateKnowledge
+          ? projectPrivateTerminationMessage(recoveredResult.terminationMessage, outputLanguage)
+          : recoveredResult.terminationMessage,
         reportUrl: finalArtifacts?.reportUrl,
-        reportError: finalArtifacts?.reportError,
+        reportError: privateKnowledge ? undefined : finalArtifacts?.reportError,
         resultSnapshotId: finalArtifacts?.resultSnapshotId,
-        findings: recoveredResult.findings,
-        findingsCount: recoveredResult.findings.length,
-        resultContract,
+        analysisReceipt: privateKnowledge
+          ? projectPrivateAnalysisReceipt(completedPayload?.analysisReceipt)
+          : completedPayload?.analysisReceipt,
+        uiActionProposals: privateKnowledge
+          ? projectPrivateStructuredValue(sessionId, completedPayload?.uiActionProposals || [])
+          : completedPayload?.uiActionProposals,
+        findings: projectedFindings,
+        findingsCount: projectedFindings.length,
+        resultContract: privateKnowledge
+          ? projectPrivateStructuredValue(sessionId, resultContract)
+          : resultContract,
       };
     }
   }
 
   if (session.status === 'failed' || session.status === 'cancelled') {
-    response.error = session.error;
+    response.error = sessionUsesPrivateKnowledge(session)
+      ? privateAnalysisFailureMessage(sessionOutputLanguage(session))
+      : session.error;
   }
 
   res.json(response);
@@ -2507,6 +3524,10 @@ router.get('/:sessionId/turns', (req, res) => {
   if (!isResolvedSessionAccessible(req, resolved)) {
     return sendResourceNotFound(res, 'Session context not found');
   }
+  const privateSelection = assistantAppService.getSession(sessionId) ??
+    SessionPersistenceService.getInstance().loadSessionStateSnapshot(sessionId) ?? {};
+  const privateSessionId = sessionUsesPrivateKnowledge(privateSelection) ? sessionId : undefined;
+  const outputLanguage = sessionOutputLanguage(privateSelection);
 
   const allTurns = resolved.context.getAllTurns();
   const ordered = order === 'desc' ? [...allTurns].reverse() : [...allTurns];
@@ -2519,11 +3540,15 @@ router.get('/:sessionId/turns', (req, res) => {
     sessionId,
     traceId: resolved.traceId,
     source: resolved.source,
-    query: resolved.query,
+    query: privateSessionId
+      ? privateAnalysisQueryMessage(outputLanguage)
+      : resolved.query,
     createdAt: resolved.createdAt,
     totalTurns: allTurns.length,
-    turns: paged.map(buildTurnSummary),
-    latestTurn: latestTurn ? buildTurnSummary(latestTurn) : null,
+    turns: paged.map(turn => buildTurnSummary(turn, privateSessionId, outputLanguage)),
+    latestTurn: latestTurn
+      ? buildTurnSummary(latestTurn, privateSessionId, outputLanguage)
+      : null,
     pagination: {
       limit,
       offset,
@@ -2556,6 +3581,10 @@ router.get('/:sessionId/turns/:turnId', (req, res) => {
   if (!isResolvedSessionAccessible(req, resolved)) {
     return sendResourceNotFound(res, 'Session context not found');
   }
+  const privateSelection = assistantAppService.getSession(sessionId) ??
+    SessionPersistenceService.getInstance().loadSessionStateSnapshot(sessionId) ?? {};
+  const privateSessionId = sessionUsesPrivateKnowledge(privateSelection) ? sessionId : undefined;
+  const outputLanguage = sessionOutputLanguage(privateSelection);
 
   const turns = resolved.context.getAllTurns();
   if (turns.length === 0) {
@@ -2569,10 +3598,10 @@ router.get('/:sessionId/turns/:turnId', (req, res) => {
   if (turnId === 'latest') {
     turn = turns[turns.length - 1];
   } else {
-    turn = turns.find(t => t.id === turnId);
+    turn = turns.find((t) => t.id === turnId);
     if (!turn && /^\d+$/.test(turnId)) {
       const parsed = parseInt(turnId, 10);
-      turn = turns.find(t => t.turnIndex === parsed) || turns.find(t => t.turnIndex === parsed - 1);
+      turn = turns.find((t) => t.turnIndex === parsed) || turns.find((t) => t.turnIndex === parsed - 1);
     }
   }
 
@@ -2584,15 +3613,15 @@ router.get('/:sessionId/turns/:turnId', (req, res) => {
     });
   }
 
-  const previousTurn = turns.find(t => t.turnIndex === turn!.turnIndex - 1) || null;
-  const nextTurn = turns.find(t => t.turnIndex === turn!.turnIndex + 1) || null;
+  const previousTurn = turns.find((t) => t.turnIndex === turn!.turnIndex - 1) || null;
+  const nextTurn = turns.find((t) => t.turnIndex === turn!.turnIndex + 1) || null;
 
   return res.json({
     success: true,
     sessionId,
     traceId: resolved.traceId,
     source: resolved.source,
-    turn: buildTurnDetail(turn),
+    turn: buildTurnDetail(turn, privateSessionId, outputLanguage),
     navigation: {
       previousTurnId: previousTurn?.id || null,
       nextTurnId: nextTurn?.id || null,
@@ -2630,8 +3659,63 @@ router.delete('/:sessionId', async (req, res) => {
   res.json({ success: true });
 });
 
-const FEEDBACK_DIR = backendLogPath('feedback');
-const FEEDBACK_FILE = path.join(FEEDBACK_DIR, 'feedback.jsonl');
+function privateFeedbackResponse(input: {
+  durable: boolean;
+  eventId?: string;
+  feedbackId?: string;
+}) {
+  return {
+    success: true,
+    schemaVersion: 1 as const,
+    durableFeedbackStored: input.durable,
+    storageDisposition: 'stored_private_local' as const,
+    ...(input.eventId ? {eventId: input.eventId} : {}),
+    ...(input.feedbackId ? {feedbackId: input.feedbackId} : {}),
+    patternStatus: null,
+    caseCandidateFeedbackAdded: null,
+  };
+}
+
+function feedbackTargetBelongsToSession(
+  session: AnalysisSession,
+  targetKind: string,
+  targetId: string,
+  runId: string,
+  manifest: ReturnType<ReturnType<typeof getRunManifestStore>['getByRunId']>,
+): boolean {
+  if (targetKind === 'session') return targetId === session.sessionId;
+  if (targetKind === 'conclusion') {
+    return targetId === runId || targetId === session.sessionId;
+  }
+  if (targetKind === 'finding') {
+    const findings = [
+      ...((session.result as any)?.findings ?? []),
+      ...((session as any).findings ?? []),
+    ];
+    return findings.some((finding: any) =>
+      finding?.id === targetId || finding?.findingId === targetId);
+  }
+  if (targetKind === 'claim') {
+    return (session.claimSupport ?? []).some((claim: any) =>
+      claim?.claimId === targetId || claim?.id === targetId);
+  }
+  if (targetKind === 'evidence') {
+    return (session.dataEnvelopes ?? []).some((envelope: any) =>
+      envelope?.meta?.evidenceRefId === targetId ||
+      envelope?.evidenceRefId === targetId);
+  }
+  if (targetKind === 'skill_note') {
+    return manifest?.injections.skillNotes.some(note => note.id === targetId) ??
+      false;
+  }
+  if (targetKind === 'injection') {
+    if (!manifest) return false;
+    return Object.values(manifest.injections)
+      .flat()
+      .some(reference => reference.id === targetId);
+  }
+  return false;
+}
 
 /**
  * POST /api/agent/v1/:sessionId/feedback
@@ -2650,63 +3734,183 @@ router.post('/:sessionId/feedback', async (req, res) => {
 
   const session = getAuthorizedSession(req, res, sessionId);
   if (!session) return;
-  const lookup: FeedbackSessionLookup | null = session
-    ? { traceId: session.traceId, referenceTraceId: session.referenceTraceId }
-    : null;
+  const requestContext = requireRequestContext(req);
+  if (!hasRbacPermission(requestContext, 'agent:run')) {
+    return sendForbidden(res, 'Feedback mutation requires agent:run');
+  }
+  const feedbackKnowledgeScope = knowledgeScopeFromRequestContext(
+    requestContext,
+  );
+  const targetRun = resolveSessionRun(session, validated.value.runId);
+  if (!targetRun) {
+    return res.status(404).json({
+      success: false,
+      error: 'Feedback run not found in session',
+    });
+  }
+  const resolvedFeedbackScope = resolveKnowledgeScope(feedbackKnowledgeScope);
+  const runManifest = getRunManifestStore().getByRunId(
+    resolvedFeedbackScope,
+    targetRun.runId,
+  );
+  const targetKind = validated.value.targetKind ??
+    (validated.value.patternId
+      ? 'pattern'
+      : validated.value.caseCandidateId
+        ? 'case_candidate'
+        : 'session');
+  const targetId = validated.value.targetId ??
+    validated.value.patternId ??
+    validated.value.caseCandidateId ??
+    sessionId;
+  if (
+    validated.value.patternId &&
+    (targetKind !== 'pattern' || targetId !== validated.value.patternId)
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: 'patternId must identify a pattern target',
+    });
+  }
+  if (
+    validated.value.caseCandidateId &&
+    (
+      targetKind !== 'case_candidate' ||
+      targetId !== validated.value.caseCandidateId
+    )
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: 'caseCandidateId must identify a case_candidate target',
+    });
+  }
+  if (targetKind === 'pattern') {
+    if (!patternExistsForFeedback(targetId, feedbackKnowledgeScope)) {
+      return res.status(404).json({success: false, error: 'Pattern not found'});
+    }
+  } else if (targetKind === 'case_candidate') {
+    const outbox = openCaseCandidateOutbox();
+    try {
+      const candidate = outbox.getCandidate(targetId);
+      const candidateScope = candidate
+        ? caseCandidateKnowledgeScope(candidate.candidate)
+        : null;
+      if (
+        !candidate ||
+        !candidateScope ||
+        candidateScope.tenantId !== resolvedFeedbackScope.tenantId ||
+        candidateScope.workspaceId !== resolvedFeedbackScope.workspaceId
+      ) {
+        return res.status(404).json({
+          success: false,
+          error: 'Case candidate not found',
+        });
+      }
+    } finally {
+      outbox.close();
+    }
+  } else if (!feedbackTargetBelongsToSession(
+    session,
+    targetKind,
+    targetId,
+    targetRun.runId,
+    runManifest,
+  )) {
+    return res.status(404).json({
+      success: false,
+      error: 'Feedback target not found in session run',
+    });
+  }
 
-  const entry = enrichFeedbackEntry(sessionId, validated.value, lookup);
+  const idempotencyKey = validated.value.idempotencyKey ??
+    (typeof req.header('Idempotency-Key') === 'string'
+      ? req.header('Idempotency-Key')!
+      : randomUUID());
+  const eventInput: AppendFeedbackEventInput = {
+    kind: validated.value.eventKind ?? 'created',
+    feedbackId: validated.value.feedbackId,
+    supersedesEventId: validated.value.supersedesEventId,
+    idempotencyKey,
+    runId: targetRun.runId,
+    runManifestId: runManifest?.runManifestId,
+    sessionId,
+    rating: validated.value.rating,
+    dimensions: validated.value.dimensions,
+    comment: validated.value.comment,
+    targetKind,
+    targetId,
+    patternId: validated.value.patternId,
+    caseCandidateId: validated.value.caseCandidateId,
+    source: validated.value.source ?? 'ui',
+    actor: {
+      userId: requestContext.userId,
+      permissionSnapshot: 'agent:run',
+    },
+    scope: {
+      tenantId: resolvedFeedbackScope.tenantId,
+      workspaceId: resolvedFeedbackScope.workspaceId,
+    },
+  };
 
+  let store: FeedbackEventStore | null = null;
   try {
-    fs.mkdirSync(FEEDBACK_DIR, { recursive: true });
-    fs.appendFileSync(FEEDBACK_FILE, JSON.stringify(entry) + '\n');
+    if (sessionUsesPrivateKnowledge(session)) {
+      const persistence =
+        getSelfEvolutionLifecycleSnapshot().persistence.persistence ===
+        'available';
+      const paths = privateFeedbackStorePaths({
+        scope: eventInput.scope,
+        userId: requestContext.userId,
+        durable: persistence,
+      });
+      store = new FeedbackEventStore({
+        scope: eventInput.scope,
+        ...paths,
+      });
+      const appended = await store.append(eventInput);
+      for (const target of store.listDirtyTargets()) {
+        store.markTargetApplied(target);
+      }
+      return res.json(privateFeedbackResponse({
+        durable: appended.storage === 'durable',
+        eventId: appended.event.eventId,
+        feedbackId: appended.event.feedbackId,
+      }));
+    }
+
+    store = new FeedbackEventStore({scope: eventInput.scope});
+    const projected = await new FeedbackProjectionService({
+      store,
+      knowledgeScope: feedbackKnowledgeScope,
+    }).append(eventInput);
+    return res.json({
+      success: true,
+      schemaVersion: projected.event.schemaVersion,
+      eventId: projected.event.eventId,
+      feedbackId: projected.event.feedbackId,
+      idempotencyKey: projected.event.idempotencyKey,
+      idempotent: projected.idempotent,
+      durableFeedbackStored: true,
+      storageDisposition: 'stored_scoped',
+      patternStatus: projected.patternStatus,
+      caseCandidateFeedbackAdded:
+        projected.caseCandidateProjection?.found ?? null,
+    });
   } catch (err) {
     console.error('[Feedback] Failed to save feedback:', (err as Error).message);
-    return res.status(500).json({ success: false, error: 'Failed to save feedback' });
+    const code = (err as Error).message;
+    const conflict = code === 'legacy_feedback_not_retractable' ||
+      code.startsWith('feedback_supersedes_') ||
+      code === 'feedback_idempotency_conflict' ||
+      code === 'feedback_id_conflict';
+    return res.status(conflict ? 409 : 500).json({
+      success: false,
+      error: code,
+      idempotencyKey,
+    });
+  } finally {
+    store?.close();
   }
-
-  // Feed the rating into the pattern state machine when the client
-  // identified the pattern. Best-effort: log and continue if it fails so
-  // the JSONL audit trail is the canonical record either way.
-  let patternStatusAfter: string | null = null;
-  if (validated.value.patternId) {
-    try {
-      patternStatusAfter = await applyFeedbackToPattern(
-        validated.value.patternId,
-        validated.value.rating,
-      );
-    } catch (err) {
-      console.warn('[Feedback] Pattern state update failed:', (err as Error).message);
-    }
-  }
-
-  let caseCandidateFeedbackAdded: boolean | null = null;
-  if (validated.value.caseCandidateId) {
-    let outbox: ReturnType<typeof openCaseCandidateOutbox> | null = null;
-    try {
-      outbox = openCaseCandidateOutbox();
-      const feedbackResult = applyCaseCandidateFeedbackForRoute({
-        candidateId: validated.value.caseCandidateId,
-        sessionId,
-        rating: validated.value.rating,
-        surfacedAt: validated.value.caseCandidateSurfacedAt,
-        receivedAt: Date.parse(entry.timestamp),
-        outbox,
-        library: new CaseLibrary(backendLogPath('case_library.json')),
-      });
-      caseCandidateFeedbackAdded = feedbackResult.added;
-    } catch (err) {
-      console.warn('[Feedback] Case candidate state update failed:', (err as Error).message);
-    } finally {
-      try { outbox?.close(); } catch { /* ignore */ }
-    }
-  }
-
-  res.json({
-    success: true,
-    schemaVersion: entry.schemaVersion,
-    patternStatus: patternStatusAfter,
-    caseCandidateFeedbackAdded,
-  });
 });
 
 /**
@@ -2733,8 +3937,22 @@ async function handleSessionRespond(req: express.Request, res: express.Response,
   }
 
   if (action === 'abort') {
-    await cancelSessionRun(sessionId, 'Aborted by user');
-    res.json({ success: true, sessionId, status: session.status });
+    const runId = readRequiredCancellationRunId(req.body?.runId);
+    if (!runId) {
+      res.status(400).json({
+        success: false,
+        sessionId,
+        code: 'RUN_ID_REQUIRED',
+        error: 'runId is required for abort',
+      });
+      return;
+    }
+    const result = await cancelSessionRun(sessionId, runId, 'Aborted by user');
+    if (!result) {
+      sendResourceNotFound(res, 'Session not found');
+      return;
+    }
+    sendCancelSessionRunResult(res, result);
     return;
   }
 
@@ -2795,9 +4013,19 @@ router.post('/:sessionId/cancel', async (req, res) => {
   const session = getAuthorizedSession(req, res, sessionId);
   if (!session) return;
 
-  await cancelSessionRun(sessionId, 'Analysis cancelled by user');
+  const runId = readRequiredCancellationRunId(req.body?.runId);
+  if (!runId) {
+    return res.status(400).json({
+      success: false,
+      sessionId,
+      code: 'RUN_ID_REQUIRED',
+      error: 'runId is required for cancellation',
+    });
+  }
 
-  return res.json({ success: true, sessionId, status: session.status });
+  const result = await cancelSessionRun(sessionId, runId, 'Analysis cancelled by user');
+  if (!result) return sendResourceNotFound(res, 'Session not found');
+  return sendCancelSessionRunResult(res, result);
 });
 
 router.post('/:sessionId/interaction', async (req, res) => {
@@ -2846,9 +4074,8 @@ router.post('/:sessionId/interaction', async (req, res) => {
     // Record the interaction — ClaudeRuntime (agentv3) doesn't implement these methods.
     if (typeof session.orchestrator.recordUserInteraction === 'function') {
       session.orchestrator.recordUserInteraction(interaction);
-      const focusStore = typeof session.orchestrator.getFocusStore === 'function'
-        ? session.orchestrator.getFocusStore()
-        : null;
+      const focusStore =
+        typeof session.orchestrator.getFocusStore === 'function' ? session.orchestrator.getFocusStore() : null;
       const focusCount = focusStore ? focusStore.getTopFocuses(100).length : 0;
       return res.json({ success: true, sessionId, focusCount });
     }
@@ -2993,8 +4220,22 @@ registerAgentQuickSceneRoutes(router, {
 // Scene Detection Cache + Parallel Helpers
 // ============================================================================
 
-const sceneCache = new Map<string, { scenes: DetectedScene[]; timestamp: number }>();
-const SCENE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const sceneCache = new TtlLruCache<DetectedScene[]>(
+  sceneStoryConfig.quickSceneCacheMaxSize,
+  sceneStoryConfig.quickSceneCacheTtlMs,
+);
+const sceneCacheSubscriptions = new WeakSet<object>();
+
+function subscribeSceneCacheToTraceLifecycle(
+  traceProcessorService: ReturnType<typeof getTraceProcessorService>,
+): void {
+  const eventSource = traceProcessorService as unknown as {
+    on?: (event: string, listener: (traceId: string) => void) => unknown;
+  };
+  if (typeof eventSource.on !== 'function' || sceneCacheSubscriptions.has(traceProcessorService)) return;
+  eventSource.on('trace-deleted', (traceId) => sceneCache.delete(traceId));
+  sceneCacheSubscriptions.add(traceProcessorService);
+}
 const SCENE_EXTRACTION_STEP_IDS = new Set([
   'screen_state_changes',
   'app_launches',
@@ -3022,6 +4263,10 @@ async function runSmartAnalysis(
     blockedStrategyIds?: string[];
     owner: ResourceOwnerFields;
     knowledgeScope?: KnowledgeScope;
+    codeAwareMode?: import('../services/codebase/codeAwareFeature').CodeAwareMode;
+    codebaseIds?: string[];
+    knowledgeSourceIds?: string[];
+    runManifestAttributionSink: RunManifestAttributionSink;
   },
 ): Promise<void> {
   const session = assistantAppService.getSession(sessionId);
@@ -3029,6 +4274,7 @@ async function runSmartAnalysis(
 
   const startedAt = Date.now();
   const runId = options.runContext.runId;
+  session.analysisMode = normalizeReceiptAnalysisMode(options.analysisMode) ?? session.analysisMode;
   setCurrentSessionRun(session, {
     ...options.runContext,
     query,
@@ -3042,9 +4288,14 @@ async function runSmartAnalysis(
   const runHeartbeatInterval = startSessionRunHeartbeat(session, runId);
   const cancelToken = smartCancelBridge.create(sessionId, runId);
   let dispatchedToAgentDeepDive = false;
+  const privateKnowledge = sessionUsesPrivateKnowledge(session);
+  const outputLanguage = sessionOutputLanguage(session);
+  const durableQuery = privateKnowledge
+    ? privateAnalysisQueryMessage(outputLanguage)
+    : query;
 
   session.logger.info('SmartAnalysis', 'Starting smart analysis', {
-    query,
+    query: durableQuery,
     traceId,
     smartAction: options.smartAction,
     smartSelection: options.smartSelection,
@@ -3053,9 +4304,21 @@ async function runSmartAnalysis(
   });
 
   try {
-    await ensureSkillRegistryInitialized();
-    const skillExecutor = new SkillExecutor(options.traceProcessorService);
-    skillExecutor.registerSkills(skillRegistry.getAllSkills());
+    const smartRegistry = currentEffectiveSkillRegistry();
+    if (!smartRegistry) {
+      throw new Error('effective_runtime_registry_snapshot_missing_for_run');
+    }
+    options.runManifestAttributionSink.recordSkillRegistry(
+      buildSkillRegistryAttribution(smartRegistry),
+    );
+    const skillExecutor = new SkillExecutor(
+      options.traceProcessorService,
+      undefined,
+      undefined,
+      options.runManifestAttributionSink,
+    );
+    skillExecutor.registerSkills(smartRegistry.getAllSkills());
+    skillExecutor.setFragmentRegistry(smartRegistry.getFragmentCache());
 
     let report: SceneReport | null = null;
     if (options.smartAction === 'analyze') {
@@ -3077,10 +4340,9 @@ async function runSmartAnalysis(
         options: {
           routeProfile: 'smart',
           previewOnly: true,
-          forceRefresh: options.smartAction === 'preview'
-            ? true
-            : options.forceRefresh,
+          forceRefresh: options.smartAction === 'preview' ? true : options.forceRefresh,
           cancelToken,
+          outputLanguage,
         },
       });
     }
@@ -3100,6 +4362,7 @@ async function runSmartAnalysis(
         sessionId,
         report,
         totalDurationMs: Date.now() - startedAt,
+        outputLanguage,
       });
       if (isStaleRun(session, runId) || !smartCancelBridge.tryClaimTerminal(sessionId, runId)) {
         session.logger.warn('SmartAnalysis', 'Skipping late smart preview terminal', {
@@ -3123,59 +4386,89 @@ async function runSmartAnalysis(
     const dispatch = buildSmartDeepDiveDispatch({
       report,
       selection: options.smartSelection ?? { scope: 'all' },
+      outputLanguage,
     });
     if (!dispatch) {
-      throw new Error('所选范围没有匹配到可深钻场景，请返回场景盘点后重新选择。');
+      throw new Error(localize(
+        outputLanguage,
+        '所选范围没有匹配到可深钻场景，请返回场景盘点后重新选择。',
+        'The selected range does not contain a scene eligible for deep analysis. Return to the scene inventory and select again.',
+      ));
     }
 
     session.logger.info('SmartAnalysis', 'Dispatching smart selection to agent deep dive', {
-      query: dispatch.query,
+      query: privateKnowledge ? durableQuery : dispatch.query,
       selectedSceneCount: dispatch.selectedScenes.length,
       packageName: dispatch.packageName,
       previewReportId: report.reportId,
       runId: session.activeRun?.runId,
       requestId: session.activeRun?.requestId,
     });
-    broadcastToAgentDrivenClients(sessionId, {
-      type: 'progress',
-      content: {
-        phase: 'smart_deep_dive_dispatch',
-        message: `已选中 ${dispatch.selectedScenes.length} 个场景，进入详细分析`,
+    broadcastToAgentDrivenClients(
+      sessionId,
+      {
+        type: 'progress',
+        content: {
+          phase: 'smart_deep_dive_dispatch',
+          message: localize(
+            outputLanguage,
+            `已选中 ${dispatch.selectedScenes.length} 个场景，进入详细分析`,
+            `${dispatch.selectedScenes.length} scenes selected. Starting detailed analysis.`,
+          ),
+        },
+        timestamp: Date.now(),
       },
-      timestamp: Date.now(),
-    }, runId);
+      runId,
+    );
 
     dispatchedToAgentDeepDive = true;
-    await runAgentDrivenAnalysis(sessionId, dispatch.query, traceId, {
+    await runAgentDrivenAnalysis(sessionId, dispatch.query, traceId, buildSmartDeepDiveRunOptions({
       traceProcessorService: options.traceProcessorService,
       runContext: options.runContext,
       blockedStrategyIds: options.blockedStrategyIds,
-      selectionContext: dispatch.selectionContext,
-      traceContext: dispatch.traceContext,
-      packageName: dispatch.packageName,
-      analysisMode: resolveSmartDeepDiveAnalysisMode(options.analysisMode),
-      generateTracks: false,
+      dispatch,
       knowledgeScope: options.knowledgeScope,
-    });
+      outputLanguage,
+      analysisMode: options.analysisMode,
+      codeAwareMode: options.codeAwareMode,
+      codebaseIds: options.codebaseIds,
+      knowledgeSourceIds: options.knowledgeSourceIds,
+      runManifestAttributionSink: options.runManifestAttributionSink,
+    }));
   } catch (error: any) {
     if (isSessionRunCancelled(session, runId) || isStaleRun(session, runId)) {
       session.logger.info('SmartAnalysis', 'Ignoring smart analysis error after cancellation', {
         sessionId,
         runId,
-        error: error?.message || String(error),
+        error: privateKnowledge
+          ? privateAnalysisFailureMessage(outputLanguage)
+          : error?.message || String(error),
       });
       return;
     }
+    const publicErrorMessage = error instanceof SmartPreviewSelectionError
+      ? smartPreviewSelectionErrorMessage(outputLanguage, error.reportId)
+      : privateKnowledge
+        ? privateAnalysisFailureMessage(outputLanguage)
+        : error.message || String(error);
     session.status = 'failed';
-    session.error = error.message || String(error);
+    session.error = publicErrorMessage;
     markSessionRunStatus(session, 'failed', session.error, runId);
-    session.logger.error('SmartAnalysis', 'Smart analysis failed', error);
+    session.logger.error(
+      'SmartAnalysis',
+      'Smart analysis failed',
+      privateKnowledge ? new Error(publicErrorMessage) : error,
+    );
     if (!dispatchedToAgentDeepDive && smartCancelBridge.tryClaimTerminal(sessionId, runId)) {
-      broadcastToAgentDrivenClients(sessionId, {
-        type: 'error',
-        content: { message: session.error, error: session.error },
-        timestamp: Date.now(),
-      }, runId);
+      broadcastToAgentDrivenClients(
+        sessionId,
+        {
+          type: 'error',
+          content: { message: session.error, error: session.error },
+          timestamp: Date.now(),
+        },
+        runId,
+      );
     }
   } finally {
     smartCancelBridge.release(sessionId, runId);
@@ -3185,31 +4478,187 @@ async function runSmartAnalysis(
   }
 }
 
-function resolveSmartDeepDiveAnalysisMode(mode?: AnalyzeMode): AnalyzeMode {
-  return mode === 'fast' ? 'fast' : 'full';
+export function buildSmartDeepDiveRunOptions(input: {
+  traceProcessorService: ReturnType<typeof getTraceProcessorService>;
+  runContext: AnalyzeSessionRunContext;
+  blockedStrategyIds?: string[];
+  dispatch: NonNullable<ReturnType<typeof buildSmartDeepDiveDispatch>>;
+  knowledgeScope?: KnowledgeScope;
+  outputLanguage: OutputLanguage;
+  analysisMode?: AnalyzeMode;
+  codeAwareMode?: import('../services/codebase/codeAwareFeature').CodeAwareMode;
+  codebaseIds?: readonly string[];
+  knowledgeSourceIds?: readonly string[];
+  runManifestAttributionSink: RunManifestAttributionSink;
+}): Record<string, unknown> {
+  return {
+    traceProcessorService: input.traceProcessorService,
+    runContext: input.runContext,
+    blockedStrategyIds: input.blockedStrategyIds,
+    selectionContext: input.dispatch.selectionContext,
+    traceContext: input.dispatch.traceContext,
+    packageName: input.dispatch.packageName,
+    generateTracks: false,
+    knowledgeScope: input.knowledgeScope,
+    outputLanguage: input.outputLanguage,
+    runManifestAttributionSink: input.runManifestAttributionSink,
+    ...buildSmartDeepDiveAnalysisContext(input.analysisMode, input),
+  };
 }
 
-async function resolveSmartPreviewReportForSelection(input: {
+function smartSelectionReportId(selection?: SceneAnalysisSelection): string | undefined {
+  return selection?.reportId || selection?.sceneSnapshotId;
+}
+
+export function analyzeOptionsErrorMessage(
+  error: AnalyzeOptionsError,
+  outputLanguage: OutputLanguage,
+): string {
+  switch (error.code) {
+    case 'SMART_COMPARISON_UNSUPPORTED':
+      return localize(
+        outputLanguage,
+        '智能分析暂不支持双 trace 对比',
+        'Smart Analysis does not support dual-trace comparison yet',
+      );
+    case 'SMART_CONTINUATION_UNSUPPORTED':
+      return localize(
+        outputLanguage,
+        '智能分析仅支持新会话，不能作为已有会话的后续轮次运行',
+        'Smart Analysis must start a new session and cannot run as a continuation turn',
+      );
+    case 'INVALID_SMART_SELECTION':
+      return localize(
+        outputLanguage,
+        '智能分析的场景选择无效，请刷新场景盘点后重新选择',
+        'The Smart Analysis scene selection is invalid. Refresh the scene inventory and select again',
+      );
+    case 'SMART_SELECTION_REQUIRES_SMART_PRESET':
+      return localize(
+        outputLanguage,
+        '只有智能分析可以指定场景选择',
+        'Scene selection requires the Smart Analysis preset',
+      );
+    case 'SMART_ACTION_REQUIRES_SMART_PRESET':
+      return localize(
+        outputLanguage,
+        '只有智能分析可以指定智能分析操作',
+        'Smart actions require the Smart Analysis preset',
+      );
+    case 'UNSUPPORTED_SMART_ACTION':
+      return localize(
+        outputLanguage,
+        '不支持所请求的智能分析操作',
+        'The requested Smart Analysis action is unsupported',
+      );
+    case 'UNSUPPORTED_ANALYZE_PRESET':
+      return localize(
+        outputLanguage,
+        '不支持所请求的分析预设',
+        'The requested analysis preset is unsupported',
+      );
+    case 'UNSUPPORTED_OUTPUT_LANGUAGE':
+      return localize(
+        outputLanguage,
+        '输出语言必须是 en 或 zh-CN',
+        'Output language must be en or zh-CN',
+      );
+    case 'UNSUPPORTED_ANALYSIS_MODE':
+      return localize(
+        outputLanguage,
+        '分析模式必须是 fast、full 或 auto',
+        'Analysis mode must be fast, full, or auto',
+      );
+    case 'UNSUPPORTED_RUNTIME_CONTROL': {
+      const field = typeof error.details?.field === 'string'
+        ? error.details.field
+        : '该运行参数';
+      return localize(
+        outputLanguage,
+        `${field} 无法在所有 AI runtime 上保持一致，当前不支持按请求设置`,
+        `${field} is not supported as a request-level control across all AI runtimes`,
+      );
+    }
+    case 'UNSUPPORTED_CODE_AWARE_MODE':
+      return localize(
+        outputLanguage,
+        '源码感知模式必须是 off、metadata_only 或 provider_send',
+        'Code-aware mode must be off, metadata_only, or provider_send',
+      );
+    case 'CODEBASE_IDS_REQUIRE_CODE_AWARE_MODE':
+      return localize(
+        outputLanguage,
+        '选择源码库时，源码感知模式必须是 metadata_only 或 provider_send',
+        'Selecting codebases requires code-aware mode metadata_only or provider_send',
+      );
+    case 'ANALYSIS_SOURCE_ALLOWLIST_TOO_LARGE': {
+      const field = error.details?.field === 'codebaseIds'
+        ? 'codebaseIds'
+        : 'knowledgeSourceIds';
+      const maxItems = typeof error.details?.maxItems === 'number'
+        ? error.details.maxItems
+        : 'the configured limit';
+      return localize(
+        outputLanguage,
+        `${field} 最多允许 ${maxItems} 个唯一 ID`,
+        `${field} accepts at most ${maxItems} unique IDs`,
+      );
+    }
+    default:
+      return localize(
+        outputLanguage,
+        '分析参数无效，请检查后重试',
+        error.message,
+      );
+  }
+}
+
+export class SmartPreviewSelectionError extends Error {
+  readonly code = 'smart_preview_selection_stale';
+  readonly reportId: string;
+
+  constructor(reportId: string) {
+    super('Smart preview selection is unavailable');
+    this.name = 'SmartPreviewSelectionError';
+    this.reportId = reportId;
+  }
+}
+
+export function smartPreviewSelectionErrorMessage(
+  outputLanguage: OutputLanguage,
+  reportId: string,
+): string {
+  return localize(
+    outputLanguage,
+    `智能场景盘点“${reportId}”不可用、已过期或不再被授权。请刷新场景盘点后再开始深度分析。`,
+    `Smart scene inventory '${reportId}' is unavailable, expired, or no longer authorized. Refresh the scene inventory before starting deep analysis.`,
+  );
+}
+
+export async function resolveSmartPreviewReportForSelection(input: {
   session: AnalysisSession;
   selection?: SceneAnalysisSelection;
   traceId: string;
   owner: ResourceOwnerFields;
+  loadReport?: (reportId: string) => Promise<SceneReport | null>;
 }): Promise<SceneReport | null> {
-  const requestedReportId = input.selection?.reportId || input.selection?.sceneSnapshotId;
+  const requestedReportId = smartSelectionReportId(input.selection);
   const sessionReport = input.session.sceneStoryReport as SceneReport | undefined;
   if (isUsableSmartPreviewReport(sessionReport, input.traceId, input.owner, requestedReportId)) {
     return sessionReport;
   }
   if (!requestedReportId) return null;
 
-  const persisted = await sceneStoryService.getReport(requestedReportId);
+  const persisted = await (input.loadReport ?? (reportId => sceneStoryService.getReport(reportId)))(
+    requestedReportId,
+  );
   if (isUsableSmartPreviewReport(persisted, input.traceId, input.owner, requestedReportId)) {
     return persisted;
   }
-  return null;
+  throw new SmartPreviewSelectionError(requestedReportId);
 }
 
-function isUsableSmartPreviewReport(
+export function isUsableSmartPreviewReport(
   report: SceneReport | null | undefined,
   traceId: string,
   owner: ResourceOwnerFields,
@@ -3218,6 +4667,8 @@ function isUsableSmartPreviewReport(
   if (!report) return false;
   if (requestedReportId && report.reportId !== requestedReportId) return false;
   if (report.traceId !== traceId) return false;
+  if (report.phase !== 'selection_preview') return false;
+  if (report.expiresAt !== null && report.expiresAt <= Date.now()) return false;
   return ownersMatch(report, owner);
 }
 
@@ -3273,7 +4724,10 @@ function completeAgentDrivenSessionWithResult(input: {
   });
 }
 
-function objectRowsToEnvelopePayload(rows: Array<Record<string, any>>): { columns: string[]; rows: any[][] } {
+function objectRowsToEnvelopePayload(rows: Array<Record<string, any>>): {
+  columns: string[];
+  rows: any[][];
+} {
   if (!Array.isArray(rows) || rows.length === 0) {
     return { columns: [], rows: [] };
   }
@@ -3297,6 +4751,37 @@ function objectRowsToEnvelopePayload(rows: Array<Record<string, any>>): { column
   };
 }
 
+function appendTraceContextDataEnvelopes(
+  session: AnalysisSession,
+  traceContext: TraceDataset[] | undefined,
+  traceId: string,
+): DataEnvelope[] {
+  const envelopes = buildTraceContextDataEnvelopes(traceContext, traceId);
+  if (envelopes.length === 0) return [];
+
+  const existingHashes = new Set(
+    (session.dataEnvelopes || [])
+      .map((env) => env?.meta?.queryHash)
+      .filter((hash): hash is string => typeof hash === 'string' && hash.length > 0),
+  );
+  const unique = envelopes.filter((env) => {
+    const hash = env.meta?.queryHash;
+    if (!hash || existingHashes.has(hash)) return false;
+    existingHashes.add(hash);
+    return true;
+  });
+  if (unique.length === 0) return [];
+
+  const turnNumber = session.activeRun?.sequence || session.runSequence || 1;
+  for (const env of unique) {
+    if (env.meta) (env.meta as any).turn = turnNumber;
+  }
+
+  session.dataEnvelopes.push(...unique);
+  trimSessionArray(session.dataEnvelopes, MAX_SESSION_DATA_ENVELOPES);
+  return unique;
+}
+
 function buildSceneExtractionEnvelopesFromRawResults(rawResults: any): DataEnvelope[] {
   const envelopes: DataEnvelope[] = [];
   if (!rawResults || typeof rawResults !== 'object') return envelopes;
@@ -3311,15 +4796,17 @@ function buildSceneExtractionEnvelopesFromRawResults(rawResults: any): DataEnvel
     const payload = objectRowsToEnvelopePayload(rows);
     if (payload.columns.length === 0) continue;
 
-    envelopes.push(createDataEnvelope(payload, {
-      type: 'skill_result',
-      source: `scene_reconstruction.${stepId}`,
-      skillId: 'scene_reconstruction',
-      stepId,
-      title: stepId,
-      layer: 'list',
-      format: 'table',
-    }));
+    envelopes.push(
+      createDataEnvelope(payload, {
+        type: 'skill_result',
+        source: `scene_reconstruction.${stepId}`,
+        skillId: 'scene_reconstruction',
+        stepId,
+        title: stepId,
+        layer: 'list',
+        format: 'table',
+      }),
+    );
   }
 
   return envelopes;
@@ -3333,12 +4820,14 @@ function buildSceneExtractionEnvelopesFromRawResults(rawResults: any): DataEnvel
  */
 async function executeStateTimelineSkill(
   traceProcessorService: ReturnType<typeof getTraceProcessorService>,
-  traceId: string
+  traceId: string,
 ): Promise<DataEnvelope[]> {
   await ensureSkillRegistryInitialized();
 
+  const runtimeSkillRegistry =
+    resolveEffectiveSkillRegistryForRuntime(skillRegistry);
   const skillExecutor = new SkillExecutor(traceProcessorService);
-  skillExecutor.registerSkills(skillRegistry.getAllSkills());
+  skillExecutor.registerSkills(runtimeSkillRegistry.getAllSkills());
 
   const skillResult = await skillExecutor.execute('state_timeline', traceId, {
     trace_id: traceId,
@@ -3362,15 +4851,17 @@ async function executeStateTimelineSkill(
     const payload = objectRowsToEnvelopePayload(rows);
     if (payload.columns.length === 0) continue;
 
-    envelopes.push(createDataEnvelope(payload, {
-      type: 'skill_result',
-      source: `state_timeline:${stepId}`,
-      skillId: 'state_timeline',
-      stepId,
-      title: stepId,
-      layer: 'list',
-      format: 'table',
-    }));
+    envelopes.push(
+      createDataEnvelope(payload, {
+        type: 'skill_result',
+        source: `state_timeline:${stepId}`,
+        skillId: 'state_timeline',
+        stepId,
+        title: stepId,
+        layer: 'list',
+        format: 'table',
+      }),
+    );
   }
 
   return envelopes;
@@ -3378,12 +4869,14 @@ async function executeStateTimelineSkill(
 
 async function detectScenesQuickViaSkill(
   traceProcessorService: ReturnType<typeof getTraceProcessorService>,
-  traceId: string
+  traceId: string,
 ): Promise<DetectedScene[]> {
   await ensureSkillRegistryInitialized();
 
+  const runtimeSkillRegistry =
+    resolveEffectiveSkillRegistryForRuntime(skillRegistry);
   const skillExecutor = new SkillExecutor(traceProcessorService);
-  skillExecutor.registerSkills(skillRegistry.getAllSkills());
+  skillExecutor.registerSkills(runtimeSkillRegistry.getAllSkills());
 
   const skillResult = await skillExecutor.execute('scene_reconstruction', traceId, {
     trace_id: traceId,
@@ -3404,7 +4897,9 @@ async function detectStartups(
 ): Promise<DetectedScene[]> {
   // Reclassify startup_type: platform may report 'warm' even when
   // bindApplication exists (process killed + ActivityRecord survives).
-  const result = await tps.query(traceId, `
+  const result = await tps.query(
+    traceId,
+    `
     SELECT
       s.ts,
       s.dur,
@@ -3425,7 +4920,8 @@ async function detectStartups(
     FROM android_startups s
     WHERE s.dur > 0
     ORDER BY s.ts
-  `);
+  `,
+  );
 
   const scenes: DetectedScene[] = [];
   if (result.rows) {
@@ -3454,7 +4950,9 @@ async function detectScrollSessions(
   tps: ReturnType<typeof getTraceProcessorService>,
   traceId: string,
 ): Promise<DetectedScene[]> {
-  const scrollResult = await tps.query(traceId, `
+  const scrollResult = await tps.query(
+    traceId,
+    `
     WITH
     input_exists AS (
       SELECT 1 AS ok WHERE EXISTS (
@@ -3518,7 +5016,8 @@ async function detectScrollSessions(
     FROM scroll_sessions s
     WHERE s.end_ts > s.start_ts + 100000000
     ORDER BY s.start_ts
-  `);
+  `,
+  );
 
   const scenes: DetectedScene[] = [];
   if (scrollResult.rows) {
@@ -3548,7 +5047,9 @@ async function detectTapEvents(
   tps: ReturnType<typeof getTraceProcessorService>,
   traceId: string,
 ): Promise<DetectedScene[]> {
-  const tapResult = await tps.query(traceId, `
+  const tapResult = await tps.query(
+    traceId,
+    `
     WITH
     input_exists AS (
       SELECT 1 AS ok WHERE EXISTS (
@@ -3581,7 +5082,8 @@ async function detectTapEvents(
       AND (up_ts - down_ts) < 300000000
     ORDER BY down_ts
     LIMIT 50
-  `);
+  `,
+  );
 
   const scenes: DetectedScene[] = [];
   if (tapResult.rows) {
@@ -3605,7 +5107,7 @@ async function detectTapEvents(
  */
 async function detectScenesQuickLegacy(
   traceProcessorService: ReturnType<typeof getTraceProcessorService>,
-  traceId: string
+  traceId: string,
 ): Promise<DetectedScene[]> {
   // =========================================================================
   // Pre-load Perfetto stdlib modules (parallel)
@@ -3613,15 +5115,16 @@ async function detectScenesQuickLegacy(
   // `android_input_events` and `android_startups` are stdlib VIEWS, not
   // intrinsic tables. They only exist after loading the corresponding modules.
   const REQUIRED_MODULES = [
-    'android.input',            // Creates android_input_events, android_key_events
+    'android.input', // Creates android_input_events, android_key_events
     'android.startup.startups', // Creates android_startups
   ];
 
   await Promise.all(
-    REQUIRED_MODULES.map(module =>
-      traceProcessorService.query(traceId, `INCLUDE PERFETTO MODULE ${module};`)
-        .catch(e => console.warn(`[QuickSceneDetect] Module not available: ${module}`, e))
-    )
+    REQUIRED_MODULES.map((module) =>
+      traceProcessorService
+        .query(traceId, `INCLUDE PERFETTO MODULE ${module};`)
+        .catch((e) => console.warn(`[QuickSceneDetect] Module not available: ${module}`, e)),
+    ),
   );
 
   // =========================================================================
@@ -3663,12 +5166,13 @@ async function detectScenesQuickLegacy(
 
 async function detectScenesQuick(
   traceProcessorService: ReturnType<typeof getTraceProcessorService>,
-  traceId: string
+  traceId: string,
 ): Promise<DetectedScene[]> {
+  subscribeSceneCacheToTraceLifecycle(traceProcessorService);
   const cached = sceneCache.get(traceId);
-  if (cached && Date.now() - cached.timestamp < SCENE_CACHE_TTL) {
+  if (cached) {
     console.log('[QuickSceneDetect] Cache hit for traceId:', traceId);
-    return cached.scenes;
+    return cached;
   }
 
   const t0 = Date.now();
@@ -3680,12 +5184,17 @@ async function detectScenesQuick(
     if (scenes.length === 0) {
       const legacyScenes = await detectScenesQuickLegacy(traceProcessorService, traceId);
       if (legacyScenes.length > 0) {
-        console.log(`[QuickSceneDetect] Legacy fallback provided ${legacyScenes.length} scenes after empty skill extraction`);
+        console.log(
+          `[QuickSceneDetect] Legacy fallback provided ${legacyScenes.length} scenes after empty skill extraction`,
+        );
         scenes = legacyScenes;
       }
     }
   } catch (error: any) {
-    console.warn('[QuickSceneDetect] Skill extraction failed, falling back to legacy SQL path:', error?.message || error);
+    console.warn(
+      '[QuickSceneDetect] Skill extraction failed, falling back to legacy SQL path:',
+      error?.message || error,
+    );
     scenes = await detectScenesQuickLegacy(traceProcessorService, traceId);
   }
 
@@ -3696,7 +5205,7 @@ async function detectScenesQuick(
   });
 
   console.log(`[QuickSceneDetect] Completed in ${Date.now() - t0}ms, ${scenes.length} scenes`);
-  sceneCache.set(traceId, { scenes, timestamp: Date.now() });
+  sceneCache.set(traceId, scenes);
   return scenes;
 }
 
@@ -3715,37 +5224,17 @@ registerAgentReportRoutes(router, {
   getCompletedPayload: ensureCompletedAnalysisResultPayload,
 });
 
+registerAgentExternalIssueRoutes(router, {
+  getSessionOwner: (sessionId) =>
+    assistantAppService.getSession(sessionId) ??
+    SessionPersistenceService.getInstance().getSession(sessionId)?.metadata,
+});
+
 // ============================================================================
 // Agent-Driven Analysis Helper Functions (Phase 2-4)
 // ============================================================================
 
 type CaseCandidateSaveFn = (input: CaseCandidateCaptureInput) => Promise<unknown>;
-
-interface ApplyCaseCandidateFeedbackForRouteInput {
-  candidateId: string;
-  sessionId: string;
-  rating: 'positive' | 'negative';
-  surfacedAt?: number;
-  receivedAt: number;
-  outbox: ReturnType<typeof openCaseCandidateOutbox>;
-  library: CaseLibrary;
-  recordFeedback?: typeof recordCaseCandidateFeedback;
-}
-
-export function applyCaseCandidateFeedbackForRoute(
-  input: ApplyCaseCandidateFeedbackForRouteInput,
-): ReturnType<typeof recordCaseCandidateFeedback> {
-  const recordFeedback = input.recordFeedback ?? recordCaseCandidateFeedback;
-  return recordFeedback({
-    candidateId: input.candidateId,
-    sourceSessionId: input.sessionId,
-    rating: input.rating,
-    surfacedAt: input.surfacedAt,
-    receivedAt: input.receivedAt,
-    outbox: input.outbox,
-    library: input.library,
-  });
-}
 
 export interface CaptureCaseCandidatesAfterQualityArtifactsInput {
   sessionId: string;
@@ -3786,6 +5275,30 @@ function resolveCaseEvolutionTurnIndex(session: AnalysisSession): number {
   return 0;
 }
 
+function resolveCaseEvolutionEngine(runtimeKind: AgentRuntimeKind | undefined): CaseEvolutionEngine {
+  switch (runtimeKind) {
+    case 'openai-agents-sdk':
+      return 'openai';
+    case 'opencode':
+      return 'opencode';
+    case 'pi-agent-core':
+      return 'pi';
+    case 'claude-agent-sdk':
+    default:
+      return 'claude';
+  }
+}
+
+function cloneCaseEvolutionEnvelopes(envelopes: readonly DataEnvelope[]): DataEnvelope[] {
+  try {
+    return structuredClone(envelopes) as DataEnvelope[];
+  } catch {
+    // DataEnvelope payloads are expected to be structured-cloneable. Keep a
+    // detached top-level snapshot for legacy/custom envelopes that are not.
+    return envelopes.map(envelope => ({...envelope}));
+  }
+}
+
 export function buildCaseEvolutionSnapshotPath(sessionId: string): string {
   return `session-persistence://sessions/${sessionId}/metadata/sessionStateSnapshot`;
 }
@@ -3815,7 +5328,7 @@ export function collectPublishedSceneRootCauses(scope: KnowledgeScope | undefine
   const keys = new Set<string>();
   try {
     const library = new CaseLibrary(backendLogPath('case_library.json'));
-    const published = library.listCases({status: 'published'}, scope);
+    const published = library.listCases({ status: 'published' }, scope);
     for (const node of published) {
       const knowledge = node.knowledge;
       if (!knowledge) continue;
@@ -3833,39 +5346,74 @@ export async function captureCaseCandidatesAfterQualityArtifacts(
   input: CaptureCaseCandidatesAfterQualityArtifactsInput,
 ): Promise<void> {
   try {
+    if (sessionUsesPrivateKnowledge(input.session)) {
+      input.logger.info('CaseEvolution', 'Skipping candidate capture for private source or knowledge analysis', {
+        sessionId: input.sessionId,
+        runId: input.runIdForAnalysis,
+      });
+      return;
+    }
+    try {
+      assertAiFeatureEnabled('background_review_agent');
+    } catch (error) {
+      if (error instanceof AiDisabledError) {
+        input.logger.info('CaseEvolution', 'Skipping background candidate capture because AI is disabled', {
+          sessionId: input.sessionId,
+          runId: input.runIdForAnalysis,
+          feature: error.feature,
+        });
+        return;
+      }
+      throw error;
+    }
     const config = input.caseEvolutionConfig || loadCaseEvolutionConfig();
     if (!isCaseEvolutionCaptureEnabled(config)) return;
 
-    const computeTraceHash = input.computeTraceHash || ((traceId) =>
-      computeTraceContentHash(getTraceProcessorService(), traceId));
+    // Capture every mutable session-derived field before the first await. A
+    // follow-up turn may reuse and mutate the live session while trace hashing
+    // is still in flight; candidates must describe the turn that triggered
+    // this call, not whichever turn happens to be current later.
+    const capturedDataEnvelopes = cloneCaseEvolutionEnvelopes(input.session.dataEnvelopes || []);
+    const capturedArchitectureType = resolveCaseEvolutionArchitectureType(
+      input.session,
+      input.traceId,
+    );
+    const capturedTurnIndex = resolveCaseEvolutionTurnIndex(input.session);
+    const capturedEngine = resolveCaseEvolutionEngine(input.session.runtimeKind);
+
+    const computeTraceHash =
+      input.computeTraceHash || ((traceId) => computeTraceContentHash(getTraceProcessorService(), traceId));
     const traceContentHash = await computeTraceHash(input.traceId);
     // §1.2 flooding guard: build the set of (scene::rootCause) keys the
     // published library already covers, so capture skips clusters that
     // already have published guidance. Defaults to scanning the live library.
-    const listPublishedSceneRootCauses = input.listPublishedSceneRootCauses
-      ?? ((scope?: KnowledgeScope) => collectPublishedSceneRootCauses(scope ?? input.knowledgeScope));
+    const listPublishedSceneRootCauses =
+      input.listPublishedSceneRootCauses ??
+      ((scope?: KnowledgeScope) => collectPublishedSceneRootCauses(scope ?? input.knowledgeScope));
     const existingPublishedSceneRootCauses = listPublishedSceneRootCauses(input.knowledgeScope);
-    const saveCandidates = input.saveCandidates || ((captureInput: CaseCandidateCaptureInput) =>
-      saveCaseCandidates(captureInput, {
-        logger: input.logger,
-        config,
-        existingPublishedSceneRootCauses,
-      }));
+    const saveCandidates =
+      input.saveCandidates ||
+      ((captureInput: CaseCandidateCaptureInput) =>
+        saveCaseCandidates(captureInput, {
+          logger: input.logger,
+          config,
+          existingPublishedSceneRootCauses,
+        }));
 
     await saveCandidates({
       result: input.result,
       conclusionContract: input.normalizedConclusionContract,
       claimVerificationResult: input.result.claimVerificationResult,
-      dataEnvelopes: input.session.dataEnvelopes || [],
+      dataEnvelopes: capturedDataEnvelopes,
       sceneType: input.sceneIdHint || 'general',
-      architectureType: resolveCaseEvolutionArchitectureType(input.session, input.traceId),
+      architectureType: capturedArchitectureType,
       knowledgeScope: input.knowledgeScope,
       snapshotPath: buildCaseEvolutionSnapshotPath(input.sessionId),
       provenance: {
         sessionId: input.sessionId,
         runId: input.runIdForAnalysis,
-        turnIndex: resolveCaseEvolutionTurnIndex(input.session),
-        engine: 'claude',
+        turnIndex: capturedTurnIndex,
+        engine: capturedEngine,
         traceContentHash,
       },
     });
@@ -3878,16 +5426,19 @@ export async function captureCaseCandidatesAfterQualityArtifacts(
   }
 }
 
-async function runAgentDrivenAnalysis(
-  sessionId: string,
-  query: string,
-  traceId: string,
-  options: any = {}
-) {
+async function runAgentDrivenAnalysis(sessionId: string, query: string, traceId: string, options: any = {}) {
   const session = assistantAppService.getSession(sessionId);
   if (!session) return;
 
   const inputRun = options.runContext as AnalyzeSessionRunContext | undefined;
+  const requestedRunId = inputRun?.runId ?? session.activeRun?.runId;
+  if (requestedRunId && (isSessionRunCancelled(session, requestedRunId) || isStaleRun(session, requestedRunId))) {
+    session.logger.info('AgentDrivenAnalysis', 'Skipping inactive run before startup', {
+      sessionId,
+      runId: requestedRunId,
+    });
+    return;
+  }
   if (inputRun) {
     setCurrentSessionRun(session, {
       ...inputRun,
@@ -3896,12 +5447,10 @@ async function runAgentDrivenAnalysis(
       startedAt: inputRun.startedAt || Date.now(),
     });
     initializeCancelStateForRun(session, session.activeRun!);
-    session.runSequence = Math.max(
-      normalizeRunSequence(session.runSequence),
-      normalizeRunSequence(inputRun.sequence)
-    );
+    session.runSequence = Math.max(normalizeRunSequence(session.runSequence), normalizeRunSequence(inputRun.sequence));
   } else if (!session.activeRun) {
     const fallback = startSessionRun(session, query, generateRequestId());
+    if (!fallback) return;
     setCurrentSessionRun(session, {
       ...fallback,
       status: 'running',
@@ -3918,24 +5467,31 @@ async function runAgentDrivenAnalysis(
   }
 
   const { logger } = session;
+  const outputLanguage = sessionOutputLanguage(session);
+  session.analysisMode = normalizeReceiptAnalysisMode(options.analysisMode) ?? session.analysisMode;
   session.status = 'running';
   session.lastActivityAt = Date.now();
   const runIdForAnalysis = session.activeRun?.runId;
   persistSessionRunState(session, 'running', undefined, runIdForAnalysis);
   const runHeartbeatInterval = startSessionRunHeartbeat(session, runIdForAnalysis);
   logger.info('AgentDrivenAnalysis', 'Starting agent-driven analysis', {
-    query,
+    query: sessionUsesPrivateKnowledge(session)
+      ? privateAnalysisQueryMessage(outputLanguage)
+      : query,
     traceId,
     runId: session.activeRun?.runId,
     requestId: session.activeRun?.requestId,
     runSequence: session.activeRun?.sequence,
   });
+  const decoratedTraceContext = decorateTraceContextDatasets(options.traceContext, traceId);
+  options.traceContext = decoratedTraceContext;
   if (!runIdForAnalysis) {
     throw new Error(`Missing run id for session ${sessionId}`);
   }
-  const agentQuery = session.agentQuery && session.query === query
-    ? session.agentQuery
-    : buildAgentQueryWithContinuityNotice(query, session.continuityBreaks);
+  const agentQuery =
+    session.agentQuery && session.query === query
+      ? session.agentQuery
+      : buildAgentQueryWithContinuityNotice(query, session.continuityBreaks);
 
   // Track generation is a lightweight derivation step from DataEnvelopes.
   // Enable by default (unless explicitly disabled) so `/api/agent/v1/analyze` can
@@ -3951,10 +5507,9 @@ async function runAgentDrivenAnalysis(
   modelRouter.on('llmTelemetry', onLlmTelemetry);
 
   const runWithTraceProcessorLease = <T>(fn: () => Promise<T>): Promise<T> => {
-    const leaseContexts = [
-      options.traceProcessorLease,
-      options.referenceTraceProcessorLease,
-    ].filter(Boolean) as TraceProcessorLeaseQueryContext[];
+    const leaseContexts = [options.traceProcessorLease, options.referenceTraceProcessorLease].filter(
+      Boolean,
+    ) as TraceProcessorLeaseQueryContext[];
     if (leaseContexts.length > 1 && options.traceProcessorService?.runWithLeases) {
       return options.traceProcessorService.runWithLeases(leaseContexts, fn);
     }
@@ -3966,21 +5521,35 @@ async function runAgentDrivenAnalysis(
 
   // Set up streaming via event listener on orchestrator
   const handleUpdate = (update: StreamingUpdate) => {
-    if (isStaleRun(session, runIdForAnalysis)) return;
+    if (isStaleRun(session, runIdForAnalysis) || isSessionRunCancelled(session, runIdForAnalysis)) return;
     session.lastActivityAt = Date.now();
-    console.log(`[AgentRoutes.AgentDriven] Received event: ${update.type}`, update.content?.phase);
-    logger.debug('Stream', `Update: ${update.type}`, update.content);
+    const sourceAware = sessionUsesPrivateKnowledge({
+      codeAwareMode: options.codeAwareMode,
+      codebaseIds: options.codebaseIds,
+      knowledgeSourceIds: options.knowledgeSourceIds,
+    });
+    const projectedUpdate = projectCodeAwareStreamingUpdate(
+      sessionId,
+      update,
+      sourceAware,
+      outputLanguage,
+    );
+    // Token events are both extremely high volume and may contain model text in
+    // non-private runs. They are already represented by aggregate runtime
+    // telemetry, so never duplicate them into console/session logs.
+    if (projectedUpdate.type !== 'answer_token') {
+      logger.debug('Stream', `Update: ${projectedUpdate.type}`, projectedUpdate.content);
+    }
     const normalizedUpdate = augmentConclusionUpdateWithEvidenceIndex(
       session,
-      normalizeAgentDrivenUpdate(update),
+      normalizeAgentDrivenUpdate(projectedUpdate, outputLanguage),
     );
 
     // Final narrative is emitted through analysis_completed after deterministic
     // evidence/claim verification has run. Suppress early conclusion events so
     // clients do not render an unverified terminal answer.
     const shouldBroadcastOriginalUpdate =
-      normalizedUpdate.type !== 'conclusion' &&
-      normalizedUpdate.type !== 'answer_token';
+      normalizedUpdate.type !== 'conclusion' && normalizedUpdate.type !== 'answer_token';
     if (shouldBroadcastOriginalUpdate) {
       broadcastToAgentDrivenClients(sessionId, normalizedUpdate, runIdForAnalysis);
     }
@@ -3995,39 +5564,52 @@ async function runAgentDrivenAnalysis(
     // Derive TrackEvent(s) for scene reconstruction sessions from emitted DataEnvelopes.
     // This keeps the TrackEvent feature while unifying on the agent-driven architecture.
     if (shouldGenerateTracks && normalizedUpdate.type === 'data') {
-      const envelopes = (Array.isArray(normalizedUpdate.content) ? normalizedUpdate.content : [normalizedUpdate.content])
-        .filter((e): e is DataEnvelope => !!e && typeof e === 'object');
+      const envelopes = (
+        Array.isArray(normalizedUpdate.content) ? normalizedUpdate.content : [normalizedUpdate.content]
+      ).filter((e): e is DataEnvelope => !!e && typeof e === 'object');
       const changed = updateSceneReconstructionArtifactsFromEnvelopes(session, envelopes);
       if (changed) {
-        broadcastToAgentDrivenClients(sessionId, {
-          type: 'track_data',
-          content: {
-            tracks: session.trackEvents || [],
-            scenes: session.scenes || [],
+        broadcastToAgentDrivenClients(
+          sessionId,
+          {
+            type: 'track_data',
+            content: {
+              tracks: session.trackEvents || [],
+              scenes: session.scenes || [],
+            },
+            timestamp: update.timestamp,
+            id: generateEventId('track_data', sessionId),
           },
-          timestamp: update.timestamp,
-          id: generateEventId('track_data', sessionId),
-        }, runIdForAnalysis);
+          runIdForAnalysis,
+        );
       }
     }
 
     // Track agent dialogue events
     if (normalizedUpdate.content?.phase === 'task_dispatched' || normalizedUpdate.content?.phase === 'task_completed') {
-      pushWithSessionCap(session.agentDialogue, {
-        agentId: normalizedUpdate.content.agentId || 'master',
-        type: normalizedUpdate.content.phase === 'task_dispatched' ? 'task' : 'response',
-        content: normalizedUpdate.content,
-        timestamp: normalizedUpdate.timestamp,
-      }, MAX_SESSION_AGENT_DIALOGUE);
+      pushWithSessionCap(
+        session.agentDialogue,
+        {
+          agentId: normalizedUpdate.content.agentId || 'master',
+          type: normalizedUpdate.content.phase === 'task_dispatched' ? 'task' : 'response',
+          content: normalizedUpdate.content,
+          timestamp: normalizedUpdate.timestamp,
+        },
+        MAX_SESSION_AGENT_DIALOGUE,
+      );
 
       // Collect full agent responses for HTML report enrichment
       if (normalizedUpdate.content.phase === 'task_completed') {
-        pushWithSessionCap(session.agentResponses, {
-          taskId: normalizedUpdate.content.taskId || '',
-          agentId: normalizedUpdate.content.agentId || 'unknown',
-          response: normalizedUpdate.content.response || normalizedUpdate.content,
-          timestamp: normalizedUpdate.timestamp,
-        }, MAX_SESSION_AGENT_RESPONSES);
+        pushWithSessionCap(
+          session.agentResponses,
+          {
+            taskId: normalizedUpdate.content.taskId || '',
+            agentId: normalizedUpdate.content.agentId || 'unknown',
+            response: normalizedUpdate.content.response || normalizedUpdate.content,
+            timestamp: normalizedUpdate.timestamp,
+          },
+          MAX_SESSION_AGENT_RESPONSES,
+        );
       }
     }
 
@@ -4037,12 +5619,16 @@ async function runAgentDrivenAnalysis(
     // and remapping would cause duplicate delivery to the frontend.
     const eventType = mapToAgentDrivenEventType(normalizedUpdate);
     if (shouldBroadcastOriginalUpdate && eventType !== normalizedUpdate.type) {
-      broadcastToAgentDrivenClients(sessionId, {
-        type: eventType,
-        content: normalizedUpdate.content,
-        timestamp: normalizedUpdate.timestamp,
-        id: normalizedUpdate.id,
-      }, runIdForAnalysis);
+      broadcastToAgentDrivenClients(
+        sessionId,
+        {
+          type: eventType,
+          content: normalizedUpdate.content,
+          timestamp: normalizedUpdate.timestamp,
+          id: normalizedUpdate.id,
+        },
+        runIdForAnalysis,
+      );
     }
   };
 
@@ -4053,33 +5639,53 @@ async function runAgentDrivenAnalysis(
   session.orchestratorUpdateHandler = handleUpdate;
   session.orchestrator.on('update', handleUpdate);
 
-  // Run state_timeline skill in parallel with Agent analysis (fire-and-forget).
+  // Run state_timeline in parallel while keeping it inside the run-owned lease.
   // Only execute when explicitly requested (e.g. scene reconstruction flow),
   // NOT on every analyze call — raw state lane data needs LLM reasoning before display.
+  let stateTimelinePromise: Promise<void> = Promise.resolve();
   if (options.executeStateTimeline && options.traceProcessorService) {
-    runWithTraceProcessorLease(() => executeStateTimelineSkill(options.traceProcessorService, traceId))
+    stateTimelinePromise = runWithTraceProcessorLease(() =>
+      executeStateTimelineSkill(options.traceProcessorService, traceId),
+    )
       .then((envelopes) => {
-        if (isStaleRun(session, runIdForAnalysis)) return;
-        if (envelopes.length === 0) return;
-        // Process envelopes through the same pipeline as Agent-produced data
-        const changed = updateSceneReconstructionArtifactsFromEnvelopes(session, envelopes);
-        // Broadcast each envelope as a 'data' event so frontend track_overlay picks it up
-        for (const env of envelopes) {
-          broadcastToAgentDrivenClients(sessionId, {
-            type: 'data',
-            content: env,
-            timestamp: Date.now(),
-            id: generateEventId('data', sessionId),
-          }, runIdForAnalysis);
-        }
-        if (changed) {
-          broadcastToAgentDrivenClients(sessionId, {
-            type: 'track_data',
-            content: { tracks: session.trackEvents || [], scenes: session.scenes || [] },
-            timestamp: Date.now(),
-            id: generateEventId('track_data', sessionId),
-          }, runIdForAnalysis);
-        }
+        const projected = projectStateTimelineRunResult({
+          envelopes,
+          isStaleRun: () => isStaleRun(session, runIdForAnalysis),
+          isRunCancelled: () => isSessionRunCancelled(session, runIdForAnalysis),
+          isRunActive: () => {
+            const status = resolveSessionRun(session, runIdForAnalysis)?.status;
+            return status === 'pending' || status === 'running';
+          },
+          updateArtifacts: (result) => updateSceneReconstructionArtifactsFromEnvelopes(session, result),
+          emitData: (envelope) => {
+            broadcastToAgentDrivenClients(
+              sessionId,
+              {
+                type: 'data',
+                content: envelope,
+                timestamp: Date.now(),
+                id: generateEventId('data', sessionId),
+              },
+              runIdForAnalysis,
+            );
+          },
+          emitTrackData: () => {
+            broadcastToAgentDrivenClients(
+              sessionId,
+              {
+                type: 'track_data',
+                content: {
+                  tracks: session.trackEvents || [],
+                  scenes: session.scenes || [],
+                },
+                timestamp: Date.now(),
+                id: generateEventId('track_data', sessionId),
+              },
+              runIdForAnalysis,
+            );
+          },
+        });
+        if (!projected) return;
         logger.info('StateTimeline', 'State timeline lanes broadcast', {
           laneCount: Object.keys(session.stateTimeline || {}).length,
           envelopeCount: envelopes.length,
@@ -4092,35 +5698,80 @@ async function runAgentDrivenAnalysis(
       });
   }
 
+  const traceContextEnvelopes = appendTraceContextDataEnvelopes(session, decoratedTraceContext, traceId);
+  if (traceContextEnvelopes.length > 0) {
+    broadcastToAgentDrivenClients(
+      sessionId,
+      {
+        type: 'data',
+        content: traceContextEnvelopes,
+        timestamp: Date.now(),
+      },
+      runIdForAnalysis,
+    );
+  }
+
   try {
     console.log('[AgentRoutes.AgentDriven] Starting orchestrator.analyze...');
-    const result = await logger.timed('AgentDrivenAnalysis', 'analyze', async () => {
-      const analyze = () => session.orchestrator.analyze(agentQuery, sessionId, traceId, {
-        traceProcessorService: options.traceProcessorService,
-        packageName: options.packageName,
-        timeRange: options.timeRange,
-        taskTimeoutMs: options.taskTimeoutMs,
-        blockedStrategyIds: options.blockedStrategyIds,
-        adb: options.adb,
-        selectionContext: options.selectionContext,
-        analysisMode: options.analysisMode,
-        traceContext: options.traceContext,
-        referenceTraceId: options.referenceTraceId,
-        providerId: options.providerId,
-        codeAwareMode: options.codeAwareMode,
-        codebaseIds: Array.isArray(options.codebaseIds) ? options.codebaseIds : undefined,
-        tenantId: session.tenantId,
-        workspaceId: session.workspaceId,
-        userId: session.userId,
-        runId: session.activeRun?.runId,
+    let result;
+    try {
+      result = await logger.timed('AgentDrivenAnalysis', 'analyze', async () => {
+        const analyze = () =>
+          session.orchestrator.analyze(agentQuery, sessionId, traceId, {
+            traceProcessorService: options.traceProcessorService,
+            packageName: options.packageName,
+            timeRange: options.timeRange,
+            taskTimeoutMs: options.taskTimeoutMs,
+            blockedStrategyIds: options.blockedStrategyIds,
+            adb: options.adb,
+            selectionContext: options.selectionContext,
+            analysisMode: options.analysisMode,
+            traceContext: decoratedTraceContext,
+            referenceTraceId: options.referenceTraceId,
+            tracePairContext: options.tracePairContext,
+            providerId: options.providerId,
+            outputLanguage,
+            codeAwareMode: options.codeAwareMode,
+            codebaseIds: Array.isArray(options.codebaseIds) ? options.codebaseIds : undefined,
+            knowledgeSourceIds: Array.isArray(options.knowledgeSourceIds)
+              ? options.knowledgeSourceIds
+              : undefined,
+            analysisContextFingerprint: session.analysisContextFingerprint,
+            androidInternalsPackPin: session.androidInternalsPackPin,
+            tenantId: session.tenantId,
+            workspaceId: session.workspaceId,
+            userId: session.userId,
+            runId: session.activeRun?.runId,
+            runManifestAttributionSink: options.runManifestAttributionSink,
+          });
+        return runWithTraceProcessorLease(analyze);
       });
-      return runWithTraceProcessorLease(analyze);
-    });
+    } finally {
+      await stateTimelinePromise;
+    }
     console.log('[AgentRoutes.AgentDriven] analyze completed, success:', result.success);
-    if (isStaleRun(session, runIdForAnalysis)) {
-      logger.info('AgentDrivenAnalysis', 'Ignoring stale analysis success', {
+    if (session.analysisContextFingerprint && sessionUsesPrivateKnowledge(session)) {
+      assertCurrentAnalysisContextAuthorization(
+        {
+          codeAwareMode: session.codeAwareMode,
+          codebaseIds: session.codebaseIds,
+          knowledgeSourceIds: session.knowledgeSourceIds,
+        },
+        options.knowledgeScope ?? {
+          tenantId: session.tenantId,
+          workspaceId: session.workspaceId,
+          userId: session.userId,
+        },
+        session.analysisContextFingerprint,
+      );
+    }
+    const runIsInactive = () =>
+      isSessionRunCancelled(session, runIdForAnalysis) || isStaleRun(session, runIdForAnalysis);
+    if (runIsInactive()) {
+      logger.info('AgentDrivenAnalysis', 'Ignoring inactive analysis success', {
         sessionId,
         runId: runIdForAnalysis,
+        cancelled: isSessionRunCancelled(session, runIdForAnalysis),
       });
       return;
     }
@@ -4131,30 +5782,56 @@ async function runAgentDrivenAnalysis(
     }
 
     if (session.referenceTraceId && options.traceProcessorService) {
-      session.comparisonSource = 'raw_trace_pair';
+      let comparisonReportSection: typeof session.comparisonReportSection;
       try {
-        session.comparisonReportSection = await runWithTraceProcessorLease(() =>
+        comparisonReportSection = await runWithTraceProcessorLease(() =>
           buildRawTraceComparisonReportSection(options.traceProcessorService, {
             currentTraceId: traceId,
             referenceTraceId: session.referenceTraceId!,
           }),
         );
       } catch (comparisonSectionError: any) {
-        session.comparisonReportSection = {
+        if (runIsInactive()) return;
+        const comparisonTitle = localize(
+          outputLanguage,
+          'SmartPerfetto 确定性对比附录',
+          'SmartPerfetto deterministic comparison appendix',
+        );
+        const comparisonFailure = localize(
+          outputLanguage,
+          '固定 SQL 附录生成失败。请重新运行分析；若问题持续，请携带诊断标识查看服务端日志。',
+          'The deterministic SQL appendix could not be generated. Retry the analysis; if the problem persists, use the diagnostic identity to inspect server logs.',
+        );
+        logger.warn('AgentDrivenAnalysis', 'Comparison appendix generation failed', {
+          sessionId,
+          runId: runIdForAnalysis,
+          diagnostic: diagnosticLogIdentity(errorMessage(comparisonSectionError)),
+        });
+        comparisonReportSection = {
           source: 'raw_trace_pair',
-          title: 'SmartPerfetto 确定性对比附录',
+          title: comparisonTitle,
           markdown: [
-            '## SmartPerfetto 确定性对比附录',
+            `## ${comparisonTitle}`,
             '',
-            `- 固定 SQL 附录生成失败：${comparisonSectionError?.message || String(comparisonSectionError)}`,
+            `- ${comparisonFailure}`,
             '',
           ].join('\n'),
-          html: `<section class="smartperfetto-comparison-appendix"><h2>SmartPerfetto 确定性对比附录</h2><p>固定 SQL 附录生成失败：${escapeHtmlForInlineHtml(comparisonSectionError?.message || String(comparisonSectionError))}</p></section>`,
-          limitations: [`固定 SQL 附录生成失败：${comparisonSectionError?.message || String(comparisonSectionError)}`],
+          html: `<section class="smartperfetto-comparison-appendix"><h2>${escapeHtmlForInlineHtml(comparisonTitle)}</h2><p>${escapeHtmlForInlineHtml(comparisonFailure)}</p></section>`,
+          limitations: [comparisonFailure],
         };
       }
+      if (runIsInactive()) {
+        logger.info('AgentDrivenAnalysis', 'Ignoring comparison result for inactive run', {
+          sessionId,
+          runId: runIdForAnalysis,
+        });
+        return;
+      }
+      session.comparisonSource = 'raw_trace_pair';
+      session.comparisonReportSection = comparisonReportSection;
     }
 
+    if (runIsInactive()) return;
     if (result.success || result.partial === true) {
       // Read the case-evolution config ONCE per request so the attach-flag
       // and capture-flag decisions see the same snapshot (MINOR-2). Both the
@@ -4165,14 +5842,15 @@ async function runAgentDrivenAnalysis(
         query,
         findings: result.findings,
       });
-      let normalizedConclusionContract = (
-        deriveEvidenceBackedConclusionContractForNarrative(result.conclusion, session.dataEnvelopes || [], {
+      let normalizedConclusionContract = (deriveEvidenceBackedConclusionContractForNarrative(
+        result.conclusion,
+        session.dataEnvelopes || [],
+        {
           existingContract: result.conclusionContract as ConclusionContract | undefined,
           mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
           sceneId: sceneIdHint,
-        }) ||
-        undefined
-      ) as ConclusionContract | undefined;
+        },
+      ) || undefined) as ConclusionContract | undefined;
       if (normalizedConclusionContract) {
         if (isCaseEvolutionRetrieveEnabled(caseEvolutionConfig)) {
           const attached = attachCaseHitsToContractSync({
@@ -4231,11 +5909,20 @@ async function runAgentDrivenAnalysis(
       logComponent: 'AgentDrivenAnalysis',
     });
   } catch (error: any) {
+    const privateKnowledge = sessionUsesPrivateKnowledge(session);
+    const authorizationChanged = error instanceof AnalysisContextAuthorizationChangedError ||
+      error?.code === 'analysis_context_changed_restart_required';
+    if (authorizationChanged) {
+      await retireAuthorizationChangedSession(sessionId, session, handleUpdate);
+    }
+    const publicErrorMessage = privateKnowledge
+      ? privateAnalysisFailureMessage(outputLanguage)
+      : error.message;
     if (isSessionRunCancelled(session, runIdForAnalysis)) {
       logger.info('AgentDrivenAnalysis', 'Ignoring analysis error after cancellation', {
         sessionId,
         runId: runIdForAnalysis,
-        error: error?.message || String(error),
+        error: publicErrorMessage,
       });
       return;
     }
@@ -4243,20 +5930,43 @@ async function runAgentDrivenAnalysis(
       logger.info('AgentDrivenAnalysis', 'Ignoring stale analysis error', {
         sessionId,
         runId: runIdForAnalysis,
-        error: error?.message || String(error),
+        error: publicErrorMessage,
       });
       return;
     }
     session.status = 'failed';
-    session.error = error.message;
-    markSessionRunStatus(session, 'failed', error.message, runIdForAnalysis);
-    logger.error('AgentDrivenAnalysis', 'Agent-driven analysis failed', error);
+    session.error = publicErrorMessage;
+    markSessionRunStatus(session, 'failed', publicErrorMessage, runIdForAnalysis);
+    logger.error(
+      'AgentDrivenAnalysis',
+      'Agent-driven analysis failed',
+      privateKnowledge ? new Error(publicErrorMessage) : error,
+    );
 
-    broadcastToAgentDrivenClients(sessionId, {
-      type: 'error',
-      content: { message: error.message, error: error.message },
-      timestamp: Date.now(),
-    }, runIdForAnalysis);
+    broadcastToAgentDrivenClients(
+      sessionId,
+      {
+        type: 'error',
+        content: {
+          message: publicErrorMessage,
+          error: publicErrorMessage,
+          ...(authorizationChanged ? {code: 'analysis_context_changed_restart_required'} : {}),
+        },
+        timestamp: Date.now(),
+      },
+      runIdForAnalysis,
+    );
+
+    if (authorizationChanged) {
+      for (const client of session.sseClients) {
+        try {
+          client.end();
+        } catch {}
+      }
+      session.sseClients = [];
+      scrubAuthorizationChangedSession(session);
+      assistantAppService.deleteSession(sessionId);
+    }
 
     logger.close();
     throw error;
@@ -4265,11 +5975,9 @@ async function runAgentDrivenAnalysis(
       clearInterval(runHeartbeatInterval);
     }
     // Prevent listener accumulation across multi-turn requests in the same session.
-    if (session.orchestratorUpdateHandler) {
-      session.orchestrator.off('update', session.orchestratorUpdateHandler);
-      if (session.orchestratorUpdateHandler === handleUpdate) {
-        session.orchestratorUpdateHandler = undefined;
-      }
+    session.orchestrator.off('update', handleUpdate);
+    if (session.orchestratorUpdateHandler === handleUpdate) {
+      session.orchestratorUpdateHandler = undefined;
     }
     modelRouter.off('llmTelemetry', onLlmTelemetry);
   }
@@ -4329,12 +6037,10 @@ function appendConversationStep(session: AnalysisSession, update: StreamingUpdat
   if (!text || !Number.isFinite(ordinal) || ordinal <= 0) return;
 
   const phaseRaw = sanitizeConversationText(payload.phase, 24) as AnalysisSession['conversationSteps'][number]['phase'];
-  const phase = ((
-    phaseRaw === 'thinking' ||
-    phaseRaw === 'tool' ||
-    phaseRaw === 'result' ||
-    phaseRaw === 'error'
-  ) ? phaseRaw : 'progress');
+  const phase =
+    phaseRaw === 'thinking' || phaseRaw === 'tool' || phaseRaw === 'result' || phaseRaw === 'error'
+      ? phaseRaw
+      : 'progress';
 
   const roleRaw = sanitizeConversationText(payload.role, 16) as AnalysisSession['conversationSteps'][number]['role'];
   const role = roleRaw === 'system' ? 'system' : 'agent';
@@ -4354,9 +6060,8 @@ function appendConversationStep(session: AnalysisSession, update: StreamingUpdat
     phase,
     role,
     text,
-    timestamp: typeof update.timestamp === 'number' && Number.isFinite(update.timestamp)
-      ? update.timestamp
-      : Date.now(),
+    timestamp:
+      typeof update.timestamp === 'number' && Number.isFinite(update.timestamp) ? update.timestamp : Date.now(),
     sourceEventType: sanitizeConversationText(payload?.source?.eventType, 48) || undefined,
   });
 
@@ -4379,13 +6084,57 @@ function summarizeTimelineToolCall(content: Record<string, any>): string {
   return message;
 }
 
+function normalizeTimelineTraceSide(value: unknown): 'current' | 'reference' | undefined {
+  return value === 'current' || value === 'reference' ? value : undefined;
+}
+
+function normalizeTimelinePaneSide(value: unknown): 'left' | 'right' | 'top' | 'bottom' | undefined {
+  return value === 'left' || value === 'right' || value === 'top' || value === 'bottom' ? value : undefined;
+}
+
+function timelineTraceRoleLabel(
+  traceSide: 'current' | 'reference',
+  language: ReturnType<typeof parseOutputLanguage>,
+): string {
+  return traceSide === 'reference'
+    ? localize(language, '参考', 'reference')
+    : localize(language, '当前', 'current');
+}
+
+function timelinePaneLabel(
+  paneSide: 'left' | 'right' | 'top' | 'bottom',
+  language: ReturnType<typeof parseOutputLanguage>,
+): string {
+  switch (paneSide) {
+    case 'left':
+      return localize(language, '左侧', 'left');
+    case 'right':
+      return localize(language, '右侧', 'right');
+    case 'top':
+      return localize(language, '上方', 'top');
+    case 'bottom':
+      return localize(language, '下方', 'bottom');
+  }
+}
+
+function timelineTraceLocationLabel(
+  envelope: Record<string, any>,
+  language: ReturnType<typeof parseOutputLanguage>,
+): string | undefined {
+  const traceSide = normalizeTimelineTraceSide(
+    envelope?.meta?.traceSide || envelope?.traceSide || envelope?.traceProvenance?.traceSide,
+  );
+  if (!traceSide) return undefined;
+
+  const paneSide = normalizeTimelinePaneSide(
+    envelope?.meta?.paneSide || envelope?.paneSide || envelope?.traceProvenance?.paneSide,
+  );
+  const roleLabel = timelineTraceRoleLabel(traceSide, language);
+  return paneSide ? `${timelinePaneLabel(paneSide, language)}/${roleLabel}` : roleLabel;
+}
+
 function summarizeTimelineResult(content: Record<string, any>): string {
-  const candidates = [
-    content.summary,
-    content.message,
-    content.result,
-    content.output,
-  ];
+  const candidates = [content.summary, content.message, content.result, content.output];
 
   for (const candidate of candidates) {
     const text = sanitizeConversationText(candidate);
@@ -4394,9 +6143,13 @@ function summarizeTimelineResult(content: Record<string, any>): string {
   return '';
 }
 
-function summarizeDataEnvelopeForTimeline(update: StreamingUpdate): string {
-  const envelopes = (Array.isArray(update.content) ? update.content : [update.content])
-    .filter((entry) => entry && typeof entry === 'object') as Array<Record<string, any>>;
+function summarizeDataEnvelopeForTimeline(
+  update: StreamingUpdate,
+  language: ReturnType<typeof parseOutputLanguage>,
+): string {
+  const envelopes = (Array.isArray(update.content) ? update.content : [update.content]).filter(
+    (entry) => entry && typeof entry === 'object',
+  ) as Array<Record<string, any>>;
   if (envelopes.length === 0) return '';
 
   const allTitles = envelopes
@@ -4410,58 +6163,76 @@ function summarizeDataEnvelopeForTimeline(update: StreamingUpdate): string {
       return Array.isArray(data?.rows) ? data.rows.length : undefined;
     })
     .filter((rowCount): rowCount is number => typeof rowCount === 'number');
+  const rowCount = rows.reduce((sum, count) => sum + count, 0);
   const rowText = rows.length > 0
-    ? `，共 ${rows.reduce((sum, rowCount) => sum + rowCount, 0)} 行`
+    ? localize(language, `，共 ${rowCount} 行`, `, ${rowCount} rows total`)
     : '';
-  const traceSides = [...new Set(envelopes
-    .map((env) => env?.meta?.traceSide || env?.traceSide || env?.traceProvenance?.traceSide)
-    .filter((side): side is string => side === 'current' || side === 'reference'))];
-  const traceText = traceSides.length > 0
-    ? `，Trace: ${traceSides.map(side => side === 'reference' ? '参考' : '当前').join('/')}`
+  const traceLocations = [
+    ...new Set(envelopes.map(env => timelineTraceLocationLabel(env, language)).filter((label): label is string => !!label)),
+  ];
+  const traceText = traceLocations.length > 0
+    ? localize(language, `，Trace: ${traceLocations.join('/')}`, `, trace: ${traceLocations.join('/')}`)
     : '';
-  const evidenceRefs = envelopes
-    .map((env) => sanitizeConversationText(env?.meta?.evidenceRefId))
-    .filter(Boolean);
+  const evidenceRefs = envelopes.map((env) => sanitizeConversationText(env?.meta?.evidenceRefId)).filter(Boolean);
   const evidenceText = evidenceRefs.length > 0
-    ? `，已登记 ${evidenceRefs.length} 个证据 ID`
+    ? localize(language, `，已登记 ${evidenceRefs.length} 个证据 ID`, `, ${evidenceRefs.length} evidence IDs recorded`)
     : '';
-  const formats = [...new Set(envelopes
-    .map((env) => sanitizeConversationText(env?.display?.format, 24))
-    .filter(Boolean))];
-  const kindText = formats.length === 1
-    ? ({
-        table: '数据表',
-        summary: '摘要数据',
-        metric: '指标数据',
-        chart: '图表数据',
-        text: '文本数据',
-        timeline: '时间线数据',
-      } as Record<string, string>)[formats[0]] || '数据输出'
-    : '数据输出';
-  const planPhases = [...new Set(envelopes
-    .map((env) => sanitizeConversationText(env?.meta?.planPhaseTitle || env?.meta?.planPhaseId, 80))
-    .filter(Boolean))];
+  const formats = [
+    ...new Set(envelopes.map((env) => sanitizeConversationText(env?.display?.format, 24)).filter(Boolean)),
+  ];
+  const kindText =
+    formats.length === 1
+      ? (
+          {
+            table: localize(language, '数据表', 'tables'),
+            summary: localize(language, '摘要数据', 'summaries'),
+            metric: localize(language, '指标数据', 'metrics'),
+            chart: localize(language, '图表数据', 'charts'),
+            text: localize(language, '文本数据', 'text outputs'),
+            timeline: localize(language, '时间线数据', 'timelines'),
+          } as Record<string, string>
+        )[formats[0]] || localize(language, '数据输出', 'data outputs')
+      : localize(language, '数据输出', 'data outputs');
+  const planPhases = [
+    ...new Set(
+      envelopes
+        .map((env) => sanitizeConversationText(env?.meta?.planPhaseTitle || env?.meta?.planPhaseId, 80))
+        .filter(Boolean),
+    ),
+  ];
   const phaseText = planPhases.length > 0
-    ? `，阶段: ${planPhases.slice(0, 2).join('/')}`
+    ? localize(language, `，阶段: ${planPhases.slice(0, 2).join('/')}`, `, phase: ${planPhases.slice(0, 2).join('/')}`)
     : '';
-  const phaseWarnings = [...new Set(envelopes
-    .map((env) => sanitizeConversationText(env?.meta?.planPhaseWarning, 120))
-    .filter(Boolean))];
+  const phaseWarnings = [
+    ...new Set(envelopes.map((env) => sanitizeConversationText(env?.meta?.planPhaseWarning, 120)).filter(Boolean)),
+  ];
   const phaseWarningText = phaseWarnings.length > 0
-    ? `，阶段归因需核对: ${phaseWarnings.slice(0, 2).join('；')}`
+    ? localize(language, `，阶段归因需核对: ${phaseWarnings.slice(0, 2).join('；')}`, `, phase attribution needs review: ${phaseWarnings.slice(0, 2).join('; ')}`)
     : '';
   const reasons = envelopes
     .map((env) => sanitizeConversationText(env?.meta?.producerReason || env?.meta?.toolNarration, 180))
     .filter(Boolean);
   const uniqueReasons = [...new Set(reasons)].slice(0, 3);
   const omittedReasonCount = Math.max(0, reasons.length - uniqueReasons.length);
-  const reasonText = uniqueReasons.length > 0
-    ? `：${uniqueReasons.join('；')}${omittedReasonCount > 0 ? `；另有 ${omittedReasonCount} 条原因` : ''}`
-    : '';
-  const titleText = titles.length > 0
-    ? `：${titles.join(' / ')}${omittedTitleCount > 0 ? ` / 另有 ${omittedTitleCount} 份` : ''}`
-    : '';
-  return `收到 ${envelopes.length} 份${kindText}${titleText}${rowText}${traceText}${phaseText}${phaseWarningText}${evidenceText}${reasonText || '，用于支撑后续诊断'}`;
+  const reasonText =
+    uniqueReasons.length > 0
+      ? localize(
+          language,
+          `：${uniqueReasons.join('；')}${omittedReasonCount > 0 ? `；另有 ${omittedReasonCount} 条原因` : ''}`,
+          `: ${uniqueReasons.join('; ')}${omittedReasonCount > 0 ? `; ${omittedReasonCount} more reasons` : ''}`,
+        )
+      : '';
+  const titleText =
+    titles.length > 0
+      ? localize(
+          language,
+          `：${titles.join(' / ')}${omittedTitleCount > 0 ? ` / 另有 ${omittedTitleCount} 份` : ''}`,
+          `: ${titles.join(' / ')}${omittedTitleCount > 0 ? ` / ${omittedTitleCount} more` : ''}`,
+        )
+      : '';
+  const fallbackReason = localize(language, '，用于支撑后续诊断', ', supporting subsequent diagnosis');
+  return localize(language, `收到 ${envelopes.length} 份`, `Received ${envelopes.length} `) +
+    `${kindText}${titleText}${rowText}${traceText}${phaseText}${phaseWarningText}${evidenceText}${reasonText || fallbackReason}`;
 }
 
 function buildConversationStepUpdate(
@@ -4479,6 +6250,7 @@ function buildConversationStepUpdate(
   let phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error' = 'progress';
   let role: 'agent' | 'system' = 'agent';
   let text = '';
+  const language = sessionOutputLanguage(session);
 
   switch (update.type) {
     case 'progress':
@@ -4492,11 +6264,11 @@ function buildConversationStepUpdate(
       role = 'system';
       text =
         sanitizeConversationText(contentRecord.message) ||
-        sanitizeConversationText(contentRecord.fallback && `降级处理: ${contentRecord.fallback}`) ||
+        sanitizeConversationText(contentRecord.fallback && localize(language, `降级处理: ${contentRecord.fallback}`, `Degraded handling: ${contentRecord.fallback}`)) ||
         sanitizeConversationText(contentRecord.reasoning) ||
-        sanitizeConversationText(contentRecord.phase && `阶段: ${contentRecord.phase}`);
+        sanitizeConversationText(contentRecord.phase && localize(language, `阶段: ${contentRecord.phase}`, `Phase: ${contentRecord.phase}`));
       if (!text && update.type === 'hypothesis_generated' && Array.isArray(contentRecord.hypotheses)) {
-        text = `形成 ${contentRecord.hypotheses.length} 个待验证假设`;
+        text = localize(language, `形成 ${contentRecord.hypotheses.length} 个待验证假设`, `Formed ${contentRecord.hypotheses.length} hypotheses to verify`);
       }
       break;
     case 'thought':
@@ -4525,23 +6297,30 @@ function buildConversationStepUpdate(
       phase = 'result';
       role = 'agent';
       if (update.type === 'finding' && Array.isArray(contentRecord.findings)) {
-        const firstFinding = contentRecord.findings.find(
-          (entry) => entry && typeof entry === 'object'
-        ) as Record<string, any> | undefined;
+        const firstFinding = contentRecord.findings.find((entry) => entry && typeof entry === 'object') as
+          Record<string, any> | undefined;
         const firstTitle = sanitizeConversationText(firstFinding?.title || firstFinding?.description);
         text = firstTitle
-          ? `新增发现 ${contentRecord.findings.length} 条: ${firstTitle}`
-          : `新增发现 ${contentRecord.findings.length} 条`;
+          ? localize(
+              language,
+              `新增发现 ${contentRecord.findings.length} 条: ${firstTitle}`,
+              `${contentRecord.findings.length} new findings: ${firstTitle}`,
+            )
+          : localize(
+              language,
+              `新增发现 ${contentRecord.findings.length} 条`,
+              `${contentRecord.findings.length} new findings`,
+            );
       } else {
         text =
           summarizeTimelineResult(contentRecord) ||
-          (contentRecord.taskId ? `工具调用完成 (#${String(contentRecord.taskId).slice(-6)})` : '');
+          (contentRecord.taskId ? localize(language, `工具调用完成 (#${String(contentRecord.taskId).slice(-6)})`, `Tool call completed (#${String(contentRecord.taskId).slice(-6)})`) : '');
       }
       break;
     case 'data': {
       phase = 'result';
       role = 'system';
-      text = summarizeDataEnvelopeForTimeline(update);
+      text = summarizeDataEnvelopeForTimeline(update, language);
       break;
     }
     case 'conclusion':
@@ -4550,13 +6329,13 @@ function buildConversationStepUpdate(
       text =
         sanitizeConversationText(contentRecord.summary) ||
         sanitizeConversationText(contentRecord.message) ||
-        '最终结论已生成';
+        localize(language, '最终结论已生成', 'Final conclusion generated');
       break;
     case 'answer_token':
       if (contentRecord.done === true) {
         phase = 'result';
         role = 'agent';
-        text = '最终回答生成完成';
+        text = localize(language, '最终回答生成完成', 'Final answer generation completed');
       }
       break;
     case 'error':
@@ -4565,7 +6344,7 @@ function buildConversationStepUpdate(
       text =
         sanitizeConversationText(contentRecord.message) ||
         sanitizeConversationText(contentRecord.error) ||
-        '分析过程中发生错误';
+        localize(language, '分析过程中发生错误', 'An error occurred during analysis');
       break;
     default:
       return null;
@@ -4627,28 +6406,34 @@ function buildConversationStepUpdate(
 /**
  * Normalize orchestrator updates before mapping/broadcasting
  */
-function normalizeAgentDrivenUpdate(update: StreamingUpdate): StreamingUpdate {
+function normalizeAgentDrivenUpdate(
+  update: StreamingUpdate,
+  language: OutputLanguage = configuredOutputLanguage(),
+): StreamingUpdate {
   const rawContent = update.content;
   if (!rawContent || typeof rawContent !== 'object' || Array.isArray(rawContent)) {
     return update;
   }
 
-  const content: Record<string, any> = { ...(rawContent as Record<string, any>) };
+  const content: Record<string, any> = {
+    ...(rawContent as Record<string, any>),
+  };
 
   if (update.type === 'stage_transition') {
     const stageName = typeof content.stageName === 'string' ? content.stageName : 'unknown';
     const hasStageIndex = typeof content.stageIndex === 'number' && Number.isFinite(content.stageIndex);
-    const hasTotalStages = typeof content.totalStages === 'number' && Number.isFinite(content.totalStages) && content.totalStages > 0;
+    const hasTotalStages =
+      typeof content.totalStages === 'number' && Number.isFinite(content.totalStages) && content.totalStages > 0;
     const skipped = content.skipped === true;
     const skipReason = typeof content.skipReason === 'string' ? content.skipReason.trim() : '';
-    const stageSeq = hasStageIndex && hasTotalStages
-      ? ` (${content.stageIndex + 1}/${content.totalStages})`
-      : '';
+    const stageSeq = hasStageIndex && hasTotalStages ? ` (${content.stageIndex + 1}/${content.totalStages})` : '';
     if (typeof content.phase !== 'string' || !content.phase.trim()) {
       content.phase = 'stage_transition';
     }
     if (typeof content.message !== 'string' || !content.message.trim()) {
-      const prefix = skipped ? '跳过阶段' : '进入阶段';
+      const prefix = skipped
+        ? localize(language, '跳过阶段', 'Skipping stage')
+        : localize(language, '进入阶段', 'Entering stage');
       const reason = skipped && skipReason ? `: ${skipReason}` : '';
       content.message = `${prefix} ${stageName}${stageSeq}${reason}`;
     }
@@ -4664,8 +6449,10 @@ function normalizeAgentDrivenUpdate(update: StreamingUpdate): StreamingUpdate {
     if (typeof content.message !== 'string' || !content.message.trim()) {
       const taskTitle = typeof content.taskTitle === 'string' ? content.taskTitle : '';
       const toolName = typeof content.toolName === 'string' ? content.toolName : '';
-      const displayName = taskTitle || toolName || '工具任务';
-      content.message = isDone ? `完成 ${displayName}` : `调用 ${displayName}`;
+      const displayName = taskTitle || toolName || localize(language, '工具任务', 'tool task');
+      content.message = isDone
+        ? localize(language, `完成 ${displayName}`, `Completed ${displayName}`)
+        : localize(language, `调用 ${displayName}`, `Calling ${displayName}`);
     }
   }
 
@@ -4717,6 +6504,18 @@ function mapToAgentDrivenEventType(update: StreamingUpdate): StreamingUpdate['ty
   }
 }
 
+function dataEnvelopeDedupKey(envelope: DataEnvelope): string | undefined {
+  const meta = envelope.meta;
+  if (!meta) return undefined;
+  if (typeof meta.evidenceRefId === 'string' && meta.evidenceRefId.length > 0) {
+    return `evidence:${meta.evidenceRefId}`;
+  }
+  if (typeof meta.queryHash === 'string' && meta.queryHash.length > 0) {
+    return `query:${meta.traceId || ''}:${meta.queryHash}`;
+  }
+  return undefined;
+}
+
 /**
  * Broadcast update to all SSE clients for an agent-driven session
  */
@@ -4735,12 +6534,16 @@ function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdat
     onBufferedEvent: (event) => {
       if (runId) event.runId = runId;
       session.sseEventBuffer.push(event);
-      persistBufferedAgentEvent(session, {
-        cursor: event.seqId,
-        eventType: event.eventType,
-        eventData: event.eventData,
-        createdAt: Date.now(),
-      }, runId);
+      persistBufferedAgentEvent(
+        session,
+        {
+          cursor: event.seqId,
+          eventType: event.eventType,
+          eventData: event.eventData,
+          createdAt: Date.now(),
+        },
+        runId,
+      );
       // Trim ring buffer to cap
       if (session.sseEventBuffer.length > SSE_RING_BUFFER_SIZE) {
         session.sseEventBuffer.splice(0, session.sseEventBuffer.length - SSE_RING_BUFFER_SIZE);
@@ -4754,21 +6557,34 @@ function broadcastToAgentDrivenClients(sessionId: string, update: StreamingUpdat
           errors: payload.errors.slice(0, 5),
           totalErrors: payload.errors.length,
           envelope: payload.envelope,
-        }
+        },
       );
     },
     onValidDataEnvelopes: (validEnvelopes) => {
       if (validEnvelopes.length > 0) {
-        console.log(
-          `[AgentRoutes.broadcastToAgentDrivenClients] Sending ${validEnvelopes.length} DataEnvelope(s) for session ${sessionId}`
+        const existingKeys = new Set(
+          (session.dataEnvelopes || [])
+            .map(dataEnvelopeDedupKey)
+            .filter((key): key is string => typeof key === 'string' && key.length > 0),
         );
+        const uniqueEnvelopes = validEnvelopes.filter((env) => {
+          const key = dataEnvelopeDedupKey(env);
+          if (!key) return true;
+          if (existingKeys.has(key)) return false;
+          existingKeys.add(key);
+          return true;
+        });
+        console.log(
+          `[AgentRoutes.broadcastToAgentDrivenClients] Sending ${validEnvelopes.length} DataEnvelope(s) for session ${sessionId}`,
+        );
+        if (uniqueEnvelopes.length === 0) return;
         // P2-4: Tag envelopes with current turn number for multi-turn attribution
         const run = resolveSessionRun(session, runId);
         const turnNumber = run?.sequence || session.runSequence || 1;
-        for (const env of validEnvelopes) {
+        for (const env of uniqueEnvelopes) {
           if (env.meta) (env.meta as any).turn = turnNumber;
         }
-        session.dataEnvelopes.push(...validEnvelopes);
+        session.dataEnvelopes.push(...uniqueEnvelopes);
         trimSessionArray(session.dataEnvelopes, MAX_SESSION_DATA_ENVELOPES);
       }
     },
@@ -4809,6 +6625,42 @@ const SCENE_DISPLAY_NAMES: Record<SceneCategory, string> = {
   window_transition: '窗口转场',
 };
 
+const SCENE_DISPLAY_NAMES_EN: Record<SceneCategory, string> = {
+  cold_start: 'cold start',
+  warm_start: 'warm start',
+  hot_start: 'hot start',
+  scroll_start: 'scroll start',
+  scroll: 'scroll',
+  inertial_scroll: 'inertial scroll',
+  navigation: 'navigation',
+  app_switch: 'app switch',
+  home_screen: 'home screen',
+  app_foreground: 'app foreground',
+  screen_on: 'screen on',
+  screen_off: 'screen off',
+  screen_sleep: 'screen sleep',
+  screen_unlock: 'screen unlock',
+  notification: 'notification action',
+  split_screen: 'split-screen action',
+  tap: 'tap',
+  long_press: 'long press',
+  idle: 'idle',
+  jank_region: 'performance issue interval',
+  back_key: 'Back key',
+  home_key: 'Home key',
+  recents_key: 'Recents key',
+  anr: 'ANR',
+  ime_show: 'keyboard shown',
+  ime_hide: 'keyboard hidden',
+  window_transition: 'window transition',
+};
+
+function sceneDisplayName(sceneType: SceneCategory, language = configuredOutputLanguage()): string {
+  return language === 'en'
+    ? SCENE_DISPLAY_NAMES_EN[sceneType] || sceneType
+    : SCENE_DISPLAY_NAMES[sceneType] || sceneType;
+}
+
 const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
   cold_start: 'launch',
   warm_start: 'launch',
@@ -4829,7 +6681,7 @@ const SCENE_COLOR_SCHEMES: Record<SceneCategory, TrackEvent['colorScheme']> = {
   tap: 'tap',
   long_press: 'tap',
   idle: 'system',
-  jank_region: 'jank',  // Use jank color to highlight performance issues
+  jank_region: 'jank', // Use jank color to highlight performance issues
   back_key: 'system',
   home_key: 'system',
   recents_key: 'system',
@@ -4874,7 +6726,13 @@ const STEP_TO_LANE: Record<string, string> = {
 };
 
 type LaneStatus = 'available' | 'available_frame_based' | 'available_heuristic' | 'table_missing' | 'no_data';
-const VALID_LANE_STATUSES = new Set<string>(['available', 'available_frame_based', 'available_heuristic', 'table_missing', 'no_data']);
+const VALID_LANE_STATUSES = new Set<string>([
+  'available',
+  'available_frame_based',
+  'available_heuristic',
+  'table_missing',
+  'no_data',
+]);
 /** Statuses indicating data is expected (table exists, may have rows). */
 const DATA_PRESENT_STATUSES = new Set<string>(['available', 'available_frame_based', 'available_heuristic']);
 
@@ -4900,7 +6758,7 @@ function extractStateTimelineData(envelopes: DataEnvelope[]): {
         const lane = String(row.lane || '');
         const status = String(row.source_status || 'available');
         if (lane) {
-          availability[lane] = VALID_LANE_STATUSES.has(status) ? status as LaneStatus : 'available';
+          availability[lane] = VALID_LANE_STATUSES.has(status) ? (status as LaneStatus) : 'available';
         }
       }
       continue;
@@ -4949,7 +6807,7 @@ function extractStateTimelineData(envelopes: DataEnvelope[]): {
   for (const lane of [...new Set(Object.values(STEP_TO_LANE))]) {
     if (timeline[lane] && timeline[lane].length > 0) {
       // Has real data — check if it's all UNKNOWN (empty-source fallback)
-      const allUnknown = timeline[lane].every(s => s.state === 'UNKNOWN' || s.state === 'IDLE');
+      const allUnknown = timeline[lane].every((s) => s.state === 'UNKNOWN' || s.state === 'IDLE');
       if (!availability[lane]) {
         availability[lane] = allUnknown ? 'no_data' : 'available';
       }
@@ -4962,10 +6820,7 @@ function extractStateTimelineData(envelopes: DataEnvelope[]): {
   return { timeline, availability };
 }
 
-function updateSceneReconstructionArtifactsFromEnvelopes(
-  session: AnalysisSession,
-  envelopes: DataEnvelope[]
-): boolean {
+function updateSceneReconstructionArtifactsFromEnvelopes(session: AnalysisSession, envelopes: DataEnvelope[]): boolean {
   if (!Array.isArray(envelopes) || envelopes.length === 0) return false;
 
   // Extract scene events (from scene_reconstruction skill)
@@ -5047,9 +6902,7 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
 
         const startupType = String(row.startup_type || '').toLowerCase();
         const type: SceneCategory =
-          startupType === 'warm' ? 'warm_start'
-          : startupType === 'hot' ? 'hot_start'
-          : 'cold_start';
+          startupType === 'warm' ? 'warm_start' : startupType === 'hot' ? 'hot_start' : 'cold_start';
 
         const startNs = BigInt(startTs);
         const endNs = startNs + durNs;
@@ -5081,9 +6934,7 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
 
         const gestureType = String(row.gesture_type || '').toLowerCase();
         const type: SceneCategory =
-          gestureType === 'scroll' ? 'scroll'
-          : gestureType === 'long_press' ? 'long_press'
-          : 'tap';
+          gestureType === 'scroll' ? 'scroll' : gestureType === 'long_press' ? 'long_press' : 'tap';
 
         const startNs = BigInt(startTs);
         const endNs = startNs + durNs;
@@ -5253,30 +7104,30 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
     // Step: clean_timeline (quality-gated unified timeline)
     if (stepId === 'clean_timeline') {
       const cleanTimelineTypeMapping: Record<string, SceneCategory> = {
-        'cold_start': 'cold_start',
-        'warm_start': 'warm_start',
-        'hot_start': 'hot_start',
-        'scroll': 'scroll',
-        'tap': 'tap',
-        'long_press': 'long_press',
-        'screen_on': 'screen_on',
-        'screen_off': 'screen_off',
-        'screen_sleep': 'screen_sleep',
-        'screen_unlock': 'screen_unlock',
-        'notification': 'notification',
-        'split_screen': 'split_screen',
-        'pip': 'navigation',
-        'app_switch': 'app_switch',
-        'home_screen': 'home_screen',
-        'app_foreground': 'app_foreground',
-        'back_key': 'back_key',
-        'home_key': 'home_key',
-        'recents_key': 'recents_key',
-        'anr': 'anr',
-        'ime_show': 'ime_show',
-        'ime_hide': 'ime_hide',
-        'window_transition': 'window_transition',
-        'idle': 'idle',
+        cold_start: 'cold_start',
+        warm_start: 'warm_start',
+        hot_start: 'hot_start',
+        scroll: 'scroll',
+        tap: 'tap',
+        long_press: 'long_press',
+        screen_on: 'screen_on',
+        screen_off: 'screen_off',
+        screen_sleep: 'screen_sleep',
+        screen_unlock: 'screen_unlock',
+        notification: 'notification',
+        split_screen: 'split_screen',
+        pip: 'navigation',
+        app_switch: 'app_switch',
+        home_screen: 'home_screen',
+        app_foreground: 'app_foreground',
+        back_key: 'back_key',
+        home_key: 'home_key',
+        recents_key: 'recents_key',
+        anr: 'anr',
+        ime_show: 'ime_show',
+        ime_hide: 'ime_hide',
+        window_transition: 'window_transition',
+        idle: 'idle',
       };
 
       for (const row of rows) {
@@ -5319,12 +7170,13 @@ function extractDetectedScenesFromEnvelopes(envelopes: DataEnvelope[]): Detected
     }
   }
 
-  const hasGestureLikeScene = scenes.some((scene) => (
-    scene.type === 'tap' ||
-    scene.type === 'scroll' ||
-    scene.type === 'long_press' ||
-    scene.type === 'inertial_scroll'
-  ));
+  const hasGestureLikeScene = scenes.some(
+    (scene) =>
+      scene.type === 'tap' ||
+      scene.type === 'scroll' ||
+      scene.type === 'long_press' ||
+      scene.type === 'inertial_scroll',
+  );
 
   if (!hasGestureLikeScene && jankRowsForFallback.length > 0) {
     const jankIntervals = aggregateJankFramesToIntervals(jankRowsForFallback);
@@ -5381,9 +7233,7 @@ function aggregateJankFramesToIntervals(rows: Array<Record<string, any>>): JankI
   });
 
   let currentStart = toBigInt(sortedRows[0].ts);
-  let currentEnd = currentStart !== null
-    ? currentStart + (toBigInt(sortedRows[0].dur) || 0n)
-    : null;
+  let currentEnd = currentStart !== null ? currentStart + (toBigInt(sortedRows[0].dur) || 0n) : null;
   let jankCount = 1;
   let severities: string[] = [String(sortedRows[0].jank_severity_type || '')];
 
@@ -5450,12 +7300,10 @@ function sceneKey(scene: DetectedScene): string {
 
 function buildTrackEventsFromScenes(scenes: DetectedScene[]): TrackEvent[] {
   return scenes.map((scene) => {
-    const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+    const displayName = sceneDisplayName(scene.type);
     const colorScheme = SCENE_COLOR_SCHEMES[scene.type] || 'system';
 
-    const appName = scene.appPackage
-      ? scene.appPackage.replace('com.', '').replace('android.', '')
-      : '';
+    const appName = scene.appPackage ? scene.appPackage.replace('com.', '').replace('android.', '') : '';
 
     let name = displayName;
     if (appName) name += ` [${appName}]`;
@@ -5484,7 +7332,7 @@ function buildTrackEventsFromScenes(scenes: DetectedScene[]): TrackEvent[] {
 }
 
 function fingerprintTrackEvents(events: TrackEvent[]): string {
-  return events.map(e => `${e.ts}:${e.dur}:${e.name}:${e.colorScheme}`).join('|');
+  return events.map((e) => `${e.ts}:${e.dur}:${e.name}:${e.colorScheme}`).join('|');
 }
 
 function payloadToObjectRowsLocal(payload: any): Array<Record<string, any>> {
@@ -5597,7 +7445,7 @@ type ClientFindingPayload = {
 
 function buildClientFindings(
   findings: AgentRuntimeAnalysisResult['findings'],
-  scenes: DetectedScene[]
+  scenes: DetectedScene[],
 ): ClientFindingPayload[] {
   const base: ClientFindingPayload[] = (findings || []).map((f: any) => ({
     id: String(f?.id || `finding_${Date.now()}`),
@@ -5638,17 +7486,17 @@ function buildClientFindings(
   return Array.from(dedup.values());
 }
 
-function buildSessionResultContract(
-  session: AnalysisSession,
-  findings: ClientFindingPayload[]
-) {
+function buildSessionResultContract(session: AnalysisSession, findings: ClientFindingPayload[]) {
   return buildAssistantResultContract({
     dataEnvelopes: session.dataEnvelopes,
     findings,
   });
 }
 
-function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload[] {
+function deriveSceneIssueFindings(
+  scenes: DetectedScene[],
+  language: OutputLanguage = configuredOutputLanguage(),
+): ClientFindingPayload[] {
   if (!Array.isArray(scenes) || scenes.length === 0) return [];
   const scrollScenes = scenes.filter((s) => s.type === 'scroll');
 
@@ -5665,11 +7513,8 @@ function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload
   const derived: ClientFindingPayload[] = [];
   for (const item of inertialCandidates) {
     const s = item.scene;
-    const severity =
-      item.jankFrames >= 100 ? 'critical'
-        : item.jankFrames >= 40 ? 'warning'
-          : 'info';
-    const app = s.appPackage || 'unknown';
+    const severity = item.jankFrames >= 100 ? 'critical' : item.jankFrames >= 40 ? 'warning' : 'info';
+    const app = s.appPackage || localize(language, '未知', 'unknown');
     const inertialStartNs = toBigInt(s.startTs);
     const inertialEndNs = toBigInt(s.endTs);
     let totalScrollDurationMs = s.durationMs;
@@ -5696,8 +7541,16 @@ function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload
       id: `scene_inertial_${s.startTs}`,
       category: 'scroll',
       severity,
-      title: `惯性滑动卡顿：${item.jankFrames} 帧异常`,
-      description: `惯性 ${s.durationMs}ms，总滑动约 ${totalScrollDurationMs}ms，应用 ${app}，建议重点排查滑动后渲染路径`,
+      title: localize(
+        language,
+        `惯性滑动卡顿：${item.jankFrames} 帧异常`,
+        `Inertial scrolling jank: ${item.jankFrames} anomalous frames`,
+      ),
+      description: localize(
+        language,
+        `惯性 ${s.durationMs}ms，总滑动约 ${totalScrollDurationMs}ms，应用 ${app}，建议重点排查滑动后渲染路径`,
+        `Inertial phase ${s.durationMs}ms, total scroll about ${totalScrollDurationMs}ms, app ${app}. Prioritize the post-scroll rendering path.`,
+      ),
       details: {
         sceneType: s.type,
         startTs: s.startTs,
@@ -5716,11 +7569,12 @@ function deriveSceneIssueFindings(scenes: DetectedScene[]): ClientFindingPayload
 
 function isNoIssueText(text: string): boolean {
   const t = String(text || '').toLowerCase();
-  return (
-    t.includes('未发现明显性能问题') ||
+  return t.includes('未发现明显性能问题') ||
     t.includes('整体流畅度良好') ||
-    t.includes('分析未发现明显问题')
-  );
+    t.includes('分析未发现明显问题') ||
+    t.includes('no obvious performance issue') ||
+    t.includes('no significant performance issue') ||
+    t.includes('overall smoothness is good');
 }
 
 function hasIssueSignalText(text: string): boolean {
@@ -5755,21 +7609,28 @@ const SCENE_RESPONSE_THRESHOLDS: Record<string, { good: number; acceptable: numb
   app_switch: { good: 500, acceptable: 1000 },
 };
 
-function classifySceneResponse(scene: DetectedScene): '流畅' | '轻微波动' | '明显波动' | '未知' {
+function classifySceneResponse(
+  scene: DetectedScene,
+  language: OutputLanguage = configuredOutputLanguage(),
+): string {
+  const smooth = localize(language, '流畅', 'smooth');
+  const minorVariation = localize(language, '轻微波动', 'minor variation');
+  const significantVariation = localize(language, '明显波动', 'significant variation');
+  const unknown = localize(language, '未知', 'unknown');
   const metadata = scene.metadata as Record<string, any> | undefined;
 
   if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && Number.isFinite(Number(metadata?.averageFps))) {
     const fps = Number(metadata?.averageFps);
-    if (fps >= 55) return '流畅';
-    if (fps >= 45) return '轻微波动';
-    return '明显波动';
+    if (fps >= 55) return smooth;
+    if (fps >= 45) return minorVariation;
+    return significantVariation;
   }
 
   const thresholds = SCENE_RESPONSE_THRESHOLDS[scene.type];
-  if (!thresholds) return '未知';
-  if (scene.durationMs <= thresholds.good) return '流畅';
-  if (scene.durationMs <= thresholds.acceptable) return '轻微波动';
-  return '明显波动';
+  if (!thresholds) return unknown;
+  if (scene.durationMs <= thresholds.good) return smooth;
+  if (scene.durationMs <= thresholds.acceptable) return minorVariation;
+  return significantVariation;
 }
 
 function formatSceneDurationMs(durationMs: number): string {
@@ -5790,9 +7651,12 @@ function formatSceneStartTsForNarrative(tsNs: string): string {
   return `${minutes}m ${remainingSeconds.toFixed(3)}s`;
 }
 
-function buildSceneReplayNarrative(scenes: DetectedScene[]): string {
+function buildSceneReplayNarrative(
+  scenes: DetectedScene[],
+  language: OutputLanguage = configuredOutputLanguage(),
+): string {
   if (!Array.isArray(scenes) || scenes.length === 0) {
-    return '未检测到可回放的用户操作场景。';
+    return localize(language, '未检测到可回放的用户操作场景。', 'No replayable user-interaction scenes were detected.');
   }
 
   const sorted = [...scenes].sort((a, b) => {
@@ -5805,24 +7669,40 @@ function buildSceneReplayNarrative(scenes: DetectedScene[]): string {
   });
   const maxItems = 12;
   const sequenceLines = sorted.slice(0, maxItems).map((scene, idx) => {
-    const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+    const displayName = sceneDisplayName(scene.type, language);
     const startTs = formatSceneStartTsForNarrative(scene.startTs);
     const duration = formatSceneDurationMs(scene.durationMs);
-    const response = classifySceneResponse(scene);
-    const appText = scene.appPackage ? `，应用 ${scene.appPackage}` : '';
-    return `${idx + 1}. [${startTs}] ${displayName}，持续 ${duration}${appText}，响应状态：${response}`;
+    const response = classifySceneResponse(scene, language);
+    const appText = scene.appPackage
+      ? localize(language, `，应用 ${scene.appPackage}`, `, app ${scene.appPackage}`)
+      : '';
+    return localize(
+      language,
+      `${idx + 1}. [${startTs}] ${displayName}，持续 ${duration}${appText}，响应状态：${response}`,
+      `${idx + 1}. [${startTs}] ${displayName}, duration ${duration}${appText}, response: ${response}`,
+    );
   });
 
   const extraLine = sorted.length > maxItems
-    ? `- 其余 ${sorted.length - maxItems} 个场景可在表格中继续查看。`
+    ? localize(
+        language,
+        `- 其余 ${sorted.length - maxItems} 个场景可在表格中继续查看。`,
+        `- ${sorted.length - maxItems} additional scenes are available in the table.`,
+      )
     : '';
 
   return [
-    `共还原 ${sorted.length} 个操作场景。以下为操作与设备响应事实回放（不含根因推断）：`,
+    localize(
+      language,
+      `共还原 ${sorted.length} 个操作场景。以下为操作与设备响应事实回放（不含根因推断）：`,
+      `${sorted.length} interaction scenes reconstructed. The following is a factual replay of interactions and device responses, without root-cause inference:`,
+    ),
     '',
     ...sequenceLines.map((line) => `- ${line}`),
     extraLine,
-  ].filter(Boolean).join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 // Delegates to the shared normalizer so CLI's buildReportHtml gets identical
@@ -5834,18 +7714,24 @@ function normalizeNarrativeForClient(narrative: string): string {
 
 function conclusionHasEvidenceIndex(conclusion: string): boolean {
   const text = conclusion || '';
-  return /(^|\n)\s*##\s*证据(?:表)?索引\b/.test(text);
+  return /(^|\n)\s*(?:##\s*)?(?:证据(?:表)?索引|evidence\s+index)(?=\s|$|[:：])/i.test(text);
 }
 
 function markdownCell(value: unknown, maxLen = 80): string {
-  return String(value ?? '')
-    .replace(/\s+/g, ' ')
-    .replace(/\|/g, '/')
-    .trim()
-    .slice(0, maxLen) || '-';
+  return (
+    String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .replace(/\|/g, '/')
+      .trim()
+      .slice(0, maxLen) || '-'
+  );
 }
 
-function buildConclusionEvidenceIndex(envelopes: DataEnvelope[], maxItems = 3): string {
+function buildConclusionEvidenceIndex(
+  envelopes: DataEnvelope[],
+  maxItems = 3,
+  language: OutputLanguage = configuredOutputLanguage(),
+): string {
   if (!Array.isArray(envelopes) || envelopes.length === 0) return '';
 
   const seen = new Set<string>();
@@ -5870,34 +7756,47 @@ function buildConclusionEvidenceIndex(envelopes: DataEnvelope[], maxItems = 3): 
   if (candidates.length === 0) return '';
   const rows = candidates.slice(0, maxItems);
   const omitted = Math.max(0, candidates.length - rows.length);
-  const summary = rows
-    .map(item => `${item.title}（${item.source} / ${item.evidence}）`)
-    .join('；');
+  const summary = rows.map((item) => localize(
+    language,
+    `${item.title}（${item.source} / ${item.evidence}）`,
+    `${item.title} (${item.source} / ${item.evidence})`,
+  )).join(localize(language, '；', '; '));
   return [
-    '## 证据索引',
+    localize(language, '## 证据索引', '## Evidence Index'),
     '',
-    `关键数据来源：${summary}${omitted > 0 ? `；其余 ${omitted} 份结构化证据见报告数据详情。` : '。'}`,
-  ].filter(Boolean).join('\n');
+    localize(
+      language,
+      `关键数据来源：${summary}${omitted > 0 ? `；其余 ${omitted} 份结构化证据见报告数据详情。` : '。'}`,
+      `Key data sources: ${summary}${omitted > 0 ? `; ${omitted} additional structured evidence items are available in report details.` : '.'}`,
+    ),
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
-function appendEvidenceIndexIfMissing(conclusion: string, envelopes: DataEnvelope[]): string {
+function appendEvidenceIndexIfMissing(
+  conclusion: string,
+  envelopes: DataEnvelope[],
+  language: OutputLanguage = configuredOutputLanguage(),
+): string {
   const normalized = conclusion || '';
   if (conclusionHasEvidenceIndex(normalized)) return normalized;
-  const evidenceIndex = buildConclusionEvidenceIndex(envelopes);
+  const evidenceIndex = buildConclusionEvidenceIndex(envelopes, 3, language);
   if (!evidenceIndex) return normalized;
   return `${normalized.trim()}\n\n${evidenceIndex}`;
 }
 
-function augmentConclusionUpdateWithEvidenceIndex(
-  session: AnalysisSession,
-  update: StreamingUpdate,
-): StreamingUpdate {
+function augmentConclusionUpdateWithEvidenceIndex(session: AnalysisSession, update: StreamingUpdate): StreamingUpdate {
   if (update.type !== 'conclusion') return update;
   const content = update.content;
   if (!content || typeof content !== 'object' || Array.isArray(content)) return update;
   const conclusion = (content as Record<string, any>).conclusion;
   if (typeof conclusion !== 'string') return update;
-  const augmented = appendEvidenceIndexIfMissing(conclusion, session.dataEnvelopes || []);
+  const augmented = appendEvidenceIndexIfMissing(
+    conclusion,
+    session.dataEnvelopes || [],
+    sessionOutputLanguage(session),
+  );
   if (augmented === conclusion) return update;
   return {
     ...update,
@@ -5920,11 +7819,7 @@ function ensureAnalysisQualityArtifacts(
   const result = resultOverride || session.result;
   if (!result) return {};
 
-  if (
-    result.claimSupport &&
-    result.claimVerificationResult &&
-    result.identityResolutions
-  ) {
+  if (result.claimSupport && result.claimVerificationResult && result.identityResolutions) {
     session.claimSupport = result.claimSupport;
     session.claimVerificationResult = result.claimVerificationResult;
     session.identityResolutions = result.identityResolutions;
@@ -5969,6 +7864,182 @@ function ensureAnalysisQualityArtifacts(
   };
 }
 
+function collectEvidenceRefsFromText(text: string | undefined): Set<string> {
+  const refs = new Set<string>();
+  const matches = String(text || '').match(/data:[A-Za-z0-9_.:-]+/g) || [];
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[).,;，。；、]+$/g, '');
+    if (cleaned) refs.add(cleaned);
+  }
+  return refs;
+}
+
+function collectEvidenceRefsFromClaimSupport(claimSupport: ClaimSupportV1[] | undefined): Set<string> {
+  const refs = new Set<string>();
+  for (const claim of claimSupport || []) {
+    for (const anchor of claim.anchors || []) {
+      if (anchor.evidenceRefId) refs.add(anchor.evidenceRefId);
+    }
+  }
+  return refs;
+}
+
+function currentRunEnvelopeCounts(
+  session: AnalysisSession,
+  runId?: string,
+): {
+  currentRunDataEnvelopes: number;
+  frontendPrequeryInjected: number;
+} {
+  const run = resolveSessionRun(session, runId);
+  const turn = run?.sequence || session.runSequence || session.activeRun?.sequence;
+  const envelopes = session.dataEnvelopes || [];
+  const current = turn ? envelopes.filter((env) => (env.meta as any)?.turn === turn) : envelopes;
+  return {
+    currentRunDataEnvelopes: current.length,
+    frontendPrequeryInjected: current.filter((env) => env.meta?.source === 'frontend_trace_context').length,
+  };
+}
+
+function quickRunVerifierStatus(
+  result: AgentRuntimeAnalysisResult,
+  claimVerificationResult: ClaimVerificationResult | undefined,
+): NonNullable<AgentRuntimeAnalysisResult['quickRun']>['verifierStatus'] {
+  if (result.partial === true || result.terminationReason === 'max_turns' || result.terminationReason === 'timeout') {
+    return 'issues';
+  }
+  const status = claimVerificationResult?.status;
+  if (status === 'passed') return 'passed';
+  if (status === 'failed') return 'failed';
+  if (status === 'partial') return 'issues';
+  return 'not_checked';
+}
+
+function finalizeQuickRunReceipt(
+  session: AnalysisSession,
+  input: {
+    result: AgentRuntimeAnalysisResult;
+    qualityArtifacts: CompletedAnalysisResultPayload['qualityArtifacts'];
+    runId?: string;
+  },
+): AgentRuntimeAnalysisResult['quickRun'] {
+  const receipt = input.result.quickRun;
+  if (!receipt) return undefined;
+  const textRefs = collectEvidenceRefsFromText(input.result.conclusion);
+  const supportRefs = collectEvidenceRefsFromClaimSupport(input.qualityArtifacts.claimSupport);
+  const citedRefs = new Set([...textRefs, ...supportRefs]);
+  const frontendPrequeryCited = [...citedRefs].filter((ref) => ref.startsWith('data:frontend_prequery:')).length;
+  const envelopeCounts = currentRunEnvelopeCounts(session, input.runId);
+  const actualTurns = input.result.rounds || receipt.actualTurns;
+  const extended = actualTurns > receipt.targetTurns;
+  return {
+    ...receipt,
+    profile: receipt.profile === 'triage' ? 'triage' : extended ? 'extended' : receipt.profile,
+    actualTurns,
+    elapsedMs: input.result.totalDurationMs || receipt.elapsedMs,
+    stopReason:
+      input.result.partial === true
+        ? receipt.stopReason === 'hard_cap' || receipt.stopReason === 'timeout'
+          ? receipt.stopReason
+          : 'partial'
+        : extended && receipt.stopReason === 'answered'
+          ? 'extended_answered'
+          : receipt.stopReason,
+    evidence: {
+      ...receipt.evidence,
+      frontendPrequeryInjected: Math.max(
+        receipt.evidence.frontendPrequeryInjected,
+        envelopeCounts.frontendPrequeryInjected,
+      ),
+      frontendPrequeryCited,
+      currentRunDataEnvelopes: envelopeCounts.currentRunDataEnvelopes,
+      citedEvidenceRefs: citedRefs.size,
+    },
+    verifierStatus: quickRunVerifierStatus(input.result, input.qualityArtifacts.claimVerificationResult),
+  };
+}
+
+interface RunManifestReceiptReference {
+  runManifestId?: string;
+  existingReceipt?: AnalysisReceipt;
+  legacyRecovery?: true;
+}
+
+function resolveRunManifestReceiptReference(
+  session: AnalysisSession,
+  result: AgentRuntimeAnalysisResult,
+  runId?: string,
+): RunManifestReceiptReference {
+  if (!runId) {
+    const receipt = result.analysisReceipt;
+    if (receipt) return {existingReceipt: receipt};
+    throw new Error('run_manifest_run_id_missing');
+  }
+  const scope = runManifestScopeFromSession(session);
+  const lifecycle = getActiveRunManifestLifecycle(
+    scope,
+    session.sessionId,
+    runId,
+  );
+  if (lifecycle) {
+    sealHttpRunManifest(session, lifecycle);
+    const manifest = lifecycle.sealOnceAndPersist();
+    const invokedSkills = new Set(manifest.skills.map(skill => skill.skillId));
+    const envelopeSkills = new Set(
+      session.dataEnvelopes
+        .map(envelope => envelope.meta?.skillId)
+        .filter((skillId): skillId is string => Boolean(skillId)),
+    );
+    for (const skillId of envelopeSkills) {
+      if (!invokedSkills.has(skillId)) {
+        lifecycle.diagnostics.push({
+          code: 'data_envelope_skill_without_executor_invocation',
+          recordedAt: Date.now(),
+          details: {skillId},
+        });
+      }
+    }
+    return {runManifestId: manifest.runManifestId};
+  }
+
+  const persistedManifest = getRunManifestStore().getByRunId(scope, runId);
+  if (persistedManifest) {
+    return {runManifestId: persistedManifest.runManifestId};
+  }
+
+  const receipt = result.analysisReceipt;
+  if (!receipt) {
+    return {legacyRecovery: true};
+  }
+  if (receipt.schemaVersion === 1) {
+    return {existingReceipt: receipt};
+  }
+  const receiptManifest = getRunManifestStore().get(
+    scope,
+    receipt.runManifestId,
+  );
+  return receiptManifest
+    ? {runManifestId: receipt.runManifestId}
+    : {existingReceipt: receipt};
+}
+
+function buildAnalysisReceiptForReference(
+  reference: RunManifestReceiptReference,
+  input: Omit<BuildAnalysisReceiptInput, 'runManifestId'>,
+): AnalysisReceipt {
+  if (reference.runManifestId) {
+    return buildAnalysisReceipt({
+      ...input,
+      runManifestId: reference.runManifestId,
+    });
+  }
+  if (reference.existingReceipt) return reference.existingReceipt;
+  if (reference.legacyRecovery) {
+    return buildLegacyAnalysisReceipt(input);
+  }
+  throw new Error('run_manifest_receipt_reference_missing');
+}
+
 interface CompletedAnalysisFinalArtifacts {
   reportId?: string;
   reportUrl?: string;
@@ -5976,6 +8047,7 @@ interface CompletedAnalysisFinalArtifacts {
   resultSnapshotId?: string;
   resultSnapshotEventData?: Record<string, unknown>;
   generatedAt: number;
+  receiptReference: RunManifestReceiptReference;
 }
 
 interface CompletedAnalysisResultPayload {
@@ -5988,6 +8060,9 @@ interface CompletedAnalysisResultPayload {
     claimVerificationResult?: ClaimVerificationResult;
     identityResolutions?: IdentityResolutionV1[];
   };
+  quickRun?: AgentRuntimeAnalysisResult['quickRun'];
+  analysisReceipt?: AgentRuntimeAnalysisResult['analysisReceipt'];
+  uiActionProposals?: AgentRuntimeAnalysisResult['uiActionProposals'];
   clientFindings: ReturnType<typeof buildClientFindings>;
   resultContract: ReturnType<typeof buildSessionResultContract>;
   finalArtifacts: CompletedAnalysisFinalArtifacts;
@@ -6006,14 +8081,30 @@ function ensureCompletedAnalysisFinalArtifacts(
   },
 ): CompletedAnalysisFinalArtifacts {
   const runId = input.runId;
-  const artifactCache = ((session as any).completedAnalysisFinalArtifactsByRunId ||= {}) as Record<string, CompletedAnalysisFinalArtifacts>;
+  const artifactCache = ((session as any).completedAnalysisFinalArtifactsByRunId ||= {}) as Record<
+    string,
+    CompletedAnalysisFinalArtifacts
+  >;
   const cached = runId
     ? artifactCache[runId]
-    : (session as any).completedAnalysisFinalArtifacts as CompletedAnalysisFinalArtifacts | undefined;
+    : ((session as any).completedAnalysisFinalArtifacts as CompletedAnalysisFinalArtifacts | undefined);
   if (cached) return cached;
 
   const result = input.result;
-  const finalArtifacts: CompletedAnalysisFinalArtifacts = { generatedAt: Date.now() };
+  const receiptReference = resolveRunManifestReceiptReference(
+    session,
+    result,
+    runId,
+  );
+  const privateKnowledge = sessionUsesPrivateKnowledge(session);
+  const outputLanguage = sessionOutputLanguage(session);
+  const durableResultForClient = privateKnowledge
+    ? projectPrivateAnalysisResult(session.sessionId, input.resultForClient, outputLanguage)
+    : input.resultForClient;
+  const finalArtifacts: CompletedAnalysisFinalArtifacts = {
+    generatedAt: Date.now(),
+    receiptReference,
+  };
   let reportId: string | undefined;
 
   if (!input.hasEvidenceBackedConclusion) {
@@ -6026,14 +8117,9 @@ function ensureCompletedAnalysisFinalArtifacts(
         const scope = leaseScopeFromSession(session);
         if (scope) {
           const traceInfo = getTraceProcessorService().getTrace(session.traceId);
-          const reportLeaseDecision = buildLeaseModeDecisionForTrace(
-            scope,
-            session.traceId,
-            'report_generation',
-            {
-              traceSizeBytes: traceInfo?.size,
-            },
-          );
+          const reportLeaseDecision = buildLeaseModeDecisionForTrace(scope, session.traceId, 'report_generation', {
+            traceSizeBytes: traceInfo?.size,
+          });
           reportLease = getTraceProcessorLeaseStore().acquireHolder(
             scope,
             session.traceId,
@@ -6055,14 +8141,38 @@ function ensureCompletedAnalysisFinalArtifacts(
       }
 
       const generator = getHTMLReportGenerator();
+      const reportUrl = `/api/reports/${reportId}`;
+      // Report generation needs a receipt before the final snapshot ID exists,
+      // so this projection is intentionally report-scoped.
+      const reportReceipt = buildAnalysisReceiptForReference(receiptReference, {
+        session,
+        result: durableResultForClient,
+        runId,
+        qualityArtifacts: input.qualityArtifacts,
+        quickRun: durableResultForClient.quickRun,
+        finalArtifacts: {
+          reportId,
+          reportUrl,
+          generatedAt: finalArtifacts.generatedAt,
+        },
+        providerId: session.providerId ?? null,
+      });
+      const resultForReport = {
+        ...durableResultForClient,
+        analysisReceipt: privateKnowledge
+          ? projectPrivateAnalysisReceipt(reportReceipt)
+          : reportReceipt,
+      };
       const reportData = buildAgentDrivenReportData({
         session,
-        result: input.resultForClient as any,
+        result: resultForReport,
       });
       console.log(`[AgentRoutes] Generating HTML report, data keys:`, {
         hasResult: !!result,
-        conclusionLength: input.normalizedConclusion?.length || 0,
-        conclusionPreview: (input.normalizedConclusion || '').substring(0, 100),
+        conclusionLength: durableResultForClient.conclusion?.length || 0,
+        ...(!privateKnowledge
+          ? {conclusionPreview: (input.normalizedConclusion || '').substring(0, 100)}
+          : {}),
         hasConclusionContract: !!input.normalizedConclusionContract,
         findingsCount: result.findings?.length || 0,
         hypothesesCount: session.hypotheses?.length || 0,
@@ -6093,7 +8203,7 @@ function ensureCompletedAnalysisFinalArtifacts(
       });
 
       finalArtifacts.reportId = reportId;
-      finalArtifacts.reportUrl = `/api/reports/${reportId}`;
+      finalArtifacts.reportUrl = reportUrl;
       console.log(`[AgentRoutes] Generated agent-driven HTML report: ${reportId} (${html.length} bytes)`);
     } catch (error: any) {
       reportId = undefined;
@@ -6117,7 +8227,9 @@ function ensureCompletedAnalysisFinalArtifacts(
               finalArtifacts.reportId || reportId || 'report_generation',
             );
           } catch (releaseError: any) {
-            console.warn(`[AgentRoutes] Failed to release report_generation lease ${reportLease.id}: ${releaseError.message}`);
+            console.warn(
+              `[AgentRoutes] Failed to release report_generation lease ${reportLease.id}: ${releaseError.message}`,
+            );
           }
         }
       }
@@ -6126,6 +8238,17 @@ function ensureCompletedAnalysisFinalArtifacts(
 
   if (input.hasEvidenceBackedConclusion) {
     try {
+      // Snapshot persistence needs the latest report artifacts, but the
+      // snapshot ID is only known after persistCompletedAnalysisResultSnapshot.
+      const snapshotReceipt = buildAnalysisReceiptForReference(receiptReference, {
+        session,
+        result: durableResultForClient,
+        runId,
+        qualityArtifacts: input.qualityArtifacts,
+        quickRun: durableResultForClient.quickRun,
+        finalArtifacts,
+        providerId: session.providerId ?? null,
+      });
       const resultSnapshot = persistCompletedAnalysisResultSnapshot({
         tenantId: session.tenantId,
         workspaceId: session.workspaceId,
@@ -6134,18 +8257,33 @@ function ensureCompletedAnalysisFinalArtifacts(
         sessionId: session.sessionId,
         runId,
         reportId: finalArtifacts.reportId,
-        query: session.query,
+        sceneType: resolveAnalysisResultSceneType(session.query, session.dataEnvelopes),
+        query: privateKnowledge
+          ? privateAnalysisQueryMessage(outputLanguage)
+          : session.query,
         traceLabel: session.traceId,
-        conclusion: input.normalizedConclusion,
-        conclusionContract: input.normalizedConclusionContract,
-        claimSupport: input.qualityArtifacts.claimSupport,
-        claimVerificationResult: input.qualityArtifacts.claimVerificationResult,
-        identityResolutions: input.qualityArtifacts.identityResolutions,
+        conclusion: privateKnowledge
+          ? durableResultForClient.conclusion
+          : input.normalizedConclusion,
+        conclusionContract: durableResultForClient.conclusionContract,
+        claimSupport: durableResultForClient.claimSupport,
+        claimVerificationResult: durableResultForClient.claimVerificationResult,
+        identityResolutions: durableResultForClient.identityResolutions,
         confidence: result.confidence,
         partial: result.partial,
-        terminationReason: result.terminationReason,
-        terminationMessage: result.terminationMessage,
+        terminationReason: privateKnowledge
+          ? projectPrivateTerminationReason(result.terminationReason)
+          : result.terminationReason,
+        terminationMessage: privateKnowledge
+          ? projectPrivateTerminationMessage(result.terminationMessage, outputLanguage)
+          : result.terminationMessage,
         dataEnvelopes: session.dataEnvelopes,
+        analysisReceipt: privateKnowledge
+          ? projectPrivateAnalysisReceipt(snapshotReceipt)
+          : snapshotReceipt,
+        uiActionProposals: durableResultForClient.uiActionProposals,
+        privateKnowledge,
+        outputLanguage,
       });
       finalArtifacts.resultSnapshotId = resultSnapshot?.id;
       if (resultSnapshot) {
@@ -6184,6 +8322,7 @@ function ensureCompletedAnalysisResultPayload(
   session: AnalysisSession,
   runId?: string,
 ): CompletedAnalysisResultPayload | undefined {
+  const completedRunId = getCompletedResultRunId(session, runId);
   const result = session.result;
   if (!result) return undefined;
   const replayOnlyScene = isSceneReplayOnlyQuery(session.query);
@@ -6191,37 +8330,51 @@ function ensureCompletedAnalysisResultPayload(
   const isSmartResult = result.conclusionContract?.metadata?.sceneId === 'smart';
   const normalizedConclusion = replayOnlyScene
     ? buildSceneReplayNarrative(session.scenes || [])
-    : hasEvidenceBackedConclusion ? appendEvidenceIndexIfMissing(
-      normalizeNarrativeForClient(result.conclusion),
-      session.dataEnvelopes || [],
-    ) : normalizeNarrativeForClient(result.conclusion);
+    : hasEvidenceBackedConclusion
+      ? appendEvidenceIndexIfMissing(
+          normalizeNarrativeForClient(result.conclusion),
+          session.dataEnvelopes || [],
+          sessionOutputLanguage(session),
+        )
+      : normalizeNarrativeForClient(result.conclusion);
   const sceneIdHint = replayOnlyScene
     ? undefined
     : resolveConclusionSceneIdHint({
-      sessionId: session.sessionId,
-      query: session.query,
-      findings: result.findings,
-    });
+        sessionId: session.sessionId,
+        query: session.query,
+        findings: result.findings,
+      });
   const normalizedConclusionContract = replayOnlyScene
     ? undefined
     : isSmartResult
-      ? result.conclusionContract as ConclusionContract
-    : hasEvidenceBackedConclusion ? (
-      deriveEvidenceBackedConclusionContractForNarrative(result.conclusion, session.dataEnvelopes || [], {
-        existingContract: result.conclusionContract as ConclusionContract | undefined,
-        mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
-        sceneId: sceneIdHint,
-      }) ||
-      undefined
-    ) : undefined;
-  const qualityArtifacts = hasEvidenceBackedConclusion && !replayOnlyScene
-    ? ensureAnalysisQualityArtifacts(session, normalizedConclusionContract)
-    : {};
+      ? (result.conclusionContract as ConclusionContract)
+      : hasEvidenceBackedConclusion
+        ? deriveEvidenceBackedConclusionContractForNarrative(result.conclusion, session.dataEnvelopes || [], {
+            existingContract: result.conclusionContract as ConclusionContract | undefined,
+            mode: result.rounds > 1 ? 'focused_answer' : 'initial_report',
+            sceneId: sceneIdHint,
+          }) || undefined
+        : undefined;
+  const qualityArtifacts =
+    hasEvidenceBackedConclusion && !replayOnlyScene
+      ? ensureAnalysisQualityArtifacts(session, normalizedConclusionContract)
+      : {};
+  let quickRun = finalizeQuickRunReceipt(session, {
+    result,
+    qualityArtifacts,
+    runId: completedRunId,
+  });
+  if (quickRun) {
+    result.quickRun = quickRun;
+  }
   if (normalizedConclusionContract) {
     result.conclusionContract = normalizedConclusionContract;
   }
   if (!replayOnlyScene) {
-    const readPathQualityIssue = applyFinalResultQualityGate({ result, query: session.query });
+    const readPathQualityIssue = applyFinalResultQualityGate({
+      result,
+      query: session.query,
+    });
     if (readPathQualityIssue) {
       sessionContextManager.get(session.sessionId, session.traceId)?.annotateLatestCompletedTurn({
         success: result.success,
@@ -6236,21 +8389,43 @@ function ensureCompletedAnalysisResultPayload(
         claimVerificationResult: result.claimVerificationResult,
         identityResolutions: result.identityResolutions,
       });
+      quickRun = finalizeQuickRunReceipt(session, {
+        result,
+        qualityArtifacts,
+        runId: completedRunId,
+      });
+      if (quickRun) {
+        result.quickRun = quickRun;
+      }
     }
   }
-  const resultForClient =
+  let resultForClient: AgentRuntimeAnalysisResult =
     normalizedConclusion === result.conclusion &&
-      normalizedConclusionContract === result.conclusionContract &&
-      qualityArtifacts.claimSupport === result.claimSupport &&
-      qualityArtifacts.claimVerificationResult === result.claimVerificationResult &&
-      qualityArtifacts.identityResolutions === result.identityResolutions
+    normalizedConclusionContract === result.conclusionContract &&
+    qualityArtifacts.claimSupport === result.claimSupport &&
+    qualityArtifacts.claimVerificationResult === result.claimVerificationResult &&
+    qualityArtifacts.identityResolutions === result.identityResolutions &&
+    quickRun === result.quickRun
       ? result
       : {
-        ...result,
-        conclusion: normalizedConclusion,
-        conclusionContract: normalizedConclusionContract,
-        ...qualityArtifacts,
-      };
+          ...result,
+          conclusion: normalizedConclusion,
+          conclusionContract: normalizedConclusionContract,
+          ...qualityArtifacts,
+          quickRun,
+        };
+  const uiActionProposals = replayOnlyScene
+    ? []
+    : deriveUiActionProposals({
+        dataEnvelopes: session.dataEnvelopes || [],
+        currentTraceId: session.traceId,
+        existingProposals: result.uiActionProposals,
+      });
+  result.uiActionProposals = uiActionProposals;
+  resultForClient = {
+    ...resultForClient,
+    uiActionProposals,
+  };
   const clientFindings = replayOnlyScene ? [] : buildClientFindings(result.findings, session.scenes || []);
   const resultContract = buildSessionResultContract(session, clientFindings);
   const finalArtifacts = ensureCompletedAnalysisFinalArtifacts(session, {
@@ -6260,14 +8435,41 @@ function ensureCompletedAnalysisResultPayload(
     normalizedConclusionContract,
     qualityArtifacts,
     resultForClient: resultForClient as AgentRuntimeAnalysisResult,
-    runId,
+    runId: completedRunId,
   });
+  const analysisReceipt = buildAnalysisReceiptForReference(
+    finalArtifacts.receiptReference,
+    {
+      session,
+      result: resultForClient,
+      runId: completedRunId,
+      qualityArtifacts,
+      quickRun,
+      finalArtifacts,
+      providerId: session.providerId ?? null,
+    },
+  );
+  result.analysisReceipt = analysisReceipt;
+  resultForClient = {
+    ...resultForClient,
+    analysisReceipt,
+  };
+  if (completedRunId) {
+    getActiveRunManifestLifecycle(
+      runManifestScopeFromSession(session),
+      session.sessionId,
+      completedRunId,
+    )?.dispose();
+  }
   return {
     result,
     replayOnlyScene,
     normalizedConclusion,
     normalizedConclusionContract,
     qualityArtifacts,
+    quickRun,
+    analysisReceipt,
+    uiActionProposals,
     clientFindings,
     resultContract,
     finalArtifacts,
@@ -6277,32 +8479,38 @@ function ensureCompletedAnalysisResultPayload(
 /**
  * Send agent-driven analysis result to SSE client
  */
+function analysisCompletedData(
+  data: AnalysisCompletedEvent['data'],
+): AnalysisCompletedEvent['data'] {
+  return data;
+}
+
 function ensureCompletedAnalysisSseEvents(session: AnalysisSession, runId?: string): BufferedSseEvent[] {
-  const sseCache = ((session as any).completedAnalysisSseEventsByRunId ||= {}) as Record<string, {
-    qualityGateVersion?: number;
-    events: BufferedSseEvent[];
-  }>;
-  const runCache = runId ? sseCache[runId] : undefined;
-  const cached = runId
+  const completedRunId = getCompletedResultRunId(session, runId);
+  const sseCache = ((session as any).completedAnalysisSseEventsByRunId ||= {}) as Record<
+    string,
+    {
+      qualityGateVersion?: number;
+      events: BufferedSseEvent[];
+    }
+  >;
+  const runCache = completedRunId ? sseCache[completedRunId] : undefined;
+  const cached = completedRunId
     ? runCache?.events
-    : (session as any).completedAnalysisSseEvents as BufferedSseEvent[] | undefined;
-  const cachedVersion = runId
+    : ((session as any).completedAnalysisSseEvents as BufferedSseEvent[] | undefined);
+  const cachedVersion = completedRunId
     ? runCache?.qualityGateVersion
     : (session as any).completedAnalysisSseEventsQualityGateVersion;
-  if (
-    cached?.length &&
-    cachedVersion ===
-      COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION
-  ) {
+  if (cached?.length && cachedVersion === COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION) {
     return cached;
   }
 
-  const completedPayload = ensureCompletedAnalysisResultPayload(session, runId);
+  const completedPayload = ensureCompletedAnalysisResultPayload(session, completedRunId);
   if (!completedPayload) {
-    const persisted = loadPersistedCompletedAnalysisSseEvents(session, runId);
+    const persisted = loadPersistedCompletedAnalysisSseEvents(session, completedRunId);
     if (persisted.length > 0) {
-      if (runId) {
-        sseCache[runId] = { events: persisted };
+      if (completedRunId) {
+        sseCache[completedRunId] = { events: persisted };
       } else {
         (session as any).completedAnalysisSseEvents = persisted;
         delete (session as any).completedAnalysisSseEventsQualityGateVersion;
@@ -6316,118 +8524,231 @@ function ensureCompletedAnalysisSseEvents(session: AnalysisSession, runId?: stri
     normalizedConclusion,
     normalizedConclusionContract,
     qualityArtifacts,
+    quickRun,
+    analysisReceipt,
+    uiActionProposals,
     clientFindings,
     resultContract,
     finalArtifacts,
   } = completedPayload;
-  const observability = buildStreamObservability(session, runId);
+  const observability = buildStreamObservability(session, completedRunId);
+  const privateKnowledge = sessionUsesPrivateKnowledge(session);
+  const outputLanguage = sessionOutputLanguage(session);
+  const projectedConclusion = privateKnowledge
+    ? projectPrivateConclusion({
+        sessionId: session.sessionId,
+        conclusion: normalizedConclusion,
+        success: result.success,
+        language: outputLanguage,
+      })
+    : normalizedConclusion;
+  const projectedConclusionContract = privateKnowledge
+    ? projectPrivateStructuredValue(session.sessionId, normalizedConclusionContract)
+    : normalizedConclusionContract;
+  const projectedQualityArtifacts = privateKnowledge
+    ? projectPrivateStructuredValue(session.sessionId, qualityArtifacts)
+    : qualityArtifacts;
+  const projectedUiActionProposals = privateKnowledge
+    ? projectPrivateStructuredValue(session.sessionId, uiActionProposals)
+    : uiActionProposals;
+  const projectedClientFindings = privateKnowledge
+    ? projectPrivateStructuredValue(session.sessionId, clientFindings)
+    : clientFindings;
+  const projectedResultContract = privateKnowledge
+    ? projectPrivateStructuredValue(session.sessionId, resultContract)
+    : resultContract;
+  const projectedHypotheses = projectPrivateStructuredValue(
+    session.sessionId,
+    result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
+      id: h.id,
+      description: h.description,
+      status: h.status,
+      confidence: h.confidence,
+      supportingEvidence: h.supportingEvidence,
+      contradictingEvidence: h.contradictingEvidence,
+    })),
+  );
   const events: BufferedSseEvent[] = [];
+  const progressEvent =
+    latestBufferedProgressEvent(session, completedRunId) ??
+    appendAndPersistReplayableSessionEvent(
+      session,
+      'progress',
+      {
+        type: 'progress',
+        architecture: 'agent-driven',
+        ...observability,
+        data: {
+          phase: 'completed',
+          message: localize(
+            outputLanguage,
+            '分析已完成。',
+            'Analysis completed.',
+          ),
+        },
+        timestamp: Date.now(),
+      },
+      completedRunId,
+    );
+  events.push(progressEvent);
+
   if (finalArtifacts.resultSnapshotEventData) {
-    events.push(appendAndPersistReplayableSessionEvent(session, 'snapshot_created', {
-      type: 'snapshot_created',
-      architecture: 'agent-driven',
-      ...observability,
-      data: finalArtifacts.resultSnapshotEventData,
-      timestamp: Date.now(),
-    }, runId));
+    events.push(
+      appendAndPersistReplayableSessionEvent(
+        session,
+        'snapshot_created',
+        {
+          type: 'snapshot_created',
+          architecture: 'agent-driven',
+          ...observability,
+          data: finalArtifacts.resultSnapshotEventData,
+          timestamp: Date.now(),
+        },
+        completedRunId,
+      ),
+    );
   }
 
   // Send analysis_completed event with full result. Keep it replayable so a
   // reconnect between conclusion and report generation can recover reportUrl.
-  events.push(appendAndPersistReplayableSessionEvent(session, 'analysis_completed', {
-    type: 'analysis_completed',
-    architecture: 'agent-driven',
-    ...observability,
-    data: {
-      conclusion: normalizedConclusion,
-      conclusionContract: normalizedConclusionContract,
-      claimSupport: qualityArtifacts.claimSupport,
-      claimVerificationResult: qualityArtifacts.claimVerificationResult,
-      identityResolutions: qualityArtifacts.identityResolutions,
-      confidence: result.confidence,
-      rounds: result.rounds,
-      totalDurationMs: result.totalDurationMs,
-      partial: result.partial,
-      terminationReason: result.terminationReason,
-      terminationMessage: result.terminationMessage,
-      smartScenePreview: result.smartScenePreview,
-      findings: clientFindings,
-      resultContract,
-      hypotheses: result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
-        id: h.id,
-        description: h.description,
-        status: h.status,
-        confidence: h.confidence,
-        supportingEvidence: h.supportingEvidence,
-        contradictingEvidence: h.contradictingEvidence,
-      })),
-      agentDialogueCount: session.agentDialogue.length,
-      conversationTimelineCount: session.conversationSteps.length,
-      conversationTimeline: session.conversationSteps,
-      reportUrl: finalArtifacts.reportUrl,
-      reportError: finalArtifacts.reportError,
-      comparisonReportSection: session.comparisonReportSection
-        ? {
-          source: session.comparisonReportSection.source,
-          title: session.comparisonReportSection.title,
-          markdown: session.comparisonReportSection.markdown,
-          limitations: session.comparisonReportSection.limitations,
-          evidencePack: session.comparisonReportSection.evidencePack,
-        }
-        : undefined,
-      resultSnapshotId: finalArtifacts.resultSnapshotId,
-      observability,
-      terminalRunStatus: session.status === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
-    },
-    timestamp: Date.now(),
-  }, runId));
+  events.push(
+    appendAndPersistReplayableSessionEvent(
+      session,
+      'analysis_completed',
+      {
+        type: 'analysis_completed',
+        architecture: 'agent-driven',
+        ...observability,
+        data: analysisCompletedData({
+          ...(privateKnowledge
+            ? {privateProjectionVersion: PRIVATE_ANALYSIS_EVENT_PROJECTION_VERSION}
+            : {}),
+          conclusion: projectedConclusion,
+          conclusionContract: projectedConclusionContract,
+          claimSupport: projectedQualityArtifacts.claimSupport,
+          claimVerificationResult: projectedQualityArtifacts.claimVerificationResult,
+          identityResolutions: projectedQualityArtifacts.identityResolutions,
+          confidence: result.confidence,
+          rounds: result.rounds,
+          totalDurationMs: result.totalDurationMs,
+          partial: result.partial,
+          terminationReason: privateKnowledge
+            ? projectPrivateTerminationReason(result.terminationReason)
+            : result.terminationReason,
+          terminationMessage: privateKnowledge
+            ? projectPrivateTerminationMessage(result.terminationMessage, outputLanguage)
+            : result.terminationMessage,
+          quickRun,
+          analysisReceipt: privateKnowledge
+            ? projectPrivateAnalysisReceipt(analysisReceipt)
+            : analysisReceipt,
+          uiActionProposals: projectedUiActionProposals,
+          smartScenePreview: privateKnowledge && result.smartScenePreview
+            ? projectPrivateStructuredValue(session.sessionId, result.smartScenePreview)
+            : result.smartScenePreview,
+          findings: projectedClientFindings,
+          resultContract: projectedResultContract,
+          hypotheses: privateKnowledge
+            ? projectedHypotheses
+            : result.hypotheses.map((h: AgentRuntimeAnalysisResult['hypotheses'][number]) => ({
+                id: h.id,
+                description: h.description,
+                status: h.status,
+                confidence: h.confidence,
+                supportingEvidence: h.supportingEvidence,
+                contradictingEvidence: h.contradictingEvidence,
+              })),
+          agentDialogueCount: privateKnowledge ? 0 : session.agentDialogue.length,
+          conversationTimelineCount: privateKnowledge ? 0 : session.conversationSteps.length,
+          conversationTimeline: privateKnowledge ? [] : session.conversationSteps,
+          reportUrl: finalArtifacts.reportUrl,
+          reportError: privateKnowledge ? undefined : finalArtifacts.reportError,
+          comparisonReportSection: session.comparisonReportSection
+            ? (privateKnowledge
+                ? projectPrivateStructuredValue(session.sessionId, {
+                    source: session.comparisonReportSection.source,
+                    title: session.comparisonReportSection.title,
+                    markdown: session.comparisonReportSection.markdown,
+                    limitations: session.comparisonReportSection.limitations,
+                    evidencePack: session.comparisonReportSection.evidencePack,
+                  })
+                : {
+                    source: session.comparisonReportSection.source,
+                    title: session.comparisonReportSection.title,
+                    markdown: session.comparisonReportSection.markdown,
+                    limitations: session.comparisonReportSection.limitations,
+                    evidencePack: session.comparisonReportSection.evidencePack,
+                  })
+            : undefined,
+          resultSnapshotId: finalArtifacts.resultSnapshotId,
+          observability,
+          terminalRunStatus: session.status === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
+        }),
+        timestamp: Date.now(),
+      },
+      completedRunId,
+    ),
+  );
 
   // Backward-compatible scene reconstruction payload (used by the legacy /scene-reconstruct clients).
   if ((session.scenes?.length || 0) > 0 || (session.trackEvents?.length || 0) > 0) {
-    events.push(appendAndPersistReplayableSessionEvent(session, 'scene_reconstruction_completed', {
-      type: 'scene_reconstruction_completed',
-      ...observability,
-      data: {
-        narrative: normalizedConclusion,
-        confidence: result.confidence,
-        executionTimeMs: result.totalDurationMs,
-        scenes: (session.scenes || []).map((s) => ({
-          type: s.type,
-          startTs: s.startTs,
-          endTs: s.endTs,
-          durationMs: s.durationMs,
-          confidence: s.confidence,
-          appPackage: s.appPackage,
-        })),
-        trackEvents: session.trackEvents || [],
-        findings: clientFindings.map((f) => ({
-          id: f.id,
-          category: f.category,
-          severity: f.severity,
-          title: f.title,
-          description: f.description,
-          timestampsNs: f.timestampsNs,
-        })),
-        suggestions: [],
-        observability,
-      },
-      timestamp: Date.now(),
-    }, runId));
+    events.push(
+      appendAndPersistReplayableSessionEvent(
+        session,
+        'scene_reconstruction_completed',
+        {
+          type: 'scene_reconstruction_completed',
+          ...observability,
+          data: {
+            narrative: projectedConclusion,
+            confidence: result.confidence,
+            executionTimeMs: result.totalDurationMs,
+            scenes: (session.scenes || []).map((s) => ({
+              type: s.type,
+              startTs: s.startTs,
+              endTs: s.endTs,
+              durationMs: s.durationMs,
+              confidence: s.confidence,
+              appPackage: s.appPackage,
+            })),
+            trackEvents: session.trackEvents || [],
+            findings: projectedClientFindings.map((f) => ({
+              id: f.id,
+              category: f.category,
+              severity: f.severity,
+              title: f.title,
+              description: f.description,
+              timestampsNs: f.timestampsNs,
+            })),
+            suggestions: [],
+            observability,
+          },
+          timestamp: Date.now(),
+        },
+        completedRunId,
+      ),
+    );
   }
 
-  events.push(appendAndPersistReplayableSessionEvent(session, 'end', {
-    timestamp: Date.now(),
-    ...observability,
-  }, runId));
-  if (runId) {
-    sseCache[runId] = {
+  events.push(
+    appendAndPersistReplayableSessionEvent(
+      session,
+      'end',
+      {
+        timestamp: Date.now(),
+        ...observability,
+      },
+      completedRunId,
+    ),
+  );
+  if (completedRunId) {
+    sseCache[completedRunId] = {
       events,
       qualityGateVersion: COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION,
     };
   } else {
     (session as any).completedAnalysisSseEvents = events;
-    (session as any).completedAnalysisSseEventsQualityGateVersion =
-      COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION;
+    (session as any).completedAnalysisSseEventsQualityGateVersion = COMPLETED_ANALYSIS_SSE_EVENTS_QUALITY_GATE_VERSION;
   }
   return events;
 }
@@ -6492,5 +8813,26 @@ const sessionCleanupInterval = setInterval(() => {
     });
 }, SESSION_CLEANUP_INTERVAL_MS);
 sessionCleanupInterval.unref?.();
+
+export const agentRoutesPrivacyProjectionTestSeam = {
+  buildTurnSummary,
+  buildTurnDetail,
+  sanitizePersistedAnalysisCompletedEvent,
+  agentEventScopeFromSession,
+  persistSessionRunState,
+  persistBufferedAgentEvent,
+  scrubAuthorizationChangedSession,
+  retireAuthorizationChangedSession,
+  connectedStreamQuery,
+  conclusionHasEvidenceIndex,
+  buildConclusionEvidenceIndex,
+  appendEvidenceIndexIfMissing,
+  privateFeedbackResponse,
+};
+
+export const agentRoutesSmartPreviewSelectionTestSeam = {
+  hasSession: (sessionId: string) => Boolean(assistantAppService.getSession(sessionId)),
+  deleteSession: (sessionId: string) => assistantAppService.deleteSession(sessionId),
+};
 
 export default router;

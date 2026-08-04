@@ -96,7 +96,6 @@ dialogue:
 prerequisites:
   modules:
     - android.frames.timeline
-    - android.frames.jank
     - android.frames.jank_type
 
 inputs:

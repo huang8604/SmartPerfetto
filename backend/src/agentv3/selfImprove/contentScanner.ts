@@ -16,7 +16,7 @@
  * note is recoverable (review agent retries or human triages); a smuggled
  * jailbreak is not.
  *
- * See docs/architecture/self-improving-design.md §9 (Trust Boundary).
+ * See docs/architecture/self-improving-design.md "存储与安全".
  */
 
 export const THREAT_KINDS = [

@@ -9,7 +9,7 @@
 #   {oem} ∈ {pixel, qualcomm, mtk, samsung, honor, oppo, vivo, xiaomi}
 #   {scene} 与某个已注册 base skill 的 id 对应（通常是 composite/<scene>_analysis）
 #
-# 运行时合同（详见 docs/skills-audit-2026-05.md §5）:
+# 运行时合同（详见 docs/reference/skill-system.md 的 Skill tier 与校验规则）:
 # - SkillRegistry.loadVendorOverrides() 加载文件 → 按 extends 索引
 # - claudeRuntime.detectVendor() 探测 trace 的 vendor → 缓存到 vendorCache
 # - claudeMcpServer.ts:702-717 在 invoke_skill 响应里挂 vendorOverrideHint

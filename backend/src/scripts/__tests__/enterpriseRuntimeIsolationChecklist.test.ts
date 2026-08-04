@@ -8,8 +8,6 @@ import { execFileSync } from 'child_process';
 import { RUNTIME_ISOLATION_CHECKLIST } from '../enterpriseRuntimeIsolationChecklist';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
-const README_PATH = 'docs/features/enterprise-multi-tenant/README.md';
-const CHECKLIST_DOC_PATH = 'docs/features/enterprise-multi-tenant/runtime-isolation-checklist.md';
 
 const EXPECTED_IDS = [
   'proxy-status-websocket-query',
@@ -45,21 +43,10 @@ function isPerfettoSubmoduleEvidence(relativePath: string): boolean {
 }
 
 describe('enterprise runtime isolation checklist', () => {
-  it('keeps the §11.11 checklist as an explicit 15-item contract', () => {
+  it('keeps the runtime-isolation checklist as an explicit 15-item contract', () => {
     expect(RUNTIME_ISOLATION_CHECKLIST.map(item => item.id)).toEqual(EXPECTED_IDS);
     expect(new Set(RUNTIME_ISOLATION_CHECKLIST.map(item => item.vulnerability)).size).toBe(EXPECTED_IDS.length);
     expect(new Set(RUNTIME_ISOLATION_CHECKLIST.map(item => item.acceptance)).size).toBe(EXPECTED_IDS.length);
-  });
-
-  it('maps every README §11.11 vulnerability and acceptance row to the checklist', () => {
-    const readme = readRepoFile(README_PATH);
-
-    for (const item of RUNTIME_ISOLATION_CHECKLIST) {
-      expect(readme).toContain(item.vulnerability);
-      expect(readme).toContain(item.acceptance);
-    }
-    expect(readme).toContain('- [x] 4.12 §11.11 漏洞清单：每行设计验收都打勾验证');
-    expect(readme).toContain(`- [x] \`${CHECKLIST_DOC_PATH}\``);
   });
 
   it('verifies the evidence file and pattern for every checklist item', () => {
@@ -91,16 +78,5 @@ describe('enterprise runtime isolation checklist', () => {
 
     expect(missingRootEvidence).toEqual([]);
     expect(checkedEvidence.size).toBeGreaterThanOrEqual(EXPECTED_IDS.length * 2);
-  });
-
-  it('keeps the runtime isolation checklist document synchronized with the contract', () => {
-    const doc = readRepoFile(CHECKLIST_DOC_PATH);
-
-    for (const item of RUNTIME_ISOLATION_CHECKLIST) {
-      expect(doc).toContain(item.id);
-      expect(doc).toContain(item.vulnerability);
-      expect(doc).toContain(item.acceptance);
-    }
-    expect(doc).toContain('cd backend && npx jest --runInBand src/scripts/__tests__/enterpriseRuntimeIsolationChecklist.test.ts');
   });
 });

@@ -26,6 +26,7 @@ import { REPORT_CAUSAL_MAP_CSS, REPORT_CAUSAL_MAP_SCRIPT } from '../services/rep
 import { REPORT_LAYOUT_FIX_CSS, REPORT_LAYOUT_FIX_MARKER } from '../services/reportLayoutAssets';
 import { localize, parseOutputLanguage } from '../agentv3/outputLanguage';
 import { backendLogPath } from '../runtimePaths';
+import {WeightedLruMap} from '../services/weightedLruMap';
 import { resolveEnterpriseDataRoot } from '../services/traceMetadataStore';
 import { resolveEnterpriseRetentionExpiresAt } from '../services/enterpriseQuotaPolicyService';
 import {
@@ -42,6 +43,24 @@ import {
 const router = express.Router();
 
 const REPORTS_DIR = backendLogPath('reports');
+const REPORT_DOCUMENT_CSP = [
+  "sandbox allow-scripts",
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data:',
+  'font-src data:',
+  "connect-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
+
+function setReportDocumentSecurityHeaders(res: express.Response): void {
+  res.setHeader('Content-Security-Policy', REPORT_DOCUMENT_CSP);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+}
 
 // Ensure reports directory exists
 if (!fs.existsSync(REPORTS_DIR)) {
@@ -61,7 +80,14 @@ type PersistedReport = ResourceOwnerFields & {
   expiresAt?: number | null;
 };
 
-export const reportStore = new Map<string, PersistedReport>();
+const REPORT_CACHE_MAX_ENTRIES = 64;
+const REPORT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+export const reportStore = new WeightedLruMap<string, PersistedReport>(
+  REPORT_CACHE_MAX_ENTRIES,
+  REPORT_CACHE_MAX_BYTES,
+  report => Buffer.byteLength(report.html, 'utf8'),
+);
 
 interface ReportArtifactRow {
   id: string;
@@ -98,6 +124,10 @@ function recordReportAudit(
 
 const SAFE_REPORT_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 
+function isSafeReportSegment(value: string): boolean {
+  return SAFE_REPORT_ID_RE.test(value) && value !== '.' && value !== '..';
+}
+
 function enterpriseReportStoreEnabled(): boolean {
   return enterpriseDbReadAuthorityEnabled();
 }
@@ -111,7 +141,7 @@ function legacyReportWritesEnabled(): boolean {
 }
 
 function assertSafeReportSegment(value: string, label: string): string {
-  if (!SAFE_REPORT_ID_RE.test(value) || value === '.' || value === '..') {
+  if (!isSafeReportSegment(value)) {
     throw new Error(`Unsafe ${label}: ${value}`);
   }
   return value;
@@ -329,7 +359,7 @@ function persistLegacyReport(reportId: string, entry: PersistedReport): void {
 }
 
 function loadEnterpriseReport(reportId: string): PersistedReport | null {
-  if (!SAFE_REPORT_ID_RE.test(reportId)) return null;
+  if (!isSafeReportSegment(reportId)) return null;
   try {
     return withEnterpriseReportDb((db) => {
       const row = db.prepare<unknown[], ReportArtifactRow>(`
@@ -412,13 +442,14 @@ export function upgradeLegacyReportHtml(html: string): string {
 
 /** Save a report to disk. Called externally when reports are generated. */
 export function persistReport(reportId: string, entry: PersistedReport): void {
-  reportStore.set(reportId, entry);
+  const safeReportId = assertSafeReportSegment(reportId, 'report id');
+  reportStore.set(safeReportId, entry);
   try {
     if (legacyReportWritesEnabled()) {
-      persistLegacyReport(reportId, entry);
+      persistLegacyReport(safeReportId, entry);
     }
     if (enterpriseReportDbWritesEnabled()) {
-      persistEnterpriseReport(reportId, entry);
+      persistEnterpriseReport(safeReportId, entry);
     }
   } catch (err) {
     console.warn('[ReportRoutes] Failed to persist report to disk:', (err as Error).message);
@@ -434,6 +465,7 @@ function loadReportFromDisk(reportId: string): PersistedReport | null {
 }
 
 function loadLegacyReportFromDisk(reportId: string): PersistedReport | null {
+  if (!isSafeReportSegment(reportId)) return null;
   try {
     const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
     if (!fs.existsSync(filePath)) return null;
@@ -485,6 +517,7 @@ function loadLegacyReportFromDisk(reportId: string): PersistedReport | null {
 }
 
 function deleteLegacyReport(reportId: string): boolean {
+  if (!isSafeReportSegment(reportId)) return false;
   try {
     const htmlPath = path.join(REPORTS_DIR, `${reportId}.html`);
     const metaPath = path.join(REPORTS_DIR, `${reportId}.meta.json`);
@@ -498,7 +531,7 @@ function deleteLegacyReport(reportId: string): boolean {
 }
 
 function deleteEnterpriseReport(reportId: string): boolean {
-  if (!SAFE_REPORT_ID_RE.test(reportId)) return false;
+  if (!isSafeReportSegment(reportId)) return false;
   try {
     return withEnterpriseReportDb((db) => {
       const row = db.prepare<unknown[], ReportArtifactRow>(
@@ -532,6 +565,7 @@ function deletePersistedReport(reportId: string): boolean {
 }
 
 function getReportForContext(reportId: string, req: express.Request): PersistedReport | null {
+  if (!isSafeReportSegment(reportId)) return null;
   const context = requireRequestContext(req);
   const report = reportStore.get(reportId) || loadReportFromDisk(reportId);
   if (report && isReportExpired(report)) {
@@ -599,6 +633,7 @@ router.get('/:reportId/export', (req, res) => {
 
     const filename = `smartperfetto-${reportId}.html`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    setReportDocumentSecurityHeaders(res);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
@@ -652,6 +687,7 @@ router.get('/:reportId', (req, res) => {
     }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    setReportDocumentSecurityHeaders(res);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -676,6 +712,9 @@ router.get('/:reportId', (req, res) => {
 router.delete('/:reportId', (req, res) => {
   try {
     const { reportId } = req.params;
+    if (!isSafeReportSegment(reportId)) {
+      return sendResourceNotFound(res, 'Report not found');
+    }
 
     const context = requireRequestContext(req);
     const report = reportStore.get(reportId) || loadReportFromDisk(reportId);

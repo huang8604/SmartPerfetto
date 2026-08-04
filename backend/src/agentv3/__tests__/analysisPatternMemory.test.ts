@@ -27,7 +27,9 @@ let mockPatternFileRaw: string | undefined;
 let mockNegativePatternFileRaw: string | undefined;
 let mockQuickPatternFileRaw: string | undefined;
 let mockCorruptBackups: Array<{ src: string; dest: string }> = [];
+const mockRecordRunManifestInjection = jest.fn();
 const originalEnterprise = process.env.SMARTPERFETTO_ENTERPRISE;
+const originalMigrationPhase = process.env.SMARTPERFETTO_ENTERPRISE_MIGRATION_PHASE;
 
 // Temporary storage for atomic write simulation (writeFile to .tmp, then rename)
 let tmpWriteBuffer: Map<string, string> = new Map();
@@ -100,6 +102,22 @@ jest.mock('fs', () => {
   };
 });
 
+jest.mock('../../services/filesystemRegistryLock', () => ({
+  withFilesystemRegistryLockAsync: jest.fn(
+    async (
+      _storagePath: string,
+      _busyError: string,
+      operation: (lease: {assertHeld(): void}) => Promise<unknown>,
+    ) => operation({assertHeld: () => {}}),
+  ),
+}));
+
+jest.mock('../../services/selfEvolution/runManifestLifecycle', () => ({
+  currentRunManifestAttributionSink: () => ({
+    recordInjection: mockRecordRunManifestInjection,
+  }),
+}));
+
 import {
   extractTraceFeatures,
   extractKeyInsights,
@@ -110,13 +128,16 @@ import {
   saveQuickPathPattern,
   matchQuickPatternsAsBackup,
   promoteQuickPatternIfMatching,
-  applyFeedbackToPattern,
+  applyEffectiveFeedbackProjection,
+  projectPatternFeedbackStatus,
+  migrateLegacyPatternStatuses,
   sweepAutoConfirm,
   buildPatternContextSection,
   buildNegativePatternSection,
   setSupersedeStoreForTesting,
 } from '../analysisPatternMemory';
 import { bucketPackageDomain } from '../../services/caseEvolution/domainBucket';
+import { canonicalContentHash } from '../../services/selfEvolution/canonicalJson';
 
 // ── Setup ────────────────────────────────────────────────────────────────
 
@@ -128,10 +149,12 @@ beforeEach(() => {
   mockNegativePatternFileRaw = undefined;
   mockQuickPatternFileRaw = undefined;
   mockCorruptBackups = [];
+  mockRecordRunManifestInjection.mockClear();
   tmpWriteBuffer = new Map();
   // Disable the real SQLite supersede store for fs-mocked tests; PR9b's
   // own integration tests cover the live store behaviour.
   setSupersedeStoreForTesting(null);
+  process.env.SMARTPERFETTO_ENTERPRISE_MIGRATION_PHASE = 'legacy';
 });
 
 afterEach(() => {
@@ -139,6 +162,11 @@ afterEach(() => {
     delete process.env.SMARTPERFETTO_ENTERPRISE;
   } else {
     process.env.SMARTPERFETTO_ENTERPRISE = originalEnterprise;
+  }
+  if (originalMigrationPhase === undefined) {
+    delete process.env.SMARTPERFETTO_ENTERPRISE_MIGRATION_PHASE;
+  } else {
+    process.env.SMARTPERFETTO_ENTERPRISE_MIGRATION_PHASE = originalMigrationPhase;
   }
 });
 
@@ -568,6 +596,13 @@ describe('buildPatternContextSection', () => {
     expect(section).toContain('历史分析经验');
     expect(section).toContain('scrolling');
     expect(section).toContain('RenderThread blocking');
+    const renderedContribution = section?.split('\n\n')[2];
+    expect(renderedContribution).toBeDefined();
+    expect(mockRecordRunManifestInjection).toHaveBeenCalledWith(
+      'patterns',
+      'pat-1',
+      canonicalContentHash(renderedContribution),
+    );
   });
 });
 
@@ -596,6 +631,13 @@ describe('buildNegativePatternSection', () => {
     expect(section).toContain('历史踩坑记录');
     expect(section).toContain('避免');
     expect(section).toContain('替代方案');
+    const renderedContribution = section?.split('\n\n')[2];
+    expect(renderedContribution).toBeDefined();
+    expect(mockRecordRunManifestInjection).toHaveBeenCalledWith(
+      'patterns',
+      'neg-1',
+      canonicalContentHash(renderedContribution),
+    );
   });
 });
 
@@ -897,72 +939,128 @@ describe('promoteQuickPatternIfMatching', () => {
   });
 });
 
-describe('applyFeedbackToPattern state machine', () => {
+describe('FeedbackEvent pattern projection', () => {
+  const feedbackScope = {
+    tenantId: 'default-dev-tenant',
+    workspaceId: 'default-workspace',
+  };
   const baseEntry = {
     id: 'p1', traceFeatures: ['arch:STANDARD'], sceneType: 'scrolling',
     keyInsights: ['x'], confidence: 0.7, matchCount: 0,
+    provenance: {
+      sourceTenantId: feedbackScope.tenantId,
+      sourceWorkspaceId: feedbackScope.workspaceId,
+    },
   };
 
+  function feedback(
+    rating: 'positive' | 'negative',
+    sequence: number,
+    timestamp = 1_700_000_000_000 + sequence * 1_000,
+  ): any {
+    return {
+      feedbackId: `feedback-${sequence}`,
+      currentEventId: `event-${sequence}`,
+      sequence,
+      legacy: false,
+      sessionId: 'session-1',
+      rating,
+      dimensions: [],
+      targetKind: 'pattern',
+      targetId: 'p1',
+      patternId: 'p1',
+      source: 'ui',
+      actor: {userId: 'user-1'},
+      scope: feedbackScope,
+      timestamp: new Date(timestamp).toISOString(),
+    };
+  }
+
   it('returns null when patternId not found', async () => {
-    const result = await applyFeedbackToPattern('missing', 'positive');
+    const result = await applyEffectiveFeedbackProjection(
+      'missing',
+      [feedback('positive', 1)],
+      feedbackScope,
+    );
     expect(result).toBeNull();
   });
 
-  it('flips provisional → confirmed on positive feedback', async () => {
+  it('projects positive feedback without overwriting intrinsic state', async () => {
     mockPatterns = [{ ...baseEntry, status: 'provisional', createdAt: Date.now() }];
-    const status = await applyFeedbackToPattern('p1', 'positive');
+    const status = await applyEffectiveFeedbackProjection(
+      'p1',
+      [feedback('positive', 1)],
+      feedbackScope,
+    );
     expect(status).toBe('confirmed');
     expect(mockPatterns[0].status).toBe('confirmed');
+    expect(mockPatterns[0].intrinsicStatus).toBe('provisional');
+    expect(mockPatterns[0].feedbackProjectionStatus).toBe('confirmed');
+    expect(mockPatterns[0].migrationSource).toBe('legacy_frozen');
     expect(mockPatterns[0].lastFeedbackAt).toBeDefined();
   });
 
-  it('flips provisional → rejected on negative feedback', async () => {
+  it('retraction returns effective status to the frozen intrinsic state', async () => {
     mockPatterns = [{ ...baseEntry, status: 'provisional', createdAt: Date.now() }];
-    const status = await applyFeedbackToPattern('p1', 'negative');
-    expect(status).toBe('rejected');
+    await applyEffectiveFeedbackProjection(
+      'p1',
+      [feedback('negative', 1)],
+      feedbackScope,
+    );
+    expect(mockPatterns[0].status).toBe('rejected');
+
+    const status = await applyEffectiveFeedbackProjection(
+      'p1',
+      [],
+      feedbackScope,
+    );
+    expect(status).toBe('provisional');
+    expect(mockPatterns[0].status).toBe('provisional');
+    expect(mockPatterns[0].feedbackProjectionStatus).toBeUndefined();
+    expect(mockPatterns[0].firstFeedbackAt).toBeUndefined();
   });
 
-  it('reverse feedback within 10s is treated as misclick (last-write-wins)', async () => {
+  it('keeps the existing reverse-feedback time windows deterministic', () => {
     const t0 = 1_700_000_000_000;
-    mockPatterns = [{
-      ...baseEntry, status: 'confirmed', createdAt: t0 - 1000,
-      firstFeedbackAt: t0, lastFeedbackAt: t0,
-    }];
-    const status = await applyFeedbackToPattern('p1', 'negative', t0 + 5_000);
-    expect(status).toBe('rejected');
-  });
-
-  it('reverse feedback in the 10s–24h window enters disputed', async () => {
-    const t0 = 1_700_000_000_000;
-    mockPatterns = [{
-      ...baseEntry, status: 'confirmed', createdAt: t0 - 1000,
-      firstFeedbackAt: t0, lastFeedbackAt: t0,
-    }];
-    const status = await applyFeedbackToPattern('p1', 'negative', t0 + 60 * 60 * 1000); // 1h later
-    expect(status).toBe('disputed');
-  });
-
-  it('reverse feedback >24h later enters disputed_late', async () => {
-    const t0 = 1_700_000_000_000;
-    mockPatterns = [{
-      ...baseEntry, status: 'confirmed', createdAt: t0 - 1000,
-      firstFeedbackAt: t0, lastFeedbackAt: t0,
-    }];
-    const status = await applyFeedbackToPattern('p1', 'negative', t0 + 48 * 60 * 60 * 1000); // 2 days later
-    expect(status).toBe('disputed_late');
-  });
-
-  it('rejected entries stay rejected regardless of subsequent positives', async () => {
-    mockPatterns = [{ ...baseEntry, status: 'rejected', createdAt: Date.now() }];
-    const status = await applyFeedbackToPattern('p1', 'positive');
-    expect(status).toBe('rejected');
+    expect(projectPatternFeedbackStatus('confirmed', [
+      feedback('positive', 1, t0),
+      feedback('negative', 2, t0 + 5_000),
+    ]).effectiveStatus).toBe('rejected');
+    expect(projectPatternFeedbackStatus('confirmed', [
+      feedback('positive', 1, t0),
+      feedback('negative', 2, t0 + 60 * 60 * 1_000),
+    ]).effectiveStatus).toBe('disputed');
+    expect(projectPatternFeedbackStatus('confirmed', [
+      feedback('positive', 1, t0),
+      feedback('negative', 2, t0 + 48 * 60 * 60 * 1_000),
+    ]).effectiveStatus).toBe('disputed_late');
   });
 
   it('finds patterns across positive / quick / negative buckets', async () => {
     mockQuickPatterns = [{ ...baseEntry, id: 'q1', status: 'provisional', createdAt: Date.now() }];
-    const status = await applyFeedbackToPattern('q1', 'positive');
+    const row = {...feedback('positive', 1), targetId: 'q1', patternId: 'q1'};
+    const status = await applyEffectiveFeedbackProjection(
+      'q1',
+      [row],
+      feedbackScope,
+    );
     expect(status).toBe('confirmed');
     expect(mockQuickPatterns[0].status).toBe('confirmed');
+  });
+
+  it('does not mutate a matching id owned by another tenant', async () => {
+    mockPatterns = [{...baseEntry, status: 'provisional', createdAt: Date.now()}];
+    const status = await applyEffectiveFeedbackProjection(
+      'p1',
+      [feedback('negative', 1)],
+      {
+        tenantId: 'tenant-b',
+        workspaceId: feedbackScope.workspaceId,
+      },
+    );
+
+    expect(status).toBeNull();
+    expect(mockPatterns[0].status).toBe('provisional');
   });
 });
 
@@ -1028,6 +1126,46 @@ describe('sweepAutoConfirm', () => {
     expect(mockPatterns.find(p => p.id === 'pos-b').status).toBe('provisional');
     expect(mockNegativePatterns.find(p => p.id === 'neg-a').status).toBe('confirmed');
     expect(mockNegativePatterns.find(p => p.id === 'neg-b').status).toBe('provisional');
+  });
+});
+
+describe('legacy pattern status migration', () => {
+  it('freezes each legacy effective status exactly once', async () => {
+    mockPatterns = [{
+      id: 'legacy-positive',
+      traceFeatures: ['x'],
+      sceneType: 'scrolling',
+      keyInsights: ['legacy'],
+      confidence: 0.5,
+      createdAt: Date.now(),
+      matchCount: 0,
+      status: 'rejected',
+    }];
+    mockQuickPatterns = [{
+      id: 'legacy-quick',
+      traceFeatures: ['y'],
+      sceneType: 'scrolling',
+      keyInsights: ['legacy'],
+      confidence: 0.3,
+      createdAt: Date.now(),
+      matchCount: 0,
+    }];
+
+    const first = await migrateLegacyPatternStatuses();
+    const second = await migrateLegacyPatternStatuses();
+
+    expect(first).toMatchObject({migrated: 2, positive: 1, quick: 1});
+    expect(second.migrated).toBe(0);
+    expect(mockPatterns[0]).toMatchObject({
+      status: 'rejected',
+      intrinsicStatus: 'rejected',
+      migrationSource: 'legacy_frozen',
+    });
+    expect(mockQuickPatterns[0]).toMatchObject({
+      status: 'confirmed',
+      intrinsicStatus: 'confirmed',
+      migrationSource: 'legacy_frozen',
+    });
   });
 });
 

@@ -20,7 +20,7 @@ meta:
   description: "View + SurfaceView 混合渲染，常见于视频播放器、内嵌游戏"
   icon: "layers"
   family: hwui
-  doc_path: "rendering_pipelines/android_view_mixed.md"
+  doc_path: rendering_pipelines/S05_mixed_rendering_type.md
   # ----- Article-grounded signature (S05) -----
   s_article_ref: "S05"
   four_features:
@@ -28,7 +28,7 @@ meta:
     optional_producer_threads: ["GLThread", "MediaCodec*", "*Decoder*", "EGLThread"]
     expected_layer_count: 2     # 宿主 + 独立 SurfaceView layer（最少）；TextureView 路径仍是 1 层
     bufferqueue_path: "BBQ_TRANSACTION_INPROC + INDEPENDENT_LAYER"   # 多条并行
-    extra_rhythm_sources: ["video_codec_pacing", "camera_sensor_trigger"]   # 视情况
+    extra_rhythm_sources: ["video_codec_pacing", "camera_request_activity"]   # 视情况；Camera 名称仅为 request activity candidate
   deviation_anchors: "multi_path_anchor_4_5_6_8"
   # 锚点偏离：宿主走完整 ④⑤⑥；独立 Producer 也各自走 ④⑤⑥（独立节奏）；
   # ⑧ SF latch 这一轮处理多 layer——文章 §"多 Layer 场景里，SF 会对没有新 buffer 的 Layer 沿用旧内容"。
@@ -37,7 +37,7 @@ meta:
     - MIXED_RENDERING_HWUI_SURFACEVIEW（独立 layer 进 SF，SF 看到 ≥2 个 layer）
     - MIXED_RENDERING_HWUI_TEXTUREVIEW（外部内容回宿主 RT 通过 updateTexImage 吸收，仍单 layer）
     - MIXED_RENDERING_HYBRID（两者都有）
-    Phase E 会拆分独立 ID。
+    三种形态统一属于 S05；检测结果保留具体子路径，但主类型仍为混合渲染。
     关键判别：在 SF 进程下查 layer 数量（>1 → SurfaceView，=1 → TextureView/纯宿主）。
 
 detection:
@@ -71,79 +71,7 @@ detection:
     - thread: UnityMain        # Game Engine → GAME_ENGINE
 
 teaching:
-  title: "Android View 混合渲染管线"
-  summary: |
-    同时使用 View 系统和 SurfaceView 进行渲染。View 部分通过 RenderThread，
-    SurfaceView 有独立的渲染线程 (GLThread/MediaCodec)。常见于视频播放器、
-    内嵌游戏等需要混合原生 UI 和自定义渲染的场景。
-    两条链路通常比纯 View 更解耦，但窗口几何和内容同步仍需以实际 trace 判断。
-
-  mermaid: |
-    sequenceDiagram
-      participant VA as VSync-app
-      participant Main as App (main)
-      participant RT as RenderThread
-      participant GL as GLThread (SurfaceView)
-      participant BQ as BufferQueue
-      participant VS as VSync-sf
-      participant SF as SurfaceFlinger
-
-      Note over VA,SF: 📍 View + SurfaceView 混合渲染
-      VA->>Main: 🔔 VSync-app
-      activate Main
-      Main->>RT: syncFrameState (View 部分)
-      deactivate Main
-
-      par View 渲染链路
-        activate RT
-        RT->>RT: DrawFrame (HWUI)
-        RT->>BQ: queueBuffer (Layer 1)
-        deactivate RT
-      and SurfaceView 渲染链路
-        activate GL
-        GL->>GL: OpenGL/Vulkan 渲染
-        GL->>BQ: eglSwapBuffers (Layer 2)
-        deactivate GL
-      end
-
-      VS->>SF: 🔔 VSync-sf
-      activate SF
-      SF->>SF: latchBuffer (多 Layer)
-      SF->>SF: HWC 合成
-      deactivate SF
-
-      Note over VA,SF: ⚠️ 两条独立链路，需注意同步问题；BLAST 只会降低竞态，不保证逐帧完美同显
-  thread_roles:
-    - thread: main
-      role: "UI 协调"
-      description: "协调 View 和 SurfaceView，处理布局"
-    - thread: RenderThread
-      role: "View 层渲染"
-      description: "渲染原生 View UI"
-    - thread: GLThread
-      role: "SurfaceView 渲染"
-      description: "独立渲染 SurfaceView 内容"
-    - thread: MediaCodec
-      role: "视频解码"
-      description: "解码视频帧到 SurfaceView"
-
-  key_slices:
-    - name: "SurfaceView"
-      thread: any
-      description: "SurfaceView 相关操作"
-    - name: "Choreographer#doFrame"
-      thread: main
-      description: "帧回调入口，协调 View 与 SurfaceView 的布局/动画"
-    - name: "syncFrameState"
-      thread: RenderThread
-      description: "主线程与 RenderThread 同步 DisplayList/RenderNode（仅描述 View 子链路）"
-    - name: "DrawFrame"
-      thread: RenderThread
-      description: "View 层渲染"
-    - name: "eglSwapBuffers"
-      thread: GLThread
-      description: "SurfaceView 渲染线程提交帧"
-
+  source: "rendering_pipelines/S05_mixed_rendering_type.md"
 auto_pin:
   instructions:
     # Time-ordered pinning (production -> transfer -> consume -> display)

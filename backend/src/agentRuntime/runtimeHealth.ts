@@ -12,8 +12,13 @@ import {
   getRuntimeDiagnosticProviderMode,
   getRuntimeDiagnostics,
 } from './runtimeDiagnostics';
+import { getAiCapabilityPolicy } from '../services/aiCapabilityPolicy';
+import {
+  getAndroidInternalsPackStatus,
+} from '../services/androidInternalsPack/knowledgePackStatus';
 
 export function buildRuntimeHealthPayload(now: Date = new Date()) {
+  const aiPolicy = getAiCapabilityPolicy();
   const runtimeSelection = resolveAgentRuntimeSelection();
   const providerSvc = getProviderService();
   const activeProvider = providerSvc.list().find(p => p.isActive);
@@ -30,10 +35,14 @@ export function buildRuntimeHealthPayload(now: Date = new Date()) {
     timestamp: now.toISOString(),
     environment: serverConfig.nodeEnv,
     version: getSmartPerfettoVersion(),
+    aiPolicy,
+    androidInternalsKnowledgePack: getAndroidInternalsPackStatus(),
     aiEngine: {
       runtime: runtimeSelection.kind,
       model: selectedModel,
       providerMode: selectedProviderMode,
+      aiEnabled: aiPolicy.aiEnabled,
+      ...(aiPolicy.disabledReason ? { disabledReason: aiPolicy.disabledReason } : {}),
       configured: selectedDiagnostics.configured,
       source: runtimeSelection.source,
       credentialSource: runtimeSelection.source === 'provider'

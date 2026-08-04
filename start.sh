@@ -3,6 +3,24 @@
 # Copyright (C) 2024-2026 Gracker (Chris)
 # This file is part of SmartPerfetto. See LICENSE for details.
 
+# `sh start.sh` ignores the Bash shebang. Re-exec before the shell reaches
+# Bash-only syntax such as process substitution in start_with_logs(). macOS
+# /bin/sh reports BASH_VERSION but runs Bash in POSIX mode, so detect that too.
+smartperfetto_needs_bash=false
+if [ -z "${BASH_VERSION:-}" ]; then
+  smartperfetto_needs_bash=true
+elif command -v shopt >/dev/null 2>&1 && shopt -qo posix; then
+  smartperfetto_needs_bash=true
+fi
+if [ "$smartperfetto_needs_bash" = true ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "ERROR: SmartPerfetto start.sh requires Bash." >&2
+  exit 1
+fi
+unset smartperfetto_needs_bash
+
 # SmartPerfetto Quick Start
 # Uses pre-built frontend (no Perfetto submodule required) + backend with tsx watch.
 #
@@ -21,13 +39,16 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd -P)"
 NODE_ENV_HELPERS="$PROJECT_ROOT/scripts/node-env.sh"
 SERVICE_PORT_HELPERS="$PROJECT_ROOT/scripts/service-ports.sh"
+SERVICE_LIFECYCLE_HELPERS="$PROJECT_ROOT/scripts/service-lifecycle.sh"
 # shellcheck source=scripts/node-env.sh
 . "$NODE_ENV_HELPERS"
 # shellcheck source=scripts/service-ports.sh
 . "$SERVICE_PORT_HELPERS"
+# shellcheck source=scripts/service-lifecycle.sh
+. "$SERVICE_LIFECYCLE_HELPERS"
 LOGS_DIR="$PROJECT_ROOT/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 CLEAN_LOGS=false
@@ -37,6 +58,13 @@ BACKEND_PORT=""
 FRONTEND_PORT=""
 BACKEND_URL=""
 FRONTEND_URL=""
+BACKEND_GENERATION=""
+FRONTEND_GENERATION=""
+BACKEND_CWD="$PROJECT_ROOT/backend"
+FRONTEND_CWD="$PROJECT_ROOT/frontend"
+FRONTEND_DEV_CWD="$PROJECT_ROOT/perfetto/ui"
+BACKEND_PID_FILE="$PROJECT_ROOT/.backend.pid"
+FRONTEND_PID_FILE="$PROJECT_ROOT/.frontend.pid"
 
 smartperfetto_init_service_ports
 
@@ -80,34 +108,6 @@ hash_sha256() {
   node -e "const fs=require('fs');const crypto=require('crypto');console.log(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))" "$file"
 }
 
-kill_pid_and_children() {
-  local pid="$1"
-  local name="$2"
-  [ -z "${pid:-}" ] && return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  echo "Stopping $name (PID: $pid)..."
-  pkill -TERM -P "$pid" 2>/dev/null || true
-  kill "$pid" 2>/dev/null || true
-  sleep 1
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -9 "$pid" 2>/dev/null || true
-  fi
-}
-
-kill_processes_on_port() {
-  local port="$1"
-  local pids
-  # -sTCP:LISTEN restricts the match to the server bound to this port.
-  # Without it, lsof returns every process with a TCP socket on this port,
-  # including connected clients (e.g. a Claude Code CLI keeping an SSE
-  # connection open against the backend), and they would all be SIGKILL'd.
-  pids=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
-  if [ -n "$pids" ]; then
-    echo "Stopping listener on port $port: $pids"
-    echo "$pids" | xargs kill -9 2>/dev/null || true
-  fi
-}
-
 start_with_logs() {
   local pid_var="$1"
   local prefix="$2"
@@ -117,17 +117,30 @@ start_with_logs() {
   printf -v "$pid_var" '%s' "$!"
 }
 
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by traps.
 cleanup() {
   local code="${1:-0}"
+  trap - EXIT SIGINT SIGTERM
+  set +e
   echo ""
   echo "Shutting down services..."
-  kill_pid_and_children "$BACKEND_PID" "backend"
-  kill_pid_and_children "$FRONTEND_PID" "frontend"
-  rm -f "$PROJECT_ROOT/.backend.pid" "$PROJECT_ROOT/.frontend.pid" 2>/dev/null || true
+  if [ -n "$FRONTEND_PID" ]; then
+    smartperfetto_terminate_process_tree "$FRONTEND_PID" "frontend"
+  fi
+  if [ -n "$BACKEND_PID" ]; then
+    smartperfetto_terminate_process_tree "$BACKEND_PID" "backend"
+  fi
+  if [ -n "$FRONTEND_GENERATION" ]; then
+    smartperfetto_remove_pid_file_if_generation "$FRONTEND_PID_FILE" "$FRONTEND_GENERATION"
+  fi
+  if [ -n "$BACKEND_GENERATION" ]; then
+    smartperfetto_remove_pid_file_if_generation "$BACKEND_PID_FILE" "$BACKEND_GENERATION"
+  fi
   echo "Cleanup complete."
   exit "$code"
 }
 
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by traps.
 on_exit() {
   local code=$?
   cleanup "$code"
@@ -172,7 +185,7 @@ ensure_trace_processor_path() {
   if [ ! -f "$path" ]; then
     echo "ERROR: trace_processor_shell not found at TRACE_PROCESSOR_PATH:"
     echo "  $path"
-    exit 1
+    return 1
   fi
   if [ ! -x "$path" ]; then
     echo "ERROR: trace_processor_shell is not executable:"
@@ -180,52 +193,76 @@ ensure_trace_processor_path() {
     echo ""
     echo "Run:"
     echo "  chmod +x \"$path\""
-    exit 1
+    return 1
   fi
   if ! "$path" --version >/dev/null 2>&1; then
     echo "ERROR: trace_processor_shell failed the --version smoke test:"
     echo "  $path"
     print_macos_trace_processor_permission_help "$path"
-    exit 1
+    return 1
   fi
+}
+
+resolve_trace_processor_pin() {
+  local pin_env="$PROJECT_ROOT/scripts/trace-processor-pin.env"
+  local os
+  local arch
+
+  if [ ! -f "$pin_env" ]; then
+    echo "ERROR: trace processor pin file not found: $pin_env" >&2
+    return 1
+  fi
+  # shellcheck source=scripts/trace-processor-pin.env
+  . "$pin_env"
+
+  case "$(uname -s)" in
+    Darwin) os=mac ;;
+    Linux) os=linux ;;
+    *) echo "ERROR: Unsupported OS: $(uname -s). Use Docker or WSL2 on Windows." >&2; return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *) echo "ERROR: Unsupported architecture: $(uname -m)" >&2; return 1 ;;
+  esac
+
+  TRACE_PROCESSOR_PLATFORM="${os}-${arch}"
+  case "$TRACE_PROCESSOR_PLATFORM" in
+    linux-amd64) TRACE_PROCESSOR_EXPECTED_SHA="${PERFETTO_SHELL_SHA256_LINUX_AMD64:-}" ;;
+    linux-arm64) TRACE_PROCESSOR_EXPECTED_SHA="${PERFETTO_SHELL_SHA256_LINUX_ARM64:-}" ;;
+    mac-amd64) TRACE_PROCESSOR_EXPECTED_SHA="${PERFETTO_SHELL_SHA256_MAC_AMD64:-}" ;;
+    mac-arm64) TRACE_PROCESSOR_EXPECTED_SHA="${PERFETTO_SHELL_SHA256_MAC_ARM64:-}" ;;
+  esac
+  if [ -z "$TRACE_PROCESSOR_EXPECTED_SHA" ]; then
+    echo "ERROR: missing pinned trace processor SHA for $TRACE_PROCESSOR_PLATFORM." >&2
+    return 1
+  fi
+}
+
+verify_pinned_trace_processor() {
+  local path="$1"
+  local actual_sha
+  resolve_trace_processor_pin
+  [ -f "$path" ] || return 1
+  actual_sha=$(hash_sha256 "$path")
+  if [ "$actual_sha" != "$TRACE_PROCESSOR_EXPECTED_SHA" ]; then
+    echo "WARNING: cached trace_processor_shell does not match the pinned SHA: $path" >&2
+    return 1
+  fi
+  ensure_trace_processor_path "$path"
 }
 
 download_trace_processor_prebuilt() {
   local dest="$1"
-  local pin_env="$PROJECT_ROOT/scripts/trace-processor-pin.env"
-  local os arch plat sha url_base url tmp actual_sha
+  local url_base url tmp actual_sha
 
-  if [ -f "$pin_env" ]; then
-    # shellcheck source=scripts/trace-processor-pin.env
-    . "$pin_env"
-  fi
-
-  case "$(uname -s)" in
-    Darwin) os=mac ;;
-    Linux)  os=linux ;;
-    *) echo "ERROR: Unsupported OS: $(uname -s). Use Docker or WSL2 on Windows."; exit 1 ;;
-  esac
-  case "$(uname -m)" in
-    x86_64|amd64)  arch=amd64 ;;
-    arm64|aarch64) arch=arm64 ;;
-    *) echo "ERROR: Unsupported architecture: $(uname -m)"; exit 1 ;;
-  esac
-  plat="${os}-${arch}"
-
-  case "$plat" in
-    linux-amd64) sha="${PERFETTO_SHELL_SHA256_LINUX_AMD64:-2ef3c927d0eabaa246e383b221217158c189ee2c3b638de497ce913e268a34e7}" ;;
-    linux-arm64) sha="${PERFETTO_SHELL_SHA256_LINUX_ARM64:-996eda7c304be9fe4c859b96fbe4decc1cb406281ab4db077f0c762385a6c272}" ;;
-    mac-amd64)   sha="${PERFETTO_SHELL_SHA256_MAC_AMD64:-ca38354e77f5afe3d432576a350ce8000a9b394c5d13a2b70345a53d7a453ab5}" ;;
-    mac-arm64)   sha="${PERFETTO_SHELL_SHA256_MAC_ARM64:-21a68743627c3435146f8c241f767761ed9c161341a2ad2dfef47e50aa7160d9}" ;;
-  esac
-
-  PERFETTO_VERSION="${PERFETTO_VERSION:-v56.0}"
+  resolve_trace_processor_pin
   url_base="${TRACE_PROCESSOR_DOWNLOAD_BASE:-${PERFETTO_LUCI_URL_BASE:-https://commondatastorage.googleapis.com/perfetto-luci-artifacts}}"
-  url="${TRACE_PROCESSOR_DOWNLOAD_URL:-${url_base%/}/${PERFETTO_VERSION}/${plat}/trace_processor_shell}"
+  url="${TRACE_PROCESSOR_DOWNLOAD_URL:-${url_base%/}/${PERFETTO_VERSION}/${TRACE_PROCESSOR_PLATFORM}/trace_processor_shell}"
   tmp=$(mktemp -t trace_processor_shell.XXXXXX)
 
   echo "trace_processor_shell not found. Downloading pinned prebuilt..."
-  echo "  platform: $plat"
+  echo "  platform: $TRACE_PROCESSOR_PLATFORM"
   echo "  version:  $PERFETTO_VERSION"
   echo "  url:      $url"
 
@@ -236,10 +273,10 @@ download_trace_processor_prebuilt() {
   fi
 
   actual_sha=$(hash_sha256 "$tmp")
-  if [ "$actual_sha" != "$sha" ]; then
+  if [ "$actual_sha" != "$TRACE_PROCESSOR_EXPECTED_SHA" ]; then
     rm -f "$tmp"
     echo "ERROR: trace_processor_shell SHA256 mismatch."
-    echo "  expected: $sha"
+    echo "  expected: $TRACE_PROCESSOR_EXPECTED_SHA"
     echo "  actual:   $actual_sha"
     echo ""
     echo "If you intentionally use a custom binary, set TRACE_PROCESSOR_PATH instead."
@@ -247,7 +284,10 @@ download_trace_processor_prebuilt() {
   fi
 
   chmod +x "$tmp"
-  ensure_trace_processor_path "$tmp"
+  if ! ensure_trace_processor_path "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
   mkdir -p "$(dirname "$dest")"
   mv "$tmp" "$dest"
   echo "Downloaded: $("$dest" --version 2>/dev/null | head -1)"
@@ -281,6 +321,7 @@ for arg in "$@"; do
       echo "  TRACE_PROCESSOR_PATH           Use an existing trace_processor_shell"
       echo "  TRACE_PROCESSOR_DOWNLOAD_BASE  Mirror base with Perfetto LUCI path layout"
       echo "  TRACE_PROCESSOR_DOWNLOAD_URL   Exact trace_processor_shell URL for this platform"
+      echo "  SMARTPERFETTO_NO_OPEN=1        Do not open a browser after readiness succeeds"
       echo ""
       echo "For AI plugin development (with hot reload), use: ./scripts/start-dev.sh"
       exit 0
@@ -297,7 +338,7 @@ require_command node
 require_command npm
 require_command curl
 require_command lsof
-require_command pkill
+require_command pgrep
 
 FRONTEND_SERVER="$PROJECT_ROOT/frontend/server.js"
 if [ ! -f "$FRONTEND_SERVER" ]; then
@@ -347,42 +388,49 @@ echo ""
 trap on_exit EXIT
 trap 'cleanup 130' SIGINT SIGTERM
 
-# ── Kill existing processes ───────────────────────────────────────────────────
+# ── Stop only a previous launcher-owned instance ──────────────────────────────
 
 echo "Stopping existing processes..."
-kill_processes_on_port "$BACKEND_PORT"
-kill_processes_on_port "$FRONTEND_PORT"
-pkill -f "$PROJECT_ROOT/backend/node_modules/.bin/tsx watch src/index.ts" 2>/dev/null || true
-pkill -f "trace_processor_shell.*--httpd" 2>/dev/null || true
-sleep 1
+smartperfetto_stop_owned_pid_file \
+  "$BACKEND_PID_FILE" "backend" "$PROJECT_ROOT" "$BACKEND_CWD"
+smartperfetto_stop_owned_pid_file_for_allowed_cwds \
+  "$FRONTEND_PID_FILE" "frontend" "$PROJECT_ROOT" "$FRONTEND_CWD" "$FRONTEND_DEV_CWD"
+smartperfetto_assert_port_available "$BACKEND_PORT" "backend"
+smartperfetto_assert_port_available "$FRONTEND_PORT" "frontend"
 
 # ── trace_processor_shell ─────────────────────────────────────────────────────
 
-# Search order: TRACE_PROCESSOR_PATH env > repo prebuilt > backend/bin/ > perfetto/out/ui/
-PREBUILT_TRACE_PROCESSOR="$(trace_processor_prebuilt_candidate)"
-TRACE_PROCESSOR_CANDIDATES=(
-  "${TRACE_PROCESSOR_PATH:-}"
-  "$PREBUILT_TRACE_PROCESSOR"
-  "$PROJECT_ROOT/backend/bin/trace_processor_shell"
-  "$PROJECT_ROOT/perfetto/out/ui/trace_processor_shell"
-)
-TRACE_PROCESSOR=""
-for _candidate in "${TRACE_PROCESSOR_CANDIDATES[@]}"; do
-  [ -z "$_candidate" ] && continue
-  if [ -f "$_candidate" ] && "$_candidate" --version >/dev/null 2>&1; then
-    TRACE_PROCESSOR="$_candidate"
-    chmod +x "$TRACE_PROCESSOR" 2>/dev/null || true
-    break
-  fi
-done
-
-if [ -n "$TRACE_PROCESSOR" ]; then
-  echo "trace_processor_shell: $("$TRACE_PROCESSOR" --version 2>/dev/null | head -1)"
+# An explicit path is a user-owned override: validate it, but never chmod,
+# replace, download into, or compare it with SmartPerfetto's pinned artifact.
+if [ -n "${TRACE_PROCESSOR_PATH:-}" ]; then
+  TRACE_PROCESSOR="$TRACE_PROCESSOR_PATH"
+  ensure_trace_processor_path "$TRACE_PROCESSOR" || exit 1
+  TRACE_PROCESSOR="$(cd "$(dirname "$TRACE_PROCESSOR")" && pwd -P)/$(basename "$TRACE_PROCESSOR")"
+  echo "trace_processor_shell: custom override $("$TRACE_PROCESSOR" --version 2>/dev/null | head -1)"
 else
-  # No local binary found — download to backend/bin/ (preferred) or perfetto/out/ui/
-  TRACE_PROCESSOR="$PROJECT_ROOT/backend/bin/trace_processor_shell"
-  mkdir -p "$(dirname "$TRACE_PROCESSOR")"
-  download_trace_processor_prebuilt "$TRACE_PROCESSOR"
+  # Implicit candidates are SmartPerfetto-owned pinned artifacts.
+  PREBUILT_TRACE_PROCESSOR="$(trace_processor_prebuilt_candidate)"
+  TRACE_PROCESSOR=""
+  if [ -n "$PREBUILT_TRACE_PROCESSOR" ] && verify_pinned_trace_processor "$PREBUILT_TRACE_PROCESSOR"; then
+    TRACE_PROCESSOR="$PREBUILT_TRACE_PROCESSOR"
+  fi
+
+  TRACE_PROCESSOR_CACHE="$PROJECT_ROOT/backend/bin/trace_processor_shell"
+  if [ -z "$TRACE_PROCESSOR" ] && [ -f "$TRACE_PROCESSOR_CACHE" ]; then
+    if verify_pinned_trace_processor "$TRACE_PROCESSOR_CACHE"; then
+      TRACE_PROCESSOR="$TRACE_PROCESSOR_CACHE"
+    else
+      echo "Removing invalid SmartPerfetto-managed trace processor cache."
+      rm -f "$TRACE_PROCESSOR_CACHE"
+    fi
+  fi
+
+  if [ -z "$TRACE_PROCESSOR" ]; then
+    TRACE_PROCESSOR="$TRACE_PROCESSOR_CACHE"
+    mkdir -p "$(dirname "$TRACE_PROCESSOR")"
+    download_trace_processor_prebuilt "$TRACE_PROCESSOR"
+  fi
+  echo "trace_processor_shell: $("$TRACE_PROCESSOR" --version 2>/dev/null | head -1)"
 fi
 export TRACE_PROCESSOR_PATH="$TRACE_PROCESSOR"
 
@@ -392,30 +440,38 @@ smartperfetto_ensure_backend_deps "$PROJECT_ROOT"
 
 # ── Start backend ─────────────────────────────────────────────────────────────
 
+SOURCE_BUILD_COMMIT="$(smartperfetto_source_build_commit "$PROJECT_ROOT")"
+
 echo "Starting backend..."
 cd "$PROJECT_ROOT/backend"
+BACKEND_GENERATION="$(smartperfetto_new_launch_generation backend)"
 start_with_logs BACKEND_PID "BACKEND" "$BACKEND_LOG" env \
   PORT="$BACKEND_PORT" \
   SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
   SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
   FRONTEND_URL="$FRONTEND_URL" \
   SMARTPERFETTO_LOCK_SERVICE_PORTS=1 \
+  SMARTPERFETTO_LOCK_RUNTIME_IDENTITY=1 \
+  SMARTPERFETTO_PACKAGE_ROOT="$PROJECT_ROOT" \
+  SMARTPERFETTO_DISTRIBUTION=source \
+  SMARTPERFETTO_BUILD_COMMIT="$SOURCE_BUILD_COMMIT" \
   npm run dev
+if ! smartperfetto_write_pid_file \
+  "$BACKEND_PID_FILE" "$BACKEND_PID" "backend" "$PROJECT_ROOT" "$BACKEND_CWD" "$BACKEND_GENERATION"; then
+  exit 1
+fi
 
 echo "Waiting for backend..."
-for i in {1..30}; do
-  if curl -fs "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1 || \
-     curl -fs "http://localhost:$BACKEND_PORT/api/traces/stats" >/dev/null 2>&1; then
-    echo "Backend is ready! (took ${i}s)"
-    break
-  fi
-  sleep 1
-done
+if ! smartperfetto_wait_for_http \
+  "$BACKEND_PID" "Backend" "$BACKEND_HEALTH_URL" 30 "$BACKEND_LOG"; then
+  exit 1
+fi
 
 # ── Start frontend ────────────────────────────────────────────────────────────
 
 echo "Starting frontend..."
 cd "$PROJECT_ROOT/frontend"
+FRONTEND_GENERATION="$(smartperfetto_new_launch_generation frontend)"
 start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" env \
   PORT="$FRONTEND_PORT" \
   SMARTPERFETTO_BACKEND_PORT="$BACKEND_PORT" \
@@ -423,15 +479,16 @@ start_with_logs FRONTEND_PID "FRONTEND" "$FRONTEND_LOG" env \
   SMARTPERFETTO_BACKEND_PUBLIC_URL="$BACKEND_PUBLIC_URL" \
   SMARTPERFETTO_FRONTEND_PORT="$FRONTEND_PORT" \
   node server.js
+if ! smartperfetto_write_pid_file \
+  "$FRONTEND_PID_FILE" "$FRONTEND_PID" "frontend" "$PROJECT_ROOT" "$FRONTEND_CWD" "$FRONTEND_GENERATION"; then
+  exit 1
+fi
 
 echo "Waiting for frontend..."
-for i in {1..15}; do
-  if curl -fs "http://localhost:$FRONTEND_PORT/" >/dev/null 2>&1; then
-    echo "Frontend is ready! (took ${i}s)"
-    break
-  fi
-  sleep 1
-done
+if ! smartperfetto_wait_for_http \
+  "$FRONTEND_PID" "Frontend" "$FRONTEND_HEALTH_URL" 15 "$FRONTEND_LOG"; then
+  exit 1
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
@@ -439,8 +496,8 @@ echo ""
 echo "=============================================="
 echo "SmartPerfetto is running!"
 echo "=============================================="
-echo "  Frontend:  http://localhost:$FRONTEND_PORT"
-echo "  Backend:   http://localhost:$BACKEND_PORT"
+echo "  Frontend:  $FRONTEND_URL"
+echo "  Backend:   $BACKEND_URL"
 echo "  Backend PID:  $BACKEND_PID"
 echo "  Frontend PID: $FRONTEND_PID"
 echo ""
@@ -448,15 +505,20 @@ echo "  💡 To develop the AI plugin UI: ./scripts/start-dev.sh"
 echo "  💡 Press Ctrl+C to stop"
 echo "=============================================="
 
-# Open browser automatically
-if command -v open >/dev/null 2>&1; then
-  open "http://localhost:$FRONTEND_PORT"
-elif command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "http://localhost:$FRONTEND_PORT"
+# Open browser automatically unless a headless caller opts out.
+if [ "${SMARTPERFETTO_NO_OPEN:-0}" != "1" ]; then
+  if command -v open >/dev/null 2>&1; then
+    open "$FRONTEND_URL"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$FRONTEND_URL"
+  fi
 fi
 
-echo "$BACKEND_PID"  > "$PROJECT_ROOT/.backend.pid"
-echo "$FRONTEND_PID" > "$PROJECT_ROOT/.frontend.pid"
-
-# Keep running
-wait "$BACKEND_PID" 2>/dev/null || true
+# Keep running until either required service exits. A clean child exit is still
+# unexpected here and therefore maps to a non-zero launcher status.
+set +e
+smartperfetto_wait_for_services \
+  "$BACKEND_PID" "Backend" "$FRONTEND_PID" "Frontend"
+SERVICE_EXIT_CODE=$?
+set -e
+exit "$SERVICE_EXIT_CODE"

@@ -27,7 +27,7 @@ meta:
   # ----- Phase F: pipeline-aware 接口标注 -----
   pipeline_aware: true
   pipeline_aware_note: |
-    Layer 数量是 4 特征分型的"特征 2"。expected_layer_count 按 pipeline 不同：
+    Layer 数量是辅助证据轴之一，不是独立类型分类法。expected_layer_count 按 pipeline 不同：
     标准/TextureView=1, SurfaceView/Mixed≥2, HC overlay=N, WebView Functor=0。
     未来按 pipeline_id 标注期望 layer 数 + 偏离判定。
 

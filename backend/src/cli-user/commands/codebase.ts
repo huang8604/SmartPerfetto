@@ -7,7 +7,10 @@ import * as path from 'path';
 import {bootstrap} from '../bootstrap';
 import {backendLogPath} from '../../runtimePaths';
 import {RagStore} from '../../services/ragStore';
-import {CodebaseRegistry} from '../../services/codebase/codebaseRegistry';
+import {
+  CodebaseRegistry,
+  resolveCodebaseScope,
+} from '../../services/codebase/codebaseRegistry';
 import {PathSecurityGate} from '../../services/codebase/pathSecurityGate';
 import {AppSourceIngester} from '../../services/rag/appSourceIngester';
 import {AospSourceIngester} from '../../services/rag/aospSourceIngester';
@@ -46,7 +49,7 @@ export async function runCodebasePreviewCommand(args: CodebaseCommandBaseArgs & 
     blocked: preview.blocked,
     blockedReason: preview.blockedReason,
     acceptedFileCount: preview.acceptedFiles.length,
-    skippedFileCount: preview.skippedFiles.length,
+    skippedFileCount: preview.skippedFileCount,
     acceptedFiles: preview.acceptedFiles.slice(0, 50),
   }, null, 2));
   return preview.blocked ? 1 : 0;
@@ -78,7 +81,7 @@ export async function runCodebaseRegisterCommand(args: CodebaseCommandBaseArgs &
       displayName: args.name ?? path.basename(rootPath),
       rootPath,
       acceptedFileCount: preview.acceptedFiles.length,
-      skippedFileCount: preview.skippedFiles.length,
+      skippedFileCount: preview.skippedFileCount,
     }, null, 2));
     return 0;
   }
@@ -111,7 +114,7 @@ export async function runCodebaseReindexCommand(args: CodebaseCommandBaseArgs & 
   const gate = new PathSecurityGate({allowlistRoots: [ref.rootRealpath]});
   const result = await (ref.kind === 'kernel_source'
     ? new KernelSourceIngester(store, registry, gate).ingest(args.codebaseId)
-    : ref.kind === 'aosp'
+    : ref.kind === 'aosp' || ref.kind === 'oem_sdk'
       ? new AospSourceIngester(store, registry, gate).ingest(args.codebaseId)
       : new AppSourceIngester(store, registry, gate).ingest(args.codebaseId));
   console.log(JSON.stringify(result, null, 2));
@@ -125,10 +128,14 @@ export async function runCodebaseSymbolsCommand(args: CodebaseCommandBaseArgs & 
   bootstrap({envFile: args.envFile, sessionDir: args.sessionDir});
   const registry = new CodebaseRegistry(registryPath());
   const ref = args.codebaseId ? registry.get(args.codebaseId) : undefined;
-  const resolver = new SymbolResolver(new RagStore(ragStorePath()));
+  const resolver = new SymbolResolver(
+    new RagStore(ragStorePath()),
+    resolveCodebaseScope(),
+    registry,
+  );
   const result = ref?.kind === 'kernel_source'
     ? resolver.resolveKernel({symbol: args.symbol, codebaseId: args.codebaseId, vendor: ref.vendor})
-    : ref?.kind === 'aosp'
+    : ref?.kind === 'aosp' || ref?.kind === 'oem_sdk'
       ? resolver.resolveNative({symbol: args.symbol, codebaseId: args.codebaseId})
       : resolver.resolveApp({
           symbol: args.symbol,

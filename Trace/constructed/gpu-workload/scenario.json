@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "clock": {
+    "anchor": "trace-middle",
+    "duration_ns": "1000000000"
+  },
+  "actors": {
+    "processes": [
+      {
+        "id": "app",
+        "name": "com.smartperfetto.fixture",
+        "uid": 10999
+      },
+      {
+        "id": "system",
+        "name": "system_server",
+        "uid": 1000
+      },
+      {
+        "id": "sf",
+        "name": "/system/bin/surfaceflinger",
+        "uid": 1000
+      }
+    ],
+    "threads": [
+      {
+        "id": "main",
+        "process": "app",
+        "name": "main",
+        "is_main": true
+      },
+      {
+        "id": "render",
+        "process": "app",
+        "name": "RenderThread"
+      },
+      {
+        "id": "game",
+        "process": "app",
+        "name": "GameThread"
+      },
+      {
+        "id": "rn-js",
+        "process": "app",
+        "name": "mqt_js"
+      },
+      {
+        "id": "rn-native",
+        "process": "app",
+        "name": "mqt_native_modules"
+      },
+      {
+        "id": "webview",
+        "process": "app",
+        "name": "CrRendererMain"
+      },
+      {
+        "id": "system-main",
+        "process": "system",
+        "name": "android.fg",
+        "is_main": true
+      },
+      {
+        "id": "sf-main",
+        "process": "sf",
+        "name": "surfaceflinger",
+        "is_main": true
+      }
+    ]
+  },
+  "signals": [
+    {
+      "type": "atrace-slice",
+      "at_ns": "10000000",
+      "duration_ns": "18000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto::CASE::gpu-workload"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "40000000",
+      "duration_ns": "19000000",
+      "process": "app",
+      "thread": "render",
+      "name": "GPU completion"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "70000000",
+      "duration_ns": "20000000",
+      "process": "app",
+      "thread": "main",
+      "name": "vkQueueSubmit"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "100000000",
+      "duration_ns": "21000000",
+      "process": "app",
+      "thread": "render",
+      "name": "gpu_work_period"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "200000000",
+      "duration_ns": "22000000",
+      "process": "app",
+      "thread": "render",
+      "name": "vkQueueSubmit"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "225000000",
+      "duration_ns": "23000000",
+      "process": "app",
+      "thread": "render",
+      "name": "eglSwapBuffers"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "250000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto.gpu-workload.pressure",
+      "value": 73
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "300000000",
+      "duration_ns": "45000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "380000000",
+      "duration_ns": "20000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "gpu-work-period",
+      "at_ns": "450000000",
+      "duration_ns": "30000000",
+      "gpu_id": 0,
+      "uid": 10999,
+      "active_duration_ns": "24000000",
+      "cpu": 0
+    },
+    {
+      "type": "gpu-frequency",
+      "at_ns": "450000000",
+      "gpu_id": 0,
+      "value": 700000,
+      "cpu": 0
+    },
+    {
+      "type": "gpu-power-state",
+      "at_ns": "460000000",
+      "old_state": 0,
+      "new_state": 2,
+      "cpu": 0
+    },
+    {
+      "type": "gpu-compute-kernel",
+      "at_ns": "500000000",
+      "duration_ns": "12000000",
+      "process": "app",
+      "gpu_id": 0,
+      "context": "1001",
+      "kernel": "SyntheticComputeKernelA",
+      "demangled_kernel": "SyntheticComputeKernelA(float*)",
+      "arch": "synthetic-v1",
+      "grid": {
+        "x": 64,
+        "y": 2,
+        "z": 1
+      },
+      "workgroup": {
+        "x": 32,
+        "y": 2,
+        "z": 1
+      },
+      "args": {
+        "registers_per_thread": 24,
+        "shared_mem_static": 1024,
+        "shared_mem_dynamic": 2048,
+        "barriers_per_block": 2,
+        "waves_per_multiprocessor": 4
+      }
+    },
+    {
+      "type": "gpu-compute-kernel",
+      "at_ns": "540000000",
+      "duration_ns": "7000000",
+      "process": "app",
+      "gpu_id": 0,
+      "context": "1001",
+      "kernel": "SyntheticComputeKernelB",
+      "demangled_kernel": "SyntheticComputeKernelB(int*)",
+      "arch": "synthetic-v1",
+      "grid": {
+        "x": 32,
+        "y": 1,
+        "z": 1
+      },
+      "workgroup": {
+        "x": 16,
+        "y": 1,
+        "z": 1
+      },
+      "args": {
+        "registers_per_thread": 16,
+        "shared_mem_static": 512,
+        "shared_mem_dynamic": 0,
+        "barriers_per_block": 1,
+        "waves_per_multiprocessor": 2
+      }
+    }
+  ]
+}

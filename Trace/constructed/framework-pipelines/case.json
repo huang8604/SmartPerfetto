@@ -1,0 +1,524 @@
+{
+  "schema_version": 1,
+  "id": "framework-pipelines",
+  "kind": "constructed",
+  "title": "Framework rendering pipeline signatures",
+  "description": "Deterministic framework rendering pipeline signatures signals over the android-startup-heavy real base trace.",
+  "scene": "pipeline",
+  "tags": [
+    "android",
+    "constructed",
+    "pipeline"
+  ],
+  "aliases": [],
+  "trace": {
+    "file": "trace.overlay.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "35c5cf1014ac0032188fb3da8d08899fa1ea3bb25ac6f34eb7f1c00645f3a9b3",
+    "materialization": "base-plus-overlay"
+  },
+  "android": {
+    "release": "16",
+    "api_level": 36,
+    "device": "Xiaomi pandora base",
+    "build_fingerprint": null,
+    "compatibility": {
+      "min_api": 35,
+      "max_api": 36
+    }
+  },
+  "source": {
+    "origin": "SmartPerfetto deterministic trace generator",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": "AGPL-3.0-or-later",
+    "consent": "generated",
+    "privacy_review": "not-applicable",
+    "sanitization_review": "not-applicable",
+    "publication": "public"
+  },
+  "analysis": {
+    "results": [
+      "analysis/expected.json"
+    ],
+    "logs": []
+  },
+  "construction": {
+    "base_case_id": "android-startup-heavy",
+    "scenario_file": "scenario.json",
+    "generator_version": 1,
+    "seed": "framework-pipelines-v1",
+    "output": "Trace/.generated/constructed/framework-pipelines/trace.pftrace"
+  },
+  "coverage": {
+    "skills": [
+      "ams_module",
+      "art_module",
+      "code_pinpoint",
+      "compose_recomposition_hotspot",
+      "pipeline_4feature_scoring",
+      "pipeline_android_pip_freeform",
+      "pipeline_android_view_mixed",
+      "pipeline_android_view_multi_window",
+      "pipeline_android_view_software",
+      "pipeline_android_view_standard_blast",
+      "pipeline_android_view_standard_legacy",
+      "pipeline_chrome_browser_viz",
+      "pipeline_compose_standard",
+      "pipeline_flutter_surfaceview_impeller",
+      "pipeline_flutter_surfaceview_skia",
+      "pipeline_game_engine",
+      "pipeline_imagereader_pipeline",
+      "pipeline_key_slices_overlay",
+      "pipeline_rn_new_arch",
+      "pipeline_rn_old_arch",
+      "pipeline_rn_skia",
+      "pipeline_software_compositing",
+      "pipeline_surface_control_api",
+      "pipeline_surfaceview_blast",
+      "pipeline_variable_refresh_rate",
+      "pipeline_video_overlay_hwc",
+      "pipeline_webview_gl_functor",
+      "pipeline_webview_surface_control",
+      "pipeline_webview_surfaceview_wrapper",
+      "systemui_module",
+      "third_party_module",
+      "wms_module"
+    ],
+    "strategies": [
+      "pipeline"
+    ],
+    "expectations": [
+      {
+        "id": "execute-ams_module",
+        "type": "skill",
+        "target": "ams_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/framework/ams_module.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "startup_timing",
+          "startup_phases",
+          "broadcast_analysis"
+        ],
+        "required_sql_steps": [
+          "startup_timing",
+          "startup_phases",
+          "broadcast_analysis"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "startup_timing",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-art_module",
+        "type": "skill",
+        "target": "art_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/framework/art_module.skill.yaml",
+        "parameters": {
+          "package": "com.smartperfetto.fixture"
+        },
+        "required_steps": [
+          "gc_overview",
+          "gc_events",
+          "gc_during_main_thread",
+          "jit_events"
+        ],
+        "required_sql_steps": [
+          "gc_overview",
+          "gc_events",
+          "gc_during_main_thread",
+          "jit_events"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "gc_overview",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-code_pinpoint",
+        "type": "skill",
+        "target": "code_pinpoint",
+        "mode": "execution",
+        "source_file": "backend/skills/composite/code_pinpoint.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "hot_slices",
+          "native_modules"
+        ],
+        "required_sql_steps": [
+          "hot_slices",
+          "native_modules"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "hot_slices",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-compose_recomposition_hotspot",
+        "type": "skill",
+        "target": "compose_recomposition_hotspot",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/compose_recomposition_hotspot.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "frame_timeline_check",
+          "recomposition_overview",
+          "slow_recompositions",
+          "composition_frequency",
+          "recomposition_frame_overlap"
+        ],
+        "required_sql_steps": [
+          "frame_timeline_check",
+          "recomposition_overview",
+          "slow_recompositions",
+          "composition_frequency",
+          "recomposition_frame_overlap"
+        ],
+        "forced_sql_steps": [
+          "recomposition_frame_overlap"
+        ],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "recomposition_overview",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-pipeline_4feature_scoring",
+        "type": "skill",
+        "target": "pipeline_4feature_scoring",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/pipeline_4feature_scoring.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "producer_thread_signature",
+          "layer_signature",
+          "bufferqueue_path",
+          "extra_rhythm"
+        ],
+        "required_sql_steps": [
+          "producer_thread_signature",
+          "layer_signature",
+          "bufferqueue_path",
+          "extra_rhythm"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "producer_thread_signature",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_pip_freeform",
+        "type": "skill",
+        "target": "pipeline_android_pip_freeform",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_pip_freeform.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_view_mixed",
+        "type": "skill",
+        "target": "pipeline_android_view_mixed",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_view_mixed.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_view_multi_window",
+        "type": "skill",
+        "target": "pipeline_android_view_multi_window",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_view_multi_window.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_view_software",
+        "type": "skill",
+        "target": "pipeline_android_view_software",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_view_software.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_view_standard_blast",
+        "type": "skill",
+        "target": "pipeline_android_view_standard_blast",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_view_standard_blast.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_android_view_standard_legacy",
+        "type": "skill",
+        "target": "pipeline_android_view_standard_legacy",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/android_view_standard_legacy.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_chrome_browser_viz",
+        "type": "skill",
+        "target": "pipeline_chrome_browser_viz",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/chrome_browser_viz.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_compose_standard",
+        "type": "skill",
+        "target": "pipeline_compose_standard",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/compose_standard.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_flutter_surfaceview_impeller",
+        "type": "skill",
+        "target": "pipeline_flutter_surfaceview_impeller",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/flutter_surfaceview_impeller.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_flutter_surfaceview_skia",
+        "type": "skill",
+        "target": "pipeline_flutter_surfaceview_skia",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/flutter_surfaceview_skia.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_game_engine",
+        "type": "skill",
+        "target": "pipeline_game_engine",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/game_engine.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_imagereader_pipeline",
+        "type": "skill",
+        "target": "pipeline_imagereader_pipeline",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/imagereader_pipeline.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-pipeline_key_slices_overlay",
+        "type": "skill",
+        "target": "pipeline_key_slices_overlay",
+        "mode": "execution",
+        "source_file": "backend/skills/atomic/pipeline_key_slices_overlay.skill.yaml",
+        "parameters": {
+          "slice_names": "'Choreographer#doFrame','DrawFrame','queueBuffer','latchBuffer'"
+        },
+        "required_steps": [
+          "pipeline_key_slices_overlay"
+        ],
+        "required_sql_steps": [
+          "pipeline_key_slices_overlay"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "pipeline_key_slices_overlay",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_rn_new_arch",
+        "type": "skill",
+        "target": "pipeline_rn_new_arch",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/rn_new_arch.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_rn_old_arch",
+        "type": "skill",
+        "target": "pipeline_rn_old_arch",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/rn_old_arch.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_rn_skia",
+        "type": "skill",
+        "target": "pipeline_rn_skia",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/rn_skia.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_software_compositing",
+        "type": "skill",
+        "target": "pipeline_software_compositing",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/software_compositing.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_surface_control_api",
+        "type": "skill",
+        "target": "pipeline_surface_control_api",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/surface_control_api.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_surfaceview_blast",
+        "type": "skill",
+        "target": "pipeline_surfaceview_blast",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/surfaceview_blast.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_variable_refresh_rate",
+        "type": "skill",
+        "target": "pipeline_variable_refresh_rate",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/variable_refresh_rate.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_video_overlay_hwc",
+        "type": "skill",
+        "target": "pipeline_video_overlay_hwc",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/video_overlay_hwc.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_webview_gl_functor",
+        "type": "skill",
+        "target": "pipeline_webview_gl_functor",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/webview_gl_functor.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_webview_surface_control",
+        "type": "skill",
+        "target": "pipeline_webview_surface_control",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/webview_surface_control.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "definition-pipeline_webview_surfaceview_wrapper",
+        "type": "skill",
+        "target": "pipeline_webview_surfaceview_wrapper",
+        "mode": "definition",
+        "source_file": "backend/skills/pipelines/webview_surfaceview_wrapper.skill.yaml",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-systemui_module",
+        "type": "skill",
+        "target": "systemui_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/app/systemui_module.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "systemui_process",
+          "systemui_main_thread",
+          "systemui_frames",
+          "statusbar_activities",
+          "notification_shade",
+          "quick_settings",
+          "navigation_activities",
+          "lockscreen_activities",
+          "systemui_binder",
+          "volume_dialog"
+        ],
+        "required_sql_steps": [
+          "systemui_process",
+          "systemui_main_thread",
+          "systemui_frames",
+          "statusbar_activities",
+          "notification_shade",
+          "quick_settings",
+          "navigation_activities",
+          "lockscreen_activities",
+          "systemui_binder",
+          "volume_dialog"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "systemui_process",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-third_party_module",
+        "type": "skill",
+        "target": "third_party_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/app/third_party_module.skill.yaml",
+        "parameters": {
+          "package": "com.smartperfetto.fixture"
+        },
+        "required_steps": [
+          "thread_overview",
+          "main_thread_state",
+          "long_main_thread_slices",
+          "render_thread_analysis"
+        ],
+        "required_sql_steps": [
+          "thread_overview",
+          "main_thread_state",
+          "long_main_thread_slices",
+          "render_thread_analysis"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "thread_overview",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "execute-wms_module",
+        "type": "skill",
+        "target": "wms_module",
+        "mode": "execution",
+        "source_file": "backend/skills/modules/framework/wms_module.skill.yaml",
+        "parameters": {},
+        "required_steps": [
+          "window_animation_overview",
+          "activity_transitions",
+          "window_state_changes",
+          "slow_animations",
+          "window_draw_latency"
+        ],
+        "required_sql_steps": [
+          "window_animation_overview",
+          "activity_transitions",
+          "window_state_changes",
+          "slow_animations",
+          "window_draw_latency"
+        ],
+        "forced_sql_steps": [],
+        "isolated_sql_probes": [],
+        "expected_condition_skips": [],
+        "semantic_step": "window_animation_overview",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      },
+      {
+        "id": "strategy-pipeline",
+        "type": "strategy",
+        "target": "pipeline",
+        "query": "管线识别",
+        "expected_strategy": "pipeline",
+        "source_file": "backend/strategies/pipeline.strategy.md",
+        "required_marker": "SmartPerfetto::CASE::framework-pipelines"
+      }
+    ]
+  }
+}

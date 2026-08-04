@@ -1,0 +1,629 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2024-2026 Gracker (Chris)
+# This file is part of SmartPerfetto. See LICENSE for details.
+
+name: gpu_v57_ai_diagnostics
+version: "1.0"
+type: composite
+category: gpu
+tier: B
+
+meta:
+  display_name: "GPU v57 AI Diagnostics"
+  description: "Translate Perfetto v57 GPU Agent Skill SQL into deterministic inventory, occupancy, frequency, ramp, and throttle evidence"
+  icon: "memory"
+  tags: [gpu, occupancy, dvfs, throttle, upstream_v57, composite]
+
+triggers:
+  keywords:
+    zh: [v57 GPU, Perfetto AI GPU, GPU occupancy, GPU DVFS, GPU throttle, GPU idle]
+    en: [v57 gpu, perfetto ai gpu, gpu occupancy, gpu dvfs, gpu throttle, gpu idle]
+  patterns:
+    - ".*(v57|Perfetto AI).*[Gg][Pp][Uu].*"
+    - ".*[Gg][Pp][Uu].*(occupancy|DVFS|throttle|idle).*"
+
+prerequisites:
+  modules:
+    - counters.intervals
+    - intervals.overlap
+    - intervals.intersect
+
+inputs:
+  - name: start_ts
+    type: timestamp
+    required: false
+    description: "Start timestamp in ns"
+  - name: end_ts
+    type: timestamp
+    required: false
+    description: "End timestamp in ns"
+  - name: ugpu
+    type: integer
+    required: false
+    description: "Optional host-unique GPU id"
+  - name: target_freq_ratio
+    type: number
+    required: false
+    default: 0.9
+    description: "Target clock ratio relative to observed fmax"
+  - name: min_throttle_ns
+    type: integer
+    required: false
+    default: 1000
+    description: "Minimum sustained throttle interval in ns"
+  - name: max_rows
+    type: integer
+    required: false
+    default: 20
+    description: "Maximum rows for event-style tables"
+
+steps:
+  - id: data_check
+    type: atomic
+    name: "GPU v57 data availability"
+    display:
+      level: hidden
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM gpu) AS gpu_rows,
+        (SELECT COUNT(*) FROM gpu_slice WHERE dur > 0) AS gpu_activity_rows,
+        (SELECT COUNT(*) FROM gpu_counter_track WHERE name = 'gpufreq') AS gpufreq_tracks,
+        CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('gpu') WHERE name = 'machine_id') THEN 1 ELSE 0 END AS has_gpu_machine_id,
+        CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('gpu') WHERE name = 'architecture') THEN 1 ELSE 0 END AS has_gpu_architecture,
+        CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('gpu_counter_track') WHERE name = 'ugpu') THEN 1 ELSE 0 END AS has_gpu_counter_ugpu,
+        CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('gpu_track') WHERE name = 'dimension_arg_set_id') THEN 1 ELSE 0 END AS has_gpu_track_dimensions
+    save_as: data_check
+
+  - id: gpu_inventory
+    type: atomic
+    name: "GPU inventory"
+    optional: true
+    condition: "data_check.data[0]?.gpu_rows > 0 && data_check.data[0]?.has_gpu_machine_id === 1 && data_check.data[0]?.has_gpu_architecture === 1"
+    display:
+      level: summary
+      layer: list
+      title: "GPU Inventory"
+      columns:
+        - name: machine_id
+          label: "Machine"
+          type: number
+        - name: is_host
+          label: "Host"
+          type: boolean
+        - name: ugpu
+          label: "UGPU"
+          type: number
+        - name: gpu_index
+          label: "Index"
+          type: number
+        - name: vendor
+          label: "Vendor"
+          type: string
+        - name: name
+          label: "Name"
+          type: string
+        - name: model
+          label: "Model"
+          type: string
+        - name: architecture
+          label: "Architecture"
+          type: string
+        - name: uuid
+          label: "UUID"
+          type: string
+        - name: pci_bdf
+          label: "PCI"
+          type: string
+    sql: |
+      SELECT
+        g.machine_id,
+        CASE WHEN g.machine_id = 0 THEN 1 ELSE 0 END AS is_host,
+        g.ugpu,
+        g.gpu AS gpu_index,
+        COALESCE(g.vendor, '') AS vendor,
+        COALESCE(g.name, '') AS name,
+        COALESCE(g.model, '') AS model,
+        COALESCE(g.architecture, '') AS architecture,
+        COALESCE(CAST(g.uuid AS TEXT), '') AS uuid,
+        COALESCE(g.pci_bdf, '') AS pci_bdf
+      FROM gpu AS g
+      WHERE (${ugpu} IS NULL OR g.ugpu = ${ugpu})
+      ORDER BY g.machine_id, g.gpu
+    save_as: gpu_inventory
+
+  - id: timeline_occupancy
+    type: atomic
+    name: "GPU timeline occupancy"
+    optional: true
+    condition: "data_check.data[0]?.gpu_activity_rows > 0 && data_check.data[0]?.has_gpu_track_dimensions === 1"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU Timeline Occupancy"
+      columns:
+        - name: gpu
+          label: "GPU"
+          type: number
+        - name: gpu_name
+          label: "Name"
+          type: string
+        - name: activities
+          label: "Activities"
+          type: number
+        - name: trace_wall_ns
+          label: "Trace(ns)"
+          type: duration
+          unit: ns
+        - name: active_span_ns
+          label: "Active Span(ns)"
+          type: duration
+          unit: ns
+        - name: gpu_busy_ns
+          label: "Busy(ns)"
+          type: duration
+          unit: ns
+        - name: busy_pct_of_active
+          label: "Busy/Active"
+          type: percentage
+          format: percentage
+        - name: busy_pct_of_trace
+          label: "Busy/Trace"
+          type: percentage
+          format: percentage
+    sql: |
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_work AS
+      SELECT
+        s.ts,
+        s.dur,
+        IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) AS ugpu
+      FROM gpu_slice AS s
+      JOIN gpu_track AS t
+        ON s.track_id = t.id
+      WHERE s.dur > 0
+        AND (${start_ts} IS NULL OR s.ts >= ${start_ts})
+        AND (${end_ts} IS NULL OR s.ts < ${end_ts})
+        AND (${ugpu} IS NULL OR IFNULL(EXTRACT_ARG(t.dimension_arg_set_id, 'ugpu'), 0) = ${ugpu});
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_busy AS
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY ugpu, ts) AS id,
+        ugpu,
+        ts,
+        dur,
+        ts + dur AS te
+      FROM interval_merge_overlapping_partitioned!((
+          SELECT ts, dur, ugpu FROM __sp_v57_gpu_work
+        ), (ugpu));
+
+      SELECT
+        k.ugpu AS gpu,
+        IFNULL(g.name, 'GPU ' || k.ugpu) AS gpu_name,
+        COUNT(*) AS activities,
+        trace_end() - trace_start() AS trace_wall_ns,
+        MAX(k.ts + k.dur) - MIN(k.ts) AS active_span_ns,
+        (SELECT SUM(b.dur) FROM __sp_v57_gpu_busy AS b WHERE b.ugpu = k.ugpu) AS gpu_busy_ns,
+        ROUND(
+          100.0 * (SELECT SUM(b.dur) FROM __sp_v57_gpu_busy AS b WHERE b.ugpu = k.ugpu)
+          / NULLIF(MAX(k.ts + k.dur) - MIN(k.ts), 0),
+          1
+        ) AS busy_pct_of_active,
+        ROUND(
+          100.0 * (SELECT SUM(b.dur) FROM __sp_v57_gpu_busy AS b WHERE b.ugpu = k.ugpu)
+          / NULLIF(trace_end() - trace_start(), 0),
+          1
+        ) AS busy_pct_of_trace
+      FROM __sp_v57_gpu_work AS k
+      LEFT JOIN gpu AS g
+        ON g.ugpu = k.ugpu
+      GROUP BY k.ugpu, gpu_name
+      ORDER BY k.ugpu
+    save_as: timeline_occupancy
+
+  - id: idle_gaps
+    type: atomic
+    name: "Largest GPU idle gaps"
+    optional: true
+    condition: "timeline_occupancy.data?.length > 0"
+    display:
+      level: detail
+      layer: list
+      title: "Largest GPU Idle Gaps"
+      columns:
+        - name: gpu
+          label: "GPU"
+          type: number
+        - name: gpu_name
+          label: "Name"
+          type: string
+        - name: gap_start_rel_ns
+          label: "Start(ns)"
+          type: duration
+          unit: ns
+        - name: gap_dur_ns
+          label: "Gap(ns)"
+          type: duration
+          unit: ns
+    sql: |
+      WITH input AS (
+        SELECT MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 200) AS max_rows
+      ),
+      gaps AS (
+        SELECT
+          ugpu,
+          te AS gap_start_ts,
+          LEAD(ts) OVER (PARTITION BY ugpu ORDER BY ts) AS next_ts
+        FROM __sp_v57_gpu_busy
+      )
+      SELECT
+        gaps.ugpu AS gpu,
+        IFNULL(g.name, 'GPU ' || gaps.ugpu) AS gpu_name,
+        gaps.gap_start_ts - trace_start() AS gap_start_rel_ns,
+        gaps.next_ts - gaps.gap_start_ts AS gap_dur_ns
+      FROM gaps
+      LEFT JOIN gpu AS g
+        ON g.ugpu = gaps.ugpu
+      WHERE gaps.next_ts - gaps.gap_start_ts > 0
+      ORDER BY gap_dur_ns DESC
+      LIMIT (SELECT max_rows FROM input)
+    save_as: idle_gaps
+
+  - id: frequency_residency
+    type: atomic
+    name: "GPU frequency residency while busy"
+    optional: true
+    condition: "data_check.data[0]?.gpufreq_tracks > 0 && data_check.data[0]?.has_gpu_counter_ugpu === 1 && timeline_occupancy.data?.length > 0"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU Busy Frequency Residency"
+      columns:
+        - name: gpu
+          label: "GPU"
+          type: number
+        - name: gpu_name
+          label: "Name"
+          type: string
+        - name: active_span_ns
+          label: "Active Span(ns)"
+          type: duration
+          unit: ns
+        - name: gpu_busy_ns
+          label: "Busy(ns)"
+          type: duration
+          unit: ns
+        - name: busy_pct_of_active
+          label: "Busy/Active"
+          type: percentage
+          format: percentage
+        - name: fmax_mhz
+          label: "Observed Fmax(MHz)"
+          type: number
+        - name: mean_busy_mhz
+          label: "Mean Busy(MHz)"
+          type: number
+        - name: eff_occupancy_pct
+          label: "Effective Occupancy"
+          type: percentage
+          format: percentage
+        - name: freq_coverage_pct
+          label: "Freq Coverage"
+          type: percentage
+          format: percentage
+    sql: |
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_freq AS
+      SELECT
+        f.id,
+        f.ts,
+        f.dur,
+        f.value AS freq_khz,
+        gct.ugpu
+      FROM counter_leading_intervals!((
+          SELECT c.id, c.ts, c.track_id, c.value
+          FROM counter AS c
+          JOIN gpu_counter_track AS gct
+            ON gct.id = c.track_id
+          WHERE gct.name = 'gpufreq'
+            AND (${start_ts} IS NULL OR c.ts >= ${start_ts})
+            AND (${end_ts} IS NULL OR c.ts < ${end_ts})
+            AND (${ugpu} IS NULL OR gct.ugpu = ${ugpu})
+        )) AS f
+      JOIN gpu_counter_track AS gct
+        ON gct.id = f.track_id;
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_busy_at_freq AS
+      SELECT b.ugpu, f.freq_khz, ii.dur
+      FROM _interval_intersect!((__sp_v57_gpu_busy, __sp_v57_gpu_freq), (ugpu)) AS ii
+      JOIN __sp_v57_gpu_busy AS b
+        ON b.id = ii.id_0
+      JOIN __sp_v57_gpu_freq AS f
+        ON f.id = ii.id_1;
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_span AS
+      SELECT
+        ugpu,
+        MIN(ts) AS span_start,
+        MAX(ts + dur) AS span_end,
+        SUM(dur) AS busy_ns
+      FROM __sp_v57_gpu_busy
+      GROUP BY ugpu;
+
+      SELECT
+        s.ugpu AS gpu,
+        IFNULL(g.name, 'GPU ' || s.ugpu) AS gpu_name,
+        s.span_end - s.span_start AS active_span_ns,
+        s.busy_ns AS gpu_busy_ns,
+        ROUND(100.0 * s.busy_ns / NULLIF(s.span_end - s.span_start, 0), 1) AS busy_pct_of_active,
+        (SELECT MAX(freq_khz) FROM __sp_v57_gpu_freq WHERE ugpu = s.ugpu) / 1000 AS fmax_mhz,
+        ROUND(
+          (SELECT SUM(dur * freq_khz) FROM __sp_v57_busy_at_freq WHERE ugpu = s.ugpu) * 1.0
+          / NULLIF((SELECT SUM(dur) FROM __sp_v57_busy_at_freq WHERE ugpu = s.ugpu), 0)
+          / 1000,
+          0
+        ) AS mean_busy_mhz,
+        ROUND(
+          100.0 * (SELECT SUM(dur * freq_khz) FROM __sp_v57_busy_at_freq WHERE ugpu = s.ugpu)
+          / NULLIF((s.span_end - s.span_start) * (SELECT MAX(freq_khz) FROM __sp_v57_gpu_freq WHERE ugpu = s.ugpu), 0),
+          1
+        ) AS eff_occupancy_pct,
+        ROUND(
+          100.0 * (SELECT SUM(dur) FROM __sp_v57_busy_at_freq WHERE ugpu = s.ugpu)
+          / NULLIF(s.busy_ns, 0),
+          1
+        ) AS freq_coverage_pct
+      FROM __sp_v57_gpu_span AS s
+      LEFT JOIN gpu AS g
+        ON g.ugpu = s.ugpu
+      WHERE EXISTS (SELECT 1 FROM __sp_v57_gpu_freq WHERE ugpu = s.ugpu)
+      ORDER BY s.ugpu
+    save_as: frequency_residency
+
+  - id: dvfs_ramp_events
+    type: atomic
+    name: "GPU DVFS ramp events"
+    optional: true
+    condition: "frequency_residency.data?.length > 0"
+    display:
+      level: detail
+      layer: list
+      title: "GPU DVFS Ramp Events"
+      columns:
+        - name: gpu
+          label: "GPU"
+          type: number
+        - name: gpu_name
+          label: "Name"
+          type: string
+        - name: edge_rel_ns
+          label: "Edge(ns)"
+          type: duration
+          unit: ns
+        - name: idle_gap_ns
+          label: "Idle Gap(ns)"
+          type: duration
+          unit: ns
+        - name: freq_at_edge_mhz
+          label: "Edge Freq(MHz)"
+          type: number
+        - name: target_mhz
+          label: "Target(MHz)"
+          type: number
+        - name: ramp_ns
+          label: "Ramp(ns)"
+          type: duration
+          unit: ns
+        - name: completed
+          label: "Completed"
+          type: boolean
+    sql: |
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_params AS
+      SELECT
+        COALESCE(${target_freq_ratio|0.9}, 0.9) AS target_ratio,
+        MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 200) AS max_rows;
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_fmax AS
+      SELECT ugpu, MAX(freq_khz) AS fmax_khz
+      FROM __sp_v57_gpu_freq
+      GROUP BY ugpu;
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_edges AS
+      SELECT
+        b.ugpu,
+        b.ts AS edge_ts,
+        b.te AS busy_end,
+        b.ts - LAG(b.te) OVER (PARTITION BY b.ugpu ORDER BY b.ts) AS idle_gap_ns,
+        (
+          SELECT f.freq_khz
+          FROM __sp_v57_gpu_freq AS f
+          WHERE f.ugpu = b.ugpu
+            AND f.ts <= b.ts
+            AND f.ts + f.dur > b.ts
+        ) AS freq_at_edge_khz,
+        (SELECT fmax_khz FROM __sp_v57_gpu_fmax WHERE ugpu = b.ugpu) AS fmax_khz
+      FROM __sp_v57_gpu_busy AS b;
+
+      SELECT
+        e.ugpu AS gpu,
+        IFNULL(g.name, 'GPU ' || e.ugpu) AS gpu_name,
+        e.edge_ts - trace_start() AS edge_rel_ns,
+        e.idle_gap_ns,
+        e.freq_at_edge_khz / 1000 AS freq_at_edge_mhz,
+        CAST((SELECT target_ratio FROM __sp_v57_gpu_params) * e.fmax_khz AS INT) / 1000 AS target_mhz,
+        IFNULL(
+          (
+            SELECT MIN(f.ts)
+            FROM __sp_v57_gpu_freq AS f
+            WHERE f.ugpu = e.ugpu
+              AND f.freq_khz >= (SELECT target_ratio FROM __sp_v57_gpu_params) * e.fmax_khz
+              AND f.ts >= e.edge_ts
+              AND f.ts < e.busy_end
+          ),
+          e.busy_end
+        ) - e.edge_ts AS ramp_ns,
+        CASE
+          WHEN (
+            SELECT MIN(f.ts)
+            FROM __sp_v57_gpu_freq AS f
+            WHERE f.ugpu = e.ugpu
+              AND f.freq_khz >= (SELECT target_ratio FROM __sp_v57_gpu_params) * e.fmax_khz
+              AND f.ts >= e.edge_ts
+              AND f.ts < e.busy_end
+          ) IS NOT NULL THEN 1
+          ELSE 0
+        END AS completed
+      FROM __sp_v57_gpu_edges AS e
+      LEFT JOIN gpu AS g
+        ON g.ugpu = e.ugpu
+      WHERE e.freq_at_edge_khz < (SELECT target_ratio FROM __sp_v57_gpu_params) * e.fmax_khz
+      ORDER BY ramp_ns DESC
+      LIMIT (SELECT max_rows FROM __sp_v57_gpu_params)
+    save_as: dvfs_ramp_events
+
+  - id: sustained_throttle_events
+    type: atomic
+    name: "Sustained GPU throttle events"
+    optional: true
+    condition: "frequency_residency.data?.length > 0"
+    display:
+      level: detail
+      layer: list
+      title: "Sustained GPU Throttle Events"
+      columns:
+        - name: gpu
+          label: "GPU"
+          type: number
+        - name: gpu_name
+          label: "Name"
+          type: string
+        - name: start_rel_ns
+          label: "Start(ns)"
+          type: duration
+          unit: ns
+        - name: dur_ns
+          label: "Duration(ns)"
+          type: duration
+          unit: ns
+        - name: freq_mhz
+          label: "Freq(MHz)"
+          type: number
+        - name: target_mhz
+          label: "Target(MHz)"
+          type: number
+        - name: temp_c
+          label: "Temp(C)"
+          type: number
+        - name: power_w
+          label: "Power(W)"
+          type: number
+    sql: |
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_params AS
+      SELECT
+        COALESCE(${target_freq_ratio|0.9}, 0.9) AS target_ratio,
+        MIN(MAX(COALESCE(${min_throttle_ns|1000}, 1000), 1), 10000000000) AS min_throttle_ns,
+        MIN(MAX(COALESCE(${max_rows|20}, 20), 1), 200) AS max_rows;
+
+      CREATE OR REPLACE PERFETTO TABLE __sp_v57_gpu_low_busy AS
+      SELECT ii.ts, ii.dur, f.freq_khz, b.ugpu
+      FROM _interval_intersect!((__sp_v57_gpu_busy, __sp_v57_gpu_freq), (ugpu)) AS ii
+      JOIN __sp_v57_gpu_busy AS b
+        ON b.id = ii.id_0
+      JOIN __sp_v57_gpu_freq AS f
+        ON f.id = ii.id_1
+      WHERE f.freq_khz < (SELECT target_ratio FROM __sp_v57_gpu_params) * (SELECT fmax_khz FROM __sp_v57_gpu_fmax WHERE ugpu = b.ugpu);
+
+      SELECT
+        l.ugpu AS gpu,
+        IFNULL(g.name, 'GPU ' || l.ugpu) AS gpu_name,
+        l.ts - trace_start() AS start_rel_ns,
+        l.dur AS dur_ns,
+        l.freq_khz / 1000 AS freq_mhz,
+        CAST((SELECT target_ratio FROM __sp_v57_gpu_params) * (SELECT fmax_khz FROM __sp_v57_gpu_fmax WHERE ugpu = l.ugpu) AS INT) / 1000 AS target_mhz,
+        (
+          SELECT ROUND(AVG(c.value), 1)
+          FROM counter AS c
+          JOIN gpu_counter_track AS t
+            ON t.id = c.track_id
+          WHERE t.name = 'Temperature'
+            AND t.ugpu = l.ugpu
+            AND c.ts >= l.ts
+            AND c.ts < l.ts + l.dur
+        ) AS temp_c,
+        (
+          SELECT ROUND(AVG(c.value), 1)
+          FROM counter AS c
+          JOIN gpu_counter_track AS t
+            ON t.id = c.track_id
+          WHERE t.name = 'Power'
+            AND t.ugpu = l.ugpu
+            AND c.ts >= l.ts
+            AND c.ts < l.ts + l.dur
+        ) AS power_w
+      FROM __sp_v57_gpu_low_busy AS l
+      LEFT JOIN gpu AS g
+        ON g.ugpu = l.ugpu
+      WHERE l.dur >= (SELECT min_throttle_ns FROM __sp_v57_gpu_params)
+        AND l.ts >= (
+          SELECT MAX(e.ramp_reach_ts)
+          FROM (
+            SELECT
+              b.ugpu,
+              b.ts AS edge_ts,
+              (
+                SELECT MIN(f.ts)
+                FROM __sp_v57_gpu_freq AS f
+                WHERE f.ugpu = b.ugpu
+                  AND f.freq_khz >= (SELECT target_ratio FROM __sp_v57_gpu_params) * (SELECT fmax_khz FROM __sp_v57_gpu_fmax WHERE ugpu = b.ugpu)
+                  AND f.ts >= b.ts
+                  AND f.ts < b.te
+              ) AS ramp_reach_ts
+            FROM __sp_v57_gpu_busy AS b
+          ) AS e
+          WHERE e.ugpu = l.ugpu
+            AND e.edge_ts <= l.ts
+            AND e.ramp_reach_ts IS NOT NULL
+        )
+      ORDER BY l.dur DESC
+      LIMIT (SELECT max_rows FROM __sp_v57_gpu_params)
+    save_as: sustained_throttle_events
+
+  - id: no_data_contract
+    type: atomic
+    name: "GPU v57 no-data contract"
+    optional: true
+    condition: "data_check.data[0]?.gpu_activity_rows === 0 && data_check.data[0]?.gpufreq_tracks === 0"
+    display:
+      level: summary
+      layer: overview
+      title: "GPU v57 Data Availability"
+      columns:
+        - name: status
+          label: "Status"
+          type: string
+        - name: gpu_rows
+          label: "GPU Rows"
+          type: number
+        - name: gpu_activity_rows
+          label: "GPU Activity Rows"
+          type: number
+        - name: gpufreq_tracks
+          label: "GPU Freq Tracks"
+          type: number
+    sql: |
+      SELECT
+        'no_gpu_v57_activity_or_frequency_rows' AS status,
+        gpu_rows,
+        gpu_activity_rows,
+        gpufreq_tracks
+      FROM ${data_check}
+    save_as: no_data_contract
+
+output:
+  format: structured
+  fields:
+    - name: timeline_occupancy
+      description: "Device-busy versus idle timeline decomposition translated from upstream gpu_timeline_decomposition.sql"
+    - name: frequency_residency
+      description: "Busy-time clock residency and effective occupancy translated from upstream gpu_frequency_residency.sql"
+    - name: dvfs_ramp_events
+      description: "Idle-to-busy clock ramp latency translated from upstream gpu_dvfs_ramp.sql"
+    - name: sustained_throttle_events
+      description: "Sustained low-clock busy intervals translated from upstream gpu_sustained_throttle.sql"

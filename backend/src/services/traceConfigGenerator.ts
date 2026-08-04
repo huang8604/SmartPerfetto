@@ -5,7 +5,7 @@
 /**
  * Trace Config Generator (Spark Plan 07)
  *
- * Given an analysis `intent` (scrolling / startup / anr / memory / generic)
+ * Given an analysis `intent` (scrolling / startup / camera / anr / memory / generic)
  * the generator returns a `TraceConfigGeneratorContract` listing the
  * Perfetto data sources that should be enabled, plus the canonical custom
  * slice schema and a self-description block that should be embedded inside
@@ -28,6 +28,7 @@ import {
 export type TraceIntent =
   | 'scrolling'
   | 'startup'
+  | 'camera'
   | 'anr'
   | 'memory'
   | 'gpu'
@@ -75,6 +76,26 @@ const STARTUP_FRAGMENTS: PerfettoConfigFragment[] = [
   {dataSource: 'linux.process_stats', reason: 'process create / app launch attribution'},
 ];
 
+const CAMERA_FRAGMENTS: PerfettoConfigFragment[] = [
+  {
+    dataSource: 'linux.ftrace',
+    reason: 'camera request activity, scheduler, binder, DMA-BUF/ION allocation events, and vendor atrace slices',
+    options: {
+      sched_switch: 'true',
+      sched_blocked_reason: 'true',
+      binder_transaction: 'true',
+      dma_heap_stat: 'true',
+      ion_stat: 'true',
+      ion_heap_grow: 'true',
+      ion_heap_shrink: 'true',
+    },
+  },
+  {
+    dataSource: 'android.surfaceflinger.frametimeline',
+    reason: 'presented preview frame correlation when FrameTimeline is available',
+  },
+];
+
 const ANR_FRAGMENTS: PerfettoConfigFragment[] = [
   {dataSource: 'linux.ftrace', reason: 'sched + binder events to localize main-thread blockage', options: {sched_switch: 'true', sched_blocked_reason: 'true', binder_transaction: 'true', binder_lock: 'true'}},
   {dataSource: 'android.input.inputevent', reason: 'input dispatch timeout decoration'},
@@ -107,6 +128,8 @@ function pickFragmentsForIntent(intent: TraceIntent): PerfettoConfigFragment[] {
       return [...FOUNDATION_FRAGMENTS, ...SCROLLING_FRAGMENTS];
     case 'startup':
       return [...FOUNDATION_FRAGMENTS, ...STARTUP_FRAGMENTS];
+    case 'camera':
+      return [...FOUNDATION_FRAGMENTS, ...CAMERA_FRAGMENTS];
     case 'anr':
       return [...FOUNDATION_FRAGMENTS, ...ANR_FRAGMENTS];
     case 'memory':

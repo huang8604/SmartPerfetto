@@ -20,6 +20,7 @@ let registry: CodebaseRegistry;
 let store: RagStore;
 let ledger: CodeLookupLedger;
 let codebaseId: string;
+const scope = {tenantId: 'tenant-patch', workspaceId: 'workspace-patch', userId: 'user-patch'};
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'patch-proposer-'));
@@ -34,6 +35,7 @@ beforeEach(() => {
     rootPath: appRoot,
     rootRealpath: appRoot,
     sendToProvider: true,
+    ...scope,
   });
   codebaseId = ref.codebaseId;
   store = new RagStore(path.join(tmpDir, 'rag.json'));
@@ -48,7 +50,8 @@ beforeEach(() => {
     symbol: 'slow',
     codebaseId,
     registryOrigin: 'codebase_registry',
-  });
+    sourceGeneration: `codebase_${ref.indexGeneration}`,
+  }, scope);
   ledger = new CodeLookupLedger('session-patch', 1000, 3, path.join(tmpDir, 'ledger.jsonl'));
   ledger.record({
     turn: 1,
@@ -69,7 +72,7 @@ afterEach(async () => {
 });
 
 function proposer() {
-  return new PatchProposer(store, registry, ledger);
+  return new PatchProposer(store, registry, ledger, scope);
 }
 
 describe('PatchProposer', () => {
@@ -112,7 +115,7 @@ describe('PatchProposer', () => {
 
   it('rejects missing prior lookup and cross-codebase patches', async () => {
     const emptyLedger = new CodeLookupLedger('empty', 1000, 3, path.join(tmpDir, 'empty.jsonl'));
-    const noPrior = new PatchProposer(store, registry, emptyLedger)
+    const noPrior = new PatchProposer(store, registry, emptyLedger, scope)
       .propose({contextChunkIds: ['chunk-main'], problem: 'x'});
     expect(noPrior).toMatchObject({patchStatus: 'unverified', unsupportedReason: 'prior_lookup_required'});
     await emptyLedger.flush();
@@ -123,6 +126,7 @@ describe('PatchProposer', () => {
       rootPath: appRoot,
       rootRealpath: appRoot,
       sendToProvider: true,
+      ...scope,
     });
     store.addChunk({
       chunkId: 'chunk-other',
@@ -135,7 +139,8 @@ describe('PatchProposer', () => {
       symbol: 'other',
       codebaseId: otherRef.codebaseId,
       registryOrigin: 'codebase_registry',
-    });
+      sourceGeneration: `codebase_${otherRef.indexGeneration}`,
+    }, scope);
     ledger.record({
       turn: 1,
       ts: Date.now(),
@@ -155,6 +160,36 @@ describe('PatchProposer', () => {
     expect(cross).toMatchObject({
       patchStatus: 'unverified',
       unsupportedReason: 'multi_codebase_not_supported_phase1',
+    });
+  });
+
+  it('rejects chunks from an inactive codebase generation', () => {
+    store.addChunk({
+      chunkId: 'chunk-stale',
+      kind: 'app_source',
+      uri: `codebase://${codebaseId}/src/Main.kt`,
+      snippet: 'stale source',
+      indexedAt: Date.now(),
+      filePath: 'src/Main.kt',
+      codebaseId,
+      registryOrigin: 'codebase_registry',
+      sourceGeneration: 'codebase_stale',
+    }, scope);
+    ledger.record({
+      turn: 1,
+      ts: Date.now(),
+      toolName: 'lookup_app_source',
+      codebaseId,
+      chunkIds: ['chunk-stale'],
+      consentApplied: true,
+      tokensSpent: 1,
+      outcome: 'success',
+      legacyPath: false,
+    });
+
+    expect(proposer().propose({contextChunkIds: ['chunk-stale'], problem: 'x'})).toMatchObject({
+      patchStatus: 'unverified',
+      unsupportedReason: 'inactive_codebase_generation',
     });
   });
 

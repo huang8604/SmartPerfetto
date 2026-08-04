@@ -13,8 +13,16 @@ const SEVERITY_MAP: Record<string, Finding['severity']> = {
   INFO: 'info',
 };
 
-const SEVERITY_REGEX = /\*?\*?\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]\*?\*?\s*(.+)/g;
-const NEXT_SEVERITY_REGEX = /\*?\*?\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]\*?\*?\s*/g;
+const PREFIX_SEVERITY_REGEX = /\*{0,2}\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]\*{0,2}[^\S\r\n]*(\S[^\r\n]*)/g;
+const SUFFIX_SEVERITY_REGEX = /^([^\r\n]*?\S)[^\S\r\n]+\*{0,2}\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]\*{0,2}[^\S\r\n]*$/gm;
+
+interface SeverityMatch {
+  severityLabel: string;
+  title: string;
+  markerIndex: number;
+  sectionStart: number;
+  afterTitleStart: number;
+}
 
 /**
  * Strip fenced code blocks (``` ... ```) from text to prevent extracting
@@ -56,10 +64,51 @@ function isMarkdownTableSeparatorRow(line: string): boolean {
   return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line.trim());
 }
 
-function findNextSeverityMarkerIndex(scanText: string, startIndex: number): number | undefined {
-  NEXT_SEVERITY_REGEX.lastIndex = startIndex;
-  const next = NEXT_SEVERITY_REGEX.exec(scanText);
-  return next?.index;
+function collectSeverityMatches(scanText: string): SeverityMatch[] {
+  const matches: SeverityMatch[] = [];
+
+  PREFIX_SEVERITY_REGEX.lastIndex = 0;
+  let prefixMatch: RegExpExecArray | null;
+  while ((prefixMatch = PREFIX_SEVERITY_REGEX.exec(scanText)) !== null) {
+    const sectionStart = scanText.lastIndexOf('\n', prefixMatch.index - 1) + 1;
+    matches.push({
+      severityLabel: prefixMatch[1],
+      title: normalizeFindingTitle(prefixMatch[2]),
+      markerIndex: prefixMatch.index,
+      sectionStart,
+      afterTitleStart: prefixMatch.index + prefixMatch[0].length,
+    });
+  }
+
+  SUFFIX_SEVERITY_REGEX.lastIndex = 0;
+  let suffixMatch: RegExpExecArray | null;
+  while ((suffixMatch = SUFFIX_SEVERITY_REGEX.exec(scanText)) !== null) {
+    if (!isStructuredSuffixTitle(suffixMatch[1])) continue;
+    matches.push({
+      severityLabel: suffixMatch[2],
+      title: normalizeFindingTitle(suffixMatch[1]),
+      markerIndex: suffixMatch.index + suffixMatch[0].indexOf(`[${suffixMatch[2]}]`),
+      sectionStart: suffixMatch.index,
+      afterTitleStart: suffixMatch.index + suffixMatch[0].length,
+    });
+  }
+
+  return matches
+    .filter(match => match.title.length > 0)
+    .sort((a, b) => a.markerIndex - b.markerIndex);
+}
+
+function isStructuredSuffixTitle(title: string): boolean {
+  const trimmed = title.trim();
+  return /^(?:#{1,6}\s+|[-+]\s+|\d+[.)]\s+|\*\*\S.*\*\*)/.test(trimmed);
+}
+
+function normalizeFindingTitle(title: string): string {
+  return title
+    .replace(/\*+/g, '')
+    .trim()
+    .replace(/^(?:#{1,6}\s+|[-+]\s+|\d+[.)]\s+)/, '')
+    .trim();
 }
 
 /**
@@ -74,17 +123,15 @@ export function extractFindingsFromText(text: string): Finding[] {
   // while preserving indices so evidence can still be read from the original text.
   const scanText = maskMarkdownTableRowsForFindingScan(maskCodeBlocksForFindingScan(text));
 
-  SEVERITY_REGEX.lastIndex = 0;
-
-  let match: RegExpExecArray | null;
-  while ((match = SEVERITY_REGEX.exec(scanText)) !== null) {
-    const severity = SEVERITY_MAP[match[1]] ?? 'info';
-    const title = match[2].replace(/\*+/g, '').trim();
-    const afterTitleStart = match.index + match[0].length;
-    const sectionEnd = findNextSeverityMarkerIndex(scanText, afterTitleStart) ?? text.length;
+  const severityMatches = collectSeverityMatches(scanText);
+  for (const [index, match] of severityMatches.entries()) {
+    const severity = SEVERITY_MAP[match.severityLabel] ?? 'info';
+    const title = match.title;
+    const afterTitleStart = match.afterTitleStart;
+    const sectionEnd = severityMatches[index + 1]?.sectionStart ?? text.length;
     const afterTitle = text.substring(afterTitleStart, Math.min(sectionEnd, afterTitleStart + 1600));
     const afterTitleWithoutCode = stripCodeBlocks(afterTitle);
-    const evidence = extractEvidence(afterTitle) ?? extractInlineHeadingEvidence(title);
+    const evidence = extractEvidence(afterTitle) ?? extractInlineHeadingEvidence(title) ?? extractQuantifiedRecommendationEvidence(afterTitle);
 
     findings.push({
       id: `claude-${uuidv4().slice(0, 8)}`,
@@ -167,17 +214,20 @@ function isListMarkerFragment(text: string): boolean {
 
 function extractEvidence(text: string): string | undefined {
   const labelPrefix = String.raw`\*{0,2}`;
-  const labelSuffix = String.raw`\*{0,2}\s*[：:]`;
+  const labelDelimiter = String.raw`(?:\s*[：:]\s*\*{0,2}|\*{0,2}\s*[：:])`;
   // Try explicit "证据:" or "Evidence:" label first
   const explicit = text.match(new RegExp(
-    `(?:${labelPrefix}证据(?:类型\\s*[/／]\\s*置信度|来源|链)?${labelSuffix}|${labelPrefix}Evidence(?:\\s*(?:Type\\s*[/／]\\s*Confidence|Sources?|Chain))?${labelSuffix})\\s*(.+?)(?=\\n(?:建议|Suggestion|Recommendation|${labelPrefix}\\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\\])|$)`,
+    `(?:${labelPrefix}证据(?:类型(?:\\s*[/／]\\s*置信度)?|来源|链)?${labelDelimiter}|${labelPrefix}Evidence(?:\\s*(?:Type(?:\\s*[/／]\\s*Confidence)?|Sources?|Chain))?${labelDelimiter})\\s*(.+?)(?=\\n(?:建议|Suggestion|Recommendation|${labelPrefix}\\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\\])|$)`,
     'is',
   ));
   if (explicit) return explicit[1].trim().substring(0, 500);
 
+  const metricList = extractMetricListEvidence(text);
+  if (metricList) return metricList;
+
   // Also match "根因推理链:" format (used by strategy-compliant conclusions)
   const rootCause = text.match(new RegExp(
-    `(?:${labelPrefix}根因推理链${labelSuffix}|${labelPrefix}根因${labelSuffix}|${labelPrefix}Root\\s+Cause(?:\\s+Chain)?${labelSuffix})\\s*(.+?)(?=\\n(?:建议|结论|Suggestion|Recommendation|${labelPrefix}\\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\\])|$)`,
+    `(?:${labelPrefix}根因推理链${labelDelimiter}|${labelPrefix}根因${labelDelimiter}|${labelPrefix}Root\\s+Cause(?:\\s+Chain)?${labelDelimiter})\\s*(.+?)(?=\\n(?:建议|结论|Suggestion|Recommendation|${labelPrefix}\\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\\])|$)`,
     'is',
   ));
   if (rootCause) return rootCause[1].trim().substring(0, 500);
@@ -191,6 +241,34 @@ function extractEvidence(text: string): string | undefined {
   if (markdownTable) return markdownTable;
 
   return undefined;
+}
+
+function extractMetricListEvidence(text: string): string | undefined {
+  const lines = text.split('\n');
+  let cursor = 0;
+  while (cursor < lines.length && lines[cursor].trim().length === 0) cursor += 1;
+
+  const evidenceLines: string[] = [];
+  let hasMetricField = false;
+  let hasObservedConcreteMetric = false;
+  for (; cursor < lines.length && evidenceLines.length < 8; cursor += 1) {
+    const line = lines[cursor].trim();
+    const bullet = line.match(/^[-*+]\s+(.+)$/);
+    if (!bullet) break;
+
+    evidenceLines.push(line);
+    const field = bullet[1].match(/^\*{0,2}([^：:]{1,40})\*{0,2}\s*[：:]/);
+    if (field && /耗时|duration|VSync|帧|MainThread|RenderThread|主线程|渲染线程|CPU|Binder|GC|IO|FPS/i.test(field[1])) {
+      hasMetricField = true;
+      const hasConcreteMetric = /(?:evidence_ref_id|source_ref|\d+(?:\.\d+)?\s*(?:ms|%|GHz|MHz|帧)|vsync_missed\s*[:=]\s*\d+)/i.test(bullet[1]);
+      const isProjectedMetric = /预计|预期|期望|预估|估算|目标|收益|优化后|expected\b|estimate|estimated|target|projected|after\s+optimization/i.test(bullet[1]);
+      if (hasConcreteMetric && !isProjectedMetric) hasObservedConcreteMetric = true;
+    }
+  }
+
+  const evidence = evidenceLines.join('\n').trim();
+  if (!hasMetricField || !hasObservedConcreteMetric || !looksLikeEvidenceMetricBlock(evidence)) return undefined;
+  return evidence.substring(0, 500);
 }
 
 function extractInlineHeadingEvidence(title: string): string | undefined {
@@ -228,6 +306,31 @@ function extractMarkdownTableEvidence(text: string): string | undefined {
 
   const evidence = evidenceLines.join('\n').trim();
   if (!looksLikeEvidenceMetricBlock(evidence)) return undefined;
+  return evidence.substring(0, 500);
+}
+
+function extractQuantifiedRecommendationEvidence(text: string): string | undefined {
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  const evidenceLines: string[] = [];
+  for (const line of lines) {
+    if (/^(?:#{1,6}\s+|\*{0,2}\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\])/.test(line)) break;
+    const content = line.replace(/^[-*+]\s*/, '');
+    if (/^\*{0,2}(?:收益|影响|WHY|为什么|依据|证据|Evidence|Impact|Why)\*{0,2}\s*[：:]/i.test(content)) {
+      evidenceLines.push(content);
+      continue;
+    }
+    if (evidenceLines.length > 0 && /^[-*+]\s+/.test(line) && looksLikeEvidenceMetricBlock(content)) {
+      evidenceLines.push(content);
+    }
+    if (evidenceLines.length >= 4) break;
+  }
+
+  const evidence = evidenceLines.join('\n').trim();
+  if (!evidence || !looksLikeEvidenceMetricBlock(evidence)) return undefined;
   return evidence.substring(0, 500);
 }
 

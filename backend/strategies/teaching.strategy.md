@@ -117,7 +117,10 @@ invoke_skill('rendering_pipeline_detection', { package: <package hint> })
 - 例如："DrawFrame 正常耗时 4-8ms，当前帧耗时 35ms，超出帧预算"
 
 **3b. 源码位置（按需）：**
-注意：AOSP 源码路径可能因 Android 版本不同而变化。如果引用源码位置，标注适用的 Android 版本范围（如 'Android 12+ (API 31+)'）。核心渲染路径在 android14-release 分支为最新参考。
+注意：AOSP 源码路径可能因 Android 版本不同而变化。如果引用源码位置，标注
+适用版本。渲染教学以固定上游 S01-S14 为准：平台锚点
+`android-17.0.0_r1`，kernel 锚点 `android17-6.18-2026-06_r6`，并明确
+Android 12—17 差异。框架/engine/provider 版本必须单独记录。
 
 如果用户问到源码位置，提供 AOSP 源码路径 + 关键函数名：
 

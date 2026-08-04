@@ -28,7 +28,6 @@ meta:
 
 prerequisites:
   modules:
-    - sched
 
 inputs:
   - name: package

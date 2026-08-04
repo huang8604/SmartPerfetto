@@ -27,17 +27,25 @@ export interface CodeLookupLedgerEntry {
     'lookup_kernel_source' | 'lookup_oem_sdk' | 'lookup_blog_knowledge' |
     'propose_patch';
   codebaseId?: string;
+  knowledgeSourceId?: string;
+  sourceGeneration?: string;
   chunkIds: string[];
   consentApplied: boolean;
   tokensSpent: number;
   outcome: CodeLookupOutcome;
   legacyPath: boolean;
+  /** Non-secret authorization partition. Audit-only entries never grant capability across partitions. */
+  authorizationFingerprint?: string;
 }
 
 export interface CodeLookupSummary {
   lookupCount: number;
   patchCount: number;
   referencedCodebaseIds: string[];
+  usedKnowledgeSources?: Array<{
+    knowledgeSourceId: string;
+    sourceGenerations: string[];
+  }>;
 }
 
 function defaultLedgerPath(sessionId: string): string {
@@ -46,6 +54,7 @@ function defaultLedgerPath(sessionId: string): string {
 
 export class CodeLookupLedger {
   private readonly entries: CodeLookupLedgerEntry[] = [];
+  private readonly auditEntries: CodeLookupLedgerEntry[] = [];
   private readonly sidecarPath: string;
   private appendQueue: Promise<void> = Promise.resolve();
 
@@ -54,28 +63,52 @@ export class CodeLookupLedger {
     private readonly capTokens: number,
     private readonly capPatches: number,
     sidecarPath = defaultLedgerPath(sessionId),
+    private readonly authorizationFingerprint?: string,
   ) {
     this.sidecarPath = sidecarPath;
   }
 
-  static restore(sessionId: string, capTokens: number, capPatches: number, sidecarPath = defaultLedgerPath(sessionId)): CodeLookupLedger {
-    const ledger = new CodeLookupLedger(sessionId, capTokens, capPatches, sidecarPath);
+  static restore(
+    sessionId: string,
+    capTokens: number,
+    capPatches: number,
+    sidecarPath = defaultLedgerPath(sessionId),
+    authorizationFingerprint?: string,
+  ): CodeLookupLedger {
+    const ledger = new CodeLookupLedger(
+      sessionId,
+      capTokens,
+      capPatches,
+      sidecarPath,
+      authorizationFingerprint,
+    );
     if (!fs.existsSync(sidecarPath)) return ledger;
     const raw = fs.readFileSync(sidecarPath, 'utf-8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
-      ledger.entries.push(JSON.parse(line) as CodeLookupLedgerEntry);
+      const entry = JSON.parse(line) as CodeLookupLedgerEntry;
+      ledger.auditEntries.push(entry);
+      if (
+        authorizationFingerprint === undefined ||
+        entry.authorizationFingerprint === authorizationFingerprint
+      ) {
+        ledger.entries.push(entry);
+      }
     }
     return ledger;
   }
 
   record(entry: CodeLookupLedgerEntry): void {
-    const normalized = {
+    const normalized: CodeLookupLedgerEntry = {
       ...entry,
       ts: entry.ts || Date.now(),
       chunkIds: [...entry.chunkIds],
+      ...(this.authorizationFingerprint
+        ? {authorizationFingerprint: this.authorizationFingerprint}
+        : {}),
     };
     this.entries.push(normalized);
+    this.auditEntries.push(normalized);
     this.appendQueue = this.appendQueue.then(async () => {
       const dir = path.dirname(this.sidecarPath);
       await fs.promises.mkdir(dir, {recursive: true});
@@ -122,13 +155,24 @@ export class CodeLookupLedger {
 
   toSnapshotSummary(): CodeLookupSummary {
     const codebaseIds = new Set<string>();
-    for (const entry of this.entries) {
+    const knowledgeSources = new Map<string, Set<string>>();
+    for (const entry of this.auditEntries) {
       if (entry.codebaseId) codebaseIds.add(entry.codebaseId);
+      if (entry.outcome === 'success' && entry.knowledgeSourceId) {
+        const generations = knowledgeSources.get(entry.knowledgeSourceId) ?? new Set<string>();
+        if (entry.sourceGeneration) generations.add(entry.sourceGeneration);
+        knowledgeSources.set(entry.knowledgeSourceId, generations);
+      }
     }
+    const usedKnowledgeSources = Array.from(knowledgeSources, ([knowledgeSourceId, generations]) => ({
+      knowledgeSourceId,
+      sourceGenerations: Array.from(generations).sort(),
+    })).sort((left, right) => left.knowledgeSourceId.localeCompare(right.knowledgeSourceId));
     return {
-      lookupCount: this.entries.filter(entry => entry.toolName !== 'propose_patch').length,
-      patchCount: this.entries.filter(entry => entry.toolName === 'propose_patch').length,
+      lookupCount: this.auditEntries.filter(entry => entry.toolName !== 'propose_patch').length,
+      patchCount: this.auditEntries.filter(entry => entry.toolName === 'propose_patch').length,
       referencedCodebaseIds: Array.from(codebaseIds).sort(),
+      ...(usedKnowledgeSources.length > 0 ? {usedKnowledgeSources} : {}),
     };
   }
 
@@ -136,4 +180,3 @@ export class CodeLookupLedger {
     return this.sessionId;
   }
 }
-

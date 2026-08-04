@@ -16,6 +16,27 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
+import type { RenderingArchitectureType } from '../agent/detectors/types';
+import type {
+  PipelineCandidate,
+  RelatedRenderingTypeCandidate,
+} from '../types/teaching.types';
+
+const RENDERING_ARCHITECTURE_TYPES = new Set<RenderingArchitectureType>([
+  'STANDARD',
+  'FLUTTER',
+  'WEBVIEW',
+  'COMPOSE',
+  'SURFACEVIEW',
+  'GLSURFACEVIEW',
+  'SOFTWARE',
+  'MIXED',
+  'GAME_ENGINE',
+  'CAMERA',
+  'VIDEO_OVERLAY',
+  'REACT_NATIVE',
+  'UNKNOWN',
+]);
 
 // =============================================================================
 // Types
@@ -57,12 +78,50 @@ export interface PinInstruction {
   activeProcessNames?: string[];
 }
 
-export interface TeachingContent {
-  title: string;
-  summary: string;
-  mermaid?: string;
-  thread_roles: PipelineThreadRole[];
-  key_slices: PipelineKeySlice[];
+export interface TeachingReference {
+  source: string;
+}
+
+export interface PipelineCatalogDocument {
+  id: string;
+  file: string;
+  sha256: string;
+}
+
+export interface RenderingTypeDefinition {
+  kind: 'overview' | 'concrete';
+  document: string;
+}
+
+export interface PipelineCatalogEntry {
+  file: string;
+  family: string;
+  classification_role: 'variant' | 'feature';
+  teaching_type_id: string;
+  rendering_type_id?: string;
+  related_rendering_type_ids?: string[];
+  architecture_type: RenderingArchitectureType;
+  signal_scope: 'app' | 'global';
+  primary_eligible: boolean;
+  feature_visible: boolean;
+}
+
+export interface PipelineCatalog {
+  version: string;
+  description: string;
+  source: {
+    repository: string;
+    commit: string;
+    android_tag: string;
+    kernel_tag: string;
+  };
+  documents: PipelineCatalogDocument[];
+  rendering_types: Record<string, RenderingTypeDefinition>;
+  default: {
+    pipeline_id: string;
+    rendering_type_id: string;
+  };
+  pipelines: Record<string, PipelineCatalogEntry>;
 }
 
 export interface PipelineMeta {
@@ -115,7 +174,7 @@ export interface PipelineDefinition {
       slice_pattern?: string;
     }>;
   };
-  teaching: TeachingContent;
+  teaching: TeachingReference;
   auto_pin: {
     instructions: PinInstruction[];
   };
@@ -128,11 +187,105 @@ export interface PipelineDefinition {
 
 class PipelineSkillLoaderClass {
   private pipelineCache: Map<string, PipelineDefinition> = new Map();
+  private catalog: PipelineCatalog | null = null;
   private initialized = false;
   private pipelinesDir: string;
+  private catalogPath: string;
 
-  constructor() {
-    this.pipelinesDir = path.resolve(__dirname, '../../skills/pipelines');
+  constructor(pipelinesDir?: string) {
+    this.pipelinesDir = pipelinesDir || path.resolve(__dirname, '../../skills/pipelines');
+    this.catalogPath = path.join(this.pipelinesDir, 'index.yaml');
+  }
+
+  private validateCatalog(catalog: PipelineCatalog): void {
+    if (!catalog || !Array.isArray(catalog.documents) || catalog.documents.length !== 14) {
+      throw new Error('[PipelineSkillLoader] Catalog must define the S01-S14 document set');
+    }
+    const documentFiles = new Set(catalog.documents.map((document) => document.file));
+    if (documentFiles.size !== catalog.documents.length) {
+      throw new Error('[PipelineSkillLoader] Catalog contains duplicate documents');
+    }
+    for (let index = 0; index < 14; index += 1) {
+      const prefix = `S${String(index + 1).padStart(2, '0')}_`;
+      if (!catalog.documents[index]?.file.startsWith(prefix)) {
+        throw new Error(`[PipelineSkillLoader] Catalog document order mismatch at ${prefix}`);
+      }
+    }
+    for (const [typeId, renderingType] of Object.entries(catalog.rendering_types || {})) {
+      if (!['overview', 'concrete'].includes(renderingType.kind)) {
+        throw new Error(`[PipelineSkillLoader] Rendering type ${typeId} has invalid kind`);
+      }
+      if (!documentFiles.has(renderingType.document)) {
+        throw new Error(`[PipelineSkillLoader] Rendering type ${typeId} references missing document`);
+      }
+      if (path.basename(renderingType.document) !== renderingType.document) {
+        throw new Error(`[PipelineSkillLoader] Rendering type ${typeId} has unsafe document path`);
+      }
+    }
+
+    const pipelineFiles = new Set<string>();
+    for (const [pipelineId, entry] of Object.entries(catalog.pipelines || {})) {
+      if (!entry.file || pipelineFiles.has(entry.file) || path.basename(entry.file) !== entry.file) {
+        throw new Error(`[PipelineSkillLoader] Pipeline ${pipelineId} has invalid or duplicate file`);
+      }
+      pipelineFiles.add(entry.file);
+      const teachingType = catalog.rendering_types[entry.teaching_type_id];
+      if (!teachingType) {
+        throw new Error(`[PipelineSkillLoader] Pipeline ${pipelineId} has unknown teaching type`);
+      }
+      if (!['app', 'global'].includes(entry.signal_scope)) {
+        throw new Error(`[PipelineSkillLoader] Pipeline ${pipelineId} has invalid signal scope`);
+      }
+      if (!RENDERING_ARCHITECTURE_TYPES.has(entry.architecture_type)) {
+        throw new Error(`[PipelineSkillLoader] Pipeline ${pipelineId} has invalid architecture type`);
+      }
+      if (entry.classification_role === 'variant') {
+        if (
+          !entry.primary_eligible ||
+          entry.feature_visible ||
+          entry.rendering_type_id !== entry.teaching_type_id ||
+          teachingType.kind !== 'concrete' ||
+          entry.related_rendering_type_ids !== undefined
+        ) {
+          throw new Error(`[PipelineSkillLoader] Variant ${pipelineId} has contradictory metadata`);
+        }
+      } else if (entry.classification_role === 'feature') {
+        if (
+          entry.primary_eligible ||
+          !entry.feature_visible ||
+          entry.rendering_type_id !== undefined ||
+          !Array.isArray(entry.related_rendering_type_ids)
+        ) {
+          throw new Error(`[PipelineSkillLoader] Feature ${pipelineId} has contradictory metadata`);
+        }
+        for (const relatedTypeId of entry.related_rendering_type_ids) {
+          if (catalog.rendering_types[relatedTypeId]?.kind !== 'concrete') {
+            throw new Error(`[PipelineSkillLoader] Feature ${pipelineId} has invalid related type`);
+          }
+        }
+      } else {
+        throw new Error(`[PipelineSkillLoader] Pipeline ${pipelineId} has invalid classification role`);
+      }
+    }
+
+    const defaultEntry = catalog.pipelines[catalog.default?.pipeline_id];
+    if (
+      !defaultEntry ||
+      defaultEntry.classification_role !== 'variant' ||
+      defaultEntry.rendering_type_id !== catalog.default?.rendering_type_id
+    ) {
+      throw new Error('[PipelineSkillLoader] Catalog default is invalid');
+    }
+
+    const actualFiles = fs.readdirSync(this.pipelinesDir)
+      .filter((file) => !file.startsWith('_') && file.endsWith('.skill.yaml'));
+    const unexpected = actualFiles.filter((file) => !pipelineFiles.has(file));
+    const missing = [...pipelineFiles].filter((file) => !actualFiles.includes(file));
+    if (unexpected.length > 0 || missing.length > 0) {
+      throw new Error(
+        `[PipelineSkillLoader] Catalog/YAML inventory mismatch; missing=[${missing.join(', ')}], unexpected=[${unexpected.join(', ')}]`
+      );
+    }
   }
 
   private validateDetection(pipeline: PipelineDefinition, file: string): void {
@@ -199,28 +352,35 @@ class PipelineSkillLoaderClass {
       return;
     }
 
-    const files = fs.readdirSync(this.pipelinesDir);
+    const parsedCatalog = yaml.load(fs.readFileSync(this.catalogPath, 'utf-8')) as PipelineCatalog;
+    this.validateCatalog(parsedCatalog);
+    const loadedPipelines = new Map<string, PipelineDefinition>();
 
-    for (const file of files) {
-      // Skip non-skill files (index.yaml, _base.skill.yaml)
-      if (!file.endsWith('.skill.yaml') && !file.endsWith('.skill.yml')) continue;
-      if (file.startsWith('_')) continue;
-
+    for (const [pipelineId, entry] of Object.entries(parsedCatalog.pipelines)) {
+      const file = entry.file;
       const filePath = path.join(this.pipelinesDir, file);
       try {
         const content = fs.readFileSync(filePath, 'utf-8');
         const pipeline = yaml.load(content) as PipelineDefinition;
 
-        if (pipeline && pipeline.meta?.pipeline_id) {
-          this.validateDetection(pipeline, file);
-          this.pipelineCache.set(pipeline.meta.pipeline_id, pipeline);
-          console.log(`[PipelineSkillLoader] Loaded pipeline: ${pipeline.meta.pipeline_id} (${pipeline.meta.display_name})`);
+        if (!pipeline?.meta?.pipeline_id || pipeline.meta.pipeline_id !== pipelineId) {
+          throw new Error(`expected pipeline_id ${pipelineId}, got ${pipeline?.meta?.pipeline_id}`);
         }
+        const document = parsedCatalog.rendering_types[entry.teaching_type_id].document;
+        const expectedSource = `rendering_pipelines/${document}`;
+        if (pipeline.meta.doc_path !== expectedSource || pipeline.teaching?.source !== expectedSource) {
+          throw new Error(`teaching reference must be ${expectedSource}`);
+        }
+        this.validateDetection(pipeline, file);
+        loadedPipelines.set(pipelineId, pipeline);
+        console.log(`[PipelineSkillLoader] Loaded pipeline: ${pipelineId} (${pipeline.meta.display_name})`);
       } catch (error: any) {
-        console.error(`[PipelineSkillLoader] Failed to load ${file}:`, error.message);
+        throw new Error(`[PipelineSkillLoader] Failed to load ${file}: ${error.message}`);
       }
     }
 
+    this.pipelineCache = loadedPipelines;
+    this.catalog = parsedCatalog;
     this.initialized = true;
     console.log(`[PipelineSkillLoader] Loaded ${this.pipelineCache.size} pipeline definitions`);
   }
@@ -244,6 +404,43 @@ class PipelineSkillLoaderClass {
    */
   getAllPipelineIds(): string[] {
     return Array.from(this.pipelineCache.keys());
+  }
+
+  getCatalog(): PipelineCatalog {
+    if (!this.catalog) throw new Error('[PipelineSkillLoader] Catalog is not initialized');
+    return this.catalog;
+  }
+
+  getPipelineCatalogEntry(pipelineId: string): PipelineCatalogEntry | null {
+    return this.catalog?.pipelines[pipelineId] || null;
+  }
+
+  getRenderingType(renderingTypeId: string): RenderingTypeDefinition | null {
+    return this.catalog?.rendering_types[renderingTypeId] || null;
+  }
+
+  resolveRelatedRenderingTypes(
+    candidates: PipelineCandidate[],
+  ): RelatedRenderingTypeCandidate[] {
+    return candidates.flatMap((candidate) => {
+      const renderingType = this.getRenderingType(candidate.id);
+      return renderingType
+        ? [{
+            ...candidate,
+            docPath: `rendering_pipelines/${renderingType.document}`,
+          }]
+        : [];
+    });
+  }
+
+  getDefaultSelection(): { pipelineId: string; renderingTypeId: string; docPath: string } {
+    const catalog = this.getCatalog();
+    const renderingType = catalog.rendering_types[catalog.default.rendering_type_id];
+    return {
+      pipelineId: catalog.default.pipeline_id,
+      renderingTypeId: catalog.default.rendering_type_id,
+      docPath: `rendering_pipelines/${renderingType.document}`,
+    };
   }
 
   /**
@@ -280,7 +477,7 @@ class PipelineSkillLoaderClass {
   /**
    * Get teaching content for a pipeline
    */
-  getTeachingContent(pipelineId: string): TeachingContent | null {
+  getTeachingContent(pipelineId: string): TeachingReference | null {
     const pipeline = this.getPipeline(pipelineId);
     return pipeline?.teaching || null;
   }
@@ -321,6 +518,7 @@ class PipelineSkillLoaderClass {
    */
   async reload(): Promise<void> {
     this.pipelineCache.clear();
+    this.catalog = null;
     this.initialized = false;
     await this.loadPipelines();
   }
@@ -417,7 +615,7 @@ export async function getAutoPinInstructions(pipelineId: string): Promise<PinIns
 /**
  * Convenience function to get teaching content
  */
-export async function getTeachingContent(pipelineId: string): Promise<TeachingContent | null> {
+export async function getTeachingContent(pipelineId: string): Promise<TeachingReference | null> {
   await ensurePipelineSkillsInitialized();
   return pipelineSkillLoader.getTeachingContent(pipelineId);
 }

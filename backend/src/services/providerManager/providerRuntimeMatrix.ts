@@ -56,6 +56,12 @@ export function resolveProviderAgentRuntime(
         return 'opencode';
       }
       if (
+        provider?.connection.qoderAccessToken ||
+        provider?.connection.qoderCliPath
+      ) {
+        return 'qoder-agent-sdk';
+      }
+      if (
         provider?.connection.openaiProtocol ||
         provider?.connection.openaiBaseUrl ||
         provider?.connection.openaiApiKey
@@ -83,12 +89,13 @@ export function sharedKeyShouldUseClaudeAuthToken(type: ProviderType): boolean {
 /**
  * Bedrock cross-region inference model IDs keyed by Anthropic-style short name.
  *
- * Bedrock rejects short names like 'claude-sonnet-4-6' with HTTP 400 invalid
+ * Bedrock rejects short names like 'claude-sonnet-5' with HTTP 400 invalid
  * model identifier; it requires the cross-region format
- * (us.anthropic.<model>-<date>-v1:0). Kept in one place so the provider env
+ * (for example us.anthropic.<model>). Kept in one place so the provider env
  * builder and the connection tester agree. See GitHub issue #179.
  */
 export const BEDROCK_MODEL_MAP: Record<string, string> = {
+  'claude-sonnet-5': 'us.anthropic.claude-sonnet-5',
   'claude-opus-4-6': 'us.anthropic.claude-opus-4-5-20251101-v1:0',
   'claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   'claude-haiku-4-5': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',

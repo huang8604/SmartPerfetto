@@ -20,11 +20,42 @@ Provider Base URL notice: the prefilled Claude/Anthropic-compatible and OpenAI-c
 
 The project is open source and in active development. The UI, backend runtime, and skill system are usable today, but public APIs and internal contracts may still change.
 
+<!-- android-performance-ecosystem:start -->
+## Android performance ecosystem
+
+The [Android Performance Ecosystem](https://github.com/Gracker/android-performance-ecosystem) brings its navigation Hub and seven core projects into an optional path from instrumentation and capture to analysis, system knowledge, and reproducible cases.
+
+| Stage | Project | Purpose | Address |
+| --- | --- | --- | --- |
+| Navigate | [Android Performance Ecosystem](https://github.com/Gracker/android-performance-ecosystem) | Maintain the shared project map, handoff metadata, generated README navigation, and drift checks. | [GitHub](https://github.com/Gracker/android-performance-ecosystem) |
+| Instrument | [TraceFix](https://github.com/Gracker/TraceFix) | Inject app-side android.os.Trace sections at build time so method work is visible at runtime. | [GitHub](https://github.com/Gracker/TraceFix) |
+| Capture and measure | [Perfetto Tools](https://github.com/Gracker/perfetto-tools) | Capture repeatable Perfetto traces and collect FPS or Simpleperf measurements. | [GitHub](https://github.com/Gracker/perfetto-tools) |
+| Analyze | [SmartPerfetto](https://github.com/Gracker/SmartPerfetto) | Investigate traces with an AI-assisted Web UI, CLI, reports, sessions, comparisons, and evidence workflow. | [GitHub](https://github.com/Gracker/SmartPerfetto) |
+| Agent analysis | [Perfetto Skills](https://github.com/Gracker/Perfetto-Skills) | Give agents a portable Perfetto analysis Skill for Android, Linux, and Chromium, with selected assets synchronized through pinned workflows. | [GitHub](https://github.com/Gracker/Perfetto-Skills) |
+| Learn | [Android Performance Blog](https://github.com/Gracker/Gracker.github.io) | Teach Perfetto and Systrace analysis through articles, system explanations, and case studies. | [AndroidPerformance.com](https://www.androidperformance.com/) · [GitHub](https://github.com/Gracker/Gracker.github.io) |
+| System knowledge | Android Internal Wiki | An alpha knowledge base for Android mechanisms from App to Framework, Native, and Kernel. | **Coming soon** |
+| Reproduce | [Trace for Blog (SystraceForBlog)](https://github.com/Gracker/SystraceForBlog) | Provide the Perfetto, Systrace, and related case files used by articles for hands-on reproduction. | [GitHub](https://github.com/Gracker/SystraceForBlog) |
+<!-- android-performance-ecosystem:end -->
+
+## Choose the right Perfetto project
+
+These projects are complementary. Pick the smallest surface that matches how
+you want to work; none is a prerequisite for another.
+
+| Project | Form | Best for | Main boundary | Choose it when |
+|---|---|---|---|---|
+| [SmartPerfetto](https://github.com/Gracker/SmartPerfetto) | Full Web UI, CLI, and backend | End-to-end interactive Android investigations | Managed Skill runtime, reports, sessions, comparisons, and provider integration | You want a complete analysis product |
+| [Perfetto Skills](https://github.com/Gracker/Perfetto-Skills) | Portable standard Agent Skill | Local agents with filesystem and terminal access | Deterministic local runner, evidence contracts, and broad analysis workflows | You want trace analysis inside Codex, Claude Code, or OpenCode |
+| [Google official Perfetto Skill](https://github.com/google/perfetto/tree/main/ai/skills/perfetto) | Official upstream Agent Skill bundle | Upstream-first trace recording and analysis | Official recording, memory, GPU, and ad-hoc PerfettoSQL guidance | You want the smallest upstream-maintained starting point |
+
+See Google's [official Perfetto AI usage guide](https://perfetto.dev/docs/getting-started/using-ai)
+for the upstream Skill installation and release model.
+
 ## Configure Your AI Provider First
 
 SmartPerfetto uses exactly one active model-provider source at runtime. Pick one path and avoid mixing them during first setup:
 
-- You do not need to configure Claude Code, OpenAI Agents SDK, Pi Agent Core, and OpenCode all at once. Claude Code is the local-auth / Claude-compatible runtime path; OpenAI Agents SDK is the OpenAI / OpenAI-compatible runtime path; Pi Agent Core and OpenCode are custom-provider runtime paths. Pick one for first setup.
+- You do not need to configure Claude Code, OpenAI Agents SDK, Pi Agent Core, OpenCode, and Qoder Agent SDK all at once. Claude Code is the local-auth / Claude-compatible runtime path; OpenAI Agents SDK is the OpenAI / OpenAI-compatible runtime path; Pi Agent Core, OpenCode, and Qoder are custom-provider runtime paths. Pick one for first setup.
 - UI Provider Manager: easiest for portable packages, Docker, and new users. Start SmartPerfetto, open **AI Assistant Settings → Providers**, add a provider, paste the **Provider API Key**, verify the Base URL/runtime, save it, test it, then activate it. Saving a provider is not enough; the active provider is what takes effect.
 - Env file: best for scripted or server deployments. Local source runs read `backend/.env`; Docker reads the repository-root `.env`.
 - Local Claude Code config: best for source runs when `claude` already works in the same terminal. No SmartPerfetto `.env` is required.
@@ -41,7 +72,7 @@ Step 1: Choose your run mode and credential file.
 | Source Docker build | Provider Manager UI or repository-root `.env` | `docker-compose.yml` reads root `.env`; same credential file as the Docker Hub path |
 | Portable package | Provider Manager UI first | Use the package UI at `http://localhost:10000`; only use the package env file if you need scripted setup |
 
-Step 2: Choose the runtime and provider settings. Claude Agent SDK is for Claude Code / Anthropic-compatible providers; OpenAI Agents SDK is for OpenAI / OpenAI-compatible providers. Pi Agent Core and OpenCode are optional custom-provider runtimes that reuse the same SmartPerfetto analysis contract. For first setup, keep only one credential family enabled. In advanced deployments where multiple credential families are present, `SMARTPERFETTO_AGENT_RUNTIME` or the active UI provider decides; otherwise the default is Claude Agent SDK.
+Step 2: Choose the runtime and provider settings. Claude Agent SDK is for Claude Code / Anthropic-compatible providers; OpenAI Agents SDK is for OpenAI / OpenAI-compatible providers. Pi Agent Core, OpenCode, and Qoder Agent SDK are optional custom-provider runtimes that reuse the same SmartPerfetto analysis contract. Qoder is opt-in for source/npm installs because its SDK and CLI have separate terms and are not installed by default. For first setup, keep only one credential family enabled. In advanced deployments where multiple credential families are present, `SMARTPERFETTO_AGENT_RUNTIME` or the active UI provider decides; otherwise the default is Claude Agent SDK.
 
 For direct Anthropic API access, set:
 
@@ -58,15 +89,17 @@ CLAUDE_MODEL=deepseek-v4-pro
 CLAUDE_LIGHT_MODEL=deepseek-v4-flash
 ```
 
-OpenAI / OpenAI-compatible providers use the OpenAI Agents SDK runtime; Ollama and other OpenAI-compatible endpoints use `OPENAI_AGENTS_PROTOCOL=chat_completions`. In Provider Manager, dual-surface providers such as DeepSeek, Qwen, Kimi, MiMo, and TokenHub show both Claude-compatible and OpenAI-compatible Base URLs. The selected SDK runtime decides which side is used. Pi Agent Core and OpenCode are exposed only through custom providers or explicit env configuration; neither path reads local `.pi` / OpenCode project config or CLI login state. Full provider-specific fields, known regional URL variants, model IDs, and troubleshooting notes are in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) and the env templates.
+OpenAI / OpenAI-compatible providers use the OpenAI Agents SDK runtime; Ollama and other OpenAI-compatible endpoints use `OPENAI_AGENTS_PROTOCOL=chat_completions`. In Provider Manager, dual-surface providers such as DeepSeek, Qwen, Kimi, MiMo, and TokenHub show both Claude-compatible and OpenAI-compatible Base URLs. The selected SDK runtime decides which side is used. Pi Agent Core, OpenCode, and Qoder are exposed only through custom providers or explicit env configuration. Pi/OpenCode do not read personal project/CLI state; Qoder can use local `qodercli` auth only after its optional SDK is explicitly installed. Full provider-specific fields, known regional URL variants, model IDs, and troubleshooting notes are in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md) and the env templates.
 
-Step 3 (optional): Set the output language. SmartPerfetto defaults to Simplified Chinese for AI answers, streamed progress, and generated reports. Set this if the primary users prefer English:
+Step 3 (optional): Set the output language. Web UI users can choose **AI Assistant Settings → Connection → Interface and analysis language** and select **Auto (browser language)**, **简体中文**, or **English**. The saved preference applies to the interface, built-in Skill presentation, streamed analysis, and new reports. Changing it retires the current backend agent session so one session does not mix languages.
+
+`SMARTPERFETTO_OUTPUT_LANGUAGE` remains the backend default for CLI use, server-side calls, and clients that do not send an explicit language. An explicit Web preference is request context and takes precedence. SmartPerfetto defaults to Simplified Chinese when no preference or override is provided:
 
 ```env
 SMARTPERFETTO_OUTPUT_LANGUAGE=en
 ```
 
-Step 4: Start or restart services. For Docker, run `docker compose -f docker-compose.hub.yml up -d` or `docker compose -f docker-compose.hub.yml restart`. For local source runs, use `./start.sh`; if you only changed `.env` while the backend is already running, use `./scripts/restart-backend.sh`. Verify the active source with [http://localhost:3000/health](http://localhost:3000/health): `aiEngine.credentialSource=provider-manager` means the UI provider overrides env, while `env-or-default` means SmartPerfetto is using `.env` or local Claude Code fallback. For the local Claude Code path, verify by running a normal `claude` request in the same terminal.
+Step 4: Start or restart services. For Docker, run `docker compose -f docker-compose.hub.yml up -d` or `docker compose -f docker-compose.hub.yml restart`. For local source runs, use `./start.sh`; if you only changed `.env` while the backend is already running, use `./scripts/restart-backend.sh`. Use authenticated `GET /api/runtime-health` (or the Provider settings status) to verify the active source: `aiEngine.credentialSource=provider-manager` means the UI provider overrides env, while `env-or-default` means SmartPerfetto is using `.env` or local Claude Code fallback. Public `GET /health` is liveness-only. For the local Claude Code path, also verify by running a normal `claude` request in the same terminal.
 
 ## Perfetto Resources
 
@@ -81,13 +114,26 @@ Step 4: Start or restart services. For Docker, run `docker compose -f docker-com
 - Keeps Perfetto's timeline and SQL power, then adds an AI assistant panel inside the Perfetto UI.
 - Reconstructs mixed-action traces in Smart mode before deep analysis, so users can inspect the scene timeline and choose all scenes or only startup, scrolling, click, navigation, device-state, or ANR ranges.
 - Compares completed analysis results across multiple traces, windows, or workspace users without requiring both Perfetto UI windows to stay open.
+- Ships a signed Android Internals Knowledge Pack for bounded background retrieval, while keeping private source/knowledge access explicitly authorized and separate from trace evidence.
+- Supports deterministic multi-trace Skill batches and side-effect-free Android capture proposals before explicit device recording.
+- Provides an off-by-default Self-Evolution control plane that turns effective
+  public feedback into gated, human-approved, reversible overlays without
+  automatic commits, pushes, or external judge calls.
+- Helps users turn evidence gaps and runtime/Skill failures into reviewable
+  GitHub drafts: a source-run-pinned Agent explains whether to report, what to
+  contribute, and what evidence is missing; the user still reviews and submits.
 - Uses a TypeScript backend to run agent workflows, query `trace_processor_shell`, invoke YAML analysis skills, and stream results to the browser.
-- Supports Anthropic directly, Claude/Anthropic-compatible providers, OpenAI/OpenAI-compatible providers, Pi Agent Core custom models, and OpenCode custom models through the matching backend runtime.
+- Supports Anthropic directly, Claude/Anthropic-compatible providers, OpenAI/OpenAI-compatible providers, Pi Agent Core custom models, OpenCode custom models, and opt-in Qoder Agent SDK profiles through the matching backend runtime.
 - Ships with registry-discovered YAML skill/config files and scene strategies for Android performance investigation.
 
 ## Feature Overview
 
-- [Feature Overview](docs/getting-started/features.en.md): AI Assistant workflows, Smart scene inventory and selected deep dives, performance scenarios, selection-aware analysis, reports, live trace comparison, multi-trace result comparison, code-aware local-source analysis, provider management, API/CLI automation, and runtime options.
+- [Feature Overview](docs/getting-started/features.en.md): AI Assistant workflows, Smart scene inventory and selected deep dives, performance scenarios, selection-aware analysis, reports, raw/result comparison, Android Internals knowledge, code-aware local-source analysis, provider management, controlled Self-Evolution, batch/capture automation, and runtime options.
+- [Self-Evolution Usage And Acceptance](docs/getting-started/self-evolution.en.md):
+  default-off behavior, permissions, persistence, apply/revert, reconciliation,
+  and user/maintainer tests.
+- [Agent-Assisted GitHub Feedback](docs/getting-started/agent-assisted-feedback.en.md):
+  reportability triage, contribution guidance, privacy boundaries, and tests.
 
 ## Tech Stack
 
@@ -95,7 +141,7 @@ Step 4: Start or restart services. For Docker, run `docker compose -f docker-com
 |------|------------|
 | Frontend | Forked Perfetto UI with the `com.smartperfetto.AIAssistant` plugin |
 | Backend | Node.js 24 LTS, TypeScript strict mode, Express |
-| Agent runtime | Runtime selector, Claude Agent SDK, OpenAI Agents SDK, Pi Agent Core, OpenCode, MCP tools, scene strategies, verifier, SSE streaming |
+| Agent runtime | Runtime selector, Claude Agent SDK, OpenAI Agents SDK, Pi Agent Core, OpenCode, Qoder Agent SDK, MCP tools, scene strategies, verifier, SSE streaming |
 | Trace engine | Perfetto `trace_processor_shell` over HTTP RPC |
 | Analysis logic | YAML skills under `backend/skills/` plus Markdown strategies under `backend/strategies/` |
 | Storage | Local uploads, session logs, reports, and runtime learning files |
@@ -106,10 +152,10 @@ Step 4: Start or restart services. For Docker, run `docker compose -f docker-com
 
 | Channel | Install / run | Node requirement | Includes |
 |---------|---------------|------------------|----------|
-| Docker Hub | `docker compose -f docker-compose.hub.yml up -d` | No host Node.js required | Backend, committed pre-built UI, pinned `trace_processor_shell` |
-| GitHub portable | Download `smartperfetto-v<version>-*.zip` / `.tar.gz` | Bundled Node.js 24 | Launcher, backend, pre-built UI, native dependencies, pinned `trace_processor_shell` |
-| npm CLI | `npm install -g @gracker/smartperfetto` | Host Node.js `>=24 <25` | `smp` / `smartperfetto` CLI, Skills, Strategies, SQL, trace-processor prebuilts |
-| Source checkout | `./start.sh` | Host Node.js 24 LTS | Backend source, committed pre-built UI, optional `perfetto/` submodule for UI work |
+| Docker Hub | `docker compose -f docker-compose.hub.yml up -d` | No host Node.js required | Backend, committed pre-built UI, pinned `trace_processor_shell`, signed Knowledge Pack |
+| GitHub portable | Download `smartperfetto-v<version>-*.zip` / `.tar.gz` | Bundled Node.js 24 | Launcher, backend, pre-built UI, native dependencies, pinned `trace_processor_shell`, signed Knowledge Pack |
+| npm CLI | `npm install -g @gracker/smartperfetto` | Host Node.js `>=24 <25` | `smp` / `smartperfetto` CLI, Skills, Strategies, SQL, trace-processor prebuilts, signed Knowledge Pack |
+| Source checkout | `./start.sh` | Host Node.js 24 LTS | Backend source, committed pre-built UI, signed Knowledge Pack, optional `perfetto/` submodule for UI work |
 
 Maintainer release rules are in [Release Runbook](docs/reference/release.en.md)
 and [`.claude/rules/release.md`](.claude/rules/release.md). Feature and bug
@@ -119,17 +165,44 @@ pre-built content, and Node boundaries stay aligned.
 
 ## For Users
 
+### Application Updates
+
+SmartPerfetto checks public release metadata in the background and only
+notifies you when a newer build is available. It never replaces the running
+application, edits a source checkout, or restarts a container without an
+explicit user action. The AI Assistant banner and **Settings → Application
+Update** show the detected distribution, release channel, last check, and the
+matching upgrade command or portable download. Use **Check now** for an
+explicit refresh.
+
+The npm CLI provides the same status with
+`smp update check [--format text|json]`. Interactive text commands may print a
+rate-limited reminder to stderr after they finish; CI, redirected output,
+machine-readable commands, help, and version output stay unchanged. Set
+`SMARTPERFETTO_UPDATE_CHECK=off` to disable all application update checks.
+
+Upgrade instructions remain distribution-specific:
+
+- npm CLI: run the displayed `npm install -g` command.
+- Docker stable: pin the displayed immutable SemVer tag, then pull and recreate
+  the service.
+- Docker nightly: explicitly use the mutable `nightly` tag.
+- Portable: download the matching target asset and verify the displayed SHA256
+  when GitHub exposes one.
+- Source checkout: inspect the linked commit or release, then update with your
+  normal Git workflow.
+
 ### Docker (Recommended)
 
-Use this path if you only want to run SmartPerfetto. You need Docker Desktop/Engine; configure the AI provider in the UI Provider Manager after startup, or use the repository-root `.env` when you need scripted deployment. You do not need Node.js, a C++ toolchain, or the `perfetto/` submodule. The Docker Hub image is published nightly from `main` and includes the backend, the pre-built Perfetto UI, and the pinned `trace_processor_shell`, so it also avoids first-run access to Google's artifact bucket on the host.
+Use this path if you only want to run SmartPerfetto. You need Docker Desktop/Engine; configure the AI provider in the UI Provider Manager after startup, or use the repository-root `.env` when you need scripted deployment. You do not need Node.js, a C++ toolchain, or the `perfetto/` submodule. Stable releases publish immutable SemVer tags plus `latest`; development builds publish the opt-in `nightly` tag from `main`. The image includes the backend, the pre-built Perfetto UI, and the pinned `trace_processor_shell`, so it also avoids first-run access to Google's artifact bucket on the host.
 
 Both the Docker Hub image and source Docker builds serve the committed pre-built UI from `frontend/`; Docker users never build the Perfetto submodule frontend locally.
 
 The container starts without a local `.env` file for health/UI smoke checks. Real AI analysis needs one explicit provider source: either a UI Provider Manager profile, or one env provider block such as `ANTHROPIC_API_KEY` for Anthropic direct, `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` for a Claude-compatible provider, `SMARTPERFETTO_AGENT_RUNTIME=openai-agents-sdk` plus `OPENAI_*` fields for an OpenAI-compatible provider, or a custom Pi Agent Core / OpenCode block.
 
-Provider profiles created in the UI are stored in the `provider-data` Docker volume. They survive container restarts and normal `docker compose down`; they are removed by `docker compose down -v`.
+Provider profiles created in the UI are stored in the `provider-data` Docker volume. Application update metadata and other backend runtime state use the separate `runtime-data` volume. They survive container restarts and normal `docker compose down`; they are removed by `docker compose down -v`.
 
-An active Provider Manager profile has priority over Docker `.env` credentials. The container startup log and [http://localhost:3000/health](http://localhost:3000/health) show whether the current credential source is `provider-manager` or `env-or-default`. To force Docker `.env` fallback, deactivate the active provider in AI Assistant settings.
+An active Provider Manager profile has priority over Docker `.env` credentials. The container startup log and authenticated `GET /api/runtime-health` show whether the current credential source is `provider-manager` or `env-or-default`. To force Docker `.env` fallback, deactivate the active provider in AI Assistant settings.
 
 Windows users should use Docker Desktop with the WSL2 backend. The published image is a Linux container image and runs through Docker Desktop; no separate Windows build is required.
 
@@ -140,6 +213,10 @@ Step 2 (optional): Create the Docker env file. Run `cp .env.example .env`, edit 
 Step 3: Pull the Docker Hub image. Run `docker compose -f docker-compose.hub.yml pull`.
 
 Step 4: Start the container. Run `docker compose -f docker-compose.hub.yml up -d`.
+
+The default is the stable `latest` tag. Pin a stable release with
+`SMARTPERFETTO_DOCKER_TAG=<version>` or explicitly opt into development builds
+with `SMARTPERFETTO_DOCKER_TAG=nightly` on both `pull` and `up` commands.
 
 Step 5: Open the service URLs.
 
@@ -155,19 +232,68 @@ Stop the container with `docker compose -f docker-compose.hub.yml down`.
 
 Uploads, logs, and Provider Manager profiles are stored in Docker volumes, so they survive container restarts.
 
+Shared deployments can enable the built-in OIDC gate. Unauthenticated users
+then see only the login page and the Perfetto application is not loaded. The
+backend binds each OIDC user to an isolated personal workspace, while AI
+settings no longer expose workspace, backend URL, or API-key controls. See
+[Configuration](docs/getting-started/configuration.en.md#oidc-browser-login)
+for the environment contract and plaintext-HTTP test restriction.
+
 If analysis fails with `Claude Code native binary not found at .../claude-agent-sdk-linux-x64-musl/claude` (or the glibc variant), this is the SDK's per-platform native binary auto-selection misfiring inside the container — it is unrelated to your AI provider configuration. The backend will normally auto-fall-back to an installed sibling variant; if it still mispicks, set `CLAUDE_BINARY_PATH` in `.env` to the actual installed binary. See `.env.example` for details.
 
 ### Portable Packages
 
-Users who do not want Docker can use maintainer-built portable packages for Windows, macOS, and Linux. Each package includes the Node.js 24 runtime, target-native `node_modules`, the pre-built Perfetto UI, backend runtime files, and the pinned `trace_processor_shell`.
+Users who do not want Docker can use maintainer-built portable packages for Windows, macOS, and Linux. Each package includes the Node.js 24 runtime, target-native `node_modules`, the pre-built Perfetto UI, backend runtime files, the pinned `trace_processor_shell`, and the signed Android Internals Knowledge Pack.
 
 Assets:
 
-- `smartperfetto-v<version>-windows-x64.zip`: extract and double-click `SmartPerfetto.exe`.
-- `smartperfetto-v<version>-macos-arm64.zip`: extract and double-click `SmartPerfetto.app`.
-- `smartperfetto-v<version>-linux-x64.tar.gz`: extract and run `./SmartPerfetto`.
+- `smartperfetto-v<version>-windows-x64.zip`: requires Windows 10 / Windows
+  Server 2016 or newer on x64; extract and double-click `SmartPerfetto.exe`.
+- `smartperfetto-v<version>-macos-arm64.zip`: requires macOS 13.5 or newer on
+  Apple silicon; extract and double-click `SmartPerfetto.app`.
+- `smartperfetto-v<version>-linux-x64.tar.gz`: requires an x64 distribution
+  with glibc 2.34 or newer; musl-based distributions such as Alpine Linux are
+  not supported by this archive. Extract and run `./SmartPerfetto`.
 
-All launchers start the backend and pre-built Perfetto UI, then open [http://localhost:10000](http://localhost:10000). Override ports with `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT`. AI analysis needs a Provider profile configured in the UI, or env credentials in the package's user data env file.
+All launchers start the backend and pre-built Perfetto UI, then open [http://127.0.0.1:10000](http://127.0.0.1:10000). Override ports with `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT`. AI analysis needs a Provider profile configured in the UI, or env credentials in the package's user data env file.
+
+Windows stores durable data under `%LOCALAPPDATA%\SmartPerfetto`. On first
+launch, a new package safely copies an eligible older package-local `data/`
+directory and leaves the old package untouched. Use
+`SmartPerfetto.exe --migrate-from <old-package-or-data-directory>` when
+automatic discovery cannot identify the source. Set
+`SMARTPERFETTO_PORTABLE_MODE=1` only when you intentionally want data beside
+the executable.
+
+#### Troubleshooting macOS startup
+
+`backend did not become ready` means the backend did not pass readiness; it
+does not by itself prove a port conflict. The launcher first probes the bundled
+Node.js runtime and surfaces the original operating-system error when that
+runtime cannot execute. If the backend or frontend exits before readiness, or
+the readiness check times out, the error includes the absolute service log
+path. The default macOS backend log is
+`~/Library/Logs/SmartPerfetto/backend.log`.
+
+Run these commands from the directory containing `SmartPerfetto.app`:
+
+```bash
+uname -m
+sw_vers -productVersion
+"$PWD/SmartPerfetto.app/Contents/Resources/runtime/node/bin/node" --version
+tail -n 200 "$HOME/Library/Logs/SmartPerfetto/backend.log"
+codesign --verify --deep --strict --verbose=2 SmartPerfetto.app
+spctl --assess --type execute -vv SmartPerfetto.app
+```
+
+A public macOS asset must pass both signature and Gatekeeper verification with
+its extracted contents unchanged. Do not hide a defective public asset by
+removing quarantine or ad-hoc re-signing it. Re-download the asset matching
+Apple silicon and the supported OS version, verify the SHA256 published by
+GitHub, and include the OS version, architecture, bundled Node.js probe output,
+and `backend.log` when reporting a failure. Temporary bypasses are only
+appropriate for trusted local development binaries and are not public-release
+evidence.
 
 Maintainer build command:
 
@@ -184,9 +310,12 @@ git add package.json package-lock.json backend/package.json backend/package-lock
 git commit -m "chore: release v<version>"
 git push origin main
 npm --prefix backend run cli:pack-check
-npm --prefix backend publish --access public
+cd backend
+npm publish --access public
+cd ..
 npm run package:portable
-npm run release:portable -- <version> --skip-build --no-draft
+npm run release:portable -- <version> --skip-build --no-draft \
+  --smoke-evidence-dir dist/portable/smoke-evidence
 ```
 
 Cross-platform assets are written to `dist/portable/`; the Windows-compatible command still writes to `dist/windows-exe/`. See [Release Runbook](docs/reference/release.en.md) and [Portable Packaging](docs/reference/portable-packaging.en.md) for npm smoke tests, GitHub release verification, and signing notes.
@@ -201,7 +330,7 @@ On macOS, if `trace_processor_shell` fails the `--version` smoke test, macOS say
 
 Step 1: Download the source. Run `git clone https://github.com/Gracker/SmartPerfetto.git`, then run `cd SmartPerfetto`.
 
-Step 2: Choose the model credential source. If Claude Code already works in the same terminal, run `claude` to verify it and do not create `.env`. If you want an explicit API key or compatible proxy, run `cp backend/.env.example backend/.env`, then edit `backend/.env`: uncomment `ANTHROPIC_API_KEY` for direct Anthropic, uncomment one Claude Code / Anthropic-compatible provider block for compatible providers, use the OpenAI Agents SDK fields for OpenAI / OpenAI-compatible providers, or use the custom Pi Agent Core / OpenCode sections.
+Step 2: Choose the model credential source. If Claude Code already works in the same terminal, run `claude` to verify it and do not create `.env`. If you want an explicit API key or compatible proxy, run `cp backend/.env.example backend/.env`, then edit `backend/.env`: uncomment `ANTHROPIC_API_KEY` for direct Anthropic, uncomment one Claude Code / Anthropic-compatible provider block for compatible providers, use the OpenAI Agents SDK fields for OpenAI / OpenAI-compatible providers, or use the custom Pi Agent Core / OpenCode sections. For Qoder, first review its terms, explicitly install `@qoder-ai/qoder-agent-sdk`, then use the Qoder block with a local `qodercli` login or PAT.
 
 Step 3: Start services. Run `./start.sh`. This script starts both the backend at `http://localhost:3000` and the repository's pre-built Perfetto UI at `http://localhost:10000`; regular use does not require initializing the `perfetto/` submodule or compiling Perfetto UI from source. Use `SMARTPERFETTO_BACKEND_PORT` and `SMARTPERFETTO_FRONTEND_PORT` when those defaults conflict with other local services.
 
@@ -232,19 +361,26 @@ After verifying your changes in the browser, Step 1: run `./scripts/update-front
 
 ## Runtime Settings
 
-The quick setup above covers where credentials live. Detailed provider setup, model IDs, regional Base URL variants, OpenAI-compatible runtime fields, Anthropic-compatible presets, Pi Agent Core/OpenCode custom runtime fields, proxy guidance, and troubleshooting live in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md). Use `GET /health` to confirm `aiEngine.runtime`, `aiEngine.credentialSource`, `aiEngine.providerMode`, and `aiEngine.diagnostics` after changing provider settings.
+The quick setup above covers where credentials live. Detailed provider setup, model IDs, regional Base URL variants, OpenAI-compatible runtime fields, Anthropic-compatible presets, Pi Agent Core/OpenCode/Qoder custom runtime fields, proxy guidance, and troubleshooting live in [docs/getting-started/configuration.en.md](docs/getting-started/configuration.en.md). Use authenticated `GET /api/runtime-health` to confirm `aiEngine.runtime`, `aiEngine.credentialSource`, `aiEngine.providerMode`, and `aiEngine.diagnostics` after changing provider settings.
 
-Claude Code local auth/config is only available to local source runs, not Docker. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. Even the `opencode` runtime uses explicit Provider Manager/env model configuration and an isolated server/project boundary. The frontend settings dialog's `Connection` tab stores the backend URL and an optional advanced `SMARTPERFETTO_API_KEY` access token only when the backend is protected; the `Providers` tab can write model-provider profiles to the backend Provider Manager.
+Claude Code local auth/config is only available to local source runs, not Docker. Separate tools such as Codex CLI, Gemini CLI, and OpenCode manage their own configuration files and login state; SmartPerfetto does not automatically read those credentials. Even the `opencode` runtime uses explicit Provider Manager/env model configuration and an isolated server/project boundary. Qoder is the explicit exception: after its optional SDK is installed, the `qoder-agent-sdk` runtime can use a local `qodercli` login or an explicit PAT. The frontend settings dialog's `Connection` tab stores the backend URL and an optional advanced `SMARTPERFETTO_API_KEY` access token only when the backend is protected; the `Providers` tab can write model-provider profiles to the backend Provider Manager.
 
 ### Output Language
 
-User-facing output defaults to Simplified Chinese. To make AI answers, streamed progress text, and generated Agent-Driven reports English, set:
+In the Web UI, choose **AI Assistant Settings → Connection → Interface and analysis language**:
+
+- **Auto** follows the browser language.
+- **简体中文** and **English** are explicit, persisted choices.
+- The selected language covers frontend-owned text, built-in Skill presentation, AI answers, streamed progress, teaching, critical-path results, and generated reports.
+- Changing the language retires the current backend agent session before the next analysis.
+
+The browser sends the canonical value `zh-CN` or `en`. For CLI, server defaults, and clients without an explicit language, set:
 
 ```bash
 SMARTPERFETTO_OUTPUT_LANGUAGE=en
 ```
 
-Accepted values include `zh-CN` and `en`. Restart the backend after changing `.env`.
+Accepted values are `zh-CN` and `en`. An explicit request or saved Web choice takes precedence over this environment default. Restart the backend after changing `.env`.
 
 ### Turn Budgets
 
@@ -295,6 +431,8 @@ smp report <sessionId> --open
 
 # Record an Android trace from a connected device, then analyze it.
 smp capture presets
+smp capture suggest "Analyze Camera open-to-first-preview latency" --app com.example.camera
+smp capture config --preset camera --app com.example.camera --duration 20
 smp capture android --preset startup --app com.example.app --duration 10 --out launch.perfetto-trace
 smp capture android --preset cpu --app '*' --duration 30 --categories dalvikviktime my_custom_tag --out cpu-custom.perfetto-trace
 smp capture android --preset power --app com.example.app --duration 60 --out power.perfetto-trace
@@ -303,6 +441,14 @@ smp capture android --config ~/tools/perfetto_shell/perfetto.config --out ~/tool
 # Or run the interactive SmartPerfetto REPL.
 smp repl
 ```
+
+The `camera` preset collects Camera/HAL/vendor atrace candidates, Binder and
+scheduler context, FrameTimeline, and DMA-BUF or legacy ION ftrace events. The
+atrace candidates and memory ftrace events are optional; availability depends
+on the Android release, device/vendor implementation, and kernel support. A
+trace may still lack portable Camera open, request/result, buffer, or preview
+presentation anchors; SmartPerfetto reports that evidence gap instead of
+fabricating an open-to-first-frame number.
 
 The npm CLI package is the supported standalone terminal product. It does not start or bundle the Web UI launcher; use Docker or a GitHub portable package when you need the browser experience. The first analysis uses the bundled pinned `trace_processor_shell` binary when available, and can download the pinned binary automatically on unsupported targets. Android capture itself never downloads tools at runtime: `adb` is resolved from `ADB_PATH`, an approved bundled slot, then `PATH`; pre-Android Q or `--sideload` tracebox capture requires an approved bundled `tracebox` or `--tracebox /path/to/tracebox`. If your network cannot reach Google's artifact bucket, set `TRACE_PROCESSOR_PATH=/path/to/trace_processor_shell` to use a local binary, or set `TRACE_PROCESSOR_DOWNLOAD_BASE` / `TRACE_PROCESSOR_DOWNLOAD_URL` to a trusted mirror; downloaded binaries are still checked against the pinned SHA256. `smartperfetto` remains available as the long command name; source checkout scripts are only for maintainers debugging the CLI. See [CLI Reference](docs/reference/cli.en.md) for all commands, capture presets, REPL slash commands, storage layout, and resume behavior.
 
@@ -320,7 +466,11 @@ The browser UI talks to the backend through REST and SSE. If you want to build y
 | `POST` | `/api/agent/v1/scene-reconstruct` | Start scene reconstruction |
 | `GET` | `/api/agent/v1/:sessionId/report` | Fetch the generated report |
 
-Leave `SMARTPERFETTO_API_KEY` unset for local single-user runs. Set it in `backend/.env` only if you expose the backend beyond your local machine. Protected APIs then require `Authorization: Bearer <token>`.
+Leave `SMARTPERFETTO_API_KEY` unset for local single-user runs. Set it in `backend/.env` only if you expose the backend beyond your local machine. Protected APIs then require `Authorization: Bearer <token>`. This static key is the deployment-operator credential with local administration authority; do not distribute it to ordinary users.
+
+Enterprise browser SSO uses OIDC Authorization Code + PKCE as a deployment-level gate. The backend derives a stable tenant from the issuer and creates one isolated personal workspace per OIDC subject; users do not choose a backend, API key, or workspace in AI Assistant settings. Browser sessions use an HttpOnly cookie and write requests require the session CSRF token. When OIDC is not configured, the login gate stays disabled and ordinary users keep the original local/static Perfetto startup path. See [Configuration](docs/getting-started/configuration.en.md#oidc-browser-login) and the [API Reference](docs/reference/api.en.md#oidc-authentication).
+
+OIDC deployments require a separate 32-byte-or-longer `SMARTPERFETTO_SERVER_SECRET`. SmartPerfetto derives purpose-specific keys from it for browser sessions and internal capabilities. `SMARTPERFETTO_TP_PROXY_CAPABILITY_SECRET` remains an optional trace-processor-only rotation override.
 
 ## Architecture
 
@@ -329,7 +479,7 @@ Frontend (Perfetto UI @ :10000)
   └─ SmartPerfetto AI Assistant plugin
        └─ SSE / HTTP
 Backend (Express @ :3000)
-  ├─ Runtime selector: Claude Agent SDK, OpenAI Agents SDK, Pi Agent Core, or OpenCode
+  ├─ Runtime selector: Claude Agent SDK, OpenAI Agents SDK, Pi Agent Core, OpenCode, or Qoder
   ├─ Agent orchestration: scene routing, prompts, MCP tools, verifier
   ├─ Shared comparison evidence/report contracts for Web UI and CLI
   ├─ Skill engine: YAML analysis pipelines
@@ -342,7 +492,7 @@ Repository layout:
 ```text
 SmartPerfetto/
 ├── backend/
-│   ├── src/agentRuntime/   # SDK/server runtime selection, registry, Pi/OpenCode adapters
+│   ├── src/agentRuntime/   # SDK/server runtime selection and runtime adapters
 │   ├── src/agentv3/        # Claude Agent SDK orchestration
 │   ├── src/agentOpenAI/    # OpenAI Agents SDK orchestration
 │   ├── src/services/       # Trace processor, skills, reports, sessions
@@ -382,8 +532,8 @@ Required checks:
   - Contract / type-only (`backend/src/types/sparkContracts.ts` etc.): `cd backend && npx tsc --noEmit` + relevant `__tests__/sparkContracts.test.ts`
   - CRUD-only service (file IO, no agent path touched): that service's unit tests
   - Touches mcp / memory / report / agent runtime: `cd backend && npm run test:scene-trace-regression`
-- Skill YAML change: `npm run validate:skills` plus scene regression
-- Strategy/template Markdown change: `npm run validate:strategies` plus scene regression
+  - Skill YAML change: `cd backend && npm run validate:skills` plus scene regression
+  - Strategy/template Markdown change: `cd backend && npm run validate:strategies` plus scene regression
 - Type/build fix: `cd backend && npm run typecheck`
 
 Do not hardcode prompt content in TypeScript. Put scene logic in `backend/strategies/*.strategy.md` or reusable `*.template.md` files.
@@ -399,7 +549,7 @@ Do not hardcode prompt content in TypeScript. Put scene logic in `backend/strate
 - [MCP Tools Reference](docs/reference/mcp-tools.en.md)
 - [Skill System Guide](docs/reference/skill-system.en.md)
 - [Data Contract](backend/docs/DATA_CONTRACT_DESIGN.en.md)
-- [Rendering Pipeline References](docs/rendering_pipelines/index.en.md)
+- [Android 17 Rendering Type References](docs/rendering_pipelines/S01_rendering_types_overview.md)
 - [Security Policy](SECURITY.md)
 
 ## Contributing
@@ -412,6 +562,11 @@ Contributions are welcome. Good first contributions include:
 - Fixing UI issues in the Perfetto plugin
 - Adding regression coverage for known trace scenarios
 
+If a completed analysis exposed the opportunity, start with **Ask the Agent
+whether to report this** below the result. It separates observed facts from
+uncertainty, identifies the affected product surface, and suggests the minimum
+Bug, Skill, Strategy, runtime, documentation, UI, or trace-fixture contribution.
+
 Before opening a PR:
 
 1. Read [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -422,7 +577,9 @@ Before opening a PR:
 
 ## Contact
 
-- Bugs and feature requests: [GitHub Issues](https://github.com/Gracker/SmartPerfetto/issues)
+- Analysis-derived feedback:
+  [Agent-Assisted Analysis Feedback](https://github.com/Gracker/SmartPerfetto/issues/new?template=analysis_feedback.yml)
+- Other bugs and feature requests: [GitHub Issues](https://github.com/Gracker/SmartPerfetto/issues)
 - Security reports: [GitHub private advisory](https://github.com/Gracker/SmartPerfetto/security/advisories/new) or `smartperfetto@gracker.dev`
 - Collaboration, commercial support, and sponsorship: WeChat `553000664`
 
@@ -439,6 +596,6 @@ SmartPerfetto accepts personal donations, AI credits / token sponsorship, commer
 
 [AGPL-3.0-or-later](LICENSE) for SmartPerfetto core code.
 
-The `perfetto/` submodule is a fork of [Google Perfetto](https://github.com/google/perfetto) and remains under [Apache-2.0](perfetto/LICENSE).
+The `perfetto/` submodule is a fork of [Google Perfetto](https://github.com/google/perfetto) and remains under [Apache-2.0](https://github.com/google/perfetto/blob/main/LICENSE).
 
 For commercial licensing without AGPL obligations, contact the maintainer on WeChat: `553000664`.

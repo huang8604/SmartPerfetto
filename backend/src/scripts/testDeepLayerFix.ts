@@ -20,14 +20,14 @@ async function testDeepLayerFix() {
   // Use the scrolling test trace with actual jank data
   let testTracePath = path.join(
     process.cwd(),
-    '../test-traces/scroll-demo-customer-scroll.pftrace'
+    '../Trace/real/android-scroll-customer/trace.pftrace'
   );
 
   if (!fs.existsSync(testTracePath)) {
     // Fallback to the lighter trace
     const fallbackPath = path.join(
       process.cwd(),
-      '../test-traces/scroll_Standard-AOSP-App-Without-PreAnimation.pftrace'
+      '../Trace/real/android-scroll-standard/trace.pftrace'
     );
     if (fs.existsSync(fallbackPath)) {
       testTracePath = fallbackPath;

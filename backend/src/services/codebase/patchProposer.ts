@@ -7,8 +7,9 @@ import {randomUUID} from 'crypto';
 
 import type {RagStore} from '../ragStore';
 import type {RagChunk} from '../../types/sparkContracts';
-import type {CodebaseRegistry} from './codebaseRegistry';
+import {activeCodebaseGeneration, type CodebaseRegistry} from './codebaseRegistry';
 import type {CodeLookupLedger} from './codeLookupLedger';
+import type {KnowledgeScope} from '../scopedKnowledgeStore';
 
 export type PatchStatus = 'verified' | 'sketch' | 'unverified';
 
@@ -56,12 +57,13 @@ export class PatchProposer {
     private readonly store: RagStore,
     private readonly registry: CodebaseRegistry,
     private readonly ledger?: CodeLookupLedger,
+    private readonly scope?: KnowledgeScope,
   ) {}
 
   propose(input: ProposePatchInput): PatchProposalResponse {
     const patchProposalId = `patch_${randomUUID()}`;
     const chunks = input.contextChunkIds
-      .map(id => this.store.getChunk(id))
+      .map(id => this.store.getChunk(id, this.scope))
       .filter((chunk): chunk is RagChunk => Boolean(chunk));
     const rejected = (unsupportedReason: string, rationale: string): PatchProposalResponse => {
       this.record(input.turn ?? 0, [], 'patch_unverified');
@@ -95,8 +97,15 @@ export class PatchProposer {
       return rejected('multi_codebase_not_supported_phase1', 'Phase 1 patch proposals must target one codebase at a time.');
     }
     const codebaseId = chunks[0].codebaseId!;
-    const ref = this.registry.get(codebaseId);
+    const ref = this.registry.get(codebaseId, this.scope);
     if (!ref) return rejected('invalid_codebase_metadata', `Codebase ${codebaseId} is not registered.`);
+    const activeGeneration = activeCodebaseGeneration(ref);
+    if (chunks.some(chunk => chunk.sourceGeneration !== activeGeneration)) {
+      return rejected(
+        'inactive_codebase_generation',
+        'Patch proposal context is not from the codebase active generation; run a fresh source lookup.',
+      );
+    }
     if (!ref.consent.sendToProvider) {
       return rejected('no_send_to_provider_consent', 'Patch proposal requires source-send consent for the target codebase.');
     }
@@ -184,7 +193,9 @@ export class PatchProposer {
   }
 
   private record(turn: number, chunkIds: string[], outcome: 'patch_verified' | 'patch_sketch' | 'patch_unverified'): void {
-    const codebaseId = chunkIds.length > 0 ? this.store.getChunk(chunkIds[0])?.codebaseId : undefined;
+    const codebaseId = chunkIds.length > 0
+      ? this.store.getChunk(chunkIds[0], this.scope)?.codebaseId
+      : undefined;
     this.ledger?.record({
       turn,
       ts: Date.now(),

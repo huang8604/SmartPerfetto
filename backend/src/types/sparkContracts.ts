@@ -5,10 +5,9 @@
 /**
  * SmartPerfetto Spark Contracts
  *
- * Single source of truth for the contract shapes introduced by the Spark
- *施工计划包 (`docs/superpowers/spark/plans/*`). Each plan defines a minimal,
- * forward-compatible contract that downstream services, Skills, MCP tools,
- * UI panels, or reporters can produce or consume.
+ * Single source of truth for contract shapes introduced during the legacy
+ * Spark buildout. The original planning history remains in git; downstream
+ * services, Skills, MCP tools, UI panels, and reporters depend on this module.
  *
  * Design rules (apply to every contract below):
  *  - Every result object carries `schemaVersion`, `source`, `createdAt` (or
@@ -20,8 +19,6 @@
  *    `skillId`, or an explicit `unsupportedReason`. Missing-data paths must be
  *    visible — never wrapped as a confident conclusion.
  *  - All new fields are optional by default to keep older sessions consumable.
- *
- * Spark mapping: see `docs/superpowers/spark/README.md` "Spark #1-#205 覆盖矩阵".
  *
  * @module sparkContracts
  */
@@ -81,11 +78,11 @@ export type SparkConfidence = 'low' | 'medium' | 'high' | 'unsupported';
 
 /** Per-Spark-number mapping recorded inside each contract for traceability. */
 export interface SparkCoverageEntry {
-  /** Spark idea number from `docs/spark.md`. */
+  /** Spark idea number from the archived Spark planning package. */
   sparkId: number;
   /** Plan id (`01`-`57`) consuming the idea. */
   planId: string;
-  /** Status word matching `docs/superpowers/spark/TODO.md`. */
+  /** Delivery status retained for compatibility with persisted Spark coverage. */
   status: 'scaffolded' | 'implemented' | 'unsupported' | 'future';
   /** Brief note explaining what landed for this Spark id. */
   note?: string;
@@ -122,7 +119,11 @@ export type RagSourceKind =
   /** Codebase-aware analysis — user application source. */
   | 'app_source'
   /** Codebase-aware analysis — Linux kernel or vendor kernel source. */
-  | 'kernel_source';
+  | 'kernel_source'
+  /** Operator-registered Android Internals Wiki knowledge corpus. */
+  | 'android_internals_wiki'
+  /** Signed, versioned public Android Internals Knowledge Pack. */
+  | 'android_internals_pack';
 
 /**
  * Pointer to a RAG-indexed document chunk.
@@ -1411,8 +1412,65 @@ export interface RagChunk {
   buildId?: string;
   /** Registered codebase id for user-configured source chunks. */
   codebaseId?: string;
-  /** Origin that decides legacy-vs-codebase filtering. Missing old values are backfilled by RagStore. */
-  registryOrigin?: 'codebase_registry' | 'legacy_plan55' | 'plan44_memory' | 'plan54_cases';
+  /** Registered external-knowledge source id for private document chunks. */
+  knowledgeSourceId?: string;
+  /** Immutable staged index generation; registry activation selects the readable generation. */
+  sourceGeneration?: string;
+  /** Opaque legacy-store scope binding for private knowledge; never project to clients or models. */
+  knowledgeScopeFingerprint?: string;
+  /** Upstream article workflow status, e.g. finalized or verified. */
+  sourceStatus?: string;
+  /** Upstream confidence label preserved for model caveats. */
+  sourceConfidence?: string;
+  /** Upstream platform/version boundary against which the article was last verified. */
+  lastVerifiedAgainst?: string;
+  /** Upstream article tags used for deterministic retrieval. */
+  sourceTags?: string[];
+  /** Required human-readable attribution for externally licensed knowledge. */
+  attribution?: string;
+  /** Exact corpus content identity used alongside a possibly dirty Git revision. */
+  contentFingerprint?: string;
+  /** Stable article id inside a signed public knowledge pack. */
+  articleId?: string;
+  /** Stable section id inside a signed public knowledge pack. */
+  sectionId?: string;
+  /** Section heading used for a public-pack citation. */
+  sectionHeading?: string;
+  /** Exact source chunk hash used for a public-pack citation. */
+  chunkHash?: string;
+  /** Immutable public knowledge-pack content version. */
+  knowledgePackVersion?: string;
+  /** Immutable public knowledge-pack fingerprint. */
+  knowledgePackFingerprint?: string;
+  /** True when the source checkout contained changes beyond the recorded Git revision. */
+  sourceDirty?: boolean;
+  /** Tells consumers whether commitHash is clean, dirty-worktree context, or unavailable. */
+  commitProvenance?: 'clean_git_revision' | 'dirty_git_worktree' | 'content_only';
+  /** Origin that decides legacy-vs-scoped-private filtering. Missing old values are backfilled by RagStore. */
+  registryOrigin?: 'codebase_registry' | 'external_knowledge_registry' |
+    'built_in_knowledge_pack' | 'legacy_plan55' | 'plan44_memory' | 'plan54_cases';
+}
+
+/**
+ * Provenance for explanatory background knowledge. This is deliberately
+ * separate from Trace evidence references: it cannot satisfy a SQL/Skill
+ * evidence requirement or prove a current-trace claim.
+ */
+export interface BackgroundKnowledgeReference {
+  sourceKind: 'android_internals_pack';
+  packVersion: string;
+  packFingerprint: string;
+  sourceRevision: string;
+  articleId: string;
+  articleTitle: string;
+  sectionId: string;
+  sectionHeading: string;
+  chunkId: string;
+  chunkHash: string;
+  license: string;
+  confidence?: string;
+  lastVerified?: string;
+  lastVerifiedAgainst?: string;
 }
 
 /** A single retrieval hit — supports per-hit missing-data paths. */

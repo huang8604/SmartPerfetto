@@ -52,7 +52,6 @@ prerequisites:
     - slice
   modules:
     - android.garbage_collection
-    - android.frames
 
 inputs:
   - name: package

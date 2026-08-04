@@ -7,4 +7,4 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export SMARTPERFETTO_PORTABLE_OUT_DIR="${SMARTPERFETTO_WINDOWS_OUT_DIR:-$PROJECT_ROOT/dist/windows-exe}"
-exec "$PROJECT_ROOT/scripts/package-portable.sh" --targets windows-x64 "$@"
+exec /bin/bash "$PROJECT_ROOT/scripts/package-portable.sh" --targets windows-x64 "$@"

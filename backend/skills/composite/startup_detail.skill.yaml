@@ -43,7 +43,6 @@ prerequisites:
   modules:
     - android.startup.startups
     - android.binder
-    - sched
     - linux.cpu.frequency
 
 inputs:
@@ -1081,7 +1080,7 @@ steps:
           type: string
     save_as: jit_analysis
     optional: true
-    condition: "'${startup_type}' = 'cold'"
+    condition: "'${startup_type}' === 'cold'"
 
   # ========== 热点 Slice 线程状态分布（per-slice 根因定位） ==========
   - id: hot_slice_states

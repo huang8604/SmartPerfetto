@@ -140,6 +140,8 @@ describe('enterprise repository scope abstraction', () => {
       'report_artifacts',
       'memory_entries',
       'skill_registry_entries',
+      'batch_trace_runs',
+      'batch_trace_metrics',
     ]);
   });
 

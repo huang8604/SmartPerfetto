@@ -4,11 +4,11 @@
 
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
-  applyCaseCandidateFeedbackForRoute,
   buildCaseEvolutionSnapshotPath,
   captureCaseCandidatesAfterQualityArtifacts,
   resolveCaseEvolutionArchitectureType,
 } from '../agentRoutes';
+import { buildTraceContextDataEnvelopes } from '../../agentRuntime/traceContextEvidence';
 
 afterEach(() => {
   jest.restoreAllMocks();
@@ -116,6 +116,73 @@ describe('agentRoutes case evolution capture seam', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
+  it('freezes turn provenance before asynchronous trace hashing completes', async () => {
+    let resolveHash!: (hash: string) => void;
+    const hashReady = new Promise<string>(resolve => {
+      resolveHash = resolve;
+    });
+    const originalEnvelope = {
+      schemaVersion: 'data-envelope@1',
+      data: {columns: ['value'], rows: [['original-turn']]},
+      meta: {skillId: 'scrolling_analysis', stepId: 'original-turn'},
+    };
+    const session = {
+      runtimeKind: 'openai-agents-sdk',
+      activeRun: {sequence: 4},
+      dataEnvelopes: [originalEnvelope],
+      orchestrator: {
+        getCachedArchitecture: jest.fn(() => ({type: 'android-original'})),
+      },
+    };
+    const saveCandidates = jest.fn<(input: any) => Promise<{captured: number}>>(
+      async () => ({captured: 1}),
+    );
+    const capture = captureCaseCandidatesAfterQualityArtifacts({
+      sessionId: 'session-race',
+      traceId: 'trace-race',
+      session: session as any,
+      result: {
+        sessionId: 'session-race',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'Verified conclusion',
+        confidence: 0.91,
+        rounds: 2,
+        totalDurationMs: 100,
+      } as any,
+      sceneIdHint: 'scrolling',
+      runIdForAnalysis: 'run-race',
+      caseEvolutionConfig: {captureEnabled: true} as any,
+      computeTraceHash: jest.fn(() => hashReady),
+      saveCandidates,
+      logger: {info: jest.fn(), warn: jest.fn()} as any,
+    });
+
+    session.activeRun.sequence = 5;
+    originalEnvelope.data.rows[0][0] = 'mutated-next-turn';
+    session.dataEnvelopes = [{
+      ...originalEnvelope,
+      meta: {...originalEnvelope.meta, stepId: 'next-turn'},
+    }];
+    session.orchestrator.getCachedArchitecture.mockReturnValue({type: 'android-next'});
+    resolveHash('trace-hash-race');
+    await capture;
+
+    expect(saveCandidates).toHaveBeenCalledWith(expect.objectContaining({
+      dataEnvelopes: [expect.objectContaining({
+        data: {columns: ['value'], rows: [['original-turn']]},
+        meta: expect.objectContaining({stepId: 'original-turn'}),
+      })],
+      architectureType: 'android-original',
+      provenance: expect.objectContaining({
+        turnIndex: 4,
+        engine: 'openai',
+        traceContentHash: 'trace-hash-race',
+      }),
+    }));
+  });
+
   it('does not touch trace hashing or persistence when capture is disabled', async () => {
     const computeTraceHash = jest.fn<(traceId: string) => Promise<string>>(
       async () => {
@@ -159,6 +226,38 @@ describe('agentRoutes case evolution capture seam', () => {
     expect(computeTraceHash).not.toHaveBeenCalled();
     expect(saveCandidates).not.toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('does not hash or persist candidates from private source or RAG runs', async () => {
+    const computeTraceHash = jest.fn(async () => 'must-not-be-used');
+    const saveCandidates = jest.fn(async () => ({captured: 1}));
+    const logger = {info: jest.fn(), warn: jest.fn()};
+
+    await captureCaseCandidatesAfterQualityArtifacts({
+      sessionId: 'private-session',
+      traceId: 'trace-private',
+      session: {
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['app-source'],
+        knowledgeSourceIds: ['wiki'],
+        dataEnvelopes: [],
+        orchestrator: {},
+      } as any,
+      result: {confidence: 0.99, rounds: 3} as any,
+      runIdForAnalysis: 'private-run',
+      caseEvolutionConfig: {captureEnabled: true} as any,
+      computeTraceHash,
+      saveCandidates,
+      logger: logger as any,
+    });
+
+    expect(computeTraceHash).not.toHaveBeenCalled();
+    expect(saveCandidates).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      'CaseEvolution',
+      'Skipping candidate capture for private source or knowledge analysis',
+      expect.objectContaining({sessionId: 'private-session'}),
+    );
   });
 
   it('swallows capture failures so terminal completion can continue', async () => {
@@ -207,34 +306,57 @@ describe('agentRoutes case evolution capture seam', () => {
   });
 });
 
-describe('agentRoutes case candidate feedback seam', () => {
-  it('passes CaseLibrary to the feedback state machine so CaseNode context stays in sync', () => {
-    const outbox = { close: jest.fn() } as any;
-    const library = { getCase: jest.fn() } as any;
-    const recordFeedback = jest.fn<(input: any) => { added: boolean }>(
-      () => ({ added: true }),
-    );
+describe('agentRoutes frontend traceContext envelopes', () => {
+  it('converts frontend pre-query datasets into SQL result envelopes for persistence and replay', () => {
+    const envelopes = buildTraceContextDataEnvelopes([
+      {
+        label: 'thread states in range',
+        columns: ['thread_name', 'state', 'total_ms'],
+        rows: [
+          ['RenderThread', 'Running', 12.5],
+          ['main', 'R', 4.2],
+        ],
+      },
+    ], 'trace-fast-1');
 
-    const result = applyCaseCandidateFeedbackForRoute({
-      candidateId: 'cand-route',
-      sessionId: 'session-1',
-      rating: 'positive',
-      surfacedAt: 1000,
-      receivedAt: 2000,
-      outbox,
-      library,
-      recordFeedback,
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].meta.type).toBe('sql_result');
+    expect(envelopes[0].meta.source).toBe('frontend_trace_context');
+    expect(envelopes[0].meta.traceId).toBe('trace-fast-1');
+    expect(envelopes[0].meta.evidenceRefId).toMatch(/^data:frontend_prequery:current:/);
+    expect(envelopes[0].meta.sourceToolCallId).toMatch(/^frontend-prequery:/);
+    expect(envelopes[0].meta.intent).toBe('frontend_prequeried_trace_context');
+    expect(envelopes[0].display.title).toBe('thread states in range');
+    expect(envelopes[0].display.format).toBe('table');
+    expect(envelopes[0].data).toEqual({
+      columns: ['thread_name', 'state', 'total_ms'],
+      rows: [
+        ['RenderThread', 'Running', 12.5],
+        ['main', 'R', 4.2],
+      ],
     });
+  });
 
-    expect(result.added).toBe(true);
-    expect(recordFeedback).toHaveBeenCalledWith(expect.objectContaining({
-      candidateId: 'cand-route',
-      sourceSessionId: 'session-1',
-      rating: 'positive',
-      surfacedAt: 1000,
-      receivedAt: 2000,
-      outbox,
-      library,
-    }));
+  it('uses stable hashes and skips empty frontend pre-query datasets', () => {
+    const datasets = [
+      {
+        label: 'running threads in range',
+        columns: ['thread_name', 'running_ms'],
+        rows: [['main', 9.1]],
+      },
+      {
+        label: 'empty',
+        columns: ['name'],
+        rows: [],
+      },
+    ];
+
+    const first = buildTraceContextDataEnvelopes(datasets, 'trace-fast-1');
+    const second = buildTraceContextDataEnvelopes(datasets, 'trace-fast-1');
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(first[0].meta.queryHash).toBe(second[0].meta.queryHash);
+    expect(first[0].meta.evidenceRefId).toBe(second[0].meta.evidenceRefId);
   });
 });

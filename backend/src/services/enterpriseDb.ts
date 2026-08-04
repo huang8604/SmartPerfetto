@@ -14,7 +14,10 @@ export function resolveEnterpriseDbPath(env: NodeJS.ProcessEnv = process.env): s
   if (configured && configured.trim().length > 0) {
     return path.resolve(configured);
   }
-  return path.join(process.cwd(), 'data', 'sessions', 'sessions.db');
+  const dataRoot = env.SMARTPERFETTO_BACKEND_DATA_DIR?.trim()
+    ? path.resolve(env.SMARTPERFETTO_BACKEND_DATA_DIR)
+    : path.resolve(process.cwd(), 'data');
+  return path.join(dataRoot, 'sessions', 'sessions.db');
 }
 
 export function openEnterpriseDb(dbPath = resolveEnterpriseDbPath()): Database.Database {

@@ -22,6 +22,10 @@ const conclusionContractPath = path.join(projectRoot, 'backend/src/agent/core/co
 const evidenceContractPath = path.join(projectRoot, 'backend/src/types/evidenceContract.ts');
 const claimVerificationPath = path.join(projectRoot, 'backend/src/types/claimVerification.ts');
 const identityContractPath = path.join(projectRoot, 'backend/src/types/identityContract.ts');
+const externalIssueReportingPath = path.join(
+  projectRoot,
+  'backend/src/types/externalIssueReporting.ts',
+);
 const frontendOutputPath = path.join(
   projectRoot,
   'perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/generated/data_contract.types.ts'
@@ -75,7 +79,9 @@ function extractConstArrayValues(content: string, constName: string): string[] {
 // Read backend contract
 console.log('Reading backend data contract...');
 const backendContent = fs.readFileSync(backendContractPath, 'utf-8');
-const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8').trim();
+const conclusionContractContent = fs.readFileSync(conclusionContractPath, 'utf-8')
+  .trim()
+  .replace(/import type \{CaseKnowledgeReportRecommendation\} from '..\/..\/types\/caseKnowledge';\n\n?/, '');
 const evidenceContractContent = fs.readFileSync(evidenceContractPath, 'utf-8').trim();
 const claimVerificationContent = fs.readFileSync(claimVerificationPath, 'utf-8').trim();
 const identityContractContent = fs.readFileSync(identityContractPath, 'utf-8')
@@ -83,6 +89,12 @@ const identityContractContent = fs.readFileSync(identityContractPath, 'utf-8')
   // EvidenceContract and IdentityContract are separate backend modules but
   // generated frontend types are concatenated into one file.
   .replace(/export type TraceTimestampNs = string \| number;\n\n/, '');
+const externalIssueReportingContent = fs
+  .readFileSync(externalIssueReportingPath, 'utf-8')
+  .trim()
+  .replace(/^\/\/ SPDX-License-Identifier:[^\n]*\n/, '')
+  .replace(/^\/\/ Copyright[^\n]*\n/, '')
+  .replace(/^\/\/ This file[^\n]*\n\n/, '');
 
 // Transform content for frontend
 console.log('Transforming for frontend compatibility...');
@@ -95,8 +107,146 @@ const displayLayers = extractConstArrayValues(backendContent, 'VALID_DISPLAY_LAY
 const displayLevels = extractConstArrayValues(backendContent, 'VALID_DISPLAY_LEVELS');
 const displayFormats = extractConstArrayValues(backendContent, 'VALID_DISPLAY_FORMATS');
 
+function extractAnalysisCompletedContract(content: string): string {
+  const startMarker = 'export interface AnalysisCompletedFinding {';
+  const endMarker = '/**\n * Union type for all SSE events';
+  const start = content.indexOf(startMarker);
+  const end = content.indexOf(endMarker, start);
+  if (start < 0 || end < 0) {
+    throw new Error('Unable to extract AnalysisCompletedEvent from backend data contract');
+  }
+  return content.slice(start, end)
+    .trim()
+    .replace("import('../agent/core/conclusionContract').ConclusionContract", 'ConclusionContract')
+    .replace("import('./evidenceContract').ClaimSupportV1", 'ClaimSupportV1')
+    .replace("import('./claimVerification').ClaimVerificationResult", 'ClaimVerificationResult')
+    .replace("import('./identityContract').IdentityResolutionV1", 'IdentityResolutionV1')
+    .replace("import('../agent/core/orchestratorTypes').QuickRunReceipt", 'QuickRunReceipt')
+    .replace("import('../agent/scene/types').SmartScenePreviewPayload", 'Record<string, unknown>')
+    .replace(
+      "import('../assistant/contracts/assistantResultContract').AssistantResultContract",
+      'Record<string, unknown>',
+    )
+    .replace(
+      /Omit<\s*import\('\.\.\/agentv3\/sessionStateSnapshot'\)\.ComparisonReportSection,\s*'html'\s*>\s*&\s*\{html\?: string\}/g,
+      'Record<string, unknown>',
+    );
+}
+
+const analysisCompletedFrontendContent = extractAnalysisCompletedContract(backendContent);
+
 // Build the frontend content
 const parts: string[] = [];
+
+const caseKnowledgeFrontendContent = `export type CaseKnowledgeMatchStrength = 'strong' | 'partial' | 'background';
+export type CaseKnowledgeRecommendationPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+export interface CaseKnowledgeRecommendation {
+  id: string;
+  priority: CaseKnowledgeRecommendationPriority;
+  action: string;
+  applies_when: string;
+  risks: string;
+}
+
+export interface CaseKnowledgeReportRecommendation {
+  caseId: string;
+  title: string;
+  scene?: string;
+  primaryRootCause?: string;
+  matchStrength: CaseKnowledgeMatchStrength;
+  evidenceGap?: string;
+  evidenceRefs?: string[];
+  matchedSignatures?: string[];
+  missingRequiredSignatures?: string[];
+  recommendations: {
+    app: CaseKnowledgeRecommendation[];
+    oem: CaseKnowledgeRecommendation[];
+  };
+  learnedProvenance?: {
+    candidateId: string;
+    supportingEvidence: number;
+    contradictingEvidence: number;
+    supported: boolean;
+  };
+}`;
+
+const queryReviewFrontendContent = `export const QUERY_REVIEW_SCHEMA_VERSION = 1 as const;
+
+export type QueryReviewProducerKind = 'execute_sql' | 'execute_sql_on' | 'invoke_skill';
+export type QueryReviewConfidence = 'declared' | 'observed' | 'partial';
+export type QueryReviewGuardrailSeverity = 'info' | 'warning';
+export type QueryReviewAllowedUse = 'review_metadata_only';
+export type QueryReviewPaneSide = 'left' | 'right' | 'top' | 'bottom';
+
+export interface QueryReviewProducerV1 {
+  kind: QueryReviewProducerKind;
+  sourceToolCallId?: string;
+  paramsHash?: string;
+  planPhaseId?: string;
+  planPhaseTitle?: string;
+  traceSide?: 'current' | 'reference';
+  paneSide?: QueryReviewPaneSide;
+  traceId?: string;
+}
+
+export interface QueryReviewSourceV1 {
+  skillId?: string;
+  stepId?: string;
+  artifactId?: string;
+  evidenceRefId?: string;
+  queryHash?: string;
+}
+
+export interface QueryReviewReadV1 {
+  table: string;
+  columns?: string[];
+  confidence: QueryReviewConfidence;
+}
+
+export interface QueryReviewFilterV1 {
+  expression: string;
+  confidence: QueryReviewConfidence;
+}
+
+export interface QueryReviewOutputShapeV1 {
+  name: string;
+  type?: string;
+  required?: boolean;
+}
+
+export interface QueryReviewGuardrailV1 {
+  ruleId: string;
+  message: string;
+  line?: number;
+  severity: QueryReviewGuardrailSeverity;
+}
+
+export interface QueryReviewObservedExecutionV1 {
+  executed: true;
+  executableSql?: string;
+  sqlRewrites?: string[];
+  stdlibInjectedModules?: string[];
+  durationMs?: number;
+  rowCount?: number;
+  truncated?: boolean;
+}
+
+export interface QueryReviewV1 {
+  schemaVersion: typeof QUERY_REVIEW_SCHEMA_VERSION;
+  id: string;
+  producer: QueryReviewProducerV1;
+  title: string;
+  purpose: string;
+  source: QueryReviewSourceV1;
+  reads: QueryReviewReadV1[];
+  filters: QueryReviewFilterV1[];
+  outputShape: QueryReviewOutputShapeV1[];
+  guardrails: QueryReviewGuardrailV1[];
+  limitations: string[];
+  observedExecution: QueryReviewObservedExecutionV1;
+  allowedUse: QueryReviewAllowedUse;
+}`;
 
 // Header
 parts.push(`/**
@@ -117,6 +267,8 @@ parts.push(`// =================================================================
 // Conclusion Contract Types
 // =============================================================================
 
+${caseKnowledgeFrontendContent}
+
 ${conclusionContractContent}
 `);
 
@@ -129,6 +281,14 @@ ${evidenceContractContent}
 ${claimVerificationContent}
 
 ${identityContractContent}
+
+${queryReviewFrontendContent}
+
+// =============================================================================
+// Agent-assisted external Issue reporting
+// =============================================================================
+
+${externalIssueReportingContent}
 `);
 
 // Column Types Section
@@ -257,11 +417,15 @@ export interface DataEnvelopeMeta {
   /** Trace side for comparison-mode outputs */
   traceSide?: 'current' | 'reference';
 
+  paneSide?: 'left' | 'right' | 'top' | 'bottom';
+
   /** Backend trace identifier used to produce this data */
   traceId?: string;
 
   /** Stable hash of the SQL or data-producing query */
   queryHash?: string;
+
+  queryReview?: QueryReviewV1;
 
   /** Tool-call identifier that produced this data, when available */
   sourceToolCallId?: string;
@@ -626,29 +790,147 @@ export interface ConversationStepEvent {
 /**
  * Analysis Completed Event - SSE payload for final result
  */
-export interface AnalysisCompletedEvent {
-  type: 'analysis_completed';
-  data: {
-    summary: string;
-    conclusion?: string;
-    conclusionContract?: ConclusionContract;
-    claimSupport?: ClaimSupportV1[];
-    claimVerificationResult?: ClaimVerificationResult;
-    identityResolutions?: IdentityResolutionV1[];
+export interface QuickRunReceipt {
+  requestedMode: 'fast' | 'auto' | 'full';
+  resolvedMode: 'quick' | 'full';
+  profile: 'normal' | 'extended' | 'triage';
+  targetTurns: number;
+  hardCapTurns: number;
+  actualTurns: number;
+  elapsedMs: number;
+  enforcement: 'turn_cap' | 'timeout_only' | 'not_available';
+  stopReason: 'answered' | 'needs_full' | 'extended_answered' | 'hard_cap' | 'timeout' | 'partial';
+  evidence: {
+    frontendPrequeryInjected: number;
+    frontendPrequeryCited: number;
+    currentRunDataEnvelopes: number;
+    citedEvidenceRefs: number;
+  };
+  contextInjected: {
+    conversationTurns: number;
+    recentSqlResults: number;
+    sqlPitfallPairs: number;
+    patternHints: number;
+    negativePatternHints: number;
+    caseBackgroundCases: number;
+  };
+  verifierStatus: 'passed' | 'issues' | 'not_checked' | 'failed';
+}
+
+export type AnalysisReceiptRuntime =
+  | 'claude-agent-sdk'
+  | 'openai-agents-sdk'
+  | 'pi-agent-core'
+  | 'opencode'
+  | 'qoder-agent-sdk';
+
+export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
+
+export interface AnalysisReceiptBase {
+  runId: string;
+  sessionId: string;
+  traceId: string;
+  mode: 'fast' | 'full' | 'auto';
+  resolvedMode: 'quick' | 'full';
+  runtime?: AnalysisReceiptRuntime;
+  providerId: string | null;
+  generatedAt: number;
+  traceEvidence: {
+    sqlCount: number;
+    skillCount: number;
+    dataEnvelopeCount: number;
+    artifactCount: number;
+    evidenceRefCount: number;
+  };
+  nonEvidenceContext: {
+    frontendPrequeryCount: number;
+    memoryHintCount: number;
+    conversationContextCount: number;
+    strategyHintCount: number;
+  };
+  claimAudit: {
+    totalClaims: number;
+    verifiedClaims: number;
+    unsupportedClaims: number;
+    uncertainClaims: number;
+  };
+  qualityGates: {
+    finalReportContract: AnalysisReceiptGateStatus;
+    claimVerification: AnalysisReceiptGateStatus;
+    identityResolution: AnalysisReceiptGateStatus;
+  };
+  outputs: {
+    reportId?: string;
     reportUrl?: string;
     resultSnapshotId?: string;
-    confidence?: number;
-    rounds?: number;
-    totalDurationMs?: number;
-    partial?: boolean;
-    terminationReason?: string;
-    terminationMessage?: string;
-    terminalRunStatus?: 'completed' | 'quota_exceeded';
-    findings: DiagnosticFinding[];
-    suggestions: string[];
+    cliTurnPath?: string;
+    reportError?: string;
   };
-  timestamp: number;
 }
+
+export interface AnalysisReceiptV1 extends AnalysisReceiptBase {
+  schemaVersion: 1;
+}
+
+export interface AnalysisReceiptV2 extends AnalysisReceiptBase {
+  schemaVersion: 2;
+  runManifestId: string;
+}
+
+export type AnalysisReceipt = AnalysisReceiptV1 | AnalysisReceiptV2;
+
+export type UiActionKind =
+  | 'navigate_timeline'
+  | 'navigate_range'
+  | 'open_evidence_table'
+  | 'pin_evidence';
+
+export interface UiActionProposalSource {
+  evidenceRefId?: string;
+  artifactId?: string;
+  skillId?: string;
+  sourceToolCallId?: string;
+  reportSection?: string;
+}
+
+export interface UiNavigateTimelinePayload {
+  ts: string;
+  traceId?: string;
+}
+
+export interface UiNavigateRangePayload {
+  startNs: string;
+  endNs: string;
+  traceId?: string;
+}
+
+export interface UiOpenEvidenceTablePayload {
+  artifactId: string;
+  evidenceRefId?: string;
+}
+
+export interface UiPinEvidencePayload {
+  evidenceRefId: string;
+}
+
+interface UiActionProposalBase<K extends UiActionKind, P> {
+  schemaVersion: 1;
+  id: string;
+  kind: K;
+  title: string;
+  reason: string;
+  source: UiActionProposalSource;
+  payload: P;
+  requiresConfirmation: true;
+}
+
+export type UiActionProposalV1 =
+  | UiActionProposalBase<'navigate_timeline', UiNavigateTimelinePayload>
+  | UiActionProposalBase<'navigate_range', UiNavigateRangePayload>
+  | UiActionProposalBase<'open_evidence_table', UiOpenEvidenceTablePayload>
+  | UiActionProposalBase<'pin_evidence', UiPinEvidencePayload>;
+
+${analysisCompletedFrontendContent}
 
 /**
  * Union type for all SSE events
@@ -686,6 +968,7 @@ export interface SqlQueryResult {
   collapsible?: boolean;
   defaultCollapsed?: boolean;
   maxVisibleRows?: number;
+  queryReview?: QueryReviewV1;
   // Summary report data
   summaryReport?: {
     title: string;
@@ -895,6 +1178,7 @@ export function envelopeToSqlQueryResult(envelope: DataEnvelope): SqlQueryResult
     stepId: envelope.meta.stepId,
     layer: envelope.display.layer,
     metadataFields: envelope.display.metadataFields,
+    queryReview: envelope.meta.queryReview,
     expandableData: data.expandableData,
   };
 }

@@ -29,17 +29,19 @@ export interface ResumeCommandArgs {
 }
 
 export async function runResumeCommand(args: ResumeCommandArgs): Promise<number> {
-  const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
   const renderer = createRenderer({ verbose: args.verbose, useColor: !args.noColor, format: args.format });
-  const service = new CliAnalyzeService();
+  const lifecycle: { service?: CliAnalyzeService } = {};
   let exitCode = 0;
 
   try {
     await withConsoleLogToStderr(renderer.format !== 'text', async () => {
+      const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
       const { config } = loadSession(paths, args.sessionId);
       assertAnalysisRuntimeReady(config
-        ? { providerId: config.providerId, runtimeOverride: config.agentRuntimeKind }
-        : {});
+        ? { providerId: config.providerId, runtimeOverride: config.agentRuntimeKind, aiFeature: 'agent_resume' }
+        : { aiFeature: 'agent_resume' });
       const turn = await continueSession({ paths, service, renderer }, {
         sessionId: args.sessionId,
         query: args.query,
@@ -51,6 +53,6 @@ export async function runResumeCommand(args: ResumeCommandArgs): Promise<number>
     renderer.printError((err as Error).message);
     return 1;
   } finally {
-    await service.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }

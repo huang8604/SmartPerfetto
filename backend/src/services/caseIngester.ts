@@ -19,7 +19,7 @@ import {
 } from '../types/sparkContracts';
 import {CaseGraph} from './caseGraph';
 import {CaseLibrary} from './caseLibrary';
-import {RagStore} from './ragStore';
+import {RagStore, getDefaultRagStore} from './ragStore';
 import type {KnowledgeScope} from './scopedKnowledgeStore';
 import {validateCaseKnowledgeFiles} from './caseSchemaValidator';
 
@@ -68,7 +68,9 @@ export function ingestCaseKnowledge(
   const ragStorePath = options.ragStorePath ?? backendLogPath('rag_store.json');
   const library = options.caseLibrary ?? new CaseLibrary(caseLibraryPath);
   const graph = options.caseGraph ?? new CaseGraph(caseGraphPath);
-  const ragStore = options.ragStore ?? new RagStore(ragStorePath);
+  const ragStore = options.ragStore ?? (
+    options.ragStorePath ? new RagStore(ragStorePath) : getDefaultRagStore()
+  );
   const warnings: string[] = [];
 
   const cases = [...validation.cases].sort((a, b) =>

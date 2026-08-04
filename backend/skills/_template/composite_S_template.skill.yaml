@@ -6,8 +6,8 @@
 # S 级 Composite Skill 模板（旗舰分析）
 # =============================================================================
 # 基于 backend/skills/composite/cpu_analysis.skill.yaml 反推。
-# 适用：跨多 stdlib 模块的多阶段分析 skill，对标 docs/skills-audit-2026-05.md
-# Section 6 "S 级规范"。
+# 适用：跨多 stdlib 模块的多阶段分析 skill，对标 docs/reference/skill-system.md
+# "Skill tier 与校验规则"。
 #
 # 复制时:
 # 1. 替换所有 {{...}} 占位符

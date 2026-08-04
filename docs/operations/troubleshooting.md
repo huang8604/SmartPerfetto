@@ -13,7 +13,7 @@ curl http://localhost:3000/health
 如果没有响应：
 
 ```bash
-./scripts/start-dev.sh
+./start.sh
 ```
 
 如果只有后端配置变更或 watcher 卡住：
@@ -87,13 +87,21 @@ chmod +x /absolute/path/to/trace_processor_shell
 - Frontend: `10000`
 - trace_processor RPC: `9100-9900`
 
-清理 trace processor：
+源码启动脚本只会停止 PID 元数据能够证明属于当前 checkout 的旧实例；如果端口由其他进程或另一个 checkout 占用，脚本会打印 `lsof` owner 并非零退出，不会直接杀掉它。
+
+先检查并停止当前 checkout 记录的服务：
 
 ```bash
-pkill -f trace_processor_shell
+./scripts/stop-dev.sh
 ```
 
-如果 backend 端口被占用，先确认是否已有 SmartPerfetto 实例在跑，再决定是否停止旧进程。
+只有在确认打印出的端口 owner 都应该被停止后，才使用显式强制入口：
+
+```bash
+./scripts/stop-dev.sh --force
+```
+
+`--force` 只针对当前配置的 backend/frontend 监听端口；不会按模糊进程名全局清理 watcher 或 `trace_processor_shell`。
 
 ## LLM 调用慢或失败
 
@@ -126,6 +134,23 @@ Authorization: Bearer <token>
 
 本地开发没有设置该变量时，默认不要求 bearer token。
 
+## Knowledge Pack 状态或更新失败
+
+先用 JSON 状态区分 bundled、active 和 signed channel：
+
+```bash
+smp knowledge-pack status --format json
+smp knowledge-pack update --check --format json
+```
+
+- 离线或 metadata channel 暂时不可达时，未撤回且校验通过的 bundled/active Pack
+  仍可作为 fallback。
+- 签名、版本、哈希、license 或撤回检查失败时，不能用手工覆盖 active pointer 的方式
+  绕过；修复镜像 URL/网络/时钟后重试。
+- `SMARTPERFETTO_AIW_PACK_PIN` 只能固定已经安装且未撤回的版本。
+- Pack 只能作为 background knowledge；报告缺少当前 trace 证据时，不要把 Pack 引用
+  当成分析功能已通过。
+
 ## SSE 断开
 
 SSE 断开通常由浏览器刷新、网络中断或请求超时触发。后端支持 `Last-Event-ID` / `lastEventId` replay ring buffer，前端会尽量恢复缺失事件。
@@ -150,17 +175,70 @@ SSE 断开通常由浏览器刷新、网络中断或请求超时触发。后端�
 
 - Docker 运行时仓库根目录 `.env` 是否存在；本地源码运行时 `backend/.env` 是否存在。
 - 是否配置了 `ANTHROPIC_API_KEY`，或 `ANTHROPIC_BASE_URL` 加 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`。
-- `/health` 里的 `aiEngine.credentialSource` 是否为预期来源；如果是 `provider-manager`，active provider 会覆盖 `.env`。
-- `perfetto/` submodule 是否存在。
+- 带鉴权的 `/api/runtime-health` 里的 `aiEngine.credentialSource` 是否为预期来源；如果是 `provider-manager`，active provider 会覆盖 `.env`。公开 `/health` 不返回凭证诊断。
 - Docker 可用内存和磁盘是否足够。
+
+Docker Hub 和普通 source Docker build 都消费提交的 `frontend/`，不要求初始化
+`perfetto/` submodule。只有 UI plugin 开发路径才需要 submodule。
 
 本地开发排查更容易时，可以先运行：
 
 ```bash
-./scripts/start-dev.sh
+./start.sh
 ```
 
-确认代码路径正常后再回到 Docker。
+确认普通源码路径正常后再回到 Docker；只有修改 Perfetto UI plugin 时才使用 `./scripts/start-dev.sh`。
+
+## Self-Evolution 不可用或没有提案
+
+先进入 **AI Assistant Settings → 自进化 / Evolution**，区分 requested config、
+effective config、权限和持久化状态：
+
+- 页面显示默认关闭：部署环境没有设置 `SELF_EVOLUTION_ENABLED=true`。已有 feedback
+  或 provider 不会自动打开它。
+- 策展可用但 apply/revert 关闭：确认同时设置
+  `SELF_EVOLUTION_APPLY=true`，并重启后端。
+- API 返回 `503`：查看 persistence reason。`external_data_dir_not_configured`
+  表示没有显式配置 `SMARTPERFETTO_BACKEND_DATA_DIR`；
+  `data_root_inside_package` 表示目录仍在程序包内；
+  `docker_data_root_not_mounted` 表示 Docker 路径不是持久化挂载。
+- API 返回 `403`：当前身份缺少对应的 `self_evolution:*` 权限。Analyst 只能 read；
+  企业 API key、SSO 和其他生产身份应检查持久化 roles/scopes 绑定。部署运维者的
+  `SMARTPERFETTO_API_KEY` 是例外：它是默认拥有 `org_admin` 与 `*` 的 bootstrap
+  凭据，不应分发给终端用户。
+- 策展完成但没有提案：只有 effective public feedback 会进入策展，单条反馈或
+  private feedback 不保证产生提案。这不是运行失败。
+- gate 变为 inconclusive/pending：provider、model、config、registry、case split、
+  budget 或 materialized treatment 已变化，旧 proof 不能复用；在固定环境中重新 gate。
+- apply 后新分析未使用 overlay：检查 generation、overlay validation/activation 和
+  reconciliation report。已有 run 固定旧 snapshot，只有新 run 读取新 generation。
+
+外部 L2 judge 当前应显示
+`not_configured / explicit_external_judge_consent_required`；这表示没有外部调用，
+不是 provider 配置错误。完整流程与验收矩阵见
+[Self-Evolution 使用与验收](../getting-started/self-evolution.md)。
+
+## Agent 辅助 GitHub 反馈不可用
+
+先确认源消息已经收到 `analysis_completed`。M10 只基于持久化完成事件、
+RunManifest 和可选 result snapshot 工作，不会读取仍在运行的聊天状态。
+
+- 显示“当前分析不需要反馈”：确定性检测没有发现 evidence/claim gate、Skill、
+  scene confidence、identity 或 report 输出异常；仍可从 GitHub Issue Form 手工反馈。
+- 显示 private/code-aware 不可导出：这是 fail-closed 隐私边界，不能用关闭脱敏或复制
+  私有结果绕过。安全问题请改走 GitHub private advisory。
+- 历史 run 缺少 provider pin，或 active provider snapshot 已变化：旧 run 不会改用
+  当前 provider。重新运行一次分析以生成完整 pin；不要把 fallback 当作同一模型复核。
+- 显示 Agent fallback：源 runtime 暂不支持独立 triage、固定 provider 的凭据不可用，
+  或模型输出没有通过严格 JSON/evidence 校验。界面仍会给保守的确定性建议，但不会把
+  它伪装成 Agent 结论。
+- “生成 GitHub 草稿”仍禁用：回答所有必答问题，并勾选敏感信息复核。安全敏感候选
+  不能生成公开草稿，只会返回 private advisory 入口。
+- 打开 GitHub 后没有 Issue：这是预期行为。SmartPerfetto 只预填页面，不持有 token、
+  不调用 GitHub API，也不会替用户点击提交。
+
+完整字段、状态和人工验收步骤见
+[Agent 辅助 GitHub 反馈](../getting-started/agent-assisted-feedback.md)。
 
 ## Skill 校验失败
 

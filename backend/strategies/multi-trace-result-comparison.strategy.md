@@ -10,26 +10,29 @@ optional_capabilities: []
 keywords:
   - 分析结果对比
   - 结果对比
-  - 多 Trace 对比
-  - 多 trace 对比
-  - 多个 Trace 对比
-  - 两个 Trace 对比
-  - 另一个 Trace
-  - 另外一个 Trace
+  - 多 Trace 结果对比
+  - 多 trace 结果对比
+  - 多个 Trace 结果对比
+  - 两个 Trace 结果对比
+  - 另一个 Trace 的分析结果
+  - 另外一个 Trace 的分析结果
+  - snapshot 对比
+  - SID 对比
   - analysis result comparison
   - result comparison
-  - multi trace comparison
+  - multi trace result comparison
   - compare snapshots
   - compare analysis results
 compound_patterns:
-  - "对比.*(分析结果|结果|snapshot|另一个\\s*Trace|另外一个\\s*Trace|两个\\s*Trace|多个\\s*Trace|多\\s*Trace)"
+  - "对比.*(分析结果|结果|snapshot|snapshots|SID|sid)"
+  - "对比.*(另一个\\s*Trace|另外一个\\s*Trace|两个\\s*Trace|多个\\s*Trace|多\\s*Trace).*(分析结果|结果|snapshot|snapshots|SID|sid)"
   - "(分析结果|结果|snapshot|snapshots).*(对比|compare)"
-  - "compare.*(analysis results|snapshots|multi trace|another trace)"
+  - "compare.*(analysis results|result snapshots|snapshots|snapshot ids|SIDs|session results|multi trace results)"
 
 phase_hints:
   - id: result_snapshot_selection
     keywords: ['snapshot', '结果', '候选', 'baseline', 'current result', 'analysis result']
-    constraints: '必须先确认要对比的是 AnalysisResultSnapshot，而不是旧的 referenceTraceId raw trace 对比。候选不唯一时必须让用户选择 baseline 和 candidates。'
+    constraints: '必须先确认要对比的是 AnalysisResultSnapshot/SID/result，而不是实时 raw trace pair 对比。候选不唯一时必须让用户选择 baseline 和 candidates。'
     critical_tools: []
     critical: true
   - id: matrix_first
@@ -55,7 +58,7 @@ plan_template:
 
 #### multi_trace_result_comparison Core Strategy
 
-**Route card**: 分析结果对比 / 结果对比 / 多 Trace 对比 / 多 trace 对比 / 多个 Trace 对比 / 两个 Trace 对比 / 另一个 Trace / 另外一个 Trace / analysis result comparison / result comparison
+**Route card**: 分析结果对比 / 结果对比 / 多 Trace 结果对比 / 多个 Trace 结果对比 / 两个 Trace 结果对比 / snapshot 对比 / SID 对比 / analysis result comparison / result comparison
 
 **Capabilities**: required=[none], optional=[none]
 
@@ -69,21 +72,22 @@ plan_template:
 - comparison_matrix: 分析结果对比必须构造 ComparisonMatrix，并基于结构化 metric 输出 delta (required: invoke_skill(multi_trace_result_comparison))
 
 **Phase reminders**
-- result_snapshot_selection: 必须先确认要对比的是 AnalysisResultSnapshot，而不是旧的 referenceTraceId raw trace 对比。候选不唯一时必须让用户选择 baseline 和 candidates。
+- result_snapshot_selection: 必须先确认要对比的是 AnalysisResultSnapshot/SID/result，而不是实时 raw trace pair 对比。候选不唯一时必须让用户选择 baseline 和 candidates。
 - matrix_first: 定量结论只能来自 ComparisonMatrix 的 normalized metrics。缺失 metric 要标注 missing reason；只有允许回填时才请求 trace backfill。
+- raw_trace_boundary: 如果当前会话已经有 `referenceTraceId` 或 `tracePairContext`，用户只说“对比两个 Trace/左右 Trace/上下 Trace”的启动、滑动、FPS、频率等原始数据差异时，不使用本策略；应走双 Trace raw comparison 的 `get_comparison_context`、`compare_skill`、`execute_sql_on`。
 
 **Final report contract summary**
 - 遵循通用输出契约。
 
 
 **Detail ref**
-- `multi_trace_result_comparison:full`: 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
+- `multi_trace_result_comparison:full`: 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、SID/result、另一个 Trace 的分析结果） 的完整 phase recipe、SQL、fetch_artifact 表、决策树和边界说明。
 
 
-<!-- strategy-detail id="full" title="multi_trace_result_comparison full strategy detail" keywords="multi_trace_result_comparison,分析结果对比,结果对比,多 Trace 对比,多 trace 对比,多个 Trace 对比,两个 Trace 对比,另一个 Trace,另外一个 Trace,analysis result comparison,result comparison,multi trace comparison,compare snapshots,分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果）,detail,full" default="true" -->
-#### 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、另一个 Trace 结果）
+<!-- strategy-detail id="full" title="multi_trace_result_comparison full strategy detail" keywords="multi_trace_result_comparison,分析结果对比,结果对比,多 Trace 结果对比,多 trace 结果对比,多个 Trace 结果对比,两个 Trace 结果对比,snapshot 对比,SID 对比,analysis result comparison,result comparison,multi trace result comparison,compare snapshots,分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、SID/result、另一个 Trace 的分析结果）,detail,full" default="true" -->
+#### 分析结果对比（用户提到多个 Trace 的已有分析结果、snapshot、SID/result、另一个 Trace 的分析结果）
 
-这是新的多窗口/多用户结果快照对比，不是旧的单窗口 `referenceTraceId` 双 Trace raw data 对比。
+这是多窗口/多用户结果快照对比，不是当前会话里已打开两个 Trace 的实时 raw data 对比。
 
 **核心原则：**
 1. 先对比 `AnalysisResultSnapshot`，不默认唤醒原 TraceProcessor。
@@ -91,6 +95,7 @@ plan_template:
 3. 不同 scene、设备、包名或采集配置不一致时，结论必须降级并明确说明。
 4. 每个关键数值必须能追溯到 snapshot、metric key 和 evidence refs。
 5. AI 只能解释差异，不允许从自然语言报告里重新抽取或发明指标。
+6. 如果用户说的是已打开的左/右或上/下 Trace 原始数据差异，而不是已有结果/snapshot/SID，则不要使用本策略。
 
 **Phase 1 — Snapshot 范围确认：**
 
@@ -124,7 +129,7 @@ plan_template:
 
 禁止：
 
-- 使用旧 `execute_sql_on("reference")` 路线替代结果快照对比。
+- 使用 raw trace pair 的 `execute_sql_on("reference")` 路线替代结果快照对比。
 - 对单侧缺失 metric 给出百分比变化。
 - 用报告正文里的描述覆盖 normalized metric。
 <!-- /strategy-detail -->

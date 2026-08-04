@@ -11,7 +11,10 @@ import request from 'supertest';
 import { ENTERPRISE_FEATURE_FLAG_ENV } from '../../config';
 import { EnhancedSessionContext, sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../../services/enterpriseDb';
-import { ENTERPRISE_MIGRATION_PHASE_ENV } from '../../services/enterpriseMigration';
+import {
+  ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV,
+  ENTERPRISE_MIGRATION_PHASE_ENV,
+} from '../../services/enterpriseMigration';
 import { SessionPersistenceService } from '../../services/sessionPersistenceService';
 import {
   failInterruptedAnalysisRunsOnStartup,
@@ -30,6 +33,7 @@ import traceRoutes from '../simpleTraceRoutes';
 const originalEnv = {
   enterprise: process.env[ENTERPRISE_FEATURE_FLAG_ENV],
   migrationPhase: process.env[ENTERPRISE_MIGRATION_PHASE_ENV],
+  cutoverConfirmed: process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV],
   trustedHeaders: process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS,
   enterpriseDbPath: process.env[ENTERPRISE_DB_PATH_ENV],
   enterpriseDataDir: process.env[ENTERPRISE_DATA_DIR_ENV],
@@ -171,6 +175,7 @@ beforeEach(async () => {
 
   process.env[ENTERPRISE_FEATURE_FLAG_ENV] = 'true';
   process.env[ENTERPRISE_MIGRATION_PHASE_ENV] = 'cutover';
+  process.env[ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV] = 'true';
   process.env.SMARTPERFETTO_SSO_TRUSTED_HEADERS = 'true';
   process.env[ENTERPRISE_DB_PATH_ENV] = dbPath;
   process.env[ENTERPRISE_DATA_DIR_ENV] = dataDir;
@@ -190,6 +195,7 @@ afterEach(async () => {
   sessionContextManager.remove(SESSION_ID);
   restoreEnvValue(ENTERPRISE_FEATURE_FLAG_ENV, originalEnv.enterprise);
   restoreEnvValue(ENTERPRISE_MIGRATION_PHASE_ENV, originalEnv.migrationPhase);
+  restoreEnvValue(ENTERPRISE_MIGRATION_CUTOVER_CONFIRMED_ENV, originalEnv.cutoverConfirmed);
   restoreEnvValue('SMARTPERFETTO_SSO_TRUSTED_HEADERS', originalEnv.trustedHeaders);
   restoreEnvValue(ENTERPRISE_DB_PATH_ENV, originalEnv.enterpriseDbPath);
   restoreEnvValue(ENTERPRISE_DATA_DIR_ENV, originalEnv.enterpriseDataDir);

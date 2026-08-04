@@ -17,7 +17,7 @@ on:
       - ".dockerignore"
       - "docker-compose*.yml"
       - "scripts/trace-processor-pin.env"
-      - "test-traces/**"
+      - "Trace/**"
       - ".github/dependabot.yml"
       - ".github/workflows/**"
   push:
@@ -37,7 +37,7 @@ on:
       - ".dockerignore"
       - "docker-compose*.yml"
       - "scripts/trace-processor-pin.env"
-      - "test-traces/**"
+      - "Trace/**"
       - ".github/dependabot.yml"
       - ".github/workflows/**"
 
@@ -54,10 +54,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "npm"
@@ -81,32 +81,130 @@ jobs:
   gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: "npm"
-          cache-dependency-path: "backend/package-lock.json"
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install root and backend dependencies
+        run: npm ci && npm --prefix backend ci
 
       - name: Run PR verification gate
-        run: npm run verify:pr
+        run: npm --prefix backend run verify:pr
+
+  cross-platform-contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Set up fixed Go 1.25 for the Windows gate helper
+        if: ${{ matrix.os == 'windows-latest' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.0"
+          cache: false
+
+      - name: Install root and backend dependencies
+        run: npm ci && npm --prefix backend ci
+
+      - name: Test the fixed Windows gate helper source
+        if: ${{ matrix.os == 'windows-latest' }}
+        env:
+          GO111MODULE: "off"
+        run: go test ./scripts/portable-health-probe
+
+      - name: Build the fixed Windows gate helper
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          GO111MODULE: "off"
+          SMARTPERFETTO_WINDOWS_GATE_HELPER_PATH: ${{ runner.temp }}/smartperfetto-windows-gate-helper.exe
+        run: >-
+          go build -trimpath '-ldflags=-s -w'
+          -o "$env:SMARTPERFETTO_WINDOWS_GATE_HELPER_PATH"
+          ./scripts/portable-health-probe
+
+      - name: Verify cross-platform runtime contracts
+        if: ${{ matrix.os != 'windows-latest' }}
+        run: npm run test:governance && npm --prefix backend run typecheck
+
+      - name: Verify Windows cross-platform runtime contracts
+        if: ${{ matrix.os == 'windows-latest' }}
+        env:
+          SMARTPERFETTO_WINDOWS_GATE_HELPER_PATH: ${{ runner.temp }}/smartperfetto-windows-gate-helper.exe
+        run: npm run test:governance && npm --prefix backend run typecheck
+
+  trace-corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout with Perfetto schema sources
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Install root and backend dependencies
+        run: npm ci && npm --prefix backend ci
+
+      - name: Run trace corpus semantic regression
+        run: npm run trace:regression
 
   docker-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build Docker runtime image
         run: docker build -t smartperfetto-runtime-smoke .
+
+      - name: Smoke Docker runtime assets
+        run: |
+          docker run -d --name smartperfetto-runtime-smoke smartperfetto-runtime-smoke
+          trap 'docker rm -f smartperfetto-runtime-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec smartperfetto-runtime-smoke curl -fsS http://127.0.0.1:3000/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs smartperfetto-runtime-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+          docker exec smartperfetto-runtime-smoke curl -fsS http://127.0.0.1:3000/assistant-shell | grep -qi '<html'
+          docker exec smartperfetto-runtime-smoke curl -fsS http://127.0.0.1:3000/admin-control-plane | grep -qi '<html'
+          docker exec smartperfetto-runtime-smoke /app/backend/node_modules/opencode-ai/bin/opencode.exe --version

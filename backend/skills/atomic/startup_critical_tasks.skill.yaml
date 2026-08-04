@@ -37,7 +37,6 @@ meta:
 
 prerequisites:
   modules:
-    - sched
     - linux.cpu.frequency
 
 inputs:

@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "clock": {
+    "anchor": "trace-middle",
+    "duration_ns": "1000000000"
+  },
+  "actors": {
+    "processes": [
+      {
+        "id": "app",
+        "name": "com.smartperfetto.fixture",
+        "uid": 10999
+      },
+      {
+        "id": "system",
+        "name": "system_server",
+        "uid": 1000
+      },
+      {
+        "id": "sf",
+        "name": "/system/bin/surfaceflinger",
+        "uid": 1000
+      }
+    ],
+    "threads": [
+      {
+        "id": "main",
+        "process": "app",
+        "name": "main",
+        "is_main": true
+      },
+      {
+        "id": "render",
+        "process": "app",
+        "name": "RenderThread"
+      },
+      {
+        "id": "game",
+        "process": "app",
+        "name": "GameThread"
+      },
+      {
+        "id": "rn-js",
+        "process": "app",
+        "name": "mqt_js"
+      },
+      {
+        "id": "rn-native",
+        "process": "app",
+        "name": "mqt_native_modules"
+      },
+      {
+        "id": "webview",
+        "process": "app",
+        "name": "CrRendererMain"
+      },
+      {
+        "id": "system-main",
+        "process": "system",
+        "name": "android.fg",
+        "is_main": true
+      },
+      {
+        "id": "sf-main",
+        "process": "sf",
+        "name": "surfaceflinger",
+        "is_main": true
+      }
+    ]
+  },
+  "signals": [
+    {
+      "type": "atrace-slice",
+      "at_ns": "10000000",
+      "duration_ns": "18000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto::CASE::power-thermal"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "40000000",
+      "duration_ns": "19000000",
+      "process": "app",
+      "thread": "render",
+      "name": "thermal_throttling"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "70000000",
+      "duration_ns": "20000000",
+      "process": "app",
+      "thread": "main",
+      "name": "WakeLock"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "100000000",
+      "duration_ns": "21000000",
+      "process": "app",
+      "thread": "render",
+      "name": "device_suspend"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "250000000",
+      "process": "app",
+      "thread": "main",
+      "name": "SmartPerfetto.power-thermal.pressure",
+      "value": 73
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "300000000",
+      "duration_ns": "45000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "sched-running",
+      "at_ns": "380000000",
+      "duration_ns": "20000000",
+      "thread": "main",
+      "cpu": 0,
+      "end_state": "S"
+    },
+    {
+      "type": "battery-counters",
+      "at_ns": "400000000",
+      "capacity_percent": 80,
+      "charge_counter_uah": "4000000",
+      "current_ua": "-500000",
+      "voltage_uv": "4000000"
+    },
+    {
+      "type": "battery-counters",
+      "at_ns": "600000000",
+      "capacity_percent": 79,
+      "charge_counter_uah": "3999000",
+      "current_ua": "-550000",
+      "voltage_uv": "3980000"
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "410000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "DozeDeepState",
+      "value": 5
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "610000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "DozeDeepState",
+      "value": 0
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "420000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "domain@0 Frequency",
+      "value": 800000
+    },
+    {
+      "type": "atrace-counter",
+      "at_ns": "620000000",
+      "process": "system",
+      "thread": "system-main",
+      "name": "domain@0 Frequency",
+      "value": 1600000
+    },
+    {
+      "type": "power-rail",
+      "at_ns": "430000000",
+      "duration_ns": "200000000",
+      "name": "SYNTHETIC_CPU",
+      "subsystem": "CPU",
+      "start_energy_uws": "1000000",
+      "end_energy_uws": "1300000"
+    },
+    {
+      "type": "gpu-work-period",
+      "at_ns": "450000000",
+      "duration_ns": "30000000",
+      "gpu_id": 0,
+      "uid": 10999,
+      "active_duration_ns": "24000000",
+      "cpu": 0
+    },
+    {
+      "type": "gpu-frequency",
+      "at_ns": "450000000",
+      "gpu_id": 0,
+      "value": 700000,
+      "cpu": 0
+    },
+    {
+      "type": "gpu-power-state",
+      "at_ns": "450000000",
+      "old_state": 0,
+      "new_state": 2,
+      "cpu": 0
+    },
+    {
+      "type": "cpu-frequency",
+      "at_ns": "460000000",
+      "cpu_id": 0,
+      "value": 1800000,
+      "cpu": 0
+    },
+    {
+      "type": "cpu-idle",
+      "at_ns": "470000000",
+      "cpu_id": 0,
+      "state": 1,
+      "cpu": 0
+    }
+  ]
+}

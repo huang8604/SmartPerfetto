@@ -12,7 +12,7 @@ import {
 function candidate(): CaseCandidate {
   return {
     candidateId: 'cand-sdk-1',
-    schemaVersion: 'case_candidate@1',
+    schemaVersion: 'case_candidate@2',
     provenance: {
       sourceSessionId: 'session-1',
       sourceAnalysisRunId: 'run-1',
@@ -22,6 +22,7 @@ function candidate(): CaseCandidate {
       engine: 'claude',
       sceneType: 'scrolling',
       architectureType: 'unknown',
+      originScope: {tenantId: 'default-dev-tenant', workspaceId: 'default-workspace'},
     },
     cluster: {
       scene: 'scrolling',

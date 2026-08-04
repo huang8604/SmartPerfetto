@@ -73,11 +73,9 @@ describeWithTrace('startup_analysis skill', TRACE_FILE, () => {
         }
       }, 30000);
 
-      it('should handle non-matching package gracefully', async () => {
-        const result = await evaluator.executeStep('get_startups', { package: 'com.nonexistent.package' });
-
-        expect(result.success).toBe(true);
-        expect(result.data).toHaveLength(0);
+      it('should fail closed when the requested package identity cannot be verified', async () => {
+        await expect(evaluator.executeStep('get_startups', { package: 'com.nonexistent.package' }))
+          .rejects.toThrow('Process identity could not be verified');
       }, 30000);
     });
 

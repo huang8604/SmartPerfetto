@@ -898,7 +898,10 @@ describe('ModelRouter', () => {
       const result = await deepseekRouter.callModel(deepseekModel, 'hello');
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('disabled in enterprise mode');
+      expect(result.error).toMatch(
+        /^domain=\S+ code=\S+ sha256=[a-f0-9]{16} bytes=\d+$/,
+      );
+      expect(result.errorCode).toBe('provider_error');
     });
 
     it('should create Anthropic client for anthropic provider', () => {
@@ -1048,8 +1051,38 @@ describe('ModelRouter', () => {
       expect(telemetryHandler).toHaveBeenCalledWith(expect.objectContaining({
         modelId: 'unknown-provider',
         success: false,
-        error: expect.stringContaining('Unknown provider'),
+        error: expect.stringMatching(
+          /^domain=\S+ code=\S+ sha256=[a-f0-9]{16} bytes=\d+$/,
+        ),
       }));
+    });
+
+    it('never emits or logs raw provider errors', async () => {
+      const canary = 'PRIVATE_ERROR_CANARY';
+      const failingModel = createMockModel({id: 'private-error-model'});
+      const privateRouter = new ModelRouter({
+        models: [failingModel],
+        defaultModel: failingModel.id,
+        fallbackChain: [failingModel.id],
+      });
+      privateRouter.registerClient(failingModel.id, createFailingMockClient(`provider failed: ${canary}`) as any);
+      const telemetryHandler = jest.fn();
+      const modelErrorHandler = jest.fn();
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+      privateRouter.on('llmTelemetry', telemetryHandler);
+      privateRouter.on('modelError', modelErrorHandler);
+
+      await expect(privateRouter.callWithFallback('private prompt', 'general'))
+        .rejects.toBeInstanceOf(AllModelsFailedError);
+
+      const externalized = JSON.stringify({
+        telemetry: telemetryHandler.mock.calls,
+        modelErrors: modelErrorHandler.mock.calls,
+        logs: consoleSpy.mock.calls,
+      });
+      expect(externalized).not.toContain(canary);
+      expect(externalized).toContain('sha256=');
+      consoleSpy.mockRestore();
     });
 
     it('should emit llmTelemetry event on call', async () => {

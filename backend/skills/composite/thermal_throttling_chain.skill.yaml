@@ -60,7 +60,7 @@ steps:
     name: "温度/热节流分析"
     skill: thermal_throttling
     params:
-      package: "${package|${process_name|}}"
+      package: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:
@@ -97,7 +97,7 @@ steps:
     name: "进程 CPU 利用率"
     skill: cpu_process_utilization_period
     params:
-      package: "${package|${process_name|}}"
+      process_name: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:
@@ -110,7 +110,7 @@ steps:
     name: "线程 CPU 利用率"
     skill: cpu_thread_utilization_period
     params:
-      package: "${package|${process_name|}}"
+      process_name: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:
@@ -123,7 +123,7 @@ steps:
     name: "GPU Work Period"
     skill: android_gpu_work_period_track
     params:
-      package: "${package|${process_name|}}"
+      package: "${package || process_name || ''}"
       start_ts: "${start_ts}"
       end_ts: "${end_ts}"
     display:

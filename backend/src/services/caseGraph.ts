@@ -44,9 +44,11 @@ import {
   legacyKnowledgeFilesystemWritesEnabled,
   type KnowledgeScope,
   listScopedKnowledgeRecords,
-  removeScopedKnowledgeRecord,
+  mutateScopedKnowledgeRecordWithSideEffect,
+  removeScopedKnowledgeRecordIf,
   upsertScopedKnowledgeRecord,
 } from './scopedKnowledgeStore';
+import {withFilesystemRegistryLock} from './filesystemRegistryLock';
 
 interface StorageEnvelope {
   schemaVersion: 1;
@@ -82,22 +84,30 @@ export class CaseGraph {
   /** Map from canonical edge key to the stored edge. */
   private readonly edges = new Map<string, CaseEdge>();
   private loaded = false;
+  private loadError: Error | undefined;
 
   constructor(storagePath: string) {
     this.storagePath = storagePath;
   }
 
   load(): void {
-    if (this.loaded) return;
     this.loaded = true;
+    this.edges.clear();
+    this.loadError = undefined;
     if (!fs.existsSync(this.storagePath)) return;
     try {
       const raw = fs.readFileSync(this.storagePath, 'utf-8');
       const parsed = JSON.parse(raw) as StorageEnvelope;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.edges)) return;
+      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.edges)) {
+        this.loadError = new Error('Case graph schema is invalid');
+        return;
+      }
       for (const e of parsed.edges) this.edges.set(edgeKey(e), e);
-    } catch {
+    } catch (error) {
       // Corrupted JSON: file preserved, in-memory cache stays empty.
+      this.loadError = new Error(
+        `Case graph is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -113,53 +123,81 @@ export class CaseGraph {
         `Self-loops are not permitted: edge '${edge.edgeId}' has fromCaseId === toCaseId === '${edge.fromCaseId}'`,
       );
     }
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.edges.set(edgeKey(edge), edge);
-      this.persist();
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
+    const canonicalExternalId = `canonical:${edgeKey(edge)}`;
+    if (filesystemWrites && databaseWrites) {
+      mutateScopedKnowledgeRecordWithSideEffect<CaseEdge>(
+        KNOWLEDGE_KIND,
+        canonicalExternalId,
+        scope,
+        () => ({record: edge, rowScope: caseEdgeRowScope(edge.relation)}),
+        (next, current) => this.mutateFilesystem(() => {
+          assertReplicaMatches('case edge', canonicalExternalId, current, this.edges.get(edgeKey(edge)));
+          this.edges.set(edgeKey(edge), next);
+        }),
+      );
+    } else if (filesystemWrites) {
+      this.mutateFilesystem(() => this.edges.set(edgeKey(edge), edge));
     }
-    if (enterpriseKnowledgeDbWritesEnabled()) {
-      for (const existing of this.listEnterpriseEdges(scope)) {
-        if (
-          edgeKey(existing.record) === edgeKey(edge) &&
-          existing.record.edgeId !== edge.edgeId
-        ) {
-          removeScopedKnowledgeRecord(
-            KNOWLEDGE_KIND,
-            existing.record.edgeId,
-            scope,
-          );
-        }
-      }
+    if (databaseWrites && !filesystemWrites) {
       upsertScopedKnowledgeRecord(
         KNOWLEDGE_KIND,
-        edge.edgeId,
+        canonicalExternalId,
         caseEdgeRowScope(edge.relation),
         edge,
         scope,
       );
     }
+    if (databaseWrites) {
+      for (const existing of this.listEnterpriseEdges(scope)) {
+        if (existing.externalId === canonicalExternalId) continue;
+        removeScopedKnowledgeRecordIf<CaseEdge>(
+          KNOWLEDGE_KIND,
+          existing.externalId,
+          scope,
+          current => edgeKey(current) === edgeKey(edge),
+        );
+      }
+    }
   }
 
   /** Remove an edge by canonical id. Returns whether it was present. */
   removeEdge(edgeId: string, scope?: KnowledgeScope): boolean {
+    const filesystemWrites = legacyKnowledgeFilesystemWritesEnabled();
+    const databaseWrites = enterpriseKnowledgeDbWritesEnabled();
     let removed = false;
-    if (enterpriseKnowledgeDbWritesEnabled()) {
-      removed = removeScopedKnowledgeRecord(KNOWLEDGE_KIND, edgeId, scope) || removed;
-    }
-    if (legacyKnowledgeFilesystemWritesEnabled()) {
-      this.load();
-      let foundKey: string | undefined;
-      for (const [k, e] of this.edges) {
-        if (e.edgeId === edgeId) {
-          foundKey = k;
-          break;
+    if (databaseWrites) {
+      for (const existing of this.listEnterpriseEdges(scope)) {
+        if (existing.record.edgeId === edgeId) {
+          removed = removeScopedKnowledgeRecordIf<CaseEdge>(
+            KNOWLEDGE_KIND,
+            existing.externalId,
+            scope,
+            current => current.edgeId === edgeId,
+            current => {
+              if (!filesystemWrites) return;
+              this.mutateFilesystem(() => {
+                const key = edgeKey(current);
+                assertReplicaMatches('case edge', existing.externalId, current, this.edges.get(key));
+                this.edges.delete(key);
+              });
+            },
+          ) || removed;
         }
       }
-      if (foundKey) {
-        this.edges.delete(foundKey);
-        this.persist();
-        removed = true;
-      }
+    }
+    if (filesystemWrites && !removed) {
+      const had = this.mutateFilesystem(() => {
+        for (const [key, edge] of this.edges) {
+          if (edge.edgeId === edgeId) {
+            this.edges.delete(key);
+            return true;
+          }
+        }
+        return false;
+      });
+      removed = had || removed;
     }
     return removed;
   }
@@ -274,12 +312,38 @@ export class CaseGraph {
     fs.renameSync(tmp, this.storagePath);
   }
 
+  private mutateFilesystem<T>(mutation: () => T): T {
+    return withFilesystemRegistryLock(
+      this.storagePath,
+      'case_graph_busy',
+      () => {
+        this.load();
+        if (this.loadError) throw this.loadError;
+        const result = mutation();
+        this.persist();
+        return result;
+      },
+    );
+  }
+
   private listEnterpriseEdges(scope?: KnowledgeScope) {
     return listScopedKnowledgeRecords<CaseEdge>(
       KNOWLEDGE_KIND,
       scope,
       {rowScopePrefix: CASE_EDGE_ROW_SCOPE_PREFIX},
     );
+  }
+}
+
+function assertReplicaMatches<T>(
+  kind: string,
+  id: string,
+  databaseRecord: T | undefined,
+  filesystemRecord: T | undefined,
+): void {
+  if (databaseRecord === undefined || filesystemRecord === undefined) return;
+  if (JSON.stringify(databaseRecord) !== JSON.stringify(filesystemRecord)) {
+    throw new Error(`${kind} '${id}' has diverged database and filesystem replicas`);
   }
 }
 

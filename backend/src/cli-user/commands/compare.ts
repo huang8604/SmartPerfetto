@@ -26,14 +26,16 @@ export interface CompareCommandArgs {
 export async function runCompareCommand(args: CompareCommandArgs): Promise<number> {
   const currentTracePath = path.resolve(args.currentTrace);
   const referenceTracePath = path.resolve(args.referenceTrace);
-  const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
   const renderer = createRenderer({ verbose: args.verbose, useColor: !args.noColor, format: args.format });
-  const service = new CliAnalyzeService();
+  const lifecycle: { service?: CliAnalyzeService } = {};
   let exitCode = 0;
 
   try {
     await withConsoleLogToStderr(renderer.format !== 'text', async () => {
-      assertAnalysisRuntimeReady();
+      const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir });
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
+      assertAnalysisRuntimeReady({ aiFeature: 'agent_analyze' });
       const turn = await startSession({ paths, service, renderer }, {
         tracePath: currentTracePath,
         referenceTracePath,
@@ -47,6 +49,6 @@ export async function runCompareCommand(args: CompareCommandArgs): Promise<numbe
     renderer.printError((err as Error).message);
     return 1;
   } finally {
-    await service.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }

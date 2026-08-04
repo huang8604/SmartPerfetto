@@ -3,6 +3,16 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { describe, expect, it } from '@jest/globals';
+
+jest.mock('commander', () => ({
+  Command: class {
+    description() { return this; }
+    argument() { return this; }
+    option() { return this; }
+    action() { return this; }
+  },
+}));
+
 import {
   validateStrategyFrontmatter,
   type StrategyFrontmatterValidationContext,

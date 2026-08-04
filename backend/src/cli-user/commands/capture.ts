@@ -19,6 +19,7 @@ import {
   readTraceConfigFile,
   renderAndroidTraceConfig,
 } from '../services/captureConfig';
+import { buildTraceConfigProposal } from '../../services/traceConfigProposal';
 import {
   captureAndroidTrace,
   type AdbCommandRunner,
@@ -73,13 +74,29 @@ export interface CapturePresetsCommandArgs {
   sessionDir?: string;
 }
 
+export interface CaptureSuggestCommandArgs {
+  request: string;
+  app?: string;
+  durationSeconds?: number;
+  categories?: string[];
+  cuj?: string;
+  format?: OutputFormat;
+  envFile?: string;
+  sessionDir?: string;
+}
+
 export async function runCaptureAndroidCommand(args: CaptureAndroidCommandArgs): Promise<number> {
   const { paths } = bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
   const format = args.format ?? 'text';
   const outPath = path.resolve(args.out);
-  let service: CliAnalyzeService | undefined;
+  const lifecycle: { service?: CliAnalyzeService } = {};
 
   try {
+    if (args.analyze) {
+      await withConsoleLogToStderr(format !== 'text', async () => {
+        assertAnalysisRuntimeReady({ aiFeature: 'capture_analyze' });
+      });
+    }
     const configInput = resolveAndroidConfigInput(args);
     if (format === 'text') {
       const preset = configInput.preset ? ` preset=${configInput.preset}` : '';
@@ -120,12 +137,12 @@ export async function runCaptureAndroidCommand(args: CaptureAndroidCommandArgs):
     printPreflightWarnings(format, capture);
 
     const renderer = createRenderer({ verbose: args.verbose, useColor: !args.noColor, format });
-    service = new CliAnalyzeService();
     const query = args.query?.trim() || DEFAULT_ANALYSIS_QUERY;
     let exitCode = 0;
     await withConsoleLogToStderr(renderer.format !== 'text', async () => {
-      assertAnalysisRuntimeReady();
-      const turn = await startSession({ paths, service: service!, renderer }, {
+      const service = new CliAnalyzeService();
+      lifecycle.service = service;
+      const turn = await startSession({ paths, service, renderer }, {
         tracePath: capture.out,
         query,
         analysisMode: args.analysisMode,
@@ -144,7 +161,7 @@ export async function runCaptureAndroidCommand(args: CaptureAndroidCommandArgs):
     printError(format, (err as Error).message);
     return 1;
   } finally {
-    await service?.shutdown();
+    await lifecycle.service?.shutdown();
   }
 }
 
@@ -194,6 +211,29 @@ export async function runCaptureConfigCommand(args: CaptureConfigCommandArgs): P
         process.stdout.write(configText);
       }
     }
+    return 0;
+  } catch (err) {
+    printError(format, (err as Error).message);
+    return 1;
+  }
+}
+
+export async function runCaptureSuggestCommand(args: CaptureSuggestCommandArgs): Promise<number> {
+  bootstrap({ envFile: args.envFile, sessionDir: args.sessionDir, requireLlm: false });
+  const format = args.format ?? 'text';
+  try {
+    const proposal = buildTraceConfigProposal({
+      request: args.request,
+      app: args.app,
+      durationSeconds: args.durationSeconds,
+      categories: args.categories,
+      cuj: args.cuj,
+    });
+    if (format === 'json' || format === 'ndjson') {
+      console.log(JSON.stringify({ ok: true, type: 'trace_config_proposal', proposal }, null, format === 'json' ? 2 : 0));
+      return 0;
+    }
+    printTraceConfigProposal(proposal);
     return 0;
   } catch (err) {
     printError(format, (err as Error).message);
@@ -258,6 +298,26 @@ function printPreflightWarnings(format: OutputFormat, capture: TraceCaptureResul
   }
 }
 
+function printTraceConfigProposal(proposal: ReturnType<typeof buildTraceConfigProposal>): void {
+  console.log('SmartPerfetto trace config proposal');
+  console.log(`preset     ${proposal.preset} (${proposal.presetLabel})`);
+  console.log(`confidence ${proposal.confidence}`);
+  console.log(`app        ${proposal.app}`);
+  console.log(`duration   ${proposal.config.durationSeconds}s`);
+  console.log(`config     ${formatCommand(proposal.command.config)}`);
+  console.log(`capture    ${formatCommand(proposal.command.capture)}`);
+  if (proposal.warnings.length > 0) {
+    console.log('');
+    console.log('Warnings');
+    for (const warning of proposal.warnings) console.log(`- ${warning}`);
+  }
+  console.log('');
+  console.log('Rationale');
+  for (const rationale of proposal.rationale) console.log(`- ${rationale}`);
+  console.log('');
+  process.stdout.write(proposal.config.textproto);
+}
+
 function extractDurationFromText(textproto: string, fallback?: number): number | undefined {
   const match = [...textproto.matchAll(/^\s*duration_ms\s*:\s*(\d+)\s*$/gm)];
   const last = match[match.length - 1]?.[1];
@@ -272,4 +332,13 @@ function printError(format: OutputFormat, message: string): void {
     return;
   }
   console.error(`Error: ${message}`);
+}
+
+function formatCommand(args: string[]): string {
+  return args.map(formatCommandArg).join(' ');
+}
+
+function formatCommandArg(arg: string): string {
+  if (/^[a-zA-Z0-9_./:=@%+-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
 }

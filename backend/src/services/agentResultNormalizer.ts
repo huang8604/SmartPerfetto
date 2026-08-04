@@ -80,6 +80,8 @@ const NARRATIVE_FALLBACK_USEFUL_COLUMN_RE =
   /(?:dur|ttid|ttfd|self|total|running|runnable|sleep|blocked|q[1-4][ab]?|pct|percent|freq|mhz|ms|level|severity|type|reason|slice|task|package|process|thread|core|pressure|score|count|binder|gc|jit|inflate|startup)/i;
 const NARRATIVE_FALLBACK_NOISY_COLUMN_RE =
   /^(?:ts|start_ts|end_ts|id|startup_id|upid|utid|pid|tid|track_id|slice_id|arg_set_id)$/i;
+const NARRATIVE_FALLBACK_IDENTITY_ID_COLUMN_RE =
+  /^(?:upid|utid|pid|tid)$/i;
 
 /**
  * Normalize a conclusion string for contract parsing without user-facing
@@ -280,6 +282,24 @@ function cellScore(input: {
   return score;
 }
 
+function columnAppearsInNarrative(column: string, normalizedNarrative: string): boolean {
+  const normalizedColumn = normalizeForNarrativeMatch(column);
+  return normalizedColumn.length >= 2 && normalizedNarrative.includes(normalizedColumn);
+}
+
+function shouldSkipNarrativeFallbackColumn(input: {
+  column: string;
+  value: string | number | boolean;
+  normalizedNarrative: string;
+}): boolean {
+  if (!NARRATIVE_FALLBACK_NOISY_COLUMN_RE.test(input.column)) return false;
+  if (!NARRATIVE_FALLBACK_IDENTITY_ID_COLUMN_RE.test(input.column)) return true;
+  return !(
+    primitiveValueAppearsInNarrative(input.value, input.normalizedNarrative) &&
+    columnAppearsInNarrative(input.column, input.normalizedNarrative)
+  );
+}
+
 function buildNarrativeEvidenceCandidates(
   narrative: string,
   envelopes: DataEnvelope[] | undefined,
@@ -306,7 +326,7 @@ function buildNarrativeEvidenceCandidates(
       const scoredCells = Object.entries(row)
         .flatMap(([column, value]) => {
           if (!isPrimitiveClaimValue(value)) return [];
-          if (NARRATIVE_FALLBACK_NOISY_COLUMN_RE.test(column)) return [];
+          if (shouldSkipNarrativeFallbackColumn({ column, value, normalizedNarrative })) return [];
           const valueAppears = primitiveValueAppearsInNarrative(value, normalizedNarrative);
           if (typeof value === 'number' && !valueAppears) return [];
           const useful = NARRATIVE_FALLBACK_USEFUL_COLUMN_RE.test(column) ||
@@ -437,8 +457,14 @@ function hasFullyEvidenceResolvableStructuredClaims(
   if (support.length === 0) return false;
   return support.length >= contract.claims.length &&
     support.every(claim =>
-      claim.supportLevel !== 'unsupported' &&
-      claim.anchors.every(anchor => !anchor.missing),
+      claim.supportLevel === 'verified' &&
+      claim.anchors.every(anchor => !anchor.missing) &&
+      claim.anchors.some(anchor =>
+        (anchor.cells || []).some(cell =>
+          cell.value !== undefined &&
+          (cell.actualValue !== undefined || cell.displayValue !== undefined),
+        ),
+      ),
     );
 }
 
@@ -480,10 +506,10 @@ export function deriveEvidenceBackedConclusionContractForNarrative(
   return {
     ...parsed,
     claims: fallback.claims,
-    evidenceChain: parsed.evidenceChain.length > 0 ? parsed.evidenceChain : fallback.evidenceChain,
+    evidenceChain: fallback.evidenceChain,
     metadata: {
-      ...(fallback.metadata || {}),
       ...(parsed.metadata || {}),
+      ...(fallback.metadata || {}),
     },
   };
 }

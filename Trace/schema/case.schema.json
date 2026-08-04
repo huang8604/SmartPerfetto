@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartperfetto.dev/schemas/trace-case-v1.json",
+  "title": "SmartPerfetto Trace Case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "title",
+    "description",
+    "scene",
+    "tags",
+    "trace",
+    "android",
+    "source",
+    "analysis",
+    "coverage"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "kind": {"enum": ["real", "constructed"]},
+    "title": {"type": "string", "minLength": 1},
+    "description": {"type": "string", "minLength": 1},
+    "scene": {"type": "string", "minLength": 1},
+    "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "known_issues": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "format", "sha256", "materialization"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "format": {"const": "perfetto-protobuf"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "materialization": {"enum": ["committed", "base-plus-overlay"]}
+      }
+    },
+    "android": {
+      "type": "object",
+      "required": ["release", "api_level", "device", "build_fingerprint", "compatibility"],
+      "properties": {
+        "release": {"type": ["string", "null"]},
+        "api_level": {"type": ["integer", "null"], "minimum": 1},
+        "device": {"type": ["string", "null"]},
+        "build_fingerprint": {"type": ["string", "null"]},
+        "compatibility": {
+          "type": "object",
+          "required": ["min_api", "max_api"],
+          "properties": {
+            "min_api": {"type": ["integer", "null"], "minimum": 1},
+            "max_api": {"type": ["integer", "null"], "minimum": 1}
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["origin", "captured_at", "imported_at", "license", "consent", "privacy_review", "sanitization_review", "publication"],
+      "properties": {
+        "origin": {"type": "string", "minLength": 1},
+        "captured_at": {"type": ["string", "null"]},
+        "imported_at": {"type": "string", "minLength": 1},
+        "license": {"type": ["string", "null"]},
+        "consent": {"type": ["string", "null"]},
+        "privacy_review": {"enum": ["approved", "not-applicable", "pending", null]},
+        "sanitization_review": {"enum": ["approved", "not-applicable", "pending", null]},
+        "publication": {"enum": ["public", "private", "legacy-tracked"]}
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "required": ["results", "logs"],
+      "properties": {
+        "results": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "logs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "trace_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_ns", "end_ns", "process_count_hint"],
+      "properties": {
+        "start_ns": {"type": "string", "pattern": "^[0-9]+$"},
+        "end_ns": {"type": "string", "pattern": "^[0-9]+$"},
+        "process_count_hint": {"type": "integer", "minimum": 0}
+      }
+    },
+    "construction": {
+      "type": "object",
+      "required": ["base_case_id", "scenario_file", "generator_version", "seed", "output"],
+      "properties": {
+        "base_case_id": {"type": "string"},
+        "scenario_file": {"type": "string"},
+        "generator_version": {"type": "integer", "minimum": 1},
+        "seed": {"type": "string", "minLength": 1},
+        "output": {"type": "string", "minLength": 1}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["skills", "strategies", "expectations"],
+      "properties": {
+        "skills": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "strategies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "expectations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "type", "target"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "type": {"enum": ["skill", "strategy", "sql"]},
+              "target": {"type": "string", "minLength": 1},
+              "mode": {"enum": ["semantic", "execution", "graceful_empty", "unavailable", "definition"]},
+              "semantic_step": {"type": ["string", "null"]},
+              "required_steps": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": true
+              },
+              "required_sql_steps": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": true
+              },
+              "forced_sql_steps": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": true
+              },
+              "isolated_sql_probes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["step", "setup_sql"],
+                  "properties": {
+                    "step": {"type": "string", "minLength": 1},
+                    "setup_sql": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {"type": "string", "minLength": 1}
+                    }
+                  }
+                }
+              },
+              "expected_condition_skips": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["step", "reason"],
+                  "properties": {
+                    "step": {"type": "string", "minLength": 1},
+                    "reason": {"type": "string", "minLength": 1}
+                  }
+                }
+              },
+              "expected_unavailable_sql_steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["step", "reason", "error"],
+                  "properties": {
+                    "step": {"type": "string", "minLength": 1},
+                    "reason": {"type": "string", "minLength": 1},
+                    "error": {"type": "string", "minLength": 1}
+                  }
+                }
+              },
+              "parameters": {"type": "object"},
+              "source_file": {"type": "string", "minLength": 1},
+              "required_marker": {"type": "string", "minLength": 1},
+              "query": {"type": "string"},
+              "expected_strategy": {"type": "string"},
+              "min_rows": {"type": "integer", "minimum": 0},
+              "max_rows": {"type": "integer", "minimum": 0},
+              "assertions": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["column", "operator", "value"],
+                  "properties": {
+                    "column": {"type": "string", "minLength": 1},
+                    "operator": {"enum": ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "matches"]},
+                    "value": {"type": ["string", "number", "boolean", "null"]}
+                  }
+                }
+              },
+              "limitation_reason": {"type": "string", "minLength": 1},
+              "expected_error": {"type": "string", "minLength": 1}
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {"const": "skill"},
+                    "mode": {"const": "semantic"}
+                  },
+                  "required": ["type", "mode"]
+                },
+                "then": {"required": ["assertions"]}
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "constructed"}}},
+      "then": {"required": ["construction"]}
+    }
+  ]
+}

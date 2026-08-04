@@ -18,11 +18,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import {diagnosticLogIdentity} from '../../../utils/logger';
 import { createSdkEnv, getSdkBinaryOption } from './claudeConfig';
 import type { Finding, StreamingUpdate } from '../../../agent/types';
 import type { VerificationResult, VerificationIssue, AnalysisPlanV3, Hypothesis, ToolCallRecord } from '../../../agentv3/types';
-import { expectedCallMatchesRecord, expectedToolNames, formatExpectedCall } from '../../../agentv3/types';
-import { isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
+import { expectedCallMatchesRecord, expectedToolNames, formatExpectedCall, phaseMatchesCall } from '../../../agentv3/types';
+import { isComparisonSynthesisPlanPhase, isConclusionLikePlanPhase } from '../../../agentv3/planPhaseSemantics';
 import type { SceneType } from '../../../agentv3/sceneClassifier';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, type OutputLanguage } from '../../../agentv3/outputLanguage';
 import { backendLogPath } from '../../../runtimePaths';
@@ -34,6 +35,10 @@ import {
   type VerifierMisdiagnosisSeverity,
 } from '../../../agentv3/strategyLoader';
 import { assessFinalReportContractCompleteness } from '../../../services/finalReportContractGate';
+import {
+  finalReportMissingRequiredCodeReference,
+  loadCodeReferenceContractPrompt,
+} from '../../../services/codebase/codeReferenceContract';
 
 interface CompiledMisdiagnosisPattern {
   pattern: RegExp;
@@ -104,8 +109,11 @@ function compileStrategyMisdiagnosisPatterns(sceneType?: SceneType): CompiledMis
  * Build combined misdiagnosis patterns from strategy frontmatter + learned.
  * Learned patterns are converted to regex on-the-fly from stored keywords.
  */
-function getKnownMisdiagnosisPatterns(sceneType?: SceneType): CompiledMisdiagnosisPattern[] {
-  const learned = loadLearnedPatterns();
+function getKnownMisdiagnosisPatterns(
+  sceneType?: SceneType,
+  allowPersistentLearning = true,
+): CompiledMisdiagnosisPattern[] {
+  const learned = allowPersistentLearning ? loadLearnedPatterns() : [];
   const cutoff = Date.now() - LEARNED_PATTERN_TTL_MS;
 
   const learnedAsPatterns = learned
@@ -193,6 +201,7 @@ export function verifyHeuristic(
   findings: Finding[],
   conclusion: string,
   sceneType?: SceneType,
+  allowPersistentLearning = true,
 ): VerificationIssue[] {
   const issues: VerificationIssue[] = [];
 
@@ -219,7 +228,7 @@ export function verifyHeuristic(
 
   // Check 3: Known misdiagnosis pattern matching (strategy frontmatter + learned, P2-G14)
   const fullText = conclusion + ' ' + findings.map(f => `${f.title} ${f.description}`).join(' ');
-  for (const pattern of getKnownMisdiagnosisPatterns(sceneType)) {
+  for (const pattern of getKnownMisdiagnosisPatterns(sceneType, allowPersistentLearning)) {
     if (pattern.pattern.test(fullText)) {
       issues.push({
         type: pattern.type,
@@ -366,6 +375,24 @@ function hasNonConclusionPhaseToolEvidence(
   });
 }
 
+function hasPriorNonConclusionMatchingToolEvidence(
+  plan: AnalysisPlanV3,
+  phase: AnalysisPlanV3['phases'][number],
+): boolean {
+  const phaseById = new Map(plan.phases.map(entry => [entry.id, entry]));
+  const phaseIndex = plan.phases.findIndex(entry => entry.id === phase.id);
+  return plan.toolCallLog.some(record => {
+    if (!record.matchedPhaseId || record.matchedPhaseId === phase.id) return false;
+    const matchedPhase = phaseById.get(record.matchedPhaseId);
+    if (!matchedPhase || isConclusionLikePlanPhase(matchedPhase)) return false;
+    if (phaseIndex >= 0) {
+      const matchedIndex = plan.phases.findIndex(entry => entry.id === matchedPhase.id);
+      if (matchedIndex > phaseIndex) return false;
+    }
+    return phaseMatchesCall(phase, record);
+  });
+}
+
 function expectedCallWasExecutedAnywhere(
   plan: AnalysisPlanV3,
   expectedCall: NonNullable<AnalysisPlanV3['phases'][number]['expectedCalls']>[number],
@@ -412,8 +439,11 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
   for (const phase of completedPhases) {
     const matchedCalls = plan.toolCallLog.filter(t => t.matchedPhaseId === phase.id);
     const isConclusionPhase = isConclusionLikePlanPhase(phase);
+    const isComparisonSynthesisPhase = isComparisonSynthesisPlanPhase(phase);
     const hasExternalEvidence = isConclusionPhase &&
       hasNonConclusionPhaseToolEvidence(plan, phase.id);
+    const hasReusableComparisonEvidence = isComparisonSynthesisPhase &&
+      hasPriorNonConclusionMatchingToolEvidence(plan, phase);
     const expected = expectedToolNames(phase).join(', ');
     const missingExpectedCallsForPhase = (phase.expectedCalls ?? [])
       .filter(call => !matchedCalls.some(record => expectedCallMatchesRecord(call, record)));
@@ -433,6 +463,9 @@ export function verifyPlanAdherence(plan: AnalysisPlanV3 | null): VerificationIs
     const hasExpectations = phase.expectedTools.length > 0;
     if (matchedCalls.length === 0 && hasExpectations) {
       if (isConclusionPhase && hasExternalEvidence) {
+        continue;
+      }
+      if (hasReusableComparisonEvidence) {
         continue;
       }
       issues.push({
@@ -938,8 +971,9 @@ ${conclusionPreview}${truncationNote}
         permissionMode: 'bypassPermissions' as const,
         allowDangerouslySkipPermissions: true,
         env: sdkEnv,
+        persistSession: false,
         stderr: (data: string) => {
-          console.warn(`[ClaudeVerifier] SDK stderr: ${data.trimEnd()}`);
+          console.warn(`[ClaudeVerifier] SDK stderr: ${diagnosticLogIdentity(data.trimEnd())}`);
         },
         ...getSdkBinaryOption(sdkEnv),
       },
@@ -1235,6 +1269,8 @@ export async function verifyConclusion(
     query?: string;
     /** Suppress user-facing progress when the caller will defer non-blocking issues to final gates. */
     emitIssueProgress?: boolean;
+    /** Allow global/cross-session learned verifier patterns to be read and updated. */
+    allowPersistentLearning?: boolean;
   } = {},
 ): Promise<VerificationResult> {
   const startTime = Date.now();
@@ -1242,11 +1278,24 @@ export async function verifyConclusion(
   const outputLanguage = options.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
 
   // Layer 1: Heuristic checks
-  const heuristicIssues = verifyHeuristic(findings, conclusion, sceneType);
+  const allowPersistentLearning = options.allowPersistentLearning !== false;
+  const heuristicIssues = verifyHeuristic(
+    findings,
+    conclusion,
+    sceneType,
+    allowPersistentLearning,
+  );
 
   // Layer 2: Plan adherence check
   const planIssues = verifyPlanAdherence(plan ?? null);
   heuristicIssues.push(...planIssues);
+  if (finalReportMissingRequiredCodeReference({plan, conclusion})) {
+    heuristicIssues.push({
+      type: 'missing_evidence',
+      severity: 'error',
+      message: loadCodeReferenceContractPrompt(outputLanguage),
+    });
+  }
 
   // Layer 2.5: Hypothesis resolution check (P0-G4)
   if (hypotheses && hypotheses.length > 0) {
@@ -1308,7 +1357,7 @@ export async function verifyConclusion(
   const passed = allIssues.filter(i => i.severity === 'error').length === 0;
 
   // P2-G14: Learn from LLM verification results (fire-and-forget)
-  if (llmIssues && llmIssues.length > 0) {
+  if (allowPersistentLearning && llmIssues && llmIssues.length > 0) {
     try { learnFromVerificationResults(llmIssues, findings); } catch { /* non-fatal */ }
   }
 

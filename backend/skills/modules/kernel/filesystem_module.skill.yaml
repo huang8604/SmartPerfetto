@@ -246,14 +246,12 @@ steps:
       JOIN thread t ON tt.utid = t.utid
       JOIN process p ON t.upid = p.upid
       WHERE p.name LIKE '%${package}%'
-        AND (s.name GLOB '*sqlite*'
-             OR s.name GLOB '*SQLite*'
-             OR s.name GLOB '*database*'
-             OR s.name GLOB '*query*'
-             OR s.name GLOB '*Query*'
-             OR s.name GLOB '*transaction*'
-             OR s.name GLOB '*cursor*'
-             OR s.name GLOB '*Room*')
+        -- Slice names are heuristic attribution only. Require a database
+        -- namespace/product signal; generic "query"/"transaction" names are
+        -- common outside storage and must not be promoted as DB evidence.
+        AND (LOWER(s.name) GLOB '*sqlite*'
+             OR LOWER(s.name) GLOB '*android.database*'
+             OR LOWER(s.name) GLOB '*room*database*')
         AND s.dur > 500000  -- > 0.5ms
       ORDER BY s.dur DESC
       LIMIT 30
@@ -282,11 +280,11 @@ steps:
       JOIN thread t ON tt.utid = t.utid
       JOIN process p ON t.upid = p.upid
       WHERE p.name LIKE '%${package}%'
-        AND (s.name GLOB '*SharedPreferences*'
-             OR s.name GLOB '*sharedpref*'
-             OR s.name GLOB '*getShared*'
-             OR s.name GLOB '*apply*'
-             OR s.name GLOB '*commit*')
+        -- apply/commit are generic method names; only accept an explicit
+        -- SharedPreferences namespace in the trace slice.
+        AND (LOWER(s.name) GLOB '*sharedpreferences*'
+             OR LOWER(s.name) GLOB '*sharedpref*'
+             OR LOWER(s.name) GLOB '*shared preferences*')
         AND s.dur > 500000
       ORDER BY s.dur DESC
       LIMIT 20
@@ -339,10 +337,11 @@ steps:
     save_as: io_wait_state
     synthesize: true
 
-  # Step 6: Slow IO operations (> 10ms)
+  # Step 6: Slow slices with I/O-like names (> 10ms). Name matching is a
+  # candidate signal only; generic app methods can contain these substrings.
   - id: slow_io_operations
     type: atomic
-    name: "慢 I/O 操作"
+    name: "疑似慢 I/O 命名切片"
     sql: |
       SELECT
         s.ts,
@@ -370,7 +369,7 @@ steps:
     display:
       level: detail
       layer: list
-      title: "慢 I/O 操作 (>10ms)"
+      title: "疑似慢 I/O 命名切片 (>10ms)"
     save_as: slow_io
 
   # Step 7: Diagnose IO issues
@@ -380,8 +379,8 @@ steps:
     inputs: [io_overview, main_thread_io, db_operations, io_wait_state, slow_io]
     rules:
       - condition: "main_thread_io.data.length > 0"
-        diagnosis: "检测到 ${main_thread_io.data.length} 次主线程 I/O 操作，最长 ${main_thread_io.data[0]?.dur_ms}ms"
-        confidence: critical
+        diagnosis: "主线程观测到 ${main_thread_io.data.length} 个疑似 I/O 命名切片，最长 ${main_thread_io.data[0]?.dur_ms}ms；切片名本身不能证明底层存储阻塞"
+        confidence: medium
         suggestions:
           - "将 I/O 操作移至后台线程"
           - "使用 Kotlin 协程或 RxJava 异步处理"
@@ -392,8 +391,8 @@ steps:
           - main_thread_io.data[0]?.io_operation
 
       - condition: "db_operations.data.filter(op => op.thread_type === 'main_thread').length > 5"
-        diagnosis: "主线程进行了多次数据库操作"
-        confidence: high
+        diagnosis: "主线程观测到多次疑似数据库命名切片；需结合 SQL/atrace 埋点确认具体 Room/SQLite 调用"
+        confidence: medium
         suggestions:
           - "数据库查询应在后台线程执行"
           - "使用 Room 的 @Query 配合 LiveData/Flow"
@@ -414,11 +413,11 @@ steps:
           - io_wait_state.data[0]?.io_wait_ms
 
       - condition: "slow_io.data.filter(op => op.severity === 'CRITICAL').length > 0"
-        diagnosis: "主线程存在严重慢 I/O: ${slow_io.data.filter(op => op.severity === 'CRITICAL')[0]?.operation}"
-        confidence: critical
+        diagnosis: "主线程观测到疑似慢 I/O 命名切片: ${slow_io.data.filter(op => op.severity === 'CRITICAL')[0]?.operation}；需结合线程状态或明确 I/O 埋点确认"
+        confidence: medium
         suggestions:
-          - "立即将此操作移至后台"
-          - "这可能导致 ANR"
+          - "确认该切片是否代表真实同步文件 I/O，再决定是否移至后台"
+          - "若它持续阻塞主线程并超过响应阈值，再结合调度状态评估 ANR 风险"
         evidence_fields:
           - slow_io.data[0]?.operation
           - slow_io.data[0]?.dur_ms

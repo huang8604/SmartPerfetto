@@ -283,6 +283,8 @@ export interface SceneReport {
   /** null for memory_session (expires on process restart) */
   expiresAt: number | null;
   createdAt: number;
+  /** Structural pipeline phase; avoids overloading localized summary text. */
+  phase?: 'selection_preview' | 'analyzed';
 
   /** Trace metadata snapshot */
   traceMeta: {
@@ -315,6 +317,12 @@ export interface SceneReport {
    * or errors; callers must handle null rather than assume a string.
    */
   summary: string | null;
+
+  /** Locale-complete Stage3 narratives generated from the same evidence. */
+  summaries?: {
+    'zh-CN'?: string;
+    en?: string;
+  };
 
   /** Cross-scene structured insights (optional, empty array if Stage3 skipped) */
   insights: SceneInsight[];

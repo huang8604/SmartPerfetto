@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "android-startup-heavy",
+  "kind": "real",
+  "title": "Android 16 heavy startup",
+  "description": "Existing SmartPerfetto heavy application startup fixture captured on a Xiaomi pandora device.",
+  "scene": "startup",
+  "tags": ["android", "startup", "heavy"],
+  "aliases": ["lacunh_heavy.pftrace"],
+  "trace": {
+    "file": "trace.pftrace",
+    "format": "perfetto-protobuf",
+    "sha256": "2a0c7b85e7f4a14e43b7f8d6de21172e05eba1ed3ad8ef7df539bb5e59b6ba63",
+    "materialization": "committed"
+  },
+  "android": {
+    "release": "16",
+    "api_level": 36,
+    "device": "Xiaomi pandora",
+    "build_fingerprint": "Xiaomi/pandora/pandora:16/BP2A.250605.031.A3/OS3.0.34.0.WBLCNXM:user/release-keys",
+    "compatibility": {"min_api": 36, "max_api": 36}
+  },
+  "source": {
+    "origin": "Legacy SmartPerfetto test-traces fixture; original capture provenance was not recorded",
+    "captured_at": null,
+    "imported_at": "2026-07-13T00:00:00.000Z",
+    "license": null,
+    "consent": null,
+    "privacy_review": "pending",
+    "sanitization_review": "pending",
+    "publication": "legacy-tracked"
+  },
+  "analysis": {
+    "results": ["analysis/lacunh_heavy.pftrace.fps_report.txt"],
+    "logs": []
+  },
+  "coverage": {"skills": [], "strategies": [], "expectations": []}
+}

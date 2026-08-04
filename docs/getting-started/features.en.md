@@ -2,6 +2,8 @@
 
 [English](features.en.md) | [中文](features.md)
 
+<!-- i18n-headings: paired -->
+
 This guide is for SmartPerfetto users. It explains what the product can do, where to trigger each feature, and what output to expect. For installation and configuration, see [Quick Start](quick-start.en.md) and [Configuration Guide](configuration.en.md).
 
 ## 1. AI Assistant Inside Perfetto UI
@@ -28,6 +30,26 @@ Output:
 - The AI calls backend TraceProcessor, SQL, Skills, and scene strategies.
 - The UI streams progress, SQL/Skill evidence, tables, and the final conclusion.
 - Conclusions should trace back to concrete time ranges, threads, slices, SQL rows, or Skill results.
+
+### Browser Trace Tools And Local WASM
+
+The committed Perfetto frontend also includes trace exploration capabilities
+that run directly in the browser:
+
+- Trace Doctor diagnostics and a unified Stack Samples/flamegraph entry point.
+- Raw multi-trace open/merge, Video Frames, and Pixel input-lifecycle and CUJ
+  views.
+- Experimental Memscope/OOM views, shown only when the trace contains the
+  required data and the corresponding experimental capability is available.
+- Local WASM parsing for zstd-compressed traces and `strace -ttt` input, plus
+  Perfetto UI query flows that execute multiple SQL statements at once.
+
+These capabilities belong to the local browser timeline and Perfetto plugins.
+Raw multi-trace open/merge is separate from SmartPerfetto dual-trace AI
+comparison, and new WASM capabilities do not automatically extend backend AI,
+Skills, CLI, or HTML reports. Those surfaces continue to use the packaged,
+pinned native `trace_processor_shell` until an independent upgrade passes the
+five-platform verification gates.
 
 ### Smart Analysis Mode
 
@@ -108,19 +130,30 @@ Output:
 
 ## 6. Live Trace Comparison
 
-Live trace comparison selects a reference trace inside the current AI conversation, so the AI can query the current trace and reference trace together.
+Live trace comparison places the current page's current trace and one workspace-history reference trace in a repositionable dual view, so the AI can query both traces in one conversation.
 
 Entry points:
 
 - Click `compare_arrows` in the AI Assistant header.
-- Select a reference trace.
-- Ask a comparison question, for example `Compare scrolling behavior between this trace and the reference trace`.
+- `Open Dual View` immediately opens a current-plus-empty-reference shell; no separate history picker is required first.
+- Both panes have a selector. Either pane can show current or history. Selecting history in the pane that holds current atomically moves current to the other pane.
+- History options lead with the trace filename. Upload time/file size are appended only when same-name records need disambiguation; internal ids are never the main label.
+- Once selected, history is the sole reference. The supported pair remains the current page's current parent plus one historical reference; arbitrary history-versus-history pairs are not supported.
+- You can switch horizontal/vertical layout, drag the splitter, maximize/minimize either side, or open either side in a new tab.
+- The dual-view toolbar keeps an explicit `AI Assistant` button visible. It collapses or restores the conversation panel without closing or reloading either trace pane.
+- Layout changes, maximize/minimize, and AI Panel hide/show do not reload dual-view iframes. Only explicit dual-view exit, current-trace unload, or workspace switch destroys them.
+- `Exit Dual View` releases the visual workspace while its two-trace AI context may remain; `Exit Comparison` clears the reference trace.
+- Ask a comparison question, for example `Compare scrolling behavior between this trace and the reference trace`, `Why is the left trace slower to start`, or `What frequency difference exists between the top and bottom traces`.
 
 Output:
 
 - The AI can access both current/reference raw traces in one analysis.
+- The AI Panel sends current/reference, left/right, top/bottom, active side, dual-view open state, split ratio, and maximized/minimized state to the backend.
+- When the user says "left", "right", "top", "bottom", "current", or "reference", the AI resolves that wording against the actual pane mapping; after dual-view exit, current/reference wording still works.
 - Useful for temporary two-trace comparison.
 - This mode is live analysis, not cross-window or cross-user persistent result comparison.
+
+See [Dual Trace Workspace Operation Model](../architecture/dual-trace-workspace.en.md) for the full interaction model.
 
 ## 7. Multi-Trace Analysis Result Comparison
 
@@ -133,6 +166,8 @@ Entry points:
 - Click the `fact_check` icon to open analysis result comparison.
 - Choose one `Baseline` and one or more `Candidate` results.
 - Optional: `Share` a private result to make it workspace-visible.
+- Optional: click the row-level `travel_explore` icon to view similar snapshot
+  or case hints. These hints are `navigation_hint_only`.
 - Click `Start comparison`.
 
 Output:
@@ -140,12 +175,41 @@ Output:
 - Standard metric matrix and deltas between baseline/candidates.
 - Standardized metrics such as startup duration and FPS/Jank when available.
 - 2 or more snapshots in one comparison.
+- Similar historical result hints before starting a formal comparison, without
+  treating similarity as diagnostic evidence.
 - When there is exactly one clear other candidate, the AI can start the comparison from a natural-language request; when the target is ambiguous, it asks you to choose.
 - Significant change count and an HTML comparison report.
 
 See [Multi-Trace Analysis Result Comparison](multi-trace-result-comparison.en.md) for the full workflow.
 
-## 8. Code-Aware Local Source Analysis
+## 8. Android Internals Knowledge
+
+SmartPerfetto separates Android Internals background knowledge into two sources:
+
+- a signed Knowledge Pack bundled with npm, Docker, source, and portable
+  products, available offline and updatable through a TUF stable channel;
+- a user-allowed private checkout guarded by path, rights, provider-consent,
+  and request-level source-id checks.
+
+Entry points:
+
+- CLI: `smp knowledge-pack status` and `smp knowledge-pack update --check`.
+- AI analysis: the runtime retrieves the built-in Pack when relevant; a private
+  source must be selected explicitly for the request.
+- Admin API: `/api/rag/android-internals/*` manages private checkouts only.
+
+Output:
+
+- Pack/private content is background knowledge, never current-trace SQL/Skill
+  evidence.
+- Reports retain source, version, fingerprint, and snippet hashes; logs/SSE do
+  not project excerpt bodies.
+- Updates do not silently switch active sessions; revocation requires a new
+  analysis context.
+
+See [Android Internals Knowledge Pack And Private Knowledge](android-internals-knowledge.en.md).
+
+## 9. Code-Aware Local Source Analysis
 
 Code-Aware Analysis lets users register local App, AOSP, kernel, or OEM SDK source trees with SmartPerfetto. By default, the model sees only `CodeRef` metadata, not raw source text.
 
@@ -163,7 +227,7 @@ Output:
 
 See [Code-Aware Analysis](code-aware-analysis.en.md) for the full workflow.
 
-## 9. Provider Management And Runtime Switching
+## 10. Provider Management And Runtime Switching
 
 SmartPerfetto supports UI-managed model providers and `.env` configuration.
 
@@ -177,26 +241,85 @@ Output:
 
 - Supports Anthropic, Claude/Anthropic-compatible providers, and OpenAI/OpenAI-compatible providers.
 - The active Provider Manager profile takes priority over `.env`.
-- Backend health shows the current credential source for troubleshooting.
+- The protected `/api/runtime-health` endpoint shows the current credential
+  source for troubleshooting; public `/health` exposes only readiness and version.
 
 See [Configuration Guide](configuration.en.md) for setup details.
 
-## 10. Automation, API, And CLI
+## 11. Controlled Self-Evolution
 
-SmartPerfetto also provides backend API, CLI, and MCP tool documentation for automation.
+Self-Evolution turns effective public feedback into reviewable proposals and
+compares a baseline and candidate on fixed validation/holdout cases. It is off
+by default and intended for authorized maintainers and administrators.
 
 Entry points:
 
-- Backend API: [API Reference](../reference/api.en.md).
-- CLI: [CLI Reference](../reference/cli.en.md).
-- MCP tools: [MCP Tools Reference](../reference/mcp-tools.en.md).
+- Thumbs up/down after a normal analysis.
+- **AI Assistant Settings -> Evolution** control plane.
+- `/api/admin/self-evolution` admin API.
+
+Output:
+
+- Every analysis uses an immutable RunManifest to pin attribution and overlay
+  generation.
+- Private feedback stays in a private local path; only effective public
+  feedback can enter explicit curation.
+- A proposal needs fixed paired evaluation and human acceptance before explicit
+  apply. Overlays can be reconciled and reverted and never commit, push, or call
+  GitHub automatically.
+- Missing external persistence, permissions, or a valid gate binding fails
+  closed; the default state does not change normal analysis.
+
+See [Self-Evolution Usage And Acceptance](self-evolution.en.md) for the complete
+workflow and tests.
+
+## 12. Agent-Assisted GitHub Feedback
+
+After an analysis, SmartPerfetto detects signals worth reporting or
+contributing from that run's persisted receipt, evidence, and runtime
+attribution. On user request, an independent Agent decides whether a public
+report is appropriate, which surface owns it, what the user can contribute,
+and what evidence is still missing.
+
+- Works for current and historical completed messages without reading the
+  current session's temporary result.
+- Review pins the source run's provider/runtime snapshot; mismatch produces
+  explicit fallback, never a silent model switch.
+- Agent output must reference real signals, claims, evidence, and Skills and
+  passes deterministic validation and redaction.
+- Private/code-aware analysis disables public feedback; security reports use a
+  private advisory.
+- It creates a reviewable GitHub draft only and never submits or triggers
+  Self-Evolution automatically.
+
+See [Agent-Assisted GitHub Feedback](agent-assisted-feedback.en.md) for the
+workflow, privacy boundary, and tests.
+
+## 13. Automation, API, And CLI
+
+SmartPerfetto also provides workspace APIs, a CLI, and MCP tools for automation.
+
+Entry points:
+
+- Workspace API: [API Reference](../reference/api.en.md) for batch traces,
+  explicit snapshot promotion, the comparison bridge, and trace-config proposals.
+- CLI: [CLI Reference](../reference/cli.en.md) for local sessions, batch,
+  capture, and report automation.
+- MCP/agent hosts: [MCP Tools Reference](../reference/mcp-tools.en.md) for
+  request-scoped tools in compatible hosts.
 
 Output:
 
 - Integrate trace analysis into scripts, CI, batch jobs, or internal platforms.
+- `smp batch skill` runs one deterministic Skill across a bounded local trace
+  set and exports JSON/HTML. The workspace batch API also supports explicit
+  snapshot promotion and a comparison bridge.
+- `smp capture suggest/config` creates side-effect-free Android capture
+  proposals. With a connected device, `smp capture android` records the trace;
+  presets such as Camera declare the required evidence categories.
 - Reuse the same Skills, strategies, reports, and evidence-backed output flow.
 
-## 11. Runtime And Distribution Options
+## 14. Runtime And Distribution Options
 
 SmartPerfetto supports multiple runtime paths:
 
@@ -208,6 +331,11 @@ SmartPerfetto supports multiple runtime paths:
 | Dev mode | Perfetto UI plugin development | `./scripts/start-dev.sh` watches the `perfetto/` submodule frontend |
 
 Runtime setup is in [Quick Start](quick-start.en.md). Packaging and release details are in [Portable Packaging](../reference/portable-packaging.en.md).
+See [Platform Compatibility And Verification Boundaries](../reference/platform-compatibility.en.md)
+for the distinction between host OS, actual target, static validation,
+target-native smoke, and published acceptance. UI and CLI application-update
+checks only report the version and matching action; they do not replace the
+running directory. See [Application Updates](../../README.md#application-updates).
 
 ## Which Feature Should I Use?
 
@@ -219,5 +347,10 @@ Runtime setup is in [Quick Start](quick-start.en.md). Packaging and release deta
 | Produce a shareable conclusion | HTML report |
 | Temporarily compare a reference trace in this conversation | `compare_arrows` live trace comparison |
 | Compare completed results across windows or users | `fact_check` multi-trace result comparison |
+| Retrieve Android Internals background | Built-in Knowledge Pack; explicit knowledge source for private material |
 | Map findings to local source files and line ranges | Code-Aware Analysis |
+| Decide whether an analysis is worth reporting and what to contribute | “Ask the Agent whether to report this” below the result |
+| Review and apply a qualified analysis improvement | Settings -> Evolution |
+| Run one deterministic analysis across local traces | `smp batch skill` |
+| Propose a config, then record from an Android device | `smp capture suggest/config/android` |
 | Integrate with scripts or platforms | API / CLI / MCP tools |

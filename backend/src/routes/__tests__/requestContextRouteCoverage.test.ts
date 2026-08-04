@@ -5,10 +5,17 @@
 import { afterEach, describe, expect, it } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
+import { authenticate } from '../../middleware/auth';
 import { markLegacyApi } from '../../middleware/legacyAgentApi';
+import {
+  bindWorkspaceRouteContext,
+  requireWorkspaceRouteContext,
+} from '../../middleware/workspaceRouteContext';
 import agentRoutes from '../agentRoutes';
 import providerRoutes from '../providerRoutes';
 import reportRoutes from '../reportRoutes';
+import batchTraceRoutes from '../batchTraceRoutes';
+import skillPackRoutes from '../skillPackRoutes';
 import traceRoutes from '../simpleTraceRoutes';
 
 const originalApiKey = process.env.SMARTPERFETTO_API_KEY;
@@ -47,6 +54,20 @@ function makeApp(): express.Express {
       'Legacy provider API is deprecated. Migrate to workspace-scoped provider APIs',
     ),
     providerRoutes,
+  );
+  app.use(
+    '/api/workspaces/:workspaceId/skill-packs',
+    bindWorkspaceRouteContext,
+    authenticate,
+    requireWorkspaceRouteContext,
+    skillPackRoutes,
+  );
+  app.use(
+    '/api/workspaces/:workspaceId/batch-traces',
+    bindWorkspaceRouteContext,
+    authenticate,
+    requireWorkspaceRouteContext,
+    batchTraceRoutes,
   );
   return app;
 }
@@ -121,6 +142,24 @@ describe('RequestContext route coverage', () => {
     expect(res.status).toBe(401);
     expect(res.headers.deprecation).toBe('true');
     expect(res.headers.sunset).toBeDefined();
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('applies RequestContext auth middleware to workspace skill pack routes', async () => {
+    process.env.SMARTPERFETTO_API_KEY = 'test-secret';
+
+    const res = await request(makeApp()).get('/api/workspaces/workspace-a/skill-packs');
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Unauthorized');
+  });
+
+  it('applies RequestContext auth middleware to workspace batch trace routes', async () => {
+    process.env.SMARTPERFETTO_API_KEY = 'test-secret';
+
+    const res = await request(makeApp()).get('/api/workspaces/workspace-a/batch-traces');
+
+    expect(res.status).toBe(401);
     expect(res.body.error).toBe('Unauthorized');
   });
 });

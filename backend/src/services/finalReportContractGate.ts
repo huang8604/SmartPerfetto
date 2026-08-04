@@ -10,12 +10,27 @@ export interface FinalReportContractCompletenessInput {
   query?: string;
   sceneType?: SceneType;
   contractSceneId?: string;
-  caseRecommendations?: Array<Record<string, unknown>>;
+  caseRecommendations?: readonly unknown[];
 }
 
 export interface FinalReportContractCompletenessResult {
   sceneType: SceneType;
   missingLabels: string[];
+  missingSections: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    recoveryText: { zh: string[]; en: string[] };
+  }>;
+}
+
+export interface FinalReportContractApplicabilityResult {
+  sceneType: SceneType;
+  requiredLabels: string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function patternMatches(text: string, pattern: string): boolean {
@@ -42,8 +57,9 @@ function requirementApplies(input: FinalReportContractCompletenessInput, require
   return requirement.triggerPatterns.some(pattern => patternMatches(input.query || '', pattern));
 }
 
-function hasStrongCaseRecommendation(recommendations: Array<Record<string, unknown>> | undefined): boolean {
+function hasStrongCaseRecommendation(recommendations: readonly unknown[] | undefined): boolean {
   return (recommendations ?? []).some(hit =>
+    isRecord(hit) &&
     String(hit.matchStrength ?? hit.match_strength ?? '').toLowerCase() === 'strong'
   );
 }
@@ -59,22 +75,51 @@ function normalizeSceneType(value: string | undefined): SceneType | undefined {
   return normalized;
 }
 
-export function assessFinalReportContractCompleteness(
-  input: FinalReportContractCompletenessInput,
-): FinalReportContractCompletenessResult | undefined {
-  const sceneType =
-    normalizeSceneType(input.sceneType) ||
+function resolveSceneType(input: FinalReportContractCompletenessInput): SceneType {
+  return normalizeSceneType(input.sceneType) ||
     normalizeSceneType(input.contractSceneId) ||
     classifyScene(input.query || '');
+}
+
+export function assessFinalReportContractApplicability(
+  input: FinalReportContractCompletenessInput,
+): FinalReportContractApplicabilityResult | undefined {
+  const sceneType = resolveSceneType(input);
   const contract = getFinalReportContract(sceneType);
   if (!contract || contract.requiredSections.length === 0) return undefined;
 
-  const missingLabels = contract.requiredSections
+  const requiredLabels = contract.requiredSections
     .filter(requirement => requirement.required !== false)
     .filter(requirement => requirementApplies(input, requirement))
-    .filter(requirement => !requirementSatisfied(input.conclusion, requirement))
     .map(requirement => requirement.label || requirement.id);
 
+  if (requiredLabels.length === 0) return undefined;
+  return { sceneType, requiredLabels };
+}
+
+export function assessFinalReportContractCompleteness(
+  input: FinalReportContractCompletenessInput,
+): FinalReportContractCompletenessResult | undefined {
+  const applicability = assessFinalReportContractApplicability(input);
+  if (!applicability) return undefined;
+  const sceneType = applicability.sceneType;
+  const contract = getFinalReportContract(sceneType);
+
+  const missingRequirements = (contract?.requiredSections ?? [])
+    .filter(requirement => requirement.required !== false)
+    .filter(requirement => requirementApplies(input, requirement))
+    .filter(requirement => !requirementSatisfied(input.conclusion, requirement));
+  const missingLabels = missingRequirements.map(requirement => requirement.label || requirement.id);
+
   if (missingLabels.length === 0) return undefined;
-  return { sceneType, missingLabels };
+  return {
+    sceneType,
+    missingLabels,
+    missingSections: missingRequirements.map(requirement => ({
+      id: requirement.id,
+      label: requirement.label || requirement.id,
+      ...(requirement.description ? { description: requirement.description } : {}),
+      recoveryText: requirement.recoveryText,
+    })),
+  };
 }

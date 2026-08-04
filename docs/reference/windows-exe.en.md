@@ -8,6 +8,8 @@ This file is part of SmartPerfetto. See LICENSE for details.
 
 [English](windows-exe.en.md) | [中文](windows-exe.md)
 
+<!-- i18n-headings: paired -->
+
 > The Windows commands are compatibility entry points for the cross-platform
 > portable packaging flow. See [Portable Packaging](portable-packaging.en.md)
 > for the full three-platform release process.
@@ -15,7 +17,8 @@ This file is part of SmartPerfetto. See LICENSE for details.
 The Windows distribution is not a single-file binary. `SmartPerfetto.exe` is a
 launcher placed next to the Windows Node.js 24 runtime, Windows native
 `node_modules`, the pre-built Perfetto UI, backend runtime files, and the pinned
-`trace_processor_shell.exe`. Users extract the zip and double-click
+`trace_processor_shell.exe`, plus the signed Android Internals Knowledge Pack.
+Users extract the zip and double-click
 `SmartPerfetto.exe`; they do not need Docker or a local Node.js install.
 
 ## Maintainer Build Flow
@@ -41,24 +44,28 @@ npm run package:windows-exe
 Outputs:
 
 ```text
-dist/windows-exe/smartperfetto-v1.0.1-windows-x64/SmartPerfetto.exe
-dist/windows-exe/smartperfetto-v1.0.1-windows-x64.zip
+dist/windows-exe/smartperfetto-v<version>-windows-x64/SmartPerfetto.exe
+dist/windows-exe/smartperfetto-v<version>-windows-x64.zip
 ```
 
 The script:
 
 1. Activates Node.js 24 and verifies backend dependencies for the build host.
 2. Runs `cd backend && npm run build`.
-3. Copies `backend/dist`, `backend/skills`, `backend/strategies`, `backend/sql`, `backend/data`, `backend/public`, and the root `frontend/` pre-built bundle.
+3. Copies `backend/dist`, `backend/skills`, `backend/strategies`, `backend/sql`,
+   `backend/data`, `backend/knowledge`, `backend/public`, and the root
+   `frontend/` pre-built bundle.
 4. Installs Windows x64 production dependencies in the package directory with `npm ci --omit=dev --include=optional --os=win32 --cpu=x64`.
 5. Verifies the Windows `better-sqlite3` native module and `@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe`.
 6. Downloads and verifies the Node.js 24 Windows x64 zip.
-7. Downloads and verifies `v56.0/windows-amd64/trace_processor_shell.exe`.
+7. Downloads and verifies Windows `trace_processor_shell.exe` from
+   `scripts/trace-processor-pin.env`; the version is not duplicated in docs.
 8. Cross-compiles the Go launcher as `SmartPerfetto.exe`.
 9. Writes `PACKAGE-MANIFEST.json` with the version, zip top-level directory,
-   git commit, dirty status, Node runtime, and trace processor pin.
+   git commit, dirty status, Node runtime, trace processor pin, and Knowledge
+   Pack.
 10. Writes the zip archive and verifies the filename, top-level directory,
-    package version, and manifest.
+    package version, Knowledge Pack hashes, and manifest.
 
 ## Release Flow
 
@@ -70,15 +77,16 @@ entry point for re-publishing only the Windows x64 asset.
 Before publishing a normal release, synchronize and commit the version:
 
 ```bash
-npm run version:set -- 1.0.1
+npm run version:set -- <version>
+npm run version:sync -- --check
 git add package.json package-lock.json backend/package.json backend/package-lock.json
-git commit -m "chore: release v1.0.1"
+git commit -m "chore: release v<version>"
 ```
 
 Then publish:
 
 ```bash
-npm run release:windows-exe -- 1.0.1
+npm run release:windows-exe -- <version>
 ```
 
 The script:
@@ -91,16 +99,16 @@ The script:
 4. Verifies the zip filename, top-level directory, package version, manifest
    commit, and dirty status.
 5. Generates release notes with the zip SHA256, size, and target commit.
-6. Creates or updates GitHub Release `v1.0.1`, and points the release tag target
+6. Creates or updates GitHub Release `v<version>`, and points the release tag target
    at the target commit.
-7. Uploads a versioned asset name such as `smartperfetto-v1.0.1-windows-x64.zip`,
+7. Uploads a versioned asset name such as `smartperfetto-v<version>-windows-x64.zip`,
    so users can distinguish offline packages from different releases.
 
 By default, the script creates a draft release. After a real Windows smoke test,
 publish it in the GitHub UI. To publish immediately:
 
 ```bash
-npm run release:windows-exe -- 1.0.1 --no-draft
+npm run release:windows-exe -- <version> --no-draft
 ```
 
 Uploading a release package requires a clean git worktree by default, so the
@@ -111,16 +119,16 @@ intentional.
 To synchronize versions without publishing:
 
 ```bash
-npm run version:set -- 1.0.1
+npm run version:set -- <version>
 npm run version:sync -- --check
 ```
 
 ## User Run Flow
 
-1. Extract `smartperfetto-v1.0.1-windows-x64.zip` to a normal local path such as `C:\SmartPerfetto`.
+1. Extract `smartperfetto-v<version>-windows-x64.zip` to a normal local path such as `C:\SmartPerfetto`.
 2. Double-click `SmartPerfetto.exe`.
-3. The browser usually opens automatically. If it does not, open [http://localhost:10000](http://localhost:10000).
-4. AI analysis needs a Provider profile in the UI. For env credentials, create `data\env` under the extracted package directory, edit one provider block, and restart `SmartPerfetto.exe`.
+3. The browser usually opens automatically. If it does not, open the launcher's printed [http://127.0.0.1:10000](http://127.0.0.1:10000) URL (the launcher selects another port when the default is occupied).
+4. AI analysis needs a Provider profile in the UI. For env credentials, write the provider configuration to `%LOCALAPPDATA%\SmartPerfetto\env` and restart `SmartPerfetto.exe`. Do not store durable credentials in the extracted package directory.
 5. Keep the launcher window open while using SmartPerfetto. Press `Ctrl+C` to stop the backend, frontend, and trace processor child processes.
 
 ## Verification
@@ -130,19 +138,23 @@ health, and dependency presence, but it cannot execute the Windows native smoke.
 Before public release, run this on a real Windows x64 machine:
 
 ```powershell
-Expand-Archive .\smartperfetto-v1.0.1-windows-x64.zip -DestinationPath C:\SmartPerfettoSmoke
-C:\SmartPerfettoSmoke\smartperfetto-v1.0.1-windows-x64\SmartPerfetto.exe
+Expand-Archive .\smartperfetto-v<version>-windows-x64.zip -DestinationPath C:\SmartPerfettoSmoke
+C:\SmartPerfettoSmoke\smartperfetto-v<version>-windows-x64\SmartPerfetto.exe
 ```
 
 Then check:
 
-- [http://localhost:10000](http://localhost:10000) opens the Perfetto UI.
-- [http://localhost:3000/health](http://localhost:3000/health) returns `status: "OK"`.
+- The launcher's printed `http://127.0.0.1:<port>` URL opens the Perfetto UI.
+- The launcher's printed backend `http://127.0.0.1:<port>/health` URL returns `status: "OK"`.
 - Uploading a small trace starts `trace_processor_shell.exe` in the backend log.
+- Bundled CLI `smp knowledge-pack status --format json` resolves the
+  bundled/active Pack.
 
-Set `SMARTPERFETTO_BACKEND_PORT` or `SMARTPERFETTO_FRONTEND_PORT` before
-launching the executable if the default ports conflict with other local
-services.
+The launcher prefers backend `3000` and frontend `10000`, but automatically
+selects another available port when a default is occupied. Use the URLs printed
+by the launcher. Set `SMARTPERFETTO_BACKEND_PORT` or
+`SMARTPERFETTO_FRONTEND_PORT` only when a fixed port is required; explicitly
+configured ports fail fast when unavailable.
 
 ## Limits
 

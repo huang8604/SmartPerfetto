@@ -27,7 +27,11 @@ const sqlite3Available = spawnSync('sqlite3', ['-version'], {encoding: 'utf-8'})
 const describeWithSqlite = sqlite3Available ? describe : describe.skip;
 
 const runTopologyFixture = (fixtureSql: string): Array<Record<string, unknown>> => {
-  const createTopologySql = loadCreateTopologySql();
+  // The production statement intentionally uses Perfetto's durable table
+  // syntax. SQLite is only the lightweight fixture engine here, so translate
+  // that one DDL keyword while exercising the identical CTE/classification SQL.
+  const createTopologySql = loadCreateTopologySql()
+    .replace(/^\s*CREATE\s+PERFETTO\s+TABLE\s+/i, 'CREATE TABLE ');
   const schemaSql = `
     CREATE TABLE sched_slice(cpu INTEGER);
     CREATE TABLE thread_state(cpu INTEGER, state TEXT);

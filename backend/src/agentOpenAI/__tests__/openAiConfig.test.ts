@@ -160,7 +160,7 @@ describe('createOpenAIEnv', () => {
     expect(diagnostics.configured).toBe(false);
     expect(diagnostics.baseUrlConfigured).toBe(false);
     expect(diagnostics.credentialSources).toEqual([]);
-    expect(diagnostics.model).toBe('gpt-5.5');
+    expect(diagnostics.model).toBe('gpt-5.4-mini');
   });
 
   it('ignores placeholder OpenAI keys in diagnostics', () => {
@@ -197,14 +197,18 @@ describe('createOpenAIEnv', () => {
   it('uses shared turn budget config when runtime-specific values are unset', () => {
     delete process.env.OPENAI_MAX_TURNS;
     delete process.env.OPENAI_QUICK_MAX_TURNS;
+    delete process.env.OPENAI_QUICK_TARGET_TURNS;
     delete process.env.CLAUDE_MAX_TURNS;
     delete process.env.CLAUDE_QUICK_MAX_TURNS;
+    delete process.env.CLAUDE_QUICK_TARGET_TURNS;
     process.env.AGENT_MAX_TURNS = '90';
     process.env.AGENT_QUICK_MAX_TURNS = '12';
+    process.env.AGENT_QUICK_TARGET_TURNS = '4';
 
     const config = loadOpenAIConfig(null);
 
     expect(config.maxTurns).toBe(90);
     expect(config.quickMaxTurns).toBe(12);
+    expect(config.quickTargetTurns).toBe(4);
   });
 });

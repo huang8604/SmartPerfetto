@@ -15,13 +15,22 @@ describe('outputLanguage', () => {
   it('accepts common English aliases', () => {
     expect(parseOutputLanguage('en')).toBe('en');
     expect(parseOutputLanguage('en-US')).toBe('en');
+    expect(parseOutputLanguage('en-US,en;q=0.9')).toBe('en');
+    expect(parseOutputLanguage('fr-FR, en;q=0.9')).toBe('en');
     expect(parseOutputLanguage('english')).toBe('en');
   });
 
   it('accepts common Chinese aliases', () => {
     expect(parseOutputLanguage('zh')).toBe('zh-CN');
     expect(parseOutputLanguage('zh-CN')).toBe('zh-CN');
+    expect(parseOutputLanguage('zh-CN,zh;q=0.9,en;q=0.8')).toBe('zh-CN');
     expect(parseOutputLanguage('simplified_chinese')).toBe('zh-CN');
+  });
+
+  it('honors quality and rejection values in language negotiation', () => {
+    expect(parseOutputLanguage('en;q=0.4, zh-CN;q=0.9')).toBe('zh-CN');
+    expect(parseOutputLanguage('zh-CN;q=0, en;q=0.8')).toBe('en');
+    expect(parseOutputLanguage('fr-FR, de-DE;q=0.8')).toBe('zh-CN');
   });
 
   it('selects localized text', () => {

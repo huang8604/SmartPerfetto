@@ -1,0 +1,484 @@
+{
+  "schema_version": 1,
+  "case_id": "input-interaction-latency",
+  "marker": "SmartPerfetto::CASE::input-interaction-latency",
+  "expectations": [
+    {
+      "id": "execute-app_lifecycle_in_range",
+      "type": "skill",
+      "target": "app_lifecycle_in_range",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/app_lifecycle_in_range.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-battery_doze_state_timeline",
+      "type": "skill",
+      "target": "battery_doze_state_timeline",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/battery_doze_state_timeline.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "deep_idle_intervals",
+        "light_idle_intervals"
+      ],
+      "required_sql_steps": [
+        "deep_idle_intervals",
+        "light_idle_intervals"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "deep_idle_intervals",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-click_response_analysis",
+      "type": "skill",
+      "target": "click_response_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/click_response_analysis.skill.yaml",
+      "parameters": {
+        "slow_event_threshold_ms": 100,
+        "avg_latency_critical_ms": 100,
+        "avg_handling_warning_ms": 50,
+        "avg_dispatch_warning_ms": 20,
+        "binder_blocking_threshold_ms": 30,
+        "critical_event_threshold_ms": 200,
+        "thread_state_min_dur_ms": 50,
+        "enable_per_event_detail": true
+      },
+      "required_steps": [
+        "check_input_data",
+        "get_process",
+        "input_latency_overview",
+        "latency_by_event_type",
+        "latency_by_window",
+        "slow_input_events",
+        "input_thread_state",
+        "input_binder_calls",
+        "input_to_frame",
+        "latency_distribution"
+      ],
+      "required_sql_steps": [
+        "check_input_data",
+        "get_process",
+        "input_latency_overview",
+        "latency_by_event_type",
+        "latency_by_window",
+        "slow_input_events",
+        "input_thread_state",
+        "input_binder_calls",
+        "input_to_frame",
+        "latency_distribution"
+      ],
+      "forced_sql_steps": [
+        "get_process",
+        "input_latency_overview",
+        "latency_by_event_type",
+        "latency_by_window",
+        "slow_input_events",
+        "input_thread_state",
+        "input_binder_calls",
+        "input_to_frame",
+        "latency_distribution"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "check_input_data",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-click_response_detail",
+      "type": "skill",
+      "target": "click_response_detail",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/click_response_detail.skill.yaml",
+      "parameters": {
+        "event_ts": "${trace_start}",
+        "event_end_ts": "${trace_end}",
+        "total_ms": 1,
+        "process_name": "com.smartperfetto.fixture"
+      },
+      "required_steps": [
+        "init_cpu_topology",
+        "event_info",
+        "input_dispatch_breakdown",
+        "input_pipeline_lifecycle",
+        "cpu_core_analysis",
+        "quadrant_analysis"
+      ],
+      "required_sql_steps": [
+        "event_info",
+        "input_dispatch_breakdown",
+        "input_pipeline_lifecycle",
+        "cpu_core_analysis",
+        "quadrant_analysis"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "event_info",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-device_state_timeline",
+      "type": "skill",
+      "target": "device_state_timeline",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/device_state_timeline.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "cpu_freq_transitions",
+        "thermal_events",
+        "memory_pressure_events",
+        "gpu_freq_transitions"
+      ],
+      "required_sql_steps": [
+        "cpu_freq_transitions",
+        "thermal_events",
+        "memory_pressure_events",
+        "gpu_freq_transitions"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "cpu_freq_transitions",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-input_events_in_range",
+      "type": "skill",
+      "target": "input_events_in_range",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/input_events_in_range.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-input_module",
+      "type": "skill",
+      "target": "input_module",
+      "mode": "execution",
+      "source_file": "backend/skills/modules/framework/input_module.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "click_response_overview",
+        "slow_input_events",
+        "input_dispatch_timing"
+      ],
+      "required_sql_steps": [
+        "click_response_overview",
+        "slow_input_events",
+        "input_dispatch_timing"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "click_response_overview",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-main_thread_handler_callback_slices",
+      "type": "skill",
+      "target": "main_thread_handler_callback_slices",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/main_thread_handler_callback_slices.skill.yaml",
+      "parameters": {
+        "package": "",
+        "start_ts": "${trace_start}",
+        "end_ts": "${trace_end}",
+        "min_dur_ns": 100000,
+        "top_k": 20
+      },
+      "required_steps": [
+        "callback_slices"
+      ],
+      "required_sql_steps": [
+        "callback_slices"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "callback_slices",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-navigation_analysis",
+      "type": "skill",
+      "target": "navigation_analysis",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/navigation_analysis.skill.yaml",
+      "parameters": {
+        "slow_navigation_ms": 400,
+        "nav_rating_good_ms": 200,
+        "nav_rating_severe_ms": 700,
+        "slow_lifecycle_ms": 100,
+        "blocking_op_min_dur_ms": 5,
+        "inflate_critical_ms": 100,
+        "binder_blocking_ms": 16,
+        "oncreate_slow_ms": 200
+      },
+      "required_steps": [
+        "check_lifecycle_data",
+        "get_process",
+        "navigation_overview",
+        "lifecycle_phase_breakdown",
+        "lifecycle_event_detail",
+        "navigation_blocking_ops",
+        "layout_inflation",
+        "fragment_transactions",
+        "transition_animations",
+        "navigation_binder_calls",
+        "first_frame_render",
+        "navigation_diagnosis",
+        "no_data_fallback"
+      ],
+      "required_sql_steps": [
+        "check_lifecycle_data",
+        "get_process",
+        "navigation_overview",
+        "lifecycle_phase_breakdown",
+        "lifecycle_event_detail",
+        "navigation_blocking_ops",
+        "layout_inflation",
+        "fragment_transactions",
+        "transition_animations",
+        "navigation_binder_calls",
+        "first_frame_render",
+        "no_data_fallback"
+      ],
+      "forced_sql_steps": [
+        "get_process",
+        "navigation_overview",
+        "lifecycle_phase_breakdown",
+        "lifecycle_event_detail",
+        "navigation_blocking_ops",
+        "layout_inflation",
+        "fragment_transactions",
+        "transition_animations",
+        "navigation_binder_calls",
+        "first_frame_render",
+        "no_data_fallback"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "navigation_overview",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-scene_reconstruction",
+      "type": "skill",
+      "target": "scene_reconstruction",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/scene_reconstruction.skill.yaml",
+      "parameters": {
+        "trace_id": 1
+      },
+      "required_steps": [
+        "trace_time_range",
+        "table_availability",
+        "screen_state_changes",
+        "top_app_changes",
+        "activity_lifecycle",
+        "user_gestures",
+        "scroll_initiation",
+        "navigation_keys",
+        "gesture_navigation",
+        "window_transitions",
+        "anr_events",
+        "ime_events",
+        "inertial_scrolls",
+        "idle_periods",
+        "app_launches",
+        "system_events",
+        "broadcast_events",
+        "cross_process_interactions",
+        "jank_events",
+        "device_state",
+        "app_state_tracking",
+        "operation_chain",
+        "clean_timeline",
+        "merged_timeline"
+      ],
+      "required_sql_steps": [
+        "trace_time_range",
+        "table_availability",
+        "screen_state_changes",
+        "top_app_changes",
+        "activity_lifecycle",
+        "user_gestures",
+        "scroll_initiation",
+        "navigation_keys",
+        "gesture_navigation",
+        "window_transitions",
+        "anr_events",
+        "ime_events",
+        "inertial_scrolls",
+        "idle_periods",
+        "app_launches",
+        "system_events",
+        "broadcast_events",
+        "cross_process_interactions",
+        "jank_events",
+        "device_state",
+        "app_state_tracking",
+        "operation_chain",
+        "clean_timeline",
+        "merged_timeline"
+      ],
+      "forced_sql_steps": [
+        "screen_state_changes",
+        "navigation_keys",
+        "idle_periods",
+        "jank_events"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [
+        {
+          "step": "top_app_changes",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "user_gestures",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "scroll_initiation",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "anr_events",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "inertial_scrolls",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "app_launches",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "clean_timeline",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        },
+        {
+          "step": "merged_timeline",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        }
+      ],
+      "semantic_step": "trace_time_range",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-state_timeline",
+      "type": "skill",
+      "target": "state_timeline",
+      "mode": "execution",
+      "source_file": "backend/skills/composite/state_timeline.skill.yaml",
+      "parameters": {
+        "trace_id": 1
+      },
+      "required_steps": [
+        "timeline_bounds",
+        "device_state_lane",
+        "device_state_lane_fallback",
+        "input_state_lane_frames",
+        "input_state_lane_fallback",
+        "app_state_lane",
+        "app_state_lane_fallback",
+        "system_state_lane",
+        "lane_summary"
+      ],
+      "required_sql_steps": [
+        "timeline_bounds",
+        "device_state_lane",
+        "device_state_lane_fallback",
+        "input_state_lane_frames",
+        "input_state_lane_fallback",
+        "app_state_lane",
+        "app_state_lane_fallback",
+        "system_state_lane",
+        "lane_summary"
+      ],
+      "forced_sql_steps": [
+        "device_state_lane",
+        "device_state_lane_fallback",
+        "input_state_lane_frames",
+        "input_state_lane_fallback",
+        "app_state_lane_fallback"
+      ],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [
+        {
+          "step": "app_state_lane",
+          "reason": "This conditional SQL is exercised only on its production branch because forcing it would mutate state or require condition-populated context."
+        }
+      ],
+      "semantic_step": "device_state_lane",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "execute-touch_to_display_latency",
+      "type": "skill",
+      "target": "touch_to_display_latency",
+      "mode": "execution",
+      "source_file": "backend/skills/atomic/touch_to_display_latency.skill.yaml",
+      "parameters": {},
+      "required_steps": [
+        "root"
+      ],
+      "required_sql_steps": [
+        "root"
+      ],
+      "forced_sql_steps": [],
+      "isolated_sql_probes": [],
+      "expected_condition_skips": [],
+      "semantic_step": "root",
+      "min_rows": 0,
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "strategy-interaction",
+      "type": "strategy",
+      "target": "interaction",
+      "query": "点击",
+      "expected_strategy": "interaction",
+      "source_file": "backend/strategies/interaction.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    },
+    {
+      "id": "strategy-touch_tracking",
+      "type": "strategy",
+      "target": "touch_tracking",
+      "query": "跟手度",
+      "expected_strategy": "touch_tracking",
+      "source_file": "backend/strategies/touch-tracking.strategy.md",
+      "required_marker": "SmartPerfetto::CASE::input-interaction-latency"
+    }
+  ]
+}

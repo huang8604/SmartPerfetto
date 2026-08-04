@@ -25,14 +25,21 @@ jest.mock('../../services/turnRunner', () => ({
 }));
 
 const shutdownMock = jest.fn();
+let emitConstructorDiagnostic = false;
 
 jest.mock('../../services/cliAnalyzeService', () => ({
-  CliAnalyzeService: jest.fn(() => ({ shutdown: shutdownMock })),
+  CliAnalyzeService: jest.fn(() => {
+    if (emitConstructorDiagnostic) {
+      console.log('[ProviderManager] constructor diagnostic');
+    }
+    return { shutdown: shutdownMock };
+  }),
 }));
 
 describe('runCompareCommand', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    emitConstructorDiagnostic = false;
   });
 
   test('passes the user query through without adding a CLI-private comparison prompt', async () => {
@@ -51,5 +58,28 @@ describe('runCompareCommand', () => {
     expect(input.query).toBe('对比启动慢的原因');
     expect(input.query).not.toContain('SmartPerfetto CLI 深度对比契约');
     expect(input.query).not.toContain('get_comparison_context');
+  });
+
+  test('keeps service-construction diagnostics off machine-readable stdout', async () => {
+    emitConstructorDiagnostic = true;
+    const stdoutSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const stderrSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const exitCode = await runCompareCommand({
+        currentTrace: './current.trace',
+        referenceTrace: './reference.trace',
+        query: 'compare',
+        verbose: false,
+        noColor: true,
+        format: 'json',
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stdoutSpy).not.toHaveBeenCalledWith('[ProviderManager] constructor diagnostic');
+      expect(stderrSpy).toHaveBeenCalledWith('[ProviderManager] constructor diagnostic');
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
   });
 });

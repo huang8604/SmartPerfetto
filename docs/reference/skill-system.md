@@ -21,6 +21,8 @@
 11. [Pipeline Skills](#11-pipeline-skills)
 12. [开发工作流](#12-开发工作流)
 13. [与 Claude 标准 Skill 的区别](#13-与-claude-标准-skill-的区别)
+14. [Skill tier 与校验规则](#14-skill-tier-与校验规则)
+15. [本地 Skill Pack](#15-本地-skill-pack)
 
 ---
 
@@ -43,7 +45,8 @@ Skill Engine 自动执行:
     └─ 组装 L1-L4 分层结果 → DataEnvelope → SSE → 前端
 ```
 
-一次 MCP 调用，引擎内部可能执行 **15+ 个 SQL 查询**，节省大量 token 和延迟。
+一次 MCP 调用可以由引擎编排多步 SQL、子 Skill 和条件分支，减少 agent 往返与
+上下文开销；实际步骤由当前 YAML 定义决定。
 
 ---
 
@@ -65,22 +68,19 @@ rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
 | **Composite** | `backend/skills/composite/` | 多步编排 (iterator/parallel/conditional) |
 | **Comparison** | `backend/skills/comparison/` | 多 trace / 多结果对比相关 Skill |
 | **Deep** | `backend/skills/deep/` | 深度分析 (CPU profiling, callstack) |
-| **Pipeline** | `backend/skills/pipelines/` | 渲染管线检测 + 教学内容 |
+| **Pipeline** | `backend/skills/pipelines/` | 渲染管线检测子路径、特征证据与教学来源引用 |
 | **Module** | `backend/skills/modules/` | 模块化分析 (app/framework/hardware/kernel) |
 | **Template** | `backend/skills/_template/` | Skill 作者模板，不一定代表运行时分析能力 |
 
-### 按场景分类
+### 按场景发现
 
-| 场景 | 代表性 Skills |
-|------|--------------|
-| Scrolling | `scrolling_analysis`, `consumer_jank_detection`, `jank_frame_detail` |
-| Startup | `startup_analysis`, `startup_detail`, `startup_critical_tasks` |
-| ANR | `anr_analysis`, `anr_detail`, `anr_main_thread_blocking` |
-| Memory | `memory_analysis`, `lmk_analysis`, `gc_events_in_range` |
-| CPU | `cpu_analysis`, `scheduling_analysis`, `cpu_slice_analysis` |
-| GPU | `gpu_metrics`, `gpu_render_in_range` |
-| Binder | `binder_analysis`, `binder_root_cause`, `binder_storm_detection` |
-| Pipeline | 渲染管线 (Standard/Flutter/Compose/WebView/Vulkan/...) |
+场景、标签和运行候选由当前 Skill frontmatter 与 registry 决定，不在文档里维护静态
+列表。开发者可用仓库脚本查看实时分类：
+
+```bash
+cd backend
+npm run skill:list
+```
 
 ---
 
@@ -92,7 +92,7 @@ rg --files backend/skills | rg '\.skill\.yaml$' | wc -l
 # === 元信息 ===
 name: consumer_jank_detection       # 唯一标识符 (必填)
 version: "2.0"                       # 版本号 (必填)
-type: atomic                         # 类型 (必填): atomic | composite | iterator | diagnostic | pipeline_definition
+type: atomic                         # 类型 (必填)，以 SkillType 与校验器为准
 category: rendering                  # 分类 (可选)
 
 meta:
@@ -306,6 +306,20 @@ outputs:
 ### 4.7 pipeline — 渲染管线检测
 
 专用于匹配 trace 中的渲染管线类型。详见 [Pipeline Skills](#11-pipeline-skills)。
+
+### 4.8 ai_decision / ai_summary — AI 协作步骤
+
+`ai_decision` 让当前会话选中的 AI runtime 基于指定输入产出结构化判断；
+`ai_summary` 汇总指定步骤的有界数据。两者都属于可选协作层：AI 被禁用或不可用时，
+引擎返回明确的跳过状态，不把缺失的 AI 输出伪装成确定性 SQL 结论。
+
+```yaml
+- id: summarize_findings
+  type: ai_summary
+  inputs: [frame_stats, diagnose]
+  prompt: "Summarize the selected evidence without inventing missing data."
+  save_as: ai_summary
+```
 
 ---
 
@@ -606,56 +620,47 @@ Synthesize 数据随 Artifact 一起存储，agent 可通过 `fetch_artifact` �
 
 ## 11. Pipeline Skills
 
-Pipeline Skills 是一种特殊的 Skill 类型，用于 Android 渲染管线的自动识别和教学。具体覆盖范围以 `backend/skills/pipelines/` 文件树和 `docs/rendering_pipelines/` 运行时文档为准。
+Pipeline Skills 用于 Android 渲染管线识别和教学，但“类型”和“检测条目”不是同一层：
 
-### 结构
+- `docs/rendering_pipelines/*.md` 是固定上游 commit 的 Android 17 教学真相；
+- `backend/skills/pipelines/index.yaml` 是具体 rendering type 与检测条目的实时清单；
+- `variant` 可以成为主类型，`feature` 只提供附加证据；
+- 单个 Pipeline Skill 保存信号、auto-pin、分析建议，并通过 `teaching.source` 引用权威文档。
+
+目录与单条定义的关系如下：
 
 ```yaml
-name: flutter_textureview
-version: "1.0"
+# backend/skills/pipelines/index.yaml
+pipelines:
+  FLUTTER_TEXTUREVIEW:
+    classification_role: variant
+    rendering_type_id: S10_FLUTTER
+    primary_eligible: true
+  ANGLE_GLES_VULKAN:
+    classification_role: feature
+    related_rendering_type_ids: [S08_NATIVE_GRAPHICS]
+    primary_eligible: false
+
+# backend/skills/pipelines/flutter_textureview.skill.yaml
+name: FLUTTER_TEXTUREVIEW
 type: pipeline_definition
-category: rendering
-
 detection:
-  signals:                    # Trace 中的识别信号
+  signals:
     - { name: "SurfaceTexture", source: "slice" }
-    - { name: "updateTexImage", source: "slice" }
-  confidence_threshold: 0.7
-
 teaching:
-  mermaid: |                  # Mermaid 序列图
-    sequenceDiagram
-      participant UI as UI Thread
-      participant Raster as Raster Thread
-      participant ST as SurfaceTexture
-      participant SF as SurfaceFlinger
-      UI->>Raster: Widget tree
-      Raster->>ST: Render frame
-      ST->>SF: updateTexImage()
-      SF->>Display: Composition
-  threads:                    # 关键线程说明
-    - { name: "1.ui", role: "Widget tree 构建" }
-    - { name: "1.raster", role: "Skia 渲染" }
-  key_slices:                 # 关键 Slice
-    - { name: "Choreographer#doFrame", thread: "UI" }
-    - { name: "GPURasterizer::Draw", thread: "Raster" }
-
-auto_pin:                     # 推荐 Pin 到时间线的 Track
-  - { track: "1.raster", priority: 1, filter: "GPURasterizer" }
-  - { track: "SurfaceFlinger", priority: 2 }
-
-analysis:
-  common_issues:
-    - "TextureView 多一次 GPU 拷贝"
-    - "SurfaceTexture 回调延迟"
-  recommended_skills:
-    - scrolling_analysis
-    - gpu_metrics
+  source: "rendering_pipelines/S10_flutter_type.md"
 ```
 
-### 管线覆盖范围
+检测结果分别输出主 `rendering type`、具体 pipeline 子路径和 feature 候选，避免把
+ANGLE、PIP、HWC overlay 等特征误报为应用的主出图类型。构建时同步目录会复制到
+`backend/dist/rendering_pipelines/`，所以 Docker、portable 与 npm CLI 使用同一份内容。
 
-Standard View (Blast/Legacy) | Flutter (TextureView/SurfaceView/Impeller) | Compose | WebView (多种变体) | OpenGL ES | Vulkan | ANGLE | SurfaceControl | Video Overlay | Camera Pipeline | Game Engine | Chrome Viz | PIP/FreeForm | ...
+更新上游内容时运行同步脚本，禁止手工修改同步后的 Markdown：
+
+```bash
+npm run sync:rendering-pipelines -- --source /path/to/rendering_pipelines --apply
+npm run check:rendering-pipelines
+```
 
 ---
 
@@ -692,36 +697,142 @@ cd backend && npm run test:scene-trace-regression
 2. 使用 `execute_sql` 单独测试 SQL 片段
 3. 检查 SSE 事件中的 DataEnvelope 是否正确
 
----
+## 13. 与标准 Agent Skill 的关系
 
-## 13. 与 Claude 标准 Skill 的区别
+SmartPerfetto YAML Skills **不是**标准 Agent Skill 的等价物，两者解决不同的问题：
 
-SmartPerfetto Skills **不是** Claude Code Skills 的等价物，两者解决不同的问题：
-
-| 维度 | Claude Code Skills | SmartPerfetto YAML Skills |
+| 维度 | 标准 Agent Skill | SmartPerfetto YAML Skills |
 |------|---|---|
 | **本质** | Markdown 提示词模板 | 领域 DSL (SQL 编排引擎) |
-| **执行者** | Claude 自己按 prompt 行动 | SkillExecutor 引擎确定性执行 |
+| **执行者** | 兼容 Agent 按说明和脚本行动 | SkillExecutor 引擎确定性执行 |
 | **文件格式** | `SKILL.md` (YAML frontmatter + Markdown) | `.skill.yaml` (SQL + 显示配置) |
 | **能力** | 注入上下文、指导行为 | 多步 SQL 编排 + 分层结果 + Artifact 缓存 |
-| **调用方式** | `/slash-command` 或 Claude 自动触发 | 当前 agent runtime 通过 MCP/function tool `invoke_skill` 间接调用 |
-| **可复现性** | 取决于 Claude 推理 | 确定性（同输入 = 同输出） |
-| **Token 消耗** | Claude 每步都消耗 token | 引擎内部跑完，只返回摘要 |
+| **调用方式** | Agent 自动路由或显式点名 | 当前 agent runtime 通过注册表和工具间接调用 |
+| **可复现性** | 取决于 Agent 推理与本地脚本 | 确定性（同输入 = 同输出） |
+| **产品能力** | 本地文件、终端和 `trace_processor_shell` | DataEnvelope、Artifact、报告、会话和 UI 投影 |
 
 **架构关系：**
 
 ```
-Claude Code Skills (.claude/skills/)
-    └─ 告诉 Claude "怎么思考" (prompt 层)
-        └─ 已由 .strategy.md + .template.md 实现
+Perfetto-Skills (标准 SKILL.md)
+    └─ 公开的可移植方法论、SQL、管线知识和本地查询脚本
+        └─ 由兼容 Agent 执行，不依赖 SmartPerfetto 服务
 
 SmartPerfetto Skills (backend/skills/)
-    └─ 告诉引擎 "怎么执行" (数据层)
-        └─ Claude 通过 MCP invoke_skill 触发
+    └─ 产品内确定性 DSL 与运行时真相
+        └─ 驱动 DataEnvelope、Artifact、报告和前端投影
 
-两者互补，不冲突，不需要迁移。
+backend/strategies + docs/rendering_pipelines
+    └─ 公开投影的方法论与渲染管线来源
 ```
 
-**不建议迁移的原因：**
-- 迁移到 Claude Code Skills 会**丢失**多步编排、L1-L4 分层、Artifact 压缩、确定性执行
-- SmartPerfetto 的 `.strategy.md` 已经承担了 Claude Code Skills 的角色（注入分析方法论到 system prompt）
+公开仓库 [Gracker/Perfetto-Skills](https://github.com/Gracker/Perfetto-Skills)
+是生成加人工策划的标准 Agent Skill 投影，不替代本仓库运行时。当前
+`backend/skills/public-export.yaml` 必须逐项声明每个运行候选的 workflow、
+disposition 和目标路径；公开目录记录源 commit 与逐文件 SHA-256，并导出
+SQL、策略/知识材料和渲染管线文档。Provider、会话、Artifact、DataEnvelope、
+SSE 与前端行为仍只属于 SmartPerfetto。
+
+### 批量分析的可移植边界
+
+运行候选可以声明 `batch_analysis`，把某个确定性 Skill step 的受限结果标记为
+批量后处理输入。YAML 内的 SQL、字段契约、单 trace 缺失数据语义和行数上限属于
+可移植分析能力，可以通过公开投影复用；它们本身不会执行跨 trace 聚合。
+
+`BatchTraceRunner` 只保留声明的 source step，并把校验后的有界行交给注册过的
+TypeScript post-processor。跨 trace 的 `BatchTraceDomainAnalysisV1` 结果、证据
+artifact、聚类限制和报告投影是 SmartPerfetto 产品运行时能力，不属于公开 Agent
+Skill 的本地执行契约。聚合结果由 batch run/report 持有，不能复制到每个单 trace
+snapshot；单 trace snapshot 只保留自身的提取指标和证据引用。
+
+修改 `backend/skills/`、`backend/strategies/`、`docs/rendering_pipelines/` 或
+公开策略后，在已检出 Perfetto-Skills 的环境运行：
+
+```bash
+npm run verify:public-skills
+```
+
+默认查找同级 `../Perfetto-Skills`；也可用 `PERFETTO_SKILLS_DIR` 指向其他
+checkout。门禁会拒绝未分类来源、源 hash/commit 漂移和生成文件漂移。
+
+---
+
+## 14. Skill tier 与校验规则
+
+Skill 可以声明顶层 `tier: S | A | B`，用于表达目标复杂度和 review 预期：
+
+| Tier | 适用 Skill | 结构预期 |
+|---|---|---|
+| `S` | 旗舰级跨域分析，如 startup、scrolling、CPU、scene reconstruction | `type: composite` 或 `deep`，通常包含多个 Perfetto stdlib module 和 5 个以上步骤 |
+| `A` | 单域实质分析，能产出诊断结论或关键列表 | 至少声明相关 `prerequisites.modules`，并提供可复用的显示层 |
+| `B` | 单事实或辅助数据提供者 | 查询边界清晰，字段和缺失数据语义明确 |
+
+`cd backend && npm run validate:skills` 会执行这些稳定规则：
+
+| Rule | 行为 |
+|---|---|
+| `skill-tier-must-match-declared` | 校验 `tier` 是否为 `S/A/B`，并把结构不足报告为迁移 warning |
+| `skill-stdlib-detected-vs-declared` | 扫描 SQL 中使用的 Perfetto stdlib symbol，要求被 `prerequisites.modules` 覆盖 |
+| `skill-include-budget-soft-cap` | 当 `prerequisites.modules` 超过 8 个时发出成本 warning |
+| `skill-step-id-uniqueness` | 每个 Skill 内 step id 必须唯一 |
+| `skill-vendor-override-runtime-conformant` | Vendor override 必须有真实 `additional_steps`、vendor signatures，并指向已注册 base Skill |
+
+`backend/skills/_template/` 是作者模板，不进入运行时 registry。复制模板后必须删除占位符，放入正式 Skill 目录，再运行 `validate:skills` 和匹配的 trace regression。
+
+## 15. 本地 Skill Pack
+
+本地 Skill Pack 用于把已经 review 过的团队/OEM Skill 以 workspace 范围安装，
+不需要直接修改 `backend/skills/`。第一版是本机目录导入，不是远程 marketplace：
+不支持 HTTPS URL、自动同步、`.well-known` 发现或 archive 解包。
+
+目录必须包含 `smartperfetto-skill-pack.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "packId": "vendor-scroll-pack",
+  "name": "Vendor Scroll Pack",
+  "version": "1.0.0",
+  "publisher": "vendor-team",
+  "description": "Reviewed scrolling diagnostics",
+  "license": "AGPL-3.0-or-later",
+  "compatibility": {
+    "smartPerfettoMinVersion": "0.1.0"
+  },
+  "assets": [
+    {
+      "kind": "skill",
+      "path": "atomic/vendor_scroll.skill.yaml",
+      "sha256": "<64 hex chars>",
+      "sizeBytes": 1234
+    }
+  ]
+}
+```
+
+允许的 asset 根目录：`atomic/`、`composite/`、`deep/`、`system/`、
+`comparison/`、`modules/`、`pipelines/`、`fragments/`、`docs/`。
+禁止 `strategies/`、`vendors/`、`custom/`、隐藏文件、symlink、可执行扩展和
+未在 manifest 声明的文件。每个 asset 的 `sha256` 和 `sizeBytes` 必须和实际文件一致。
+
+Workspace 管理接口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/workspaces/:workspaceId/skill-packs/preview` | 只读预检 |
+| `POST` | `/api/workspaces/:workspaceId/skill-packs/install` | 重新预检后安装 |
+| `GET` | `/api/workspaces/:workspaceId/skill-packs` | 列出已安装 pack |
+| `PATCH` | `/api/workspaces/:workspaceId/skill-packs/:packId` | 启用或禁用 |
+| `DELETE` | `/api/workspaces/:workspaceId/skill-packs/:packId` | 禁用并删除受管副本 |
+
+安装会复制声明资产到受管目录，并在 `skill_registry_entries.metadata_json`
+记录 manifest hash、content hash、审批人、Skill ID、fragment key 和 docs 路径。
+同一个 `packId + version` 已安装时，如果 content hash 不一致会被拒绝。
+外部 Skill ID 不能覆盖内置 Skill；SQL fragment key 不能覆盖不同内容的内置 fragment。
+
+带有 workspace 上下文的 agent 会在运行时加载内置 Skill 加该 workspace 已启用的
+Skill Pack。`list_skills` 会返回外部 pack 的 `origin` metadata，
+`invoke_skill` 会在 registry fingerprint 变化时刷新 executor 和 SQL fragment cache，
+因此启用、禁用或删除 pack 后不会继续执行旧内容。旧版全局 `/api/admin/skills`
+和当前 `smp skill` CLI 路径仍只使用内置 Skill；CLI 执行 workspace pack 需要未来显式
+tenant/workspace 上下文支持。
