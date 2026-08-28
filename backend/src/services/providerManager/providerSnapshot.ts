@@ -3,6 +3,8 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import crypto from 'crypto';
+import {piRuntimeFingerprintInput} from '../../agentRuntime/engines/pi/piAgentCoreConfig';
+import {redactUrlForDiagnostics} from '../../agentRuntime/envCredentialSources';
 import { mergeIsolatedProviderEnv } from './envIsolation';
 import type { ProviderService } from './providerService';
 import type { AgentRuntimeKind, ProviderConfig, ProviderScope, ProviderTuning } from './types';
@@ -94,6 +96,8 @@ const OPENCODE_SECRET_ENV_KEYS = [
 
 const QODER_SECRET_ENV_KEYS = [
   'QODER_PERSONAL_ACCESS_TOKEN',
+  'QODER_BYOK_API_KEY',
+  'QODER_BYOK_BASE_URL',
   'SMARTPERFETTO_QODER_SYSTEM_PROMPT',
 ];
 
@@ -157,9 +161,13 @@ const OPENCODE_RUNTIME_ENV_KEYS = [
 
 const QODER_RUNTIME_ENV_KEYS = [
   'SMARTPERFETTO_AGENT_RUNTIME',
+  'SMARTPERFETTO_QODER_SDK_MODULE_PATH',
   'QODERCLI_PATH',
   'QODER_MODEL',
   'QODER_LIGHT_MODEL',
+  'QODER_BYOK_PROVIDER',
+  'QODER_BYOK_BASE_URL',
+  'QODER_BYOK_STYLE',
   'QODER_MAX_TURNS',
   'QODER_QUICK_MAX_TURNS',
   'QODER_FULL_PER_TURN_MS',
@@ -218,6 +226,27 @@ function pickEnv(env: Record<string, string | undefined>, keys: string[]): Recor
     const value = env[key];
     if (value !== undefined && value !== '') picked[key] = value;
   }
+  return picked;
+}
+
+function publicRuntimeEnvironment(
+  env: Record<string, string | undefined>,
+  runtimeKind: AgentRuntimeKind,
+): Record<string, string> {
+  const picked = pickEnv(env, runtimeEnvironmentKeys(runtimeKind));
+  if (runtimeKind !== 'qoder-agent-sdk' || !picked.QODER_BYOK_BASE_URL) return picked;
+
+  const redacted = redactUrlForDiagnostics(picked.QODER_BYOK_BASE_URL);
+  try {
+    const url = redacted ? new URL(redacted) : undefined;
+    if (url?.protocol === 'http:' || url?.protocol === 'https:') {
+      picked.QODER_BYOK_BASE_URL = url.toString();
+      return picked;
+    }
+  } catch {
+    // Invalid ambient values remain available to the runtime but not to public snapshots.
+  }
+  delete picked.QODER_BYOK_BASE_URL;
   return picked;
 }
 
@@ -302,6 +331,7 @@ function pickResolvedTimeouts(
 }
 
 function inferBaseUrl(runtimeKind: AgentRuntimeKind, env: Record<string, string>): string | undefined {
+  if (runtimeKind === 'qoder-agent-sdk') return env.QODER_BYOK_BASE_URL;
   if (runtimeKind === 'openai-agents-sdk' || runtimeKind === 'opencode') {
     return env.OPENAI_BASE_URL;
   }
@@ -346,7 +376,13 @@ function envRuntimeSnapshot(runtimeOverride?: AgentRuntimeKind): ProviderRuntime
       : runtimeKind === 'claude-agent-sdk'
         ? 'CLAUDE'
         : undefined;
-  const nonSecretEnv = pickEnv(env, runtimeEnvironmentKeys(runtimeKind));
+  const nonSecretEnv = publicRuntimeEnvironment(env, runtimeKind);
+  const secretEntries = runtimeSecretEnvKeys(runtimeKind).map(
+    (key) => [key, env[key]] as [string, string | undefined],
+  );
+  if (runtimeKind === 'pi-agent-core') {
+    secretEntries.push(...piRuntimeFingerprintInput(env).entries);
+  }
   return {
     version: 1,
     providerId: null,
@@ -363,7 +399,7 @@ function envRuntimeSnapshot(runtimeOverride?: AgentRuntimeKind): ProviderRuntime
     baseUrl: inferBaseUrl(runtimeKind, nonSecretEnv),
     openaiProtocol: runtimeKind === 'openai-agents-sdk' ? env.OPENAI_AGENTS_PROTOCOL : undefined,
     environment: nonSecretEnv,
-    secretVersion: hashSecretEntries(runtimeSecretEnvKeys(runtimeKind).map((key) => [key, env[key]])),
+    secretVersion: hashSecretEntries(secretEntries),
   };
 }
 
@@ -372,14 +408,16 @@ function providerSecretVersion(
   runtimeKind: AgentRuntimeKind,
   env: Record<string, string | undefined>,
 ): string {
-  return hashSecretEntries(
-    [
-      ...runtimeSensitiveConnectionFields(runtimeKind)
-        .map((field) => [field, provider.connection[field] as string | undefined] as [string, string | undefined]),
-      ...runtimeSecretEnvKeys(runtimeKind)
-        .map((key) => [`env:${key}`, env[key]] as [string, string | undefined]),
-    ],
-  );
+  const entries: Array<[string, string | undefined]> = [
+    ...runtimeSensitiveConnectionFields(runtimeKind)
+      .map((field) => [field, provider.connection[field] as string | undefined] as [string, string | undefined]),
+    ...runtimeSecretEnvKeys(runtimeKind)
+      .map((key) => [`env:${key}`, env[key]] as [string, string | undefined]),
+  ];
+  if (runtimeKind === 'pi-agent-core') {
+    entries.push(...piRuntimeFingerprintInput(env, provider.custom?.envOverrides).entries);
+  }
+  return hashSecretEntries(entries);
 }
 
 function providerRuntimeSnapshot(
@@ -390,7 +428,7 @@ function providerRuntimeSnapshot(
   const runtimeKind = providerService.resolveAgentRuntime(provider);
   const providerEnv = providerService.getEnvForProvider(provider.id, providerScope) ?? null;
   const env = mergeIsolatedProviderEnv(process.env, providerEnv);
-  const nonSecretEnv = pickEnv(env, runtimeEnvironmentKeys(runtimeKind));
+  const nonSecretEnv = publicRuntimeEnvironment(env, runtimeKind);
   const primaryModel = runtimeKind === 'qoder-agent-sdk'
     ? nonSecretEnv.QODER_MODEL
     : provider.models.primary;

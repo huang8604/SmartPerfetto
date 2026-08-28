@@ -7,7 +7,17 @@ import {createHash} from 'crypto';
 import {execFile} from 'child_process';
 import {promisify} from 'util';
 
-import type {CodebaseRef} from '../codebase/codebaseRegistry';
+import type {CodebaseRef, IndexCoverage} from '../codebase/codebaseRegistry';
+import {
+  sourceSelectionAdmits,
+  sourceSelectionForRef,
+  type SourceSelectionIR,
+} from '../codebase/sourceSelectionPolicy';
+import {SourceEnumerator, type EnumerationResult} from '../codebase/sourceEnumerator';
+import {
+  hardenedGitEnvironment,
+  hardenedGitPrefixArguments,
+} from '../codebase/subprocessHardening';
 import {
   DEFAULT_SOURCE_MAX_TOTAL_BYTES,
   type PathSecurityGate,
@@ -17,6 +27,8 @@ import {
 
 export const MAX_SOURCE_CHUNKS_PER_GENERATION = 20_000;
 export const SOURCE_INGEST_WRITE_BATCH_SIZE = 500;
+const SOURCE_GIT_REVISION_TIMEOUT_MS = 2_000;
+const SOURCE_GIT_STATUS_TIMEOUT_MS = 8_000;
 const execFileAsync = promisify(execFile);
 
 export interface SourceGenerationProvenance {
@@ -49,16 +61,74 @@ export function assertCodebaseRootIdentity(
   }
 }
 
-export function previewRegisteredCodebaseRoot(
+export async function enumerateRegisteredCodebaseRoot(
   gate: PathSecurityGate,
-  ref: Pick<CodebaseRef, 'rootRealpath' | 'rootAuthorization'>,
-): Promise<PathPreviewResult> {
-  return gate.preview(
-    ref.rootRealpath,
-    ref.rootAuthorization === 'native_picker'
+  ref: CodebaseRef,
+  enumerator = new SourceEnumerator(),
+): Promise<EnumerationResult> {
+  const result = await enumerator.enumerate({
+    rootRealpath: ref.rootRealpath,
+    policy: sourceSelectionForRef(ref, gate.getSourceReadLimits().maxFileBytes),
+    gate,
+    expectedRootRealpath: ref.rootRealpath,
+    ...(ref.rootAuthorization === 'native_picker'
       ? {additionalAllowlistRoots: [ref.rootRealpath]}
-      : undefined,
-  );
+      : {}),
+  });
+  return result;
+}
+
+export function selectEnumeratedSourceFiles(
+  enumeration: EnumerationResult,
+  ref: CodebaseRef,
+  pathPrefix: string | undefined,
+  maxFiles: number,
+  maxBytes: number,
+): {files: PathPreviewFile[]; coverage: IndexCoverage} {
+  const policy = sourceSelectionForRef(ref);
+  const candidates = enumeration.files
+    .filter(file => codebaseSourcePathMatches(
+      ref,
+      file.relativePath,
+      pathPrefix,
+      process.platform,
+      policy,
+    ))
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const files: PathPreviewFile[] = [];
+  let bytesSelected = 0;
+  let truncationReason: IndexCoverage['truncationReason'];
+  for (const file of candidates) {
+    if (files.length >= maxFiles) {
+      truncationReason = 'file_budget';
+      break;
+    }
+    if (bytesSelected + file.sizeBytes > maxBytes) {
+      truncationReason = 'byte_budget';
+      break;
+    }
+    files.push(file);
+    bytesSelected += file.sizeBytes;
+  }
+  const truncated = truncationReason !== undefined;
+  const complete = enumeration.enumerationComplete && !truncated;
+  return {
+    files,
+    coverage: {
+      selectionPolicyRevision: ref.selectionPolicyRevision ?? 1,
+      enumerationBackend: enumeration.backend,
+      backendFidelity: enumeration.fidelity,
+      enumerationComplete: enumeration.enumerationComplete,
+      deterministic: enumeration.deterministic,
+      filesEnumerated: enumeration.files.length,
+      filesSelected: files.length,
+      bytesSelected,
+      chunksIndexed: 0,
+      truncated,
+      complete,
+      ...(truncationReason ? {truncationReason} : {}),
+    },
+  };
 }
 
 export function resolveMaxChunkChars(value: unknown, fallback: number): number {
@@ -126,39 +196,28 @@ export function resolveSourcePathPatterns(
   });
 }
 
-function globToRegExp(glob: string, caseInsensitive: boolean): RegExp {
-  const normalized = normalizeSourceRelativePath(glob);
-  let pattern = '^';
-  for (let index = 0; index < normalized.length; index++) {
-    const character = normalized[index];
-    if (character === '*' && normalized[index + 1] === '*') {
-      index++;
-      if (normalized[index + 1] === '/') {
-        index++;
-        pattern += '(?:.*/)?';
-      } else {
-        pattern += '.*';
-      }
-      continue;
-    }
-    if (character === '*') {
-      pattern += '[^/]*';
-      continue;
-    }
-    if (character === '?') {
-      pattern += '[^/]';
-      continue;
-    }
-    pattern += character.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
-  }
-  return new RegExp(`${pattern}$`, caseInsensitive ? 'i' : undefined);
-}
-
 function pathMatchesPrefix(relativePath: string, prefix: string, caseInsensitive: boolean): boolean {
   const normalizedPrefix = normalizeSourceRelativePath(prefix).replace(/\/$/, '');
   const comparablePath = caseInsensitive ? relativePath.toLocaleLowerCase('en-US') : relativePath;
   const comparablePrefix = caseInsensitive ? normalizedPrefix.toLocaleLowerCase('en-US') : normalizedPrefix;
   return !comparablePrefix || comparablePath === comparablePrefix || comparablePath.startsWith(`${comparablePrefix}/`);
+}
+
+export function codebaseSourcePathMatches(
+  ref: Pick<CodebaseRef, 'kind' | 'pathFilters' | 'excludeGlobs'>,
+  relativePath: string,
+  pathPrefix?: string,
+  platform: NodeJS.Platform = process.platform,
+  policy: SourceSelectionIR = sourceSelectionForRef(ref),
+): boolean {
+  const caseInsensitive = platform === 'win32';
+  const normalizedPath = normalizeSourceRelativePath(relativePath);
+  const requestedPrefix = pathPrefix ? normalizeSourceRelativePath(pathPrefix) : undefined;
+  if (!sourceSelectionAdmits(policy, normalizedPath, platform)) return false;
+  if (requestedPrefix && !pathMatchesPrefix(normalizedPath, requestedPrefix, caseInsensitive)) {
+    return false;
+  }
+  return true;
 }
 
 export function selectCodebasePreviewFiles(
@@ -167,27 +226,9 @@ export function selectCodebasePreviewFiles(
   pathPrefix?: string,
   platform: NodeJS.Platform = process.platform,
 ): PathPreviewFile[] {
-  const caseInsensitive = platform === 'win32';
-  const registeredPrefixes = (ref.pathFilters ?? [])
-    .filter(Boolean)
-    .map(normalizeSourceRelativePath);
-  const requestedPrefix = pathPrefix ? normalizeSourceRelativePath(pathPrefix) : undefined;
-  const excludePatterns = (ref.excludeGlobs ?? [])
-    .filter(Boolean)
-    .map(pattern => globToRegExp(pattern, caseInsensitive));
-  return preview.acceptedFiles.filter(file => {
-    const relativePath = normalizeSourceRelativePath(file.relativePath);
-    if (
-      registeredPrefixes.length > 0 &&
-      !registeredPrefixes.some(prefix => pathMatchesPrefix(relativePath, prefix, caseInsensitive))
-    ) {
-      return false;
-    }
-    if (requestedPrefix && !pathMatchesPrefix(relativePath, requestedPrefix, caseInsensitive)) {
-      return false;
-    }
-    return !excludePatterns.some(pattern => pattern.test(relativePath));
-  });
+  const policy = sourceSelectionForRef(ref);
+  return preview.acceptedFiles.filter(file =>
+    codebaseSourcePathMatches(ref, file.relativePath, pathPrefix, platform, policy));
 }
 
 /**
@@ -223,17 +264,23 @@ export async function inspectSourceGeneration(
 
   let indexedRevision: string | undefined;
   let sourceDirty = false;
+  const gitPrefix = hardenedGitPrefixArguments(rootRealpath);
+  const gitEnvironment = hardenedGitEnvironment();
   try {
-    indexedRevision = (await execFileAsync('git', ['-C', rootRealpath, 'rev-parse', 'HEAD'], {
+    indexedRevision = (await execFileAsync('git', [...gitPrefix, 'rev-parse', 'HEAD'], {
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
+      timeout: SOURCE_GIT_REVISION_TIMEOUT_MS,
+      env: gitEnvironment,
     })).stdout.trim() || undefined;
     sourceDirty = (await execFileAsync(
       'git',
-      ['-C', rootRealpath, 'status', '--porcelain=v1', '--untracked-files=all', '--', '.'],
+      [...gitPrefix, 'status', '--porcelain=v1', '--untracked-files=all', '--', '.'],
       {
         encoding: 'utf8',
         maxBuffer: 8 * 1024 * 1024,
+        timeout: SOURCE_GIT_STATUS_TIMEOUT_MS,
+        env: gitEnvironment,
       },
     )).stdout.trim().length > 0;
   } catch {

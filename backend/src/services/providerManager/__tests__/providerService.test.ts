@@ -516,6 +516,7 @@ describe('ProviderService', () => {
       ['SMARTPERFETTO_AGENT_RUNTIME', 'claude-agent-sdk'],
       ['SMARTPERFETTO_OPENCODE_MCP_COMMAND_JSON', '["/bin/sh","-c","id"]'],
       ['SMARTPERFETTO_OPENCODE_SDK_MODULE_PATH', '/tmp/hostile-sdk.mjs'],
+      ['PI_NODE_OPTIONS', '--require=/tmp/hostile-pi.cjs'],
       ['NODE_OPTIONS', '--require=/tmp/hostile.cjs'],
     ])('rejects process-control custom env override %s', (key, value) => {
       expect(() => svc.create({
@@ -533,6 +534,174 @@ describe('ProviderService', () => {
           },
         },
       })).toThrow(`Custom provider env override is not allowed: ${key}`);
+    });
+
+    it('allows only scoped Qoder BYOK overrides on a Qoder custom provider', () => {
+      const provider = svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-main', light: 'deepseek-light'},
+        connection: {agentRuntime: 'qoder-agent-sdk'},
+        custom: {
+          envOverrides: {
+            QODER_BYOK_API_KEY: 'managed-deepseek-key',
+            QODER_BYOK_PROVIDER: 'deepseek',
+            QODER_BYOK_BASE_URL: 'https://api.deepseek.com/v1',
+            QODER_BYOK_STYLE: 'openai',
+          },
+        },
+      });
+
+      expect(svc.getEnvForProvider(provider.id)).toMatchObject({
+        QODER_BYOK_API_KEY: 'managed-deepseek-key',
+        QODER_BYOK_PROVIDER: 'deepseek',
+        QODER_BYOK_BASE_URL: 'https://api.deepseek.com/v1',
+        QODER_BYOK_STYLE: 'openai',
+      });
+      expect(svc.get(provider.id)?.custom?.envOverrides?.QODER_BYOK_API_KEY)
+        .toMatch(/^\*{4}/);
+    });
+
+    it.each([
+      'https://user:password@api.deepseek.com/v1',
+      'https://api.deepseek.com/v1?api_key=secret',
+      'https://api.deepseek.com/v1#secret',
+      'ftp://api.deepseek.com/v1',
+      'not-a-url',
+    ])('rejects unsafe Qoder BYOK base URL %s', (baseUrl) => {
+      expect(() => svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-main', light: 'deepseek-light'},
+        connection: {agentRuntime: 'qoder-agent-sdk'},
+        custom: {envOverrides: {QODER_BYOK_BASE_URL: baseUrl}},
+      })).toThrow('QODER_BYOK_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment');
+    });
+
+    it.each([
+      ['QODER_BYOK_API_KEY', 'managed-deepseek-key'],
+      ['QODER_BYOK_PROVIDER', 'deepseek'],
+      ['QODER_BYOK_BASE_URL', 'https://api.deepseek.com/v1'],
+      ['QODER_BYOK_STYLE', 'openai'],
+    ])('rejects Qoder BYOK override %s for a non-Qoder runtime', (key, value) => {
+      expect(() => svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'custom-openai-main', light: 'custom-openai-light'},
+        connection: {agentRuntime: 'openai-agents-sdk'},
+        custom: {envOverrides: {[key]: value}},
+      })).toThrow(`Custom provider env override is not allowed: ${key}`);
+    });
+
+    it('rejects switching away from Qoder while Qoder BYOK overrides remain', () => {
+      const provider = svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-main', light: 'deepseek-light'},
+        connection: {agentRuntime: 'qoder-agent-sdk'},
+        custom: {
+          envOverrides: {
+            QODER_BYOK_API_KEY: 'managed-deepseek-key',
+            QODER_BYOK_PROVIDER: 'deepseek',
+          },
+        },
+      });
+
+      expect(() => svc.switchAgentRuntime(provider.id, 'opencode')).toThrow(
+        'Custom provider env override is not allowed: QODER_BYOK_API_KEY',
+      );
+      expect(svc.getRawProvider(provider.id)?.connection.agentRuntime).toBe('qoder-agent-sdk');
+    });
+
+    it.each([
+      ['QODERCLI_PATH', '/tmp/hostile-qodercli'],
+      ['SMARTPERFETTO_QODER_SDK_MODULE_PATH', '/tmp/hostile-sdk.mjs'],
+      ['QODER_WORKER_RUNTIME_PATH', '/tmp/hostile-worker.mjs'],
+    ])('rejects Qoder process-control override %s even for Qoder providers', (key, value) => {
+      expect(() => svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'qoder-main', light: 'qoder-light'},
+        connection: {agentRuntime: 'qoder-agent-sdk'},
+        custom: {envOverrides: {[key]: value}},
+      })).toThrow(`Custom provider env override is not allowed: ${key}`);
+    });
+
+    it('allows Pi provider-scoped credentials on a Pi custom provider', () => {
+      const provider = svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-chat', light: 'deepseek-chat'},
+        connection: {
+          agentRuntime: 'pi-agent-core',
+          piAgentCoreModelJson: '{"id":"deepseek-chat","provider":"deepseek"}',
+        },
+        custom: {
+          envOverrides: {
+            DEEPSEEK_API_KEY: 'managed-deepseek-key',
+            GOOGLE_APPLICATION_CREDENTIALS: '/managed/google.json',
+          },
+        },
+      });
+
+      expect(svc.getEnvForProvider(provider.id)).toMatchObject({
+        DEEPSEEK_API_KEY: 'managed-deepseek-key',
+        GOOGLE_APPLICATION_CREDENTIALS: '/managed/google.json',
+      });
+    });
+
+    it('rejects Pi-only provider credentials for non-Pi custom runtimes', () => {
+      expect(() => svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'custom-openai-main', light: 'custom-openai-light'},
+        connection: {
+          agentRuntime: 'openai-agents-sdk',
+          openaiBaseUrl: 'https://gateway.example/v1',
+          openaiProtocol: 'chat_completions',
+        },
+        custom: {
+          envOverrides: {
+            GOOGLE_APPLICATION_CREDENTIALS: '/managed/google.json',
+          },
+        },
+      })).toThrow(
+        'Custom provider env override is not allowed: GOOGLE_APPLICATION_CREDENTIALS',
+      );
+    });
+
+    it('allows adding Pi-only provider credentials while updating a Pi runtime', () => {
+      const provider = svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-chat', light: 'deepseek-chat'},
+        connection: {
+          agentRuntime: 'pi-agent-core',
+          piAgentCoreModelJson: '{"id":"deepseek-chat","provider":"deepseek"}',
+        },
+      });
+
+      expect(() => svc.update(provider.id, {
+        custom: {envOverrides: {DEEPSEEK_API_KEY: 'managed-deepseek-key'}},
+      })).not.toThrow();
+    });
+
+    it('rejects switching away from Pi while Pi-only provider credentials remain', () => {
+      const provider = svc.create({
+        ...validInput,
+        type: 'custom',
+        models: {primary: 'deepseek-chat', light: 'deepseek-chat'},
+        connection: {
+          agentRuntime: 'pi-agent-core',
+          piAgentCoreModelJson: '{"id":"deepseek-chat","provider":"deepseek"}',
+        },
+        custom: {envOverrides: {DEEPSEEK_API_KEY: 'managed-deepseek-key'}},
+      });
+
+      expect(() => svc.switchAgentRuntime(provider.id, 'opencode')).toThrow(
+        'Custom provider env override is not allowed: DEEPSEEK_API_KEY',
+      );
+      expect(svc.getRawProvider(provider.id)?.connection.agentRuntime).toBe('pi-agent-core');
     });
   });
 

@@ -3,6 +3,7 @@
 [English](usage.en.md) | [中文](usage.md)
 
 如果你想先了解 SmartPerfetto 的完整功能边界、入口和输出效果，见 [功能总览](features.md)。
+Windows 免安装包从下载到首次分析的连续流程见 [Windows 指南](windows.md)。
 
 ## 推荐 trace 内容
 
@@ -17,14 +18,33 @@ SmartPerfetto 最适合 Android 12+ trace，尤其是包含 FrameTimeline 数据
 
 ## UI 分析流程
 
-1. 打开 `http://localhost:10000`。
+1. 打开运行入口给出的地址；Windows 免安装包使用启动器打印的实际 `Open:` URL，Docker 默认是 `http://localhost:10000`。
 2. 加载 `.pftrace` 或 `.perfetto-trace`。
 3. 打开 SmartPerfetto AI Assistant 面板。
-4. 选择分析模式：快速、完整或智能。
+4. 选择分析模式：对话、快速、完整或智能。
 5. 输入自然语言问题。
 6. 等待 SSE 流式输出、表格证据和最终结论。
 
 智能模式会先返回“场景盘点”，按时间顺序列出 trace 中识别到的启动、滑动、点击、导航、设备状态、ANR 等场景，并显示可深钻的范围按钮。选择“全部”或某一类场景后，才会进入对应的启动/滑动/点击等深钻分析。
+
+## 先对话，再决定是否分析
+
+`对话` 是默认入口。没有打开 Trace 时，顶部 AI 入口会进入独立对话页；打开
+Trace 后，同一个模式会在 AI Assistant 面板中附加当前 Trace。它适合先澄清目标、
+讨论性能原理或查询已授权源码。信息不足时会返回一个明确问题；只有确实需要完整
+Trace 因果分析时，才会给出可确认的完整分析交接，不会自行启动重型分析。
+
+连续快速发送会复用同一会话并先停止旧 run。新对话、清空对话、切换 Provider、
+输出语言、Workspace、源码授权或已附加 Trace 时都会建立新的安全边界。未附加 Trace
+的会话没有 Trace 查询工具；注册的本地源码根目录即使尚无索引，也可在授权后按需
+搜索和读取，索引只作为图谱/检索加速能力。
+
+## 使用分析结果操作
+
+分析结论下方的操作只会在用户点击后执行：**跳到时间点**会把目标时间点居中并
+明显缩放，**打开表格**会回到支撑结论的证据行，**收藏证据**会把证据或结果快照保存到
+当前会话。输入 `/pins` 可以查看收藏结果；收藏不会固定 Perfetto 时间线泳道，
+也不会自动把证据加入后续 AI 上下文。同一份 action 证据只收藏一次。
 
 ## Agent 辅助外部反馈
 
@@ -65,7 +85,7 @@ apply/revert 还要求部署者启用专用开关和包外持久化目录。完�
 帮我看看这个 ANR
 这个 trace 的应用包名和主要进程是什么？
 这段选区里主线程为什么卡住？
-对比当前 trace 和参考 trace 的滑动差异
+对比基线 trace 和对比 trace 的滑动差异
 对比一下另外一份
 对比 AR-1234abcd
 ```
@@ -73,15 +93,26 @@ apply/revert 还要求部署者启用专用开关和包外持久化目录。完�
 ## Raw Trace 实时对比
 
 如果要在同一个对话里直接查询两条 raw trace，点击 AI Assistant 顶部的
-`compare_arrows`，打开 current + reference 双窗并选择一条 workspace 历史 Trace。
-之后可以说“对比当前 trace 和参考 trace”或按当前布局说“左边/右边、上面/下面”。
+`compare_arrows` 打开双窗。左/上是基线，右/下是对比；两个 selector 都可以从
+当前 workspace 任意选择 Trace，也可以使用工具栏的“交换”反转比较方向。
+之后可以说“对比基线和对比 Trace”或按当前布局说“左边/右边、上面/下面”。
 
-双窗只支持当前页面 current trace 加一条历史 reference，不支持任意两个历史 Trace。
-退出视觉双窗后可以保留 current/reference AI 上下文；“退出对比”才会清空 reference。
+如果当前还没有打开 Trace，也可以先进入 AI Assistant 的无 Trace 页面，点击
+`双 Trace` 打开左右都为空的双窗。每一侧都能直接“上传 Trace”；上传成功后文件
+保留在当前 workspace，并自动加载到对应 pane。已有 Trace 的 pane 可用“替换文件”。
+两侧上传互相独立，分析运行期间会锁定上传和替换。
+
+当前页面 Trace 只是首次打开双窗时的默认基线，不再强制留在 pair 中；两份历史
+Trace 也可以直接互相对比。退出视觉双窗后可以保留双 Trace AI 上下文；
+“退出对比”才会清空 pair。
+
+最近一次 pair、布局和已完成分析会按 workspace 保存。刷新浏览器或正常重启后，
+只要对应 Trace 仍在 workspace，就可以恢复双窗和已有分析/报告；未完成运行会标记为
+中断，需要重新发起。
 CLI 的等价入口是：
 
 ```bash
-smp compare current.pftrace reference.pftrace \
+smp compare baseline.pftrace comparison.pftrace \
   --query "对比启动和滑动差异" --mode full
 ```
 
@@ -101,6 +132,7 @@ smp compare current.pftrace reference.pftrace \
 
 | 模式 | 推荐问题 | 不适合的问题 |
 |---|---|---|
+| 对话 | 澄清需求、性能原理、已授权源码、决定是否需要 Trace 深钻 | 期望立即执行完整 Trace 因果分析 |
 | 快速 | 包名、进程、trace 概览、简单数值 | `分析启动性能`、`分析滑动卡顿` 这类重查询 |
 | 完整 | 启动、滑动、ANR、复杂渲染根因 | 只问一个简单事实时成本偏高 |
 | 智能 | 混合脚本 trace、需要先看场景再决定深钻范围 | 明确只想直接分析单一场景时不如选择完整模式加具体问题 |
@@ -110,14 +142,16 @@ fast 模式默认 50 turns，可由 runtime-specific quick-turn 配置覆盖。�
 
 ## 选区与追问
 
-前端会把 area selection 或 track event selection 作为 `selectionContext` 传给后端。适合这样问：
+前端会把 area selection 或 track event selection 作为 `selectionContext` 传给后端，其中只包含 Event/Track 身份与时间边界。卡片展示查询不会作为隐藏证据发送；后端会重新查询名称、线程、进程与异常状态。适合这样问：
 
 ```text
 只看我选中的这段时间，为什么 UI thread 变慢？
 这个 slice 前后有没有 Binder 或调度问题？
 ```
 
-多轮追问会复用 session。切换 fast/full/auto 模式会开启新的 SDK session，避免轻量上下文和完整上下文混用。
+多轮追问会复用 session。切换 conversation/fast/full/auto 模式会开启新的 SDK session，避免轻量上下文和完整上下文混用。
+
+`/anr` 和 `/jank` 使用与普通分析相同的后端证据、claim verification 和报告链路；AI 被策略禁用时，这两个命令也会被阻止。
 
 ## 源码与 Android Internals 背景
 

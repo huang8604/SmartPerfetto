@@ -172,33 +172,25 @@ export function buildSelectionContextSection(sel: SelectionContext): string {
     const template = loadSelectionTemplate('area');
     if (!template) return '';
 
-    // Build track summary from structured data
+    // Track tags are selection identity only. Descriptive facts must come from
+    // backend-owned trace queries before they are used as evidence.
     let trackSummary = '';
     if (sel.tracks && sel.tracks.length > 0) {
-      const meaningful = sel.tracks.filter(
-        (t: SelectionTrackInfo) => t.threadName || t.processName || t.cpu !== undefined,
-      );
-      if (meaningful.length > 0) {
-        const byProcess = new Map<string, string[]>();
-        const cpuTracks: number[] = [];
-        for (const t of meaningful) {
-          if (t.cpu !== undefined) { cpuTracks.push(t.cpu); continue; }
-          const procKey = t.processName
-            ? `${t.processName}(pid=${t.pid ?? '?'})`
-            : '(unknown process)';
-          const threadLabel = t.threadName ? `${t.threadName}(tid=${t.tid ?? '?'})` : null;
-          if (!byProcess.has(procKey)) byProcess.set(procKey, []);
-          if (threadLabel) byProcess.get(procKey)!.push(threadLabel);
-        }
-        const lines: string[] = [];
-        for (const [proc, threads] of byProcess) {
-          lines.push(threads.length > 0 ? `  - ${proc}: ${threads.join(', ')}` : `  - ${proc}`);
-        }
-        if (cpuTracks.length > 0) {
-          lines.push(`  - CPU cores: ${cpuTracks.sort((a, b) => a - b).join(', ')}`);
-        }
-        trackSummary = `\n选中的 Track:\n${lines.join('\n')}`;
+      const maxTrackIdentities = 16;
+      const lines = sel.tracks
+        .slice(0, maxTrackIdentities)
+        .map((track: SelectionTrackInfo) => {
+          const tags = [
+            ...(track.utid !== undefined ? [`utid=${track.utid}`] : []),
+            ...(track.upid !== undefined ? [`upid=${track.upid}`] : []),
+            ...(track.cpu !== undefined ? [`cpu=${track.cpu}`] : []),
+          ];
+          return tags.length > 0 ? tags.join(',') : `uri=${track.uri}`;
+        });
+      if (sel.tracks.length > maxTrackIdentities) {
+        lines.push(`+${sel.tracks.length - maxTrackIdentities} omitted`);
       }
+      trackSummary = `\nTrack scope IDs: ${lines.join('; ')}`;
     }
 
     return renderTemplate(template, {
@@ -217,14 +209,10 @@ export function buildSelectionContextSection(sel: SelectionContext): string {
 
     return renderTemplate(template, {
       eventId: sel.eventId,
+      trackUri: sel.trackUri ?? '未知',
       ts: sel.ts,
       durationStr: sel.dur !== undefined ? `${(sel.dur / 1e6).toFixed(2)} ms` : '未知',
       sliceEnd: sel.dur !== undefined ? `${sel.ts}+${sel.dur}` : `${sel.ts}`,
-      name: sel.name ?? '(查询中...)',
-      threadName: sel.threadName ?? '未知',
-      processName: sel.processName ?? '未知',
-      depth: sel.depth ?? '未知',
-      childCount: sel.childCount ?? '未知',
     });
   }
 
@@ -272,8 +260,8 @@ function comparisonTraceDisplayLabel(
 ): string {
   const pane = ctx.tracePairContext?.panes.find(item => item.traceSide === traceSide);
   const role = traceSide === 'current'
-    ? localize(outputLanguage, '当前 Trace', 'Current trace')
-    : localize(outputLanguage, '参考 Trace', 'Reference trace');
+    ? localize(outputLanguage, '基线 Trace', 'Baseline trace')
+    : localize(outputLanguage, '对比 Trace', 'Comparison trace');
   return pane ? `${tracePaneSideLabel(pane.side, outputLanguage)}/${role}` : role;
 }
 
@@ -301,29 +289,29 @@ function buildTracePairMappingSection(
   if (pair.splitPercent !== undefined) {
     lines.push(localize(
       outputLanguage,
-      `- 分割比例: 主窗口 ${pair.splitPercent}%`,
-      `- Split ratio: primary pane ${pair.splitPercent}%`,
+      `- 分割比例: 基线窗口 ${pair.splitPercent}%`,
+      `- Split ratio: baseline pane ${pair.splitPercent}%`,
     ));
   }
   if (pair.maximizedTraceSide) {
     lines.push(localize(
       outputLanguage,
-      `- 最大化: ${pair.maximizedTraceSide === 'current' ? '当前 Trace' : '参考 Trace'}`,
-      `- Maximized: ${pair.maximizedTraceSide === 'current' ? 'current trace' : 'reference trace'}`,
+      `- 最大化: ${pair.maximizedTraceSide === 'current' ? '基线 Trace' : '对比 Trace'}`,
+      `- Maximized: ${pair.maximizedTraceSide === 'current' ? 'baseline trace' : 'comparison trace'}`,
     ));
   }
   if (pair.minimizedTraceSides && pair.minimizedTraceSides.length > 0) {
     const minimized = pair.minimizedTraceSides
       .map(traceSide => traceSide === 'current'
-        ? localize(outputLanguage, '当前 Trace', 'current trace')
-        : localize(outputLanguage, '参考 Trace', 'reference trace'))
+        ? localize(outputLanguage, '基线 Trace', 'baseline trace')
+        : localize(outputLanguage, '对比 Trace', 'comparison trace'))
       .join(localize(outputLanguage, '、', ', '));
     lines.push(localize(outputLanguage, `- 最小化: ${minimized}`, `- Minimized: ${minimized}`));
   }
   for (const pane of pair.panes) {
     const role = pane.traceSide === 'current'
-      ? localize(outputLanguage, '当前 Trace', 'Current trace')
-      : localize(outputLanguage, '参考 Trace', 'Reference trace');
+      ? localize(outputLanguage, '基线 Trace', 'Baseline trace')
+      : localize(outputLanguage, '对比 Trace', 'Comparison trace');
     const active = pane.active ? localize(outputLanguage, '，当前焦点', ', active') : '';
     const visualState = pane.visualState === 'context_only'
       ? localize(outputLanguage, '，后端上下文', ', backend context')
@@ -342,8 +330,8 @@ function buildTracePairMappingSection(
     if (currentAliases.length > 0 || referenceAliases.length > 0) {
       lines.push(localize(
         outputLanguage,
-        `- 指代别名: 当前 Trace=${currentAliases.join('/') || '无'}；参考 Trace=${referenceAliases.join('/') || '无'}`,
-        `- Trace aliases: current=${currentAliases.join('/') || 'none'}; reference=${referenceAliases.join('/') || 'none'}`,
+        `- 指代别名: 基线 Trace=${currentAliases.join('/') || '无'}；对比 Trace=${referenceAliases.join('/') || '无'}`,
+        `- Trace aliases: baseline=${currentAliases.join('/') || 'none'}; comparison=${referenceAliases.join('/') || 'none'}`,
       ));
     }
   }

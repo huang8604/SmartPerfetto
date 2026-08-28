@@ -5,6 +5,7 @@
 import {randomUUID} from 'crypto';
 
 import type {AgentRuntimeKind} from '../../agentRuntime/runtimeKinds';
+import type {CapabilityManifestAttributionV1} from '../../types/capabilityManifest';
 import type {
   RunInjectionAttribution,
   RunInjectionCategory,
@@ -24,6 +25,8 @@ import {
   canonicalContentHash,
   immutableCanonicalSnapshot,
 } from './canonicalJson';
+import {parseAdaptiveRoutingReceipt} from '../../agentRuntime/adaptiveEvidenceRouter';
+import type {AdaptiveRoutingReceiptV1} from '../../types/adaptiveRouting';
 
 export interface CreateRunManifestBuilderInput {
   runManifestId?: string;
@@ -88,6 +91,8 @@ export class RunManifestBuilder implements RunManifestAttributionSink {
   private analysisMode: RunManifestV1['analysisMode'];
   private resolvedMode: RunManifestV1['resolvedMode'];
   private capabilityFlags = new Set<string>();
+  private capabilityManifest: CapabilityManifestAttributionV1 | undefined;
+  private adaptiveRouting: AdaptiveRoutingReceiptV1 | undefined;
   private toolAllowlistHash = canonicalContentHash([]);
   private registryFingerprint: string | undefined;
   private evolutionOverlayGeneration: string | undefined;
@@ -143,6 +148,10 @@ export class RunManifestBuilder implements RunManifestAttributionSink {
     return this.pendingInvocations.size;
   }
 
+  get currentAdaptiveRouting(): AdaptiveRoutingReceiptV1 | undefined {
+    return this.adaptiveRouting;
+  }
+
   recordScene(input: RunManifestSceneAttribution): void {
     this.assertCollecting('record_scene');
     this.scene = {
@@ -176,6 +185,88 @@ export class RunManifestBuilder implements RunManifestAttributionSink {
     for (const flag of input.capabilityFlags ?? []) {
       if (flag) this.capabilityFlags.add(flag);
     }
+  }
+
+  recordAdaptiveRouting(input: AdaptiveRoutingReceiptV1): void {
+    this.assertCollecting('record_adaptive_routing');
+    const parsed = parseAdaptiveRoutingReceipt(input);
+    if (
+      parsed.requestedMode !== this.analysisMode
+      || parsed.resolvedMode !== this.resolvedMode
+    ) {
+      throw new Error('run_manifest_adaptive_routing_mode_mismatch');
+    }
+    if (
+      this.adaptiveRouting
+      && this.adaptiveRouting.contentHash === parsed.contentHash
+    ) {
+      return;
+    }
+    if (
+      this.adaptiveRouting
+      && (
+        this.adaptiveRouting.stage === 'post_evidence'
+        || parsed.stage === 'preflight'
+        || this.adaptiveRouting.currentTier !== parsed.currentTier
+        || this.adaptiveRouting.classifierSource !== parsed.classifierSource
+        || this.adaptiveRouting.outputCap !== parsed.outputCap
+        || this.adaptiveRouting.obligations.some(obligation =>
+          !parsed.obligations.includes(obligation))
+      )
+    ) {
+      throw new Error('run_manifest_adaptive_routing_transition_invalid');
+    }
+    this.adaptiveRouting = parsed;
+  }
+
+  recordCapabilityManifest(input: CapabilityManifestAttributionV1): void {
+    this.assertCollecting('record_capability_manifest');
+    const counters = input.probeCache;
+    for (const [name, value] of Object.entries({
+      hits: counters.hits,
+      misses: counters.misses,
+      bypasses: counters.bypasses,
+    })) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`run_manifest_invalid_capability_manifest_counter:${name}`);
+      }
+    }
+
+    if (!this.capabilityManifest) {
+      this.capabilityManifest = immutableCanonicalSnapshot(input);
+      return;
+    }
+
+    const identity = (attribution: CapabilityManifestAttributionV1) =>
+      canonicalContentHash({
+        schemaVersion: attribution.schemaVersion,
+        resolution: attribution.resolution,
+        ...(attribution.probeCache.keyHash === undefined
+          ? {}
+          : {keyHash: attribution.probeCache.keyHash}),
+      });
+    if (identity(this.capabilityManifest) !== identity(input)) {
+      throw new Error('run_manifest_capability_manifest_identity_mismatch');
+    }
+
+    const merged = {
+      ...this.capabilityManifest,
+      probeCache: {
+        ...this.capabilityManifest.probeCache,
+        hits: this.capabilityManifest.probeCache.hits + counters.hits,
+        misses: this.capabilityManifest.probeCache.misses + counters.misses,
+        bypasses:
+          this.capabilityManifest.probeCache.bypasses + counters.bypasses,
+      },
+    };
+    if (
+      !Number.isSafeInteger(merged.probeCache.hits) ||
+      !Number.isSafeInteger(merged.probeCache.misses) ||
+      !Number.isSafeInteger(merged.probeCache.bypasses)
+    ) {
+      throw new Error('run_manifest_capability_manifest_counter_overflow');
+    }
+    this.capabilityManifest = immutableCanonicalSnapshot(merged);
   }
 
   recordSkillRegistry(input: RunSkillRegistryAttribution): void {
@@ -388,7 +479,13 @@ export class RunManifestBuilder implements RunManifestAttributionSink {
       featureFlagSnapshot: this.featureFlagSnapshot,
       analysisMode: this.analysisMode,
       resolvedMode: this.resolvedMode,
+      ...(this.adaptiveRouting
+        ? {adaptiveRouting: this.adaptiveRouting}
+        : {}),
       capabilityFlags: [...this.capabilityFlags].sort(),
+      ...(this.capabilityManifest
+        ? {capabilityManifest: this.capabilityManifest}
+        : {}),
       ...(this.referenceTraceId ? {referenceTraceId: this.referenceTraceId} : {}),
       ...(this.comparisonIdentity
         ? {comparisonIdentity: this.comparisonIdentity}

@@ -187,6 +187,8 @@ describe('QoderRuntime', () => {
         DATABASE_URL: 'postgres://secret',
         QODER_PERSONAL_ACCESS_TOKEN: 'test-token',
         QODER_MODEL: 'test-model',
+        QODER_BYOK_API_KEY: 'deepseek-secret',
+        QODER_BYOK_PROVIDER: 'deepseek',
       });
       await runtime.analyze('test', 'session-1', 'trace-1');
 
@@ -197,6 +199,52 @@ describe('QoderRuntime', () => {
       expect(sdkEnv.DATABASE_URL).toBeUndefined();
       expect(sdkEnv.QODER_PERSONAL_ACCESS_TOKEN).toBe('test-token');
       expect(sdkEnv.QODER_MODEL).toBe('test-model');
+      expect(sdkEnv.QODER_BYOK_API_KEY).toBeUndefined();
+      expect(sdkEnv.QODER_BYOK_PROVIDER).toBeUndefined();
+    });
+
+    it('routes Qoder model calls through a complete BYOK model policy', async () => {
+      mockQuery.mockReturnValue(createMockSdkStream([
+        { type: 'result', subtype: 'success', result: '## Final Report\ndone' },
+      ]));
+
+      const runtime = createRuntime({
+        QODER_MODEL: 'deepseek-main',
+        QODER_LIGHT_MODEL: 'deepseek-light',
+        QODER_BYOK_API_KEY: 'deepseek-secret',
+        QODER_BYOK_PROVIDER: 'deepseek',
+        QODER_BYOK_BASE_URL: 'https://api.deepseek.com/v1',
+        QODER_BYOK_STYLE: 'openai',
+      });
+      await runtime.analyze('test', 'session-1', 'trace-1');
+
+      const callArgs = mockQuery.mock.calls[0][0] as any;
+      expect(callArgs.options.model).toBe('deepseek-main');
+      expect(callArgs.options.resolveModel({ purpose: 'main' })).toEqual({
+        model: {
+          provider: 'deepseek',
+          api_key: 'deepseek-secret',
+          model: 'deepseek-main',
+          url: 'https://api.deepseek.com/v1',
+          style: 'openai',
+        },
+      });
+      expect(callArgs.options.resolveModel({ purpose: 'title' })).toEqual({
+        model: expect.objectContaining({ model: 'deepseek-light' }),
+      });
+    });
+
+    it('fails closed before query when Qoder BYOK configuration is incomplete', async () => {
+      const result = await createRuntime({
+        QODER_BYOK_API_KEY: 'deepseek-secret',
+        QODER_MODEL: undefined,
+      }).analyze('test', 'session-1', 'trace-1');
+
+      expect(result.success).toBe(false);
+      expect(result.terminationMessage).toContain('QODER_BYOK_PROVIDER');
+      expect(result.terminationMessage).toContain('QODER_MODEL');
+      expect(result.terminationMessage).not.toContain('deepseek-secret');
+      expect(mockQuery).not.toHaveBeenCalled();
     });
 
     it('does not use repo root as cwd', async () => {
@@ -304,6 +352,9 @@ describe('QoderRuntime', () => {
       mockQuery.mockReturnValue(createMockSdkStream([
         { type: 'result', subtype: 'success', result: '## Final Report\nfallback' },
       ]));
+      jest.mocked(createArchitectureDetector).mockReturnValueOnce({
+        detect: jest.fn<any>().mockResolvedValue({type: 'COMPOSE'}),
+      } as any);
       try {
         const result = await createRuntime().analyze(
           'summarize top-5 longest process slices',
@@ -312,6 +363,11 @@ describe('QoderRuntime', () => {
         );
 
         expect(createArchitectureDetector).toHaveBeenCalled();
+        expect(probeTraceCompleteness).toHaveBeenCalledWith(
+          expect.objectContaining({query: expect.any(Function)}),
+          'trace-1',
+          'COMPOSE',
+        );
         expect(createSkillExecutor).toHaveBeenCalled();
         expect(mockCreateClaudeMcpServer).toHaveBeenCalled();
         expect(mockQuery).toHaveBeenCalledTimes(1);
@@ -405,6 +461,25 @@ describe('QoderRuntime', () => {
   });
 
   describe('result handling', () => {
+    it('explains that BYOK does not replace Qoder authentication', async () => {
+      const error = new Error('Qoder CLI process exited with code 41') as Error & { exitCode: number };
+      error.exitCode = 41;
+      mockQuery.mockImplementationOnce(() => {
+        throw error;
+      });
+
+      const result = await createRuntime({
+        QODER_MODEL: 'deepseek-main',
+        QODER_BYOK_API_KEY: 'deepseek-secret',
+        QODER_BYOK_PROVIDER: 'deepseek',
+      }).analyze('test', 'session-1', 'trace-1');
+
+      expect(result.success).toBe(false);
+      expect(result.terminationMessage).toContain('Qoder authentication failed');
+      expect(result.terminationMessage).toContain('does not replace Qoder authentication');
+      expect(result.terminationMessage).not.toContain('deepseek-secret');
+    });
+
     it('uses the shared localized trace-context formatter for the user prompt', async () => {
       mockFormatTraceContext.mockReturnValueOnce('localized trace context');
       mockQuery.mockReturnValue(createMockSdkStream([
@@ -564,6 +639,42 @@ describe('QoderRuntime', () => {
   });
 
   describe('session resume', () => {
+    it('starts each analysis with a fresh plan while preserving bounded history', async () => {
+      mockQuery.mockReturnValue(createMockSdkStream([
+        { type: 'result', subtype: 'success', result: 'done' },
+      ]));
+      const runtime = createRuntime();
+      const previousPlan = {
+        phases: [{
+          id: 'p1',
+          name: '旧阶段',
+          goal: '旧 run 的分析阶段',
+          expectedTools: ['get_comparison_context'],
+          status: 'completed',
+          summary: '旧 run 已完成，不能被下一轮继续使用。',
+        }],
+        successCriteria: '旧 run 完成',
+        submittedAt: 1,
+        toolCallLog: [],
+      };
+      (runtime as any).sessionPlans.set('session-1', {
+        current: previousPlan,
+        history: [],
+        prePlanToolCallLog: [{
+          toolName: 'get_comparison_context',
+          timestamp: 10,
+          success: true,
+        }],
+      });
+
+      await runtime.analyze('second run', 'session-1', 'trace-1');
+
+      const planState = (mockCreateClaudeMcpServer.mock.calls[0][0] as any).analysisPlan;
+      expect(planState.current).toBeNull();
+      expect(planState.history).toEqual([previousPlan]);
+      expect(planState.prePlanToolCallLog).toEqual([]);
+    });
+
     it('captures session ID from system init message', async () => {
       const messages = [
         { type: 'system', subtype: 'init', session_id: 'sdk-session-abc' },

@@ -45,12 +45,12 @@ A suite that is green locally but absent from `test:gate` counts as untested.
 | MCP, memory, report, provider, session, or agent runtime | `cd backend && npm run test:scene-trace-regression` |
 | Skill YAML | `cd backend && npm run validate:skills` plus scene trace regression |
 | Strategy/template Markdown | `cd backend && npm run validate:strategies` plus scene trace regression |
-| Trace corpus, Skill/Strategy coverage, or generator | `npm run trace:regression`; also run the focused Node corpus tests for tooling changes |
+| Trace corpus, Skill/Strategy coverage, or generator | `npm run trace:regression`; it includes `npm run trace:tooling:test` plus generated-corpus build and SQL execution |
 | SQL-bearing Skill or default backend gate wiring | `cd backend && npm run trace:sql-regression`; `npm run verify:pr` includes this gate |
 | Frontend generated types | `cd backend && npm run generate:frontend-types` plus relevant tests |
 | AI plugin UI | Browser verification in `start-dev.sh`, relevant `perfetto/ui` tests/typecheck, then `./scripts/update-frontend.sh` |
-| Self-Evolution control plane | `cd backend && npm run test:self-evolution` plus `npm run typecheck` and scene trace regression; add the AI plugin UI gate when the panel changes. That script covers RBAC/scope isolation, disabled and dependency fail-closed cases, and fixed validation + holdout replay selection. It is wired into `test:gate`, so `npm run verify:pr` runs it too |
-| Agent-assisted external issue reporting | `cd backend && npm run test:external-issue-reporting`, `npm run typecheck`, strategy validation, scene trace regression, AI plugin typecheck/unit tests, browser verification in `start-dev.sh`, and `./scripts/update-frontend.sh`; verify private/security fail-closed and that no GitHub write occurs |
+| Self-Evolution control plane | `npm --prefix backend run test:self-evolution`, `npm --prefix backend run typecheck`, and scene trace regression; add the AI plugin UI gate when the panel changes. That script covers RBAC/scope isolation, disabled and dependency fail-closed cases, and fixed validation + holdout replay selection. It is wired into `test:gate`, so `npm run verify:pr` runs it too |
+| Agent-assisted external issue reporting | `npm --prefix backend run test:external-issue-reporting`, `npm --prefix backend run typecheck`, strategy validation, scene trace regression, AI plugin typecheck/unit tests, browser verification in `start-dev.sh`, and `./scripts/update-frontend.sh`; verify private/security fail-closed and that no GitHub write occurs |
 | Perfetto upstream sync, trace processor pin, SQL/stdlib index, or committed UI prebuild | Follow `.claude/rules/perfetto-sync.md`; normally `git diff --check`, `npm run check:frontend-prebuild`, `npm --prefix backend run cli:e2e`, scene trace regression, submodule remote reachability, and Skill/Strategy validation when those files changed |
 | Code-aware analysis, codebase registry, source ingestion, symbol resolution, or CodeRef report/export | `npm --prefix backend run verify:codebase-aware` plus `npm run verify:pr` before landing |
 | npm CLI package/release | `npm --prefix backend run cli:pack-check` plus isolated install smoke |
@@ -323,7 +323,7 @@ The regression uses 6 canonical traces:
 | Flutter TextureView | `Scroll-Flutter-327-TextureView.pftrace` |
 | Flutter SurfaceView | `Scroll-Flutter-SurfaceView-Wechat-Wenyiwen.pftrace` |
 
-The aliases above resolve through `Trace/catalog.json`; maintained source must not add paths to the retired flat fixture directory. The default backend gate runs `trace:sql-regression`, which materializes committed overlays without the Perfetto source submodule and executes every discovered Skill SQL contract through the production path, explicit read-only/context probes, or isolated state-changing branch probes. Skipped or unavailable SQL fails the gate. Full generator/release verification is `npm run trace:regression`. Its report keeps SQL execution coverage separate from assertion-backed semantic coverage and definition-only contracts; inventory assignment alone is not an execution or semantic pass.
+The aliases above resolve through `Trace/catalog.json`; maintained source must not add paths to the retired flat fixture directory. The default backend gate runs `trace:sql-regression`, which materializes committed overlays without the Perfetto source submodule and executes every discovered Skill SQL contract through the production path, explicit read-only/context probes, or isolated state-changing branch probes. Skipped or unavailable SQL fails the gate. Full generator/release verification is `npm run trace:regression`. It runs the registered Trace tooling tests before generated-corpus build and SQL execution. Its report keeps source-column-backed positive semantic coverage, expected-empty negative coverage, deferred prerequisites, execution-only composition, and definition-only contracts separate; inventory assignment alone is not an execution or semantic pass.
 
 ## Focused Unit Tests
 
@@ -368,6 +368,19 @@ Deepseek-backed OpenAI runtime startup final-report gate:
 cd backend
 OPENAI_API_KEY=... npm run verify:e2e:deepseek-startup
 ```
+
+Qoder DeepSeek BYOK startup gate (requires both the DeepSeek provider key and
+Qoder PAT or local `qodercli` login; BYOK does not replace Qoder auth):
+
+```bash
+cd backend
+npm run qoder:install -- --accept-terms
+DEEPSEEK_API_KEY=... QODER_PERSONAL_ACCESS_TOKEN=... \
+  npm run verify:e2e:qoder-deepseek-startup
+```
+
+When Qoder auth is unavailable, record this real-provider gate as unavailable;
+do not treat unit/type/build/PR checks as an authenticated Qoder E2E result.
 
 Agent SSE E2E runs that exercise the OpenAI runtime should use Deepseek by
 default, not GLM. The canonical wrapper is
@@ -465,6 +478,12 @@ After e2e runs, inspect:
 - `backend/logs/sessions/session_*.jsonl`
 - SSE terminal event counts and error events
 - Whether the final conclusion is supported by Skill/SQL evidence
+
+`answerTokenCount` counts streamed SSE answer chunks, not provider tokens. The
+current cross-runtime E2E artifact does not provide a common provider-reported
+input/output/cache/reasoning-token, TTFT, or cost receipt. Treat mode/model cost
+comparison as `NOT CONFIGURED` until those fields and the actual selected model
+are recorded; a 21/21 functional matrix is not an accuracy or token benchmark.
 
 ## Fixture Skip Behavior
 

@@ -36,10 +36,14 @@ import { getHTMLReportGenerator } from '../../services/htmlReportGenerator';
 import { buildAgentDrivenReportData } from '../../services/agentReportData';
 import { normalizeResultForReport } from '../../services/agentResultNormalizer';
 import { buildAnalysisReceipt } from '../../services/analysisReceiptBuilder';
+import {recordAdaptiveRoutingPostEvidenceBestEffort} from '../../agentRuntime/adaptiveRoutingProjection';
 import { deriveUiActionProposals } from '../../services/uiActionProposalDeriver';
 import { persistAgentTurn } from '../../services/persistAgentSession';
 import { applyFinalResultQualityGate } from '../../services/finalResultQualityGate';
-import { runClaimVerification } from '../../services/verifier/claimVerificationRunner';
+import {runPreparedAnalysisClaimVerification} from '../../services/evidence/analysisRelationPreparation';
+import {executeManagedTraceSummaryV1} from '../../services/managedTraceSummary';
+import {buildTraceSummaryAttributionV1} from '../../services/traceSummaryAttribution';
+import {unavailableTraceSummaryV1} from '../../services/traceSummaryExecutor';
 import { sessionContextManager } from '../../agent/context/enhancedSessionContext';
 import { backendLogPath } from '../../runtimePaths';
 import { RagStore } from '../../services/ragStore';
@@ -71,9 +75,12 @@ import {
   normalizeCodeAwareMode,
   type CodeAwareMode,
 } from '../../services/codebase/codeAwareFeature';
-import {CodebaseRegistry, resolveCodebaseScope} from '../../services/codebase/codebaseRegistry';
+import {
+  CodebaseRegistry,
+  codebaseRootAvailable,
+  resolveCodebaseScope,
+} from '../../services/codebase/codebaseRegistry';
 import {getDefaultCodebaseRegistry} from '../../services/codebase/defaultCodebaseServices';
-import {codebaseHasActiveIndex} from '../../services/codebase/codebaseRegistry';
 import {
   externalKnowledgeSourceHasActiveIndex,
   getDefaultExternalKnowledgeSourceRegistry,
@@ -209,12 +216,12 @@ function validateCliAnalysisContext(input: RunTurnInput, scope: KnowledgeScope):
         `Codebase '${codebaseId}' not found in the current analysis scope`,
       ));
     }
-    if (!codebaseHasActiveIndex(ref)) {
+    if (!codebaseRootAvailable(ref)) {
       throw new Error(
         localize(
           outputLanguage,
-          `ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE：源码库“${codebaseId}”没有可用的活动索引代际`,
-          `ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE: Codebase '${codebaseId}' has no active indexed source generation`,
+          `ANALYSIS_CONTEXT_CODEBASE_ROOT_UNAVAILABLE：源码库“${codebaseId}”的已注册根目录当前不可用`,
+          `ANALYSIS_CONTEXT_CODEBASE_ROOT_UNAVAILABLE: Codebase '${codebaseId}' has a registered root that is unavailable`,
         ),
       );
     }
@@ -497,7 +504,7 @@ export class CliAnalyzeService {
         if (normalized.conclusionContract) {
           result.conclusionContract = normalized.conclusionContract;
         }
-        const qualityArtifacts = runClaimVerification({
+        const qualityArtifacts = runPreparedAnalysisClaimVerification({
           conclusionContract: normalized.conclusionContract,
           dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
           comparisonReportSection: session.comparisonReportSection,
@@ -532,6 +539,24 @@ export class CliAnalyzeService {
           currentTraceId: traceId,
           existingProposals: result.uiActionProposals,
         });
+        try {
+          session.traceSummary = buildTraceSummaryAttributionV1(
+            await executeManagedTraceSummaryV1(
+              getTraceProcessorService(),
+              traceId,
+              'current',
+            ),
+          );
+        } catch {
+          session.traceSummary = buildTraceSummaryAttributionV1(
+            unavailableTraceSummaryV1('trace_processor_session_unavailable'),
+          );
+        }
+        recordAdaptiveRoutingPostEvidenceBestEffort({
+          builder: runManifestLifecycle.builder,
+          result,
+          dataEnvelopes: session.dataEnvelopes as DataEnvelope[],
+        });
         const runManifest = runManifestLifecycle.sealOnceAndPersist({
           turnCount:
             Number.isSafeInteger(result.rounds) && result.rounds >= 0
@@ -541,6 +566,10 @@ export class CliAnalyzeService {
         result.analysisReceipt = buildAnalysisReceipt({
           runManifestId: runManifest.runManifestId,
           runId: runManifest.runId,
+          capabilityManifest: runManifest.capabilityManifest,
+          ...(runManifest.adaptiveRouting
+            ? {adaptiveRouting: runManifest.adaptiveRouting}
+            : {}),
           session,
           result,
           qualityArtifacts,

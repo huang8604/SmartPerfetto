@@ -7,6 +7,8 @@ const SOURCE_LOOKUP_TOOLS = new Set([
   'lookup_aosp_source',
   'lookup_kernel_source',
   'lookup_oem_sdk',
+  'search_codebase',
+  'read_codebase_file',
 ]);
 
 const MAX_SOURCE_CODE_REFERENCES = 8;
@@ -14,7 +16,9 @@ const CODE_FILE_PATH = /^[\w.-]+(?:\/[\w.-]+)*\.(?:kt|java|kts|xml|cpp|cc|c|h|hp
 const sourceCodeReferencesByOwner = new WeakMap<object, SourceLookupCodeReference[]>();
 
 export interface SourceLookupCodeReference {
-  chunkId: string;
+  chunkId?: string;
+  referenceId?: string;
+  codebaseId?: string;
   filePath: string;
   lineRange?: {
     start: number;
@@ -66,6 +70,22 @@ function normalizeChunkId(value: unknown): string | undefined {
   return normalized;
 }
 
+function normalizeCodebaseId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (
+    !normalized ||
+    normalized.length > 160 ||
+    normalized.includes('/') ||
+    normalized.includes('\\') ||
+    normalized.includes('://') ||
+    /[\s\u0000-\u001f\u007f]/.test(normalized)
+  ) {
+    return undefined;
+  }
+  return normalized;
+}
+
 function normalizeLineRange(value: unknown): SourceLookupCodeReference['lineRange'] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
@@ -81,21 +101,32 @@ function normalizeLineRange(value: unknown): SourceLookupCodeReference['lineRang
 }
 
 function normalizeCodeReference(input: {
-  chunkId: unknown;
+  chunkId?: unknown;
+  referenceId?: unknown;
+  codebaseId?: unknown;
   filePath: unknown;
   lineRange?: unknown;
 }): SourceLookupCodeReference | undefined {
   const chunkId = normalizeChunkId(input.chunkId);
+  const referenceId = normalizeChunkId(input.referenceId);
+  const codebaseId = normalizeCodebaseId(input.codebaseId);
   const filePath = normalizeRelativeCodePath(input.filePath);
-  if (!chunkId || !filePath) return undefined;
+  if ((!chunkId && !referenceId) || !filePath) return undefined;
   const lineRange = normalizeLineRange(input.lineRange);
-  return {chunkId, filePath, ...(lineRange ? {lineRange} : {})};
+  return {
+    ...(chunkId ? {chunkId} : {}),
+    ...(referenceId ? {referenceId} : {}),
+    ...(codebaseId ? {codebaseId} : {}),
+    filePath,
+    ...(lineRange ? {lineRange} : {}),
+  };
 }
 
 function codeReferenceKey(reference: SourceLookupCodeReference): string {
   return [
+    reference.codebaseId ?? '',
     reference.filePath,
-    reference.chunkId,
+    reference.chunkId ?? reference.referenceId ?? '',
     reference.lineRange?.start ?? '',
     reference.lineRange?.end ?? '',
   ].join('\0');
@@ -126,6 +157,8 @@ function collectCodeReferences(
     : undefined;
   const reference = normalizeCodeReference({
     chunkId: record.chunkId,
+    referenceId: record.referenceId,
+    codebaseId: record.codebaseId ?? record.codebase_id ?? metadata?.codebaseId ?? metadata?.codebase_id,
     filePath: record.filePath ?? metadata?.filePath,
     lineRange: record.lineRange ?? metadata?.lineRange,
   });

@@ -27,7 +27,7 @@ import type { AnalyzeManagedSession } from '../assistant/application/agentAnalyz
 import { SessionPersistenceService } from './sessionPersistenceService';
 import { sessionContextManager } from '../agent/context/enhancedSessionContext';
 import { getDefaultCodebaseRegistry } from './codebase/defaultCodebaseServices';
-import {activeCodebaseGeneration} from './codebase/codebaseRegistry';
+import {activeCodebaseGeneration, isCodebaseKind} from './codebase/codebaseRegistry';
 import { CodeLookupLedger } from './codebase/codeLookupLedger';
 import type { DataEnvelope } from '../types/dataContract';
 import type { SqlResultMessageBundle, SqlResultMessageEntry } from '../models/sessionSchema';
@@ -45,11 +45,22 @@ import {
 import {
   getSessionBackgroundKnowledgeReferences,
 } from './androidInternalsPack/sessionBackgroundKnowledgeRegistry';
+import {sanitizeStoredTraceSummaryAttribution} from './traceSummaryAttribution';
 
 const MAX_SQL_RESULTS_PER_MESSAGE = 5;
 const MAX_SQL_RESULT_ENTRY_BYTES = 100 * 1024;
 const MAX_TRUNCATED_CELL_CHARS = 2048;
 const MAX_TRUNCATED_SQL_CHARS = 4096;
+const MAX_SAFE_CODEBASE_DISPLAY_NAME = 120;
+
+function safeCodebaseDisplayName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim().replace(/[\u0000-\u001f\u007f]/g, ' ');
+  if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('://')) {
+    return undefined;
+  }
+  return trimmed.slice(0, MAX_SAFE_CODEBASE_DISPLAY_NAME);
+}
 
 type PersistableSqlEnvelope = DataEnvelope & {
   sql?: string;
@@ -70,6 +81,10 @@ function buildCodebaseSnapshot(
     .filter(Boolean)
     .map(ref => ({
       codebaseId: ref!.codebaseId,
+      ...(safeCodebaseDisplayName(ref!.displayName)
+        ? {displayName: safeCodebaseDisplayName(ref!.displayName)}
+        : {}),
+      ...(isCodebaseKind(ref!.kind) ? {kind: ref!.kind} : {}),
       indexGeneration: ref!.indexGeneration,
       activeGeneration: activeCodebaseGeneration(ref!),
       contentFingerprint: ref!.contentFingerprint,
@@ -231,7 +246,7 @@ function buildAssistantSqlResult(envelopes: unknown): SqlResultMessageBundle | u
   };
 }
 
-export function persistAgentTurn(input: PersistAgentTurnInput): void {
+function persistAgentState(input: PersistAgentTurnInput, appendTurnMessages: boolean): void {
   const { session, sessionId, traceId, query, result, logger } = input;
   const privateKnowledge = sessionUsesPrivateKnowledge(session);
   const outputLanguage = session.outputLanguage
@@ -241,6 +256,7 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
   const durableDataEnvelopes = privateKnowledge
     ? projectPrivateDataEnvelopes(sessionId, (session.dataEnvelopes || []) as DataEnvelope[])
     : (session.dataEnvelopes || []) as DataEnvelope[];
+  const traceSummary = sanitizeStoredTraceSummaryAttribution(session.traceSummary);
 
   try {
     const sessionContext = sessionContextManager.get(sessionId, traceId);
@@ -251,6 +267,10 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
           referenceTraceId: session.referenceTraceId,
           comparisonSource: session.comparisonSource,
           comparisonReportSection: session.comparisonReportSection,
+          ...(session.result?.analysisReceipt
+            ? {analysisReceipt: session.result.analysisReceipt}
+            : {}),
+          ...(traceSummary ? {traceSummary} : {}),
           conversationSteps: session.conversationSteps || [],
           queryHistory: session.queryHistory || [],
           conclusionHistory: session.conclusionHistory || [],
@@ -260,7 +280,6 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
           claimSupport: session.result?.claimSupport || (session as any).claimSupport,
           claimVerificationResult: session.result?.claimVerificationResult || (session as any).claimVerificationResult,
           identityResolutions: session.result?.identityResolutions || (session as any).identityResolutions,
-          analysisReceipt: session.result?.analysisReceipt,
           hypotheses: session.hypotheses || [],
             agentRuntimeProviderId: session.providerId,
             agentRuntimeProviderSnapshotHash: session.providerSnapshotHash,
@@ -394,7 +413,7 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
 
     // Messages table is a separate SQLite table, always needed for the
     // web UI's history view — persist regardless of which branch above ran.
-    if (sessionContext) {
+    if (appendTurnMessages && sessionContext) {
       try {
         const turnIndex = session.runSequence || 1;
         const sessionEnvelopes = durableDataEnvelopes;
@@ -457,4 +476,12 @@ export function persistAgentTurn(input: PersistAgentTurnInput): void {
       console.warn(`[AgentPersistence] Failed to persist session ${sessionId} to SQLite: ${message}`);
     }
   }
+}
+
+export function persistAgentTurn(input: PersistAgentTurnInput): void {
+  persistAgentState(input, true);
+}
+
+export function refreshPersistedAgentSnapshot(input: PersistAgentTurnInput): void {
+  persistAgentState(input, false);
 }

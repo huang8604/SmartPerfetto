@@ -7,18 +7,39 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const {pathToFileURL} = require('url');
 const { spawnSync } = require('child_process');
+const {createHash} = require('crypto');
 
 const backendRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(backendRoot, '..');
 const mode = parseMode(process.argv.slice(2));
 const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), `smartperfetto-cli-e2e-${mode}-`));
 const keepArtifacts = process.env.SMARTPERFETTO_CLI_E2E_KEEP === '1';
-const tracePath = path.join(repoRoot, 'perfetto/test/data/api31_startup_cold.perfetto-trace');
+const tracePath = resolveCatalogTracePath('android-startup-heavy');
 const traceProcessorPath = resolveTraceProcessorPath();
 const rawSecret = 'cli-e2e-secret-do-not-leak';
 
 let failure = false;
+
+function resolveCatalogTracePath(caseId) {
+  const catalogPath = path.join(repoRoot, 'Trace/catalog.json');
+  const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
+  const entry = catalog.cases?.find((candidate) => candidate.id === caseId);
+  assert(entry, `Trace catalog case not found: ${caseId}`);
+  assert.equal(entry.kind, 'real', `CLI E2E case must be real: ${caseId}`);
+  assert(
+    entry.source?.evidence_tier === 'R1' || entry.source?.evidence_tier === 'R2',
+    `CLI E2E case must carry R1 or R2 evidence: ${caseId}`,
+  );
+  const caseDir = path.resolve(repoRoot, entry.case_dir);
+  const resolved = path.resolve(caseDir, entry.trace.file);
+  assert(resolved.startsWith(`${caseDir}${path.sep}`), `CLI E2E trace escapes case directory: ${caseId}`);
+  assertFile(resolved, 'catalog test trace');
+  const digest = createHash('sha256').update(fs.readFileSync(resolved)).digest('hex');
+  assert.equal(digest, entry.trace.sha256, `CLI E2E trace hash drift: ${caseId}`);
+  return resolved;
+}
 
 main()
   .then(() => {
@@ -426,6 +447,45 @@ function buildPackedCli() {
     expectExit: 0,
   });
 
+  const installedPackageRoot = path.join(
+    installDir,
+    'node_modules/@gracker/smartperfetto',
+  );
+  const piRuntimePath = path.join(
+    installedPackageRoot,
+    'dist/agentRuntime/engines/pi/piAgentCoreRuntime.js',
+  );
+  assertFile(piRuntimePath, 'packed Pi runtime adapter');
+  const piRuntimeUrl = pathToFileURL(piRuntimePath).href;
+  runProcess('packed Pi runtime construction', process.execPath, [
+    '--input-type=module',
+    '--eval',
+    `const runtime = await import(${JSON.stringify(piRuntimeUrl)});
+const {Agent} = await runtime.loadPiAgentCoreModule();
+const provider = await runtime.createPiAgentCoreProviderRuntime({
+  model: {
+    id: 'packed-pi-model',
+    name: 'Packed Pi Model',
+    provider: 'packed-pi',
+    api: 'openai-completions',
+    baseUrl: 'https://example.invalid/v1',
+    reasoning: false,
+    input: ['text'],
+    cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+    contextWindow: 8192,
+    maxTokens: 1024,
+  },
+  apiKey: 'packed-pi-secret',
+}, {});
+new Agent({initialState: {model: provider.model, tools: []}, streamFn: provider.streamFn});
+console.log('packed Pi runtime construction: PASS');`,
+  ], {
+    cwd: installDir,
+    env: process.env,
+    timeoutMs: 120000,
+    expectExit: 0,
+  });
+
   const bin = process.platform === 'win32'
     ? path.join(installDir, 'node_modules/.bin/smp.cmd')
     : path.join(installDir, 'node_modules/.bin/smp');
@@ -556,7 +616,18 @@ function resolveTraceProcessorPath() {
     return path.resolve(process.env.TRACE_PROCESSOR_PATH);
   }
   const executableName = process.platform === 'win32' ? 'trace_processor_shell.exe' : 'trace_processor_shell';
+  const platformKey =
+    process.platform === 'linux' && process.arch === 'x64'
+      ? 'linux-x64'
+      : process.platform === 'darwin' && process.arch === 'arm64'
+        ? 'darwin-arm64'
+        : process.platform === 'win32' && process.arch === 'x64'
+          ? 'win32-x64'
+          : undefined;
   const candidates = [
+    ...(platformKey
+      ? [path.join(backendRoot, 'prebuilts', 'trace_processor', platformKey, executableName)]
+      : []),
     path.join(repoRoot, 'perfetto/out/ui', executableName),
     path.join(backendRoot, 'bin', executableName),
   ];

@@ -81,6 +81,8 @@ import {
 } from '../../runtimePromptContext';
 import { buildRuntimeCaseBackgroundContext } from '../../../services/caseEvolution/caseBackgroundContext';
 import { resolveRuntimeQuickMode } from '../../quickModeResolution';
+import {buildAdaptiveRoutingForQuickResolution} from '../../adaptiveRoutingProjection';
+import {resetPrePlanToolCallsForNewRun} from '../../../agentv3/planToolCallRecorder';
 import {
   buildRuntimeQuickEvidenceDirectAnswer,
   type RuntimeQuickEvidenceCounts,
@@ -96,7 +98,12 @@ import { QODER_AGENT_RUNTIME_KIND } from '../../runtimeKinds';
 import {
   QODER_PERSONAL_ACCESS_TOKEN_ENV,
   QODER_CLI_PATH_ENV,
+  QODER_BYOK_API_KEY_ENV,
+  QODER_BYOK_BASE_URL_ENV,
+  QODER_BYOK_PROVIDER_ENV,
+  QODER_BYOK_STYLE_ENV,
   QODER_MODEL_ENV,
+  QODER_SDK_MODULE_PATH_ENV,
   QODER_SYSTEM_PROMPT_ENV,
   resolveQoderRuntimeConfig,
   getQoderEngineCapabilities,
@@ -112,7 +119,12 @@ export {
   QODER_AGENT_RUNTIME_KIND,
   QODER_PERSONAL_ACCESS_TOKEN_ENV,
   QODER_CLI_PATH_ENV,
+  QODER_BYOK_API_KEY_ENV,
+  QODER_BYOK_BASE_URL_ENV,
+  QODER_BYOK_PROVIDER_ENV,
+  QODER_BYOK_STYLE_ENV,
   QODER_MODEL_ENV,
+  QODER_SDK_MODULE_PATH_ENV,
   QODER_SYSTEM_PROMPT_ENV,
   getQoderEngineCapabilities,
   getQoderRuntimeDiagnostics,
@@ -144,6 +156,15 @@ interface QoderSdkOptions {
   mcpServers?: Record<string, unknown>;
   env?: Record<string, string | undefined>;
   stderr?: (data: string) => void;
+  resolveModel?: (context: { purpose: string }) => {
+    model: string | {
+      provider: string;
+      api_key: string;
+      model: string;
+      url?: string;
+      style?: string;
+    };
+  };
 }
 
 /** Minimal shape of the async generator returned by query(). */
@@ -212,6 +233,25 @@ function getMessageType(message: unknown): string | undefined {
   return typeof message.type === 'string' ? message.type : undefined;
 }
 
+function describeQoderSdkError(error: unknown): string {
+  if (isRecord(error) && error.exitCode === 41) {
+    return [
+      'Qoder authentication failed.',
+      'Run `qodercli login` or set a valid QODER_PERSONAL_ACCESS_TOKEN.',
+      'QODER_BYOK_API_KEY configures the model provider but does not replace Qoder authentication.',
+    ].join(' ');
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+const QODER_LIGHT_MODEL_PURPOSES = new Set([
+  'compact',
+  'compression',
+  'suggestion',
+  'title',
+  'utility',
+]);
+
 // ---------------------------------------------------------------------------
 // Session state
 // ---------------------------------------------------------------------------
@@ -272,6 +312,7 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
       ?? parseOutputLanguage(this.env.SMARTPERFETTO_OUTPUT_LANGUAGE);
     const packageName = options?.packageName;
     const normalizedOptions = options ?? {};
+    const deferTracePreflightToModel = options?.assistantSurface === 'conversation';
     const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
     const previousTurns = sessionContext.getAllTurns?.() ?? [];
     const privateAnalysisContext = analysisContextUsesPrivateKnowledge(normalizedOptions);
@@ -281,6 +322,7 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
       query,
       sceneType,
       analysisMode: options?.analysisMode,
+      conversationSurface: deferTracePreflightToModel,
       selectionContext: options?.selectionContext,
       packageName,
       hasReferenceTrace: Boolean(options?.referenceTraceId),
@@ -320,6 +362,10 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
         previousTurns,
         resolvedMode: 'quick',
         budget: { model: 'runtime-pre-evidence' },
+        adaptiveRouting: buildAdaptiveRoutingForQuickResolution({
+          options: directOptions,
+          resolution: quickModeResolution,
+        }),
       });
       return this.buildDirectQuickEvidenceResult({
         query,
@@ -339,39 +385,49 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
 
     // Architecture detection
     let architecture: ArchitectureInfo | undefined;
-    try {
-      const detector = createArchitectureDetector();
-      architecture = await detector.detect({
-        traceId,
-        traceProcessorService,
-        packageName,
-      });
-      this.architectureCache.set(traceId, architecture);
-    } catch {
-      // Non-fatal — architecture detection is optional
+    if (!deferTracePreflightToModel) {
+      try {
+        const detector = createArchitectureDetector();
+        architecture = await detector.detect({
+          traceId,
+          traceProcessorService,
+          packageName,
+        });
+        this.architectureCache.set(traceId, architecture);
+      } catch {
+        // Non-fatal — architecture detection is optional
+      }
     }
 
     // Focus app detection
     let focusApps: DetectedFocusApp[] = [];
     let focusAppMethod: 'battery_stats' | 'oom_adj' | 'frame_timeline' | 'none' = 'none';
-    try {
-      const focusResult = await detectFocusApps(
-        traceProcessorService,
-        traceId,
-        { timeRange: options?.timeRange as { startNs: number; endNs: number } | undefined },
-      );
-      focusApps = focusResult.apps;
-      focusAppMethod = focusResult.method;
-    } catch {
-      // Non-fatal
+    if (!deferTracePreflightToModel) {
+      try {
+        const focusResult = await detectFocusApps(
+          traceProcessorService,
+          traceId,
+          { timeRange: options?.timeRange as { startNs: number; endNs: number } | undefined },
+        );
+        focusApps = focusResult.apps;
+        focusAppMethod = focusResult.method;
+      } catch {
+        // Non-fatal
+      }
     }
 
     // Probe trace completeness
     let traceCompleteness: Awaited<ReturnType<typeof probeTraceCompleteness>> | undefined;
-    try {
-      traceCompleteness = await probeTraceCompleteness(traceProcessorService, traceId);
-    } catch {
-      // Non-fatal
+    if (!deferTracePreflightToModel) {
+      try {
+        traceCompleteness = await probeTraceCompleteness(
+          traceProcessorService,
+          traceId,
+          architecture?.type,
+        );
+      } catch {
+        // Non-fatal
+      }
     }
 
     const analysisRunSpec = createAnalysisRunSpec({
@@ -392,6 +448,10 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
         fullPathPerTurnMs: this.config.fullPerTurnMs,
         quickPathPerTurnMs: this.config.quickPerTurnMs,
       },
+      adaptiveRouting: buildAdaptiveRoutingForQuickResolution({
+        options: normalizedOptions,
+        resolution: quickModeResolution,
+      }),
     });
 
     // Build comparison context before assembling the shared system prompt so
@@ -498,6 +558,12 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
       planState = { current: null, history: [] };
       if (!privateAnalysisContext) this.sessionPlans.set(sessionId, planState);
     }
+    if (planState.current) {
+      planState.history.push(planState.current);
+      if (planState.history.length > 3) planState.history.shift();
+    }
+    planState.current = null;
+    resetPrePlanToolCallsForNewRun(planState);
 
     let hypotheses = privateAnalysisContext ? undefined : this.sessionHypotheses.get(sessionId);
     if (!hypotheses) {
@@ -515,7 +581,10 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
 
     const { server: mcpServer, allowedTools: allowedToolNames } = isQuickMode
       ? createClaudeMcpServer({
-        runManifestAttributionSink: options?.runManifestAttributionSink,
+          conversationTraceAttached: options?.assistantSurface === 'conversation'
+            ? options.conversationTraceAttached === true
+            : undefined,
+          runManifestAttributionSink: options?.runManifestAttributionSink,
           sessionId,
           traceId,
           traceProcessorService,
@@ -537,7 +606,10 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
           androidInternalsPackPin: options?.androidInternalsPackPin,
         })
       : createClaudeMcpServer({
-        runManifestAttributionSink: options?.runManifestAttributionSink,
+          conversationTraceAttached: options?.assistantSurface === 'conversation'
+            ? options.conversationTraceAttached === true
+            : undefined,
+          runManifestAttributionSink: options?.runManifestAttributionSink,
           sessionId,
           traceId,
           userQuery: query,
@@ -594,6 +666,8 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
       : this.config.maxTurns;
 
     try {
+      const resolveModel = this.createModelPolicy();
+
       // Load the Qoder SDK module
       const sdk = await loadQoderSdkModule(this.env) as unknown as QoderSdkModule;
 
@@ -631,6 +705,7 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
             console.error('[Qoder SDK stderr]', data);
           }
         },
+        resolveModel,
       };
 
       // Execute the query with timeout
@@ -852,7 +927,7 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
       return result;
     } catch (error) {
       const totalDurationMs = Date.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage = describeQoderSdkError(error);
       const safeErrorMessage = sanitizeCodeAwareText(sessionId, errorMessage);
 
       // Clear stale session on missing-conversation errors so next call starts fresh
@@ -913,6 +988,36 @@ export class QoderRuntime extends EventEmitter implements IOrchestrator {
     }
     // Fall back to local qodercli login state
     return sdk.qodercliAuth();
+  }
+
+  private createModelPolicy(): QoderSdkOptions['resolveModel'] {
+    const { apiKey, provider, baseUrl, style } = this.config.byok;
+    const byokRequested = Boolean(apiKey || provider || baseUrl || style);
+    if (!byokRequested) return undefined;
+
+    const missing = [
+      !apiKey ? QODER_BYOK_API_KEY_ENV : undefined,
+      !provider ? QODER_BYOK_PROVIDER_ENV : undefined,
+      !this.config.model ? QODER_MODEL_ENV : undefined,
+    ].filter((value): value is string => Boolean(value));
+    if (missing.length > 0) {
+      throw new Error(`Qoder BYOK configuration is incomplete; missing ${missing.join(', ')}`);
+    }
+
+    return ({ purpose }) => {
+      const model = QODER_LIGHT_MODEL_PURPOSES.has(purpose)
+        ? this.config.lightModel || this.config.model!
+        : this.config.model!;
+      return {
+        model: {
+          provider: provider!,
+          api_key: apiKey!,
+          model,
+          ...(baseUrl ? { url: baseUrl } : {}),
+          ...(style ? { style } : {}),
+        },
+      };
+    };
   }
 
   // -------------------------------------------------------------------------

@@ -132,6 +132,7 @@ export interface AnalysisSummary {
   partialReasons?: string[];
   analysisReceipt?: import('./dataContract').AnalysisReceipt;
   uiActionProposals?: import('./dataContract').UiActionProposalV1[];
+  traceSummary?: import('./traceSummaryAttribution').TraceSummaryAttributionV1;
 }
 
 export interface NormalizedMetricSource {
@@ -247,6 +248,7 @@ export interface AnalysisResultSnapshot {
   claimSupport?: import('./evidenceContract').ClaimSupportV1[];
   claimVerificationResult?: import('./claimVerification').ClaimVerificationResult;
   identityResolutions?: import('./identityContract').IdentityResolutionV1[];
+  capabilityManifest?: import('./capabilityManifest').CapabilityManifestAttributionV1;
   metrics: NormalizedMetricValue[];
   evidenceRefs: EvidenceRef[];
   status: AnalysisResultSnapshotStatus;

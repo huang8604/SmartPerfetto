@@ -56,7 +56,7 @@ describe('runtimeCommon', () => {
     expect(isFreshRuntimeEntry(undefined, 100, now)).toBe(false);
   });
 
-  it('formats frontend trace datasets once for both runtimes', () => {
+  it('formats explicit request trace datasets once for both runtimes', () => {
     const datasets = decorateTraceContextDatasets([{
       label: 'Frame stats',
       columns: ['name', 'dur_ms'],
@@ -71,7 +71,7 @@ describe('runtimeCommon', () => {
     const markdown = formatTraceContext(datasets, 'en');
     const envelopes = buildTraceContextDataEnvelopes(datasets, 'trace-a');
 
-    expect(markdown).toContain('## Frontend Pre-queried Trace Data');
+    expect(markdown).toContain('## Request-provided Trace Data');
     expect(markdown).toContain('### Frame stats');
     expect(markdown).toContain('evidence_ref_id: `data:frontend_prequery:reference:');
     expect(markdown).toContain('source_tool_call_id: `frontend-prequery:');
@@ -231,6 +231,34 @@ describe('runtimeCommon', () => {
       source: 'opencode',
       description: 'art-2',
     })]);
+  });
+
+  it('keeps a rejected original cause separate from a confirmed replacement cause', () => {
+    const rejected = toProtocolHypothesis({
+      id: 'h1',
+      statement: 'Measure/layout traversal dominates the long frame',
+      status: 'rejected',
+      evidence: 'animation=59.31ms, traversal=1.49ms, layout=0.55ms',
+      formedAt: 10,
+      resolvedAt: 20,
+    }, 'openai');
+    const replacement = toProtocolHypothesis({
+      id: 'h2',
+      statement: 'Animation callback work dominates the long frame',
+      status: 'confirmed',
+      evidence: 'animation=59.31ms',
+      formedAt: 21,
+      resolvedAt: 22,
+    }, 'openai');
+
+    expect(rejected.supportingEvidence).toEqual([]);
+    expect(rejected.contradictingEvidence).toEqual([
+      expect.objectContaining({description: expect.stringContaining('traversal=1.49ms')}),
+    ]);
+    expect(replacement.supportingEvidence).toEqual([
+      expect.objectContaining({description: 'animation=59.31ms'}),
+    ]);
+    expect(replacement.contradictingEvidence).toEqual([]);
   });
 
   it('does not turn formed hypothesis evidence into protocol evidence', () => {

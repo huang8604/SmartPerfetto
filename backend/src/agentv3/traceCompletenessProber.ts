@@ -21,11 +21,100 @@
  */
 
 import type { RenderingArchitectureType } from '../agent/detectors/types';
+import {
+  buildCapabilityManifest,
+  projectCapabilityManifestAttribution,
+} from '../services/capabilityManifest';
+import {
+  resolveCapabilityTraceIdentity,
+  resolveCapabilityTraceProcessorIdentity,
+  sanitizeCapabilityTraceProcessorReportedVersion,
+  type CapabilityTraceIdentityResolution,
+} from '../services/capabilityManifestRuntimeIdentity';
 import type { TraceProcessorService } from '../services/traceProcessorService';
+import {currentRunManifestAttributionSink} from '../services/selfEvolution/runManifestLifecycle';
+import {
+  canonicalContentHash,
+  immutableCanonicalSnapshot,
+} from '../services/selfEvolution/canonicalJson';
+import type {
+  BuildCapabilityManifestInput,
+  CapabilityManifestProbeCacheObservationV1,
+  CapabilityManifestResolutionV1,
+  CapabilityManifestTraceContentIdentityV1,
+  CapabilityManifestTraceProcessorIdentityV1,
+  CapabilityManifestV1,
+} from '../types/capabilityManifest';
+import type {RunManifestAttributionSink} from '../types/selfEvolution';
 import type { CapabilityProbeResult, CapabilityStatus, TraceCompleteness } from './types';
 
 /** Minimum row count below which data is considered "insufficient". */
 const INSUFFICIENT_THRESHOLD = 3;
+const CAPABILITY_METADATA_QUERY_OPTIONS = {
+  priority: 'p1',
+  timeoutMs: 2000,
+  maxRows: 1,
+  maxResponseBytes: 4096,
+  suppressErrorLog: true,
+} as const;
+const TRACE_PROCESSOR_VERSION_SQL = [
+  'SELECT str_value AS reported_version',
+  'FROM metadata',
+  "WHERE name = 'trace_processor_version'",
+  'LIMIT 1',
+].join('\n');
+const TRACE_BOUNDS_SQL = [
+  'SELECT CAST(start_ts AS TEXT) AS start_ns,',
+  '       CAST(end_ts AS TEXT) AS end_ns',
+  'FROM trace_bounds',
+  'LIMIT 1',
+].join('\n');
+const CANONICAL_NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/;
+const SAFE_DETAIL_CODE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+export interface TraceCompletenessManifestDependencies {
+  resolveTraceIdentity?: typeof resolveCapabilityTraceIdentity;
+  resolveTraceProcessorIdentity?: typeof resolveCapabilityTraceProcessorIdentity;
+  buildManifest?: (input: BuildCapabilityManifestInput) => CapabilityManifestV1;
+  projectAttribution?: typeof projectCapabilityManifestAttribution;
+  attributionSink?: RunManifestAttributionSink;
+}
+
+type TimelessCapabilityManifest = Omit<CapabilityManifestV1, 'provenance'> & {
+  provenance: Omit<
+    CapabilityManifestV1['provenance'],
+    'diagnosedAt' | 'generatedAt'
+  >;
+};
+
+type TimelessCapabilityManifestResolution =
+  | {status: 'ready'; manifest: TimelessCapabilityManifest}
+  | Exclude<CapabilityManifestResolutionV1, {status: 'ready'}>;
+
+interface TimelessTraceCompleteness {
+  available: CapabilityProbeResult[];
+  missingConfig: CapabilityProbeResult[];
+  notApplicable: CapabilityProbeResult[];
+  insufficient: CapabilityProbeResult[];
+  capabilityManifestResolution: TimelessCapabilityManifestResolution;
+}
+
+type CapabilityManifestIdentityPreparation =
+  | {
+      status: 'ready';
+      trace: CapabilityManifestTraceContentIdentityV1;
+      traceProcessor: CapabilityManifestTraceProcessorIdentityV1;
+    }
+  | {
+      status: 'unavailable';
+      resolution: Extract<CapabilityManifestResolutionV1, {status: 'unavailable'}>;
+    };
+
+const TRACE_COMPLETENESS_PROBE_CACHE_LIMIT = 32;
+const traceCompletenessProbeCache = new Map<
+  string,
+  Promise<TimelessTraceCompleteness>
+>();
 
 /** Capability definition — maps an analysis domain to its primary detection table. */
 interface CapabilityDef {
@@ -264,6 +353,254 @@ function appendCaptureHint(reason: string, cap: CapabilityDef): string {
   return cap.captureHint ? `${reason}；${cap.captureHint}` : reason;
 }
 
+function hasExactColumns(
+  columns: readonly string[],
+  expected: readonly string[],
+): boolean {
+  return columns.length === expected.length &&
+    columns.every((column, index) => column === expected[index]);
+}
+
+async function probeReportedVersion(
+  tps: TraceProcessorService,
+  traceId: string,
+): Promise<string | undefined> {
+  try {
+    const result = await tps.queryBounded(
+      traceId,
+      TRACE_PROCESSOR_VERSION_SQL,
+      CAPABILITY_METADATA_QUERY_OPTIONS,
+    );
+    if (
+      result.error ||
+      !hasExactColumns(result.columns, ['reported_version']) ||
+      result.rows.length > 1
+    ) {
+      return undefined;
+    }
+    if (result.rows.length === 0) return undefined;
+    const row = result.rows[0];
+    if (!Array.isArray(row) || row.length !== 1) return undefined;
+    return sanitizeCapabilityTraceProcessorReportedVersion(row[0]);
+  } catch {
+    return undefined;
+  }
+}
+
+async function probeClockRange(
+  tps: TraceProcessorService,
+  traceId: string,
+): Promise<{startNs: string; endNs: string} | undefined> {
+  try {
+    const result = await tps.queryBounded(
+      traceId,
+      TRACE_BOUNDS_SQL,
+      CAPABILITY_METADATA_QUERY_OPTIONS,
+    );
+    if (
+      result.error ||
+      !hasExactColumns(result.columns, ['start_ns', 'end_ns']) ||
+      result.rows.length !== 1
+    ) {
+      return undefined;
+    }
+    const row = result.rows[0];
+    if (
+      !Array.isArray(row) ||
+      row.length !== 2 ||
+      typeof row[0] !== 'string' ||
+      typeof row[1] !== 'string' ||
+      !CANONICAL_NON_NEGATIVE_INTEGER.test(row[0]) ||
+      !CANONICAL_NON_NEGATIVE_INTEGER.test(row[1])
+    ) {
+      return undefined;
+    }
+    const [startNs, endNs] = row;
+    if (BigInt(startNs) > BigInt(endNs)) return undefined;
+    return {startNs, endNs};
+  } catch {
+    return undefined;
+  }
+}
+
+function unavailableTraceResolution(
+  resolution: Extract<CapabilityTraceIdentityResolution, {status: 'unavailable'}>,
+): Extract<CapabilityManifestResolutionV1, {status: 'unavailable'}> {
+  const detailCode = typeof resolution.detail === 'string' &&
+    SAFE_DETAIL_CODE.test(resolution.detail)
+    ? resolution.detail
+    : undefined;
+  return {
+    status: 'unavailable',
+    reason: resolution.reason,
+    ...(detailCode === undefined ? {} : {detailCode}),
+  };
+}
+
+async function resolveCapabilityManifestShadow(
+  tps: TraceProcessorService,
+  traceId: string,
+  legacyResult: Omit<TraceCompleteness, 'capabilityManifestResolution'>,
+  dependencies: TraceCompletenessManifestDependencies,
+  identity: CapabilityManifestIdentityPreparation,
+): Promise<TimelessCapabilityManifestResolution> {
+  if (identity.status === 'unavailable') return identity.resolution;
+
+  const [reportedVersion, clockRangeNs] = await Promise.all([
+    probeReportedVersion(tps, traceId),
+    probeClockRange(tps, traceId),
+  ]);
+  const traceProcessor = reportedVersion === undefined
+    ? identity.traceProcessor
+    : {...identity.traceProcessor, reportedVersion};
+  const trace = clockRangeNs === undefined
+    ? identity.trace
+    : {...identity.trace, clockRangeNs};
+  const manifestBuilder = dependencies.buildManifest ?? buildCapabilityManifest;
+
+  try {
+    const manifest = manifestBuilder({
+      definitions: CAPABILITY_REGISTRY.map(capability => ({
+        id: capability.id,
+        displayName: capability.displayName,
+        primaryTable: capability.primaryTable,
+        ...(capability.requiredModules === undefined
+          ? {}
+          : {requiredModules: [...capability.requiredModules]}),
+      })),
+      legacyProbe: legacyResult,
+      traceProcessor,
+      trace,
+      provenance: {traceId},
+      generatedAt: 0,
+    });
+    const {diagnosedAt: _diagnosedAt, generatedAt: _generatedAt, ...provenance} =
+      manifest.provenance;
+    return {
+      status: 'ready',
+      manifest: immutableCanonicalSnapshot({
+        content: manifest.content,
+        provenance,
+        manifestId: manifest.manifestId,
+        contentHash: manifest.contentHash,
+      }),
+    };
+  } catch {
+    return {status: 'failed', reason: 'capability_manifest_build_failed'};
+  }
+}
+
+async function prepareCapabilityManifestIdentity(
+  tps: TraceProcessorService,
+  traceId: string,
+  dependencies: TraceCompletenessManifestDependencies,
+): Promise<CapabilityManifestIdentityPreparation> {
+  const traceResolver = dependencies.resolveTraceIdentity ??
+    resolveCapabilityTraceIdentity;
+  const traceProcessorResolver = dependencies.resolveTraceProcessorIdentity ??
+    resolveCapabilityTraceProcessorIdentity;
+
+  let traceSource: 'local_file' | 'external_rpc' | undefined;
+  try {
+    traceSource = tps.getTraceSourceKind(traceId);
+  } catch {
+    return {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'trace_source_unavailable'},
+    };
+  }
+  if (traceSource === undefined) {
+    return {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'trace_source_unavailable'},
+    };
+  }
+
+  if (traceSource === 'external_rpc') {
+    try {
+      const traceResolution = await traceResolver({
+        source: 'external_rpc',
+        traceSide: 'current',
+      });
+      return {
+        status: 'unavailable',
+        resolution: traceResolution.status === 'unavailable'
+          ? unavailableTraceResolution(traceResolution)
+          : {status: 'unavailable', reason: 'identity_resolution_failed'},
+      };
+    } catch {
+      return {
+        status: 'unavailable',
+        resolution: {status: 'unavailable', reason: 'identity_resolution_failed'},
+      };
+    }
+  }
+
+  let traceFilePath: string | undefined;
+  try {
+    traceFilePath = tps.getTrace(traceId)?.filePath;
+  } catch {
+    return {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'trace_source_unavailable'},
+    };
+  }
+  if (!traceFilePath) {
+    return {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'trace_file_unavailable'},
+    };
+  }
+
+  let traceResolution: CapabilityTraceIdentityResolution;
+  try {
+    traceResolution = await traceResolver({
+      source: 'local_file',
+      filePath: traceFilePath,
+      traceSide: 'current',
+    });
+  } catch {
+    return {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'identity_resolution_failed'},
+    };
+  }
+  if (traceResolution.status === 'unavailable') {
+    return {
+      status: 'unavailable',
+      resolution: unavailableTraceResolution(traceResolution),
+    };
+  }
+
+  let traceProcessor: CapabilityManifestTraceProcessorIdentityV1 = {
+    source: 'unknown',
+    unavailableReason: 'identity_resolution_failed',
+  };
+  try {
+    const input = tps.getRunningCapabilityTraceProcessorInput(traceId);
+    if (input) {
+      try {
+        traceProcessor = await traceProcessorResolver(input);
+      } catch {
+        traceProcessor = {
+          source: 'unknown',
+          unavailableReason: 'identity_resolution_failed',
+        };
+      }
+    }
+  } catch {
+    traceProcessor = {
+      source: 'unknown',
+      unavailableReason: 'identity_resolution_failed',
+    };
+  }
+  return {
+    status: 'ready',
+    trace: traceResolution.identity,
+    traceProcessor,
+  };
+}
+
 /**
  * Probe trace data completeness.
  *
@@ -272,11 +609,13 @@ function appendCaptureHint(reason: string, cap: CapabilityDef): string {
  * @param architectureType Detected architecture (used for not_applicable filtering)
  * @returns TraceCompleteness diagnosis
  */
-export async function probeTraceCompleteness(
+async function probeTimelessTraceCompleteness(
   tps: TraceProcessorService,
   traceId: string,
-  architectureType?: RenderingArchitectureType,
-): Promise<TraceCompleteness> {
+  architectureType: RenderingArchitectureType | undefined,
+  manifestDependencies: TraceCompletenessManifestDependencies,
+  manifestIdentity: CapabilityManifestIdentityPreparation,
+): Promise<TimelessTraceCompleteness> {
   const t0 = Date.now();
 
   await loadProbeModules(tps, traceId);
@@ -413,13 +752,205 @@ export async function probeTraceCompleteness(
     `n/a=${notApplicable.length}, insufficient=${insufficient.length}`,
   );
 
-  return {
+  const legacyResult: Omit<TraceCompleteness, 'capabilityManifestResolution'> = {
     available,
     missingConfig,
     notApplicable,
     insufficient,
-    diagnosedAt: Date.now(),
+    diagnosedAt: 0,
   };
+  let capabilityManifestResolution: TimelessCapabilityManifestResolution;
+  try {
+    capabilityManifestResolution = await resolveCapabilityManifestShadow(
+      tps,
+      traceId,
+      legacyResult,
+      manifestDependencies,
+      manifestIdentity,
+    );
+  } catch {
+    capabilityManifestResolution = {
+      status: 'failed',
+      reason: 'capability_manifest_build_failed',
+    };
+  }
+  return immutableCanonicalSnapshot({
+    available,
+    missingConfig,
+    notApplicable,
+    insufficient,
+    capabilityManifestResolution,
+  });
+}
+
+function hasInjectedManifestDependencies(
+  dependencies: TraceCompletenessManifestDependencies,
+): boolean {
+  return dependencies.resolveTraceIdentity !== undefined ||
+    dependencies.resolveTraceProcessorIdentity !== undefined ||
+    dependencies.buildManifest !== undefined ||
+    dependencies.projectAttribution !== undefined ||
+    dependencies.attributionSink !== undefined;
+}
+
+function productionCacheKeyHash(
+  traceId: string,
+  architectureType: RenderingArchitectureType | undefined,
+  identity: CapabilityManifestIdentityPreparation,
+  dependencies: TraceCompletenessManifestDependencies,
+): string | undefined {
+  if (
+    hasInjectedManifestDependencies(dependencies) ||
+    architectureType === undefined ||
+    identity.status !== 'ready' ||
+    identity.traceProcessor.source === 'unknown'
+  ) {
+    return undefined;
+  }
+  return canonicalContentHash({
+    schemaVersion: 1,
+    traceId,
+    architectureType,
+    traceFingerprintSha256: identity.trace.fingerprintSha256,
+    traceProcessor: identity.traceProcessor,
+  });
+}
+
+function materializeTraceCompleteness(
+  template: TimelessTraceCompleteness,
+): TraceCompleteness {
+  const diagnosedAt = Date.now();
+  const resolution = template.capabilityManifestResolution;
+  const capabilityManifestResolution: CapabilityManifestResolutionV1 =
+    resolution.status !== 'ready'
+      ? resolution
+      : {
+          status: 'ready',
+          manifest: immutableCanonicalSnapshot({
+            ...resolution.manifest,
+            provenance: {
+              ...resolution.manifest.provenance,
+              diagnosedAt,
+              generatedAt: Date.now(),
+            },
+          }),
+        };
+  const cloneResults = (results: readonly CapabilityProbeResult[]) =>
+    results.map(result => ({...result}));
+  return {
+    available: cloneResults(template.available),
+    missingConfig: cloneResults(template.missingConfig),
+    notApplicable: cloneResults(template.notApplicable),
+    insufficient: cloneResults(template.insufficient),
+    diagnosedAt,
+    capabilityManifestResolution,
+  };
+}
+
+function recordCapabilityManifestAttribution(
+  resolution: CapabilityManifestResolutionV1,
+  observation: CapabilityManifestProbeCacheObservationV1,
+  dependencies: TraceCompletenessManifestDependencies,
+): void {
+  let attribution;
+  try {
+    attribution = (dependencies.projectAttribution ??
+      projectCapabilityManifestAttribution)(resolution, observation);
+  } catch {
+    console.warn(
+      '[TraceCompleteness] capability_manifest_attribution_projection_failed',
+    );
+    return;
+  }
+
+  try {
+    const sink = dependencies.attributionSink ??
+      currentRunManifestAttributionSink();
+    sink?.recordCapabilityManifest(attribution);
+  } catch {
+    console.warn('[TraceCompleteness] capability_manifest_attribution_sink_failed');
+  }
+}
+
+export function clearTraceCompletenessProbeCache(): void {
+  traceCompletenessProbeCache.clear();
+}
+
+export async function probeTraceCompleteness(
+  tps: TraceProcessorService,
+  traceId: string,
+  architectureType?: RenderingArchitectureType,
+  manifestDependencies: TraceCompletenessManifestDependencies = {},
+): Promise<TraceCompleteness> {
+  let manifestIdentity: CapabilityManifestIdentityPreparation;
+  try {
+    manifestIdentity = await prepareCapabilityManifestIdentity(
+      tps,
+      traceId,
+      manifestDependencies,
+    );
+  } catch {
+    manifestIdentity = {
+      status: 'unavailable',
+      resolution: {status: 'unavailable', reason: 'identity_resolution_failed'},
+    };
+  }
+
+  const keyHash = productionCacheKeyHash(
+    traceId,
+    architectureType,
+    manifestIdentity,
+    manifestDependencies,
+  );
+  let outcome: CapabilityManifestProbeCacheObservationV1['outcome'];
+  let templatePromise: Promise<TimelessTraceCompleteness>;
+  if (keyHash === undefined) {
+    outcome = 'bypass';
+    templatePromise = probeTimelessTraceCompleteness(
+      tps,
+      traceId,
+      architectureType,
+      manifestDependencies,
+      manifestIdentity,
+    );
+  } else {
+    const cached = traceCompletenessProbeCache.get(keyHash);
+    if (cached) {
+      outcome = 'hit';
+      traceCompletenessProbeCache.delete(keyHash);
+      traceCompletenessProbeCache.set(keyHash, cached);
+      templatePromise = cached;
+    } else {
+      outcome = 'miss';
+      const created = probeTimelessTraceCompleteness(
+        tps,
+        traceId,
+        architectureType,
+        manifestDependencies,
+        manifestIdentity,
+      );
+      traceCompletenessProbeCache.set(keyHash, created);
+      while (traceCompletenessProbeCache.size > TRACE_COMPLETENESS_PROBE_CACHE_LIMIT) {
+        const oldest = traceCompletenessProbeCache.keys().next().value;
+        if (oldest === undefined) break;
+        traceCompletenessProbeCache.delete(oldest);
+      }
+      void created.catch(() => {
+        if (traceCompletenessProbeCache.get(keyHash) === created) {
+          traceCompletenessProbeCache.delete(keyHash);
+        }
+      });
+      templatePromise = created;
+    }
+  }
+
+  const result = materializeTraceCompleteness(await templatePromise);
+  recordCapabilityManifestAttribution(
+    result.capabilityManifestResolution!,
+    {outcome, ...(keyHash === undefined ? {} : {keyHash})},
+    manifestDependencies,
+  );
+  return result;
 }
 
 /** Export the registry for use by comparison mode's capability dictionary. */

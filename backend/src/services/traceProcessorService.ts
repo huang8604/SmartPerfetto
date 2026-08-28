@@ -26,6 +26,7 @@ import {
 } from './traceProcessorCancellation';
 import {currentRunManifestAttributionSink} from './selfEvolution/runManifestLifecycle';
 import {splitSqlStatements} from './sqlStdlibDependencyAnalyzer';
+import type {ResolveCapabilityTraceProcessorIdentityInput} from './capabilityManifestRuntimeIdentity';
 
 export interface TraceInfo {
   id: string;
@@ -55,6 +56,15 @@ export interface QueryResult {
   durationMs: number;
   error?: string;
 }
+
+export type RunningTraceSummaryInput =
+  | {
+      source: 'local_file';
+      tracePath: string;
+      port: number;
+      binarySelection: Extract<ResolveCapabilityTraceProcessorIdentityInput, {source: 'local_binary'}>;
+    }
+  | {source: 'external_rpc'};
 
 export interface TraceProcessor {
   id: string;
@@ -98,6 +108,11 @@ export interface TraceProcessorLeaseRestartPolicy {
   random?: () => number;
 }
 
+export interface TraceProcessorLeaseSnapshot {
+  status: TraceProcessor['status'];
+  port?: number;
+}
+
 const DEFAULT_LEASE_RESTART_BACKOFF_MS = [1000, 5000, 15000];
 const DEFAULT_LEASE_RESTART_JITTER_MS = 250;
 const LEASE_RESTART_CONFLICT_STATES = new Set<TraceProcessorLeaseState>(['draining', 'released', 'failed']);
@@ -116,6 +131,7 @@ function recordRunManifestSqlStatements(sql: string, success: boolean): void {
  */
 export class TraceProcessorService extends EventEmitter {
   private traces: Map<string, TraceInfo> = new Map();
+  private traceSources = new WeakMap<TraceInfo, 'local_file' | 'external_rpc'>();
   private processors: Map<string, TraceProcessor> = new Map();
   private uploads: Map<string, any> = new Map();
   private uploadDir: string;
@@ -139,6 +155,14 @@ export class TraceProcessorService extends EventEmitter {
     if (!fs.existsSync(this.uploadDir)) {
       fs.mkdirSync(this.uploadDir, { recursive: true });
     }
+  }
+
+  private storeTraceInfo(
+    traceInfo: TraceInfo,
+    source: 'local_file' | 'external_rpc',
+  ): void {
+    this.traces.set(traceInfo.id, traceInfo);
+    this.traceSources.set(traceInfo, source);
   }
 
   private processorKeyForLease(
@@ -202,7 +226,7 @@ export class TraceProcessorService extends EventEmitter {
       status: 'uploading',
     };
 
-    this.traces.set(traceId, traceInfo);
+    this.storeTraceInfo(traceInfo, 'local_file');
     this.emit('trace-initialized', traceInfo);
 
     return traceId;
@@ -227,7 +251,7 @@ export class TraceProcessorService extends EventEmitter {
       status: 'uploading',
     };
 
-    this.traces.set(traceId, traceInfo);
+    this.storeTraceInfo(traceInfo, 'local_file');
     this.emit('trace-initialized', traceInfo);
   }
 
@@ -266,7 +290,7 @@ export class TraceProcessorService extends EventEmitter {
       uploadTime: new Date(input.uploadedAt ?? stats.mtime),
       status: 'ready',
     };
-    this.traces.set(input.id, traceInfo);
+    this.storeTraceInfo(traceInfo, 'local_file');
     this.emit('trace-initialized', traceInfo);
     return traceInfo;
   }
@@ -622,6 +646,57 @@ export class TraceProcessorService extends EventEmitter {
     return this.traces.get(traceId);
   }
 
+  public getTraceSourceKind(
+    traceId: string,
+  ): 'local_file' | 'external_rpc' | undefined {
+    const traceInfo = this.traces.get(traceId);
+    return traceInfo ? this.traceSources.get(traceInfo) : undefined;
+  }
+
+  public getRunningCapabilityTraceProcessorInput(
+    traceId: string,
+    options: TraceProcessorServiceQueryOptions = {},
+  ): ResolveCapabilityTraceProcessorIdentityInput | undefined {
+    const leaseContext = this.resolveLeaseQueryContext(traceId, options);
+    const processorKey = this.processorKeyForLease(
+      traceId,
+      leaseContext?.leaseId,
+      leaseContext?.mode,
+    );
+    const processor = this.processors.get(processorKey);
+    if (!processor) return undefined;
+    return processor instanceof WorkingTraceProcessor
+      ? processor.getRuntimeBinarySelection()
+      : {source: 'external_rpc'};
+  }
+
+  public getRunningTraceSummaryInput(
+    traceId: string,
+    options: TraceProcessorServiceQueryOptions = {},
+  ): RunningTraceSummaryInput | undefined {
+    if (this.getTraceSourceKind(traceId) === 'external_rpc') {
+      return {source: 'external_rpc'};
+    }
+    const tracePath = this.getTraceFilePath(traceId);
+    if (!fs.existsSync(tracePath)) return undefined;
+    const leaseContext = this.resolveLeaseQueryContext(traceId, options);
+    const processorKey = this.processorKeyForLease(
+      traceId,
+      leaseContext?.leaseId,
+      leaseContext?.mode,
+    );
+    const processor = this.processors.get(processorKey);
+    if (!(processor instanceof WorkingTraceProcessor) || processor.status !== 'ready') {
+      return undefined;
+    }
+    return {
+      source: 'local_file',
+      tracePath,
+      port: processor.httpPort,
+      binarySelection: processor.getRuntimeBinarySelection(),
+    };
+  }
+
   /**
    * Get the HTTP port of the trace processor for a given trace
    * This port can be used by the frontend to connect via HTTP RPC mode
@@ -685,6 +760,22 @@ export class TraceProcessorService extends EventEmitter {
     };
   }
 
+  public getLeaseProcessorSnapshot(
+    traceId: string,
+    leaseId: string,
+    mode: TraceProcessorLeaseMode | string,
+  ): TraceProcessorLeaseSnapshot | undefined {
+    const processorKey = this.processorKeyForLease(traceId, leaseId, mode);
+    const processor = this.processors.get(processorKey) as WorkingTraceProcessor | undefined;
+    if (!processor) return undefined;
+    return {
+      status: processor.status,
+      ...(Number.isInteger(processor.httpPort) && processor.httpPort > 0
+        ? {port: processor.httpPort}
+        : {}),
+    };
+  }
+
   /**
    * Register an external RPC connection (frontend already connected to trace_processor)
    * This allows AI analysis to work with traces loaded via external HTTP RPC
@@ -706,7 +797,7 @@ export class TraceProcessorService extends EventEmitter {
       status: 'ready', // Assume it's ready since frontend is already connected
     };
 
-    this.traces.set(traceId, traceInfo);
+    this.storeTraceInfo(traceInfo, 'external_rpc');
 
     // Create a proxy processor that uses the existing HTTP RPC connection
     const processor = await TraceProcessorFactory.createFromExternalRpc(traceId, port);
@@ -778,7 +869,7 @@ export class TraceProcessorService extends EventEmitter {
       }
 
       // Register in memory
-      this.traces.set(traceId, traceInfo);
+      this.storeTraceInfo(traceInfo, 'local_file');
 
       // Create processor
       const processor = await this.createProcessor(traceId);
@@ -1060,7 +1151,7 @@ export class TraceProcessorService extends EventEmitter {
       status: 'processing',
     };
 
-    this.traces.set(traceId, traceInfo);
+    this.storeTraceInfo(traceInfo, 'local_file');
     this.emit('trace-initialized', traceInfo);
 
     // Copy file to upload directory

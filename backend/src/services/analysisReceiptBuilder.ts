@@ -6,6 +6,11 @@ import type { AgentRuntimeAnalysisResult, QuickRunReceipt } from '../agent/core/
 import type { ClaimVerificationResult } from '../types/claimVerification';
 import type { ClaimSupportV1, EvidenceSupportLevel } from '../types/evidenceContract';
 import type { IdentityResolutionV1 } from '../types/identityContract';
+import type {CapabilityManifestAttributionV1} from '../types/capabilityManifest';
+import type {AdaptiveRoutingReceiptV1} from '../types/adaptiveRouting';
+import {parseAdaptiveRoutingReceipt} from '../agentRuntime/adaptiveEvidenceRouter';
+import {sanitizeStoredCapabilityManifestAttribution} from './capabilityManifest';
+import {sanitizeStoredTraceSummaryAttribution} from './traceSummaryAttribution';
 import type {
   AnalysisReceipt,
   AnalysisReceiptRuntime,
@@ -31,6 +36,8 @@ export interface AnalysisSessionReceiptSource {
   dataEnvelopes?: DataEnvelope[];
   agentResponses?: Array<{ response?: unknown }>;
   conversationSteps?: unknown[];
+  traceSummary?: import('../types/traceSummaryAttribution').TraceSummaryAttributionV1;
+  adaptiveRouting?: AdaptiveRoutingReceiptV1;
 }
 
 export interface AnalysisReceiptFinalArtifacts {
@@ -60,6 +67,9 @@ export interface BuildAnalysisReceiptInput {
   sceneType?: FinalReportContractCompletenessInput['sceneType'];
   generatedAt?: number;
   cliTurnPath?: string;
+  capabilityManifest?: CapabilityManifestAttributionV1;
+  traceSummary?: import('../types/traceSummaryAttribution').TraceSummaryAttributionV1;
+  adaptiveRouting?: AdaptiveRoutingReceiptV1;
 }
 
 export function buildAnalysisReceipt(input: BuildAnalysisReceiptInput): AnalysisReceiptV2 {
@@ -111,6 +121,15 @@ function buildAnalysisReceiptBody(
   const claimAudit = buildClaimAudit(claimSupport, claimVerificationResult);
   const requestedMode = input.requestedMode ?? session.analysisMode ?? quickRun?.requestedMode ?? 'auto';
   const resolvedMode = input.resolvedMode ?? quickRun?.resolvedMode ?? 'full';
+  const capabilityManifest = sanitizeStoredCapabilityManifestAttribution(
+    input.capabilityManifest,
+  );
+  const traceSummary = sanitizeStoredTraceSummaryAttribution(
+    input.traceSummary ?? session.traceSummary,
+  );
+  const adaptiveRouting = input.adaptiveRouting
+    ?? session.adaptiveRouting
+    ?? quickRun?.adaptiveRouting;
 
   return {
     runId: input.runId || result.sessionId || session.sessionId,
@@ -118,9 +137,14 @@ function buildAnalysisReceiptBody(
     traceId: session.traceId,
     mode: requestedMode,
     resolvedMode,
+    ...(adaptiveRouting
+      ? {adaptiveRouting: parseAdaptiveRoutingReceipt(adaptiveRouting)}
+      : {}),
     ...(input.runtime ? { runtime: input.runtime } : {}),
     providerId: input.providerId !== undefined ? input.providerId : session.providerId ?? null,
     generatedAt: input.generatedAt ?? finalArtifacts.generatedAt ?? Date.now(),
+    ...(capabilityManifest ? {capabilityManifest} : {}),
+    ...(traceSummary ? {traceSummary} : {}),
     traceEvidence: {
       sqlCount: countSqlEvidence(dataEnvelopes),
       skillCount: countSkillEvidence(dataEnvelopes),

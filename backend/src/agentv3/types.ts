@@ -8,6 +8,7 @@ import type { DetectedFocusApp } from './focusAppDetector';
 import type { SceneType } from './sceneClassifier';
 import type { OutputLanguage } from './outputLanguage';
 import type { CodeAwareMode } from '../services/codebase/codeAwareFeature';
+import type {CapabilityManifestResolutionV1} from '../types/capabilityManifest';
 
 // =============================================================================
 // Query Complexity Classification
@@ -220,6 +221,8 @@ export interface TraceCompleteness {
   insufficient: CapabilityProbeResult[];
   /** Timestamp of diagnosis */
   diagnosedAt: number;
+  /** Probe-time shadow snapshot; current prompt/chat consumers intentionally ignore it. */
+  capabilityManifestResolution?: CapabilityManifestResolutionV1;
 }
 
 // =============================================================================
@@ -247,26 +250,16 @@ export interface TrackEventSelectionContext {
   eventId: number;
   ts: number;
   dur?: number;
-  // Pre-queried metadata from frontend (avoids first SQL turn)
-  name?: string;
-  threadName?: string;
-  processName?: string;
-  depth?: number;
-  childCount?: number;
 }
 
 /** Discriminated union: either an area or a single-slice selection from Perfetto UI. */
 export type SelectionContext = AreaSelectionContext | TrackEventSelectionContext;
 
-/** Human-readable metadata for a track in an area selection. */
+/** Stable Perfetto track identity supplied by the UI. */
 export interface SelectionTrackInfo {
   uri: string;
   utid?: number;
   upid?: number;
-  threadName?: string;
-  processName?: string;
-  tid?: number;
-  pid?: number;
   cpu?: number;
   kind?: string;
 }
@@ -414,7 +407,7 @@ export function phaseMatchesCall(phase: PlanPhase, record: ToolCallRecord): bool
   if (record.success === false) return false;
   const shortTool = shortToolName(record.toolName);
   if (!isEvidenceCapableToolName(shortTool)) return false;
-  const expectedToolSet = new Set(phase.expectedTools.map(shortToolName));
+  const expectedToolSet = new Set((phase.expectedTools ?? []).map(shortToolName));
   const structuredCallsForTool = (phase.expectedCalls ?? [])
     .filter(call => shortToolName(call.tool) === shortTool);
   if (structuredCallsForTool.length > 0) {
@@ -437,7 +430,7 @@ export function expectedToolNames(phase: PlanPhase): string[] {
   const structured = (phase.expectedCalls ?? [])
     .map(formatExpectedCall);
   const structuredTools = new Set((phase.expectedCalls ?? []).map(c => shortToolName(c.tool)));
-  const generic = phase.expectedTools
+  const generic = (phase.expectedTools ?? [])
     .map(shortToolName)
     .filter(tool => !structuredTools.has(tool));
   return [...structured, ...generic];
@@ -600,15 +593,15 @@ export type HypothesisStatus = 'formed' | 'confirmed' | 'rejected';
 
 /** A structured hypothesis formed during analysis that must be resolved before concluding. */
 export interface Hypothesis {
-  id: string;
-  /** The hypothesis statement (e.g., "RenderThread blocked by Binder causing jank") */
-  statement: string;
+  readonly id: string;
+  /** Immutable claim whose original causal meaning is resolved by status. */
+  readonly statement: string;
   status: HypothesisStatus;
   /** What observation or data prompted this hypothesis */
   basis?: string;
   /** Evidence for confirmation/rejection */
   evidence?: string;
-  formedAt: number;
+  readonly formedAt: number;
   resolvedAt?: number;
 }
 

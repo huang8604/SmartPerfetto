@@ -7,6 +7,11 @@ import type {
   Hypothesis,
   StreamingUpdate,
 } from '../../agent';
+import type {OutputLanguage} from '../../agentv3/outputLanguage';
+import {
+  completeFinalResultComparisonIdentity,
+  type FinalResultComparisonIdentity,
+} from '../../services/finalResultQualityGate';
 
 type SessionStatus = 'pending' | 'running' | 'awaiting_user' | 'completed' | 'failed' | 'cancelled' | 'quota_exceeded';
 
@@ -36,6 +41,8 @@ export interface FinalizeAgentDrivenSessionDeps<TSession extends FinalizeSession
   applyFinalResultQualityGate(input: {
     result: AgentRuntimeAnalysisResult;
     query: string;
+    sceneType?: string;
+    comparisonIdentity?: FinalResultComparisonIdentity;
   }): { code: string; message: string } | null | undefined;
   isRunCurrent(session: TSession, runId?: string): boolean;
   broadcast(sessionId: string, update: StreamingUpdate, runId?: string): void;
@@ -45,6 +52,20 @@ export interface FinalizeAgentDrivenSessionDeps<TSession extends FinalizeSession
   terminalRunStatusForResult(result: AgentRuntimeAnalysisResult): string;
   markSessionRunStatus(session: TSession, status: string, error?: string, runId?: string): void;
   persistAgentTurn(input: {
+    session: any;
+    sessionId: string;
+    traceId: string;
+    query: string;
+    result: {
+      conclusion: string;
+      totalDurationMs: number;
+      partial?: boolean;
+      terminationMessage?: string;
+    };
+    logger: TSession['logger'];
+    logComponent: string;
+  }): void;
+  refreshPersistedAgentSnapshot(input: {
     session: any;
     sessionId: string;
     traceId: string;
@@ -73,12 +94,24 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
   sessionId: string;
   query: string;
   traceId: string;
+  sceneType?: string;
   session: TSession;
   result: AgentRuntimeAnalysisResult;
   runId?: string;
   logComponent: string;
+  outputLanguage?: OutputLanguage;
+  comparisonIdentity?: FinalResultComparisonIdentity;
 }, deps: FinalizeAgentDrivenSessionDeps<TSession>): void {
-  const { sessionId, query, traceId, session, result, runId } = input;
+  const {
+    sessionId,
+    query,
+    traceId,
+    sceneType,
+    session,
+    result,
+    runId,
+    comparisonIdentity,
+  } = input;
   const { logger } = session;
   const completedRunId = getCompletedResultRunId(session, runId);
   if (!deps.isRunCurrent(session, runId)) {
@@ -89,6 +122,11 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     return;
   }
 
+  result.conclusion = completeFinalResultComparisonIdentity({
+    conclusion: result.conclusion,
+    identity: comparisonIdentity,
+    outputLanguage: input.outputLanguage ?? 'zh-CN',
+  });
   session.result = result;
   if (completedRunId) {
     delete session.completedAnalysisFinalArtifactsByRunId?.[completedRunId];
@@ -98,7 +136,12 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
   delete session.completedAnalysisSseEvents;
   delete session.completedAnalysisSseEventsQualityGateVersion;
 
-  const finalQualityIssue = deps.applyFinalResultQualityGate({ result, query });
+  const finalQualityIssue = deps.applyFinalResultQualityGate({
+    result,
+    query,
+    sceneType: sceneType ?? result.conclusionContract?.metadata?.sceneId,
+    ...(comparisonIdentity ? {comparisonIdentity} : {}),
+  });
   if (finalQualityIssue) {
     const update: StreamingUpdate = {
       type: 'degraded',
@@ -163,7 +206,7 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     runSequence: session.activeRun?.sequence || session.lastRun?.sequence,
   });
 
-  deps.persistAgentTurn({
+  const persistenceInput = {
     session,
     sessionId,
     traceId,
@@ -176,9 +219,11 @@ export function finalizeAgentDrivenSession<TSession extends FinalizeSessionLike>
     },
     logger,
     logComponent: input.logComponent,
-  });
+  };
+  deps.persistAgentTurn(persistenceInput);
 
   deps.ensureCompletedAnalysisSseEvents(session, completedRunId);
+  deps.refreshPersistedAgentSnapshot(persistenceInput);
   const clientCount = session.sseClients.length;
   session.sseClients.forEach((client, index) => {
     try {

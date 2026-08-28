@@ -10,12 +10,18 @@ excluded_runtime_paths:
 fixture_manifest_source: backend/skills/public-fixtures.yaml
 official_perfetto:
   repository: https://github.com/google/perfetto
-  tag: v57.2
-  commit: da1d152cff27890903d158fe96751de3aab883cc
+  tag: v58.2
+  commit: add693d8b338ba9599dbcbc3e300b1ab8c000897
   rpc_api_version: 14
-  stdlib_tree: 7f0459ca3eed8372a8762ae052ed7fdb48eb3d88
+  stdlib_tree: 54fc9f0b5c8dedb8772283b6786753fbb918da0d
   official_skill_reference: ai/skills/perfetto/SKILL-template.md
   official_skill_role: gap_check_only
+runtime_perfetto:
+  repository: https://github.com/google/perfetto
+  reported_version: v58.2
+  revision: add693d8b338ba9599dbcbc3e300b1ab8c000897
+  rpc_api_version: 14
+  stdlib_tree: 54fc9f0b5c8dedb8772283b6786753fbb918da0d
 sql_fragments:
   backend/skills/fragments/target_threads.sql:
     disposition: exported
@@ -1416,6 +1422,9 @@ strategies:
   backend/strategies/prompt-complexity-classifier.template.md:
     disposition: product-only
     reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-conversation.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime session and conversation orchestration
   backend/strategies/prompt-code-reference-contract-en.template.md:
     disposition: product-only
     reason: SmartPerfetto source lookup tools and codebase-aware report orchestration
@@ -1450,10 +1459,22 @@ strategies:
   backend/strategies/prompt-openai-final-report-continuation-zh.template.md:
     disposition: product-only
     reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
+  backend/strategies/prompt-final-report-quality-issue-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto final-report runtime orchestration
+  backend/strategies/prompt-final-report-quality-issue-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto final-report runtime orchestration
   backend/strategies/prompt-output-format.template.md:
     workflow: trace-overview
     disposition: exported
     destination: references/generated/strategies/prompt-output-format.template.md
+  backend/strategies/prompt-plan-completion-continuation-en.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime plan-completion orchestration
+  backend/strategies/prompt-plan-completion-continuation-zh.template.md:
+    disposition: product-only
+    reason: SmartPerfetto runtime plan-completion orchestration
   backend/strategies/prompt-quick.template.md:
     disposition: product-only
     reason: SmartPerfetto runtime, session, case, language, or codebase orchestration
@@ -1578,9 +1599,9 @@ strategies:
   backend/strategies/selfevolve-proposal.template.md:
     disposition: product-only
     reason: SmartPerfetto self-evolution proposal generation, persistence, and gated overlay lifecycle
-  backend/strategies/selfevolve-synthetic-eval-seeds.registry.yaml:
+  backend/strategies/golden-trace-eval.registry.json:
     disposition: product-only
-    reason: SmartPerfetto self-evolution evaluation corpus and gated overlay lifecycle
+    reason: SmartPerfetto golden trace evaluation corpus and gated overlay lifecycle
   backend/strategies/selection-area.template.md:
     workflow: trace-overview
     disposition: exported

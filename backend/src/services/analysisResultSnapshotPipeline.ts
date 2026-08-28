@@ -4,7 +4,7 @@
 
 import crypto from 'crypto';
 import type Database from 'better-sqlite3';
-import type { DataEnvelope } from '../types/dataContract';
+import type {AnalysisReceipt, DataEnvelope} from '../types/dataContract';
 import {
   ANALYSIS_RESULT_SNAPSHOT_SCHEMA_VERSION,
   STANDARD_COMPARISON_METRICS,
@@ -17,6 +17,8 @@ import {
 } from '../types/multiTraceComparison';
 import { openEnterpriseDb } from './enterpriseDb';
 import { createAnalysisResultSnapshotRepository } from './analysisResultSnapshotStore';
+import {sanitizeStoredCapabilityManifestAttribution} from './capabilityManifest';
+import {sanitizeStoredTraceSummaryAttribution} from './traceSummaryAttribution';
 import {parseOutputLanguage} from '../agentv3/outputLanguage';
 import type {OutputLanguage} from '../agentv3/outputLanguage';
 import {
@@ -54,6 +56,8 @@ export interface CompletedAnalysisSnapshotInput {
   terminationMessage?: string;
   dataEnvelopes?: DataEnvelope[];
   analysisReceipt?: import('../types/dataContract').AnalysisReceipt;
+  capabilityManifest?: import('../types/capabilityManifest').CapabilityManifestAttributionV1;
+  traceSummary?: import('../types/traceSummaryAttribution').TraceSummaryAttributionV1;
   uiActionProposals?: import('../types/dataContract').UiActionProposalV1[];
   createdAt?: number;
   /** Apply the non-resumable private-source persistence projection. */
@@ -448,6 +452,39 @@ export function buildCompletedAnalysisResultSnapshot(
   if (metrics.length === 0) {
     partialReasons.push('No normalized comparison metrics extracted yet');
   }
+  const storedAnalysisReceipt = input.analysisReceipt;
+  const storedReceiptCapabilityManifest =
+    sanitizeStoredCapabilityManifestAttribution(
+      storedAnalysisReceipt?.capabilityManifest,
+    );
+  let analysisReceipt: AnalysisReceipt | undefined;
+  if (storedAnalysisReceipt) {
+    const {
+      capabilityManifest: _storedCapabilityManifest,
+      traceSummary: _storedTraceSummary,
+      ...receiptWithoutAttribution
+    } = storedAnalysisReceipt;
+    const receiptTraceSummary = sanitizeStoredTraceSummaryAttribution(
+      storedAnalysisReceipt.traceSummary,
+    );
+    analysisReceipt = {
+      ...receiptWithoutAttribution,
+      ...(storedReceiptCapabilityManifest
+        ? {capabilityManifest: storedReceiptCapabilityManifest}
+        : {}),
+      ...(receiptTraceSummary ? {traceSummary: receiptTraceSummary} : {}),
+    } as AnalysisReceipt;
+  }
+  const capabilityManifest = sanitizeStoredCapabilityManifestAttribution(
+    input.capabilityManifest !== undefined
+      ? input.capabilityManifest
+      : storedAnalysisReceipt?.capabilityManifest,
+  );
+  const traceSummary = sanitizeStoredTraceSummaryAttribution(
+    input.traceSummary !== undefined
+      ? input.traceSummary
+      : storedAnalysisReceipt?.traceSummary,
+  );
 
   return {
     id: `analysis-result-${crypto.randomUUID()}`,
@@ -468,13 +505,15 @@ export function buildCompletedAnalysisResultSnapshot(
       headline,
       ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
       ...(partialReasons.length > 0 ? { partialReasons } : {}),
-      ...(input.analysisReceipt ? { analysisReceipt: input.analysisReceipt } : {}),
+      ...(analysisReceipt ? { analysisReceipt } : {}),
+      ...(traceSummary ? {traceSummary} : {}),
       ...(input.uiActionProposals && input.uiActionProposals.length > 0 ? { uiActionProposals: input.uiActionProposals } : {}),
     },
     ...(input.conclusionContract ? { conclusionContract: input.conclusionContract } : {}),
     ...(input.claimSupport ? { claimSupport: input.claimSupport } : {}),
     ...(input.claimVerificationResult ? { claimVerificationResult: input.claimVerificationResult } : {}),
     ...(input.identityResolutions ? { identityResolutions: input.identityResolutions } : {}),
+    ...(capabilityManifest ? {capabilityManifest} : {}),
     metrics,
     evidenceRefs: evidenceRefsFromInput(input),
     status: input.partial || metrics.length === 0 ? 'partial' : 'ready',

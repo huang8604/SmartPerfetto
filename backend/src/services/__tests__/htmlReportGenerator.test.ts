@@ -5,6 +5,7 @@
 import { HTMLReportGenerator } from '../htmlReportGenerator';
 import {createDataEnvelope, type DataEnvelope} from '../../types/dataContract';
 import {QUERY_REVIEW_SCHEMA_VERSION, type QueryReviewV1} from '../../types/queryReviewContract';
+import {routeAdaptiveEvidencePreflight} from '../../agentRuntime/adaptiveEvidenceRouter';
 
 const originalOutputLanguage = process.env.SMARTPERFETTO_OUTPUT_LANGUAGE;
 
@@ -204,6 +205,14 @@ describe('HTMLReportGenerator', () => {
           traceId: 'trace-receipt',
           mode: 'fast',
           resolvedMode: 'quick',
+          adaptiveRouting: routeAdaptiveEvidencePreflight({
+            requestedMode: 'fast',
+            resolvedMode: 'quick',
+            classifierIntent: 'deterministic_direct_evidence',
+            classifierSource: 'hard_rule',
+            hardObligations: [],
+            outputCap: 2_048,
+          }),
           providerId: null,
           generatedAt: 1,
           traceEvidence: {
@@ -234,24 +243,62 @@ describe('HTMLReportGenerator', () => {
             reportId: 'report-receipt',
             resultSnapshotId: 'snapshot-receipt',
           },
+          capabilityManifest: {
+            schemaVersion: 'capability_manifest_attribution@1',
+            resolution: {
+              status: 'ready',
+              manifestId: 'manifest&lt;unsafe',
+              contentHash: 'hash\"unsafe',
+              manifestSchemaVersion: 'capability_manifest@1',
+              traceFingerprintSha256: 'trace>unsafe',
+              traceProcessor: {
+                source: 'custom',
+                binarySha256: 'processor<script>alert(1)</script>',
+              },
+            },
+            probeCache: {hits: 3, misses: 1, bypasses: 2, keyHash: 'must-not-render'},
+          },
+          traceSummary: {
+            schemaVersion: 'trace_summary_attribution@1',
+            status: 'ready',
+            specId: 'smartperfetto.core.v1<script>alert(2)</script>',
+            specDigestSha256: '1'.repeat(64),
+            traceFingerprintSha256: '2'.repeat(64),
+            traceProcessor: {source: 'custom', binarySha256: '3'.repeat(64)},
+            resultDigestSha256: '4'.repeat(64),
+            availableMetricIds: ['metric_a'],
+            missingMetricIds: ['metric_b'],
+          },
         },
-        uiActionProposals: [{
-          schemaVersion: 1,
-          id: 'ui-open_evidence_table-1',
-          kind: 'open_evidence_table',
-          title: '打开启动证据表',
-          reason: '查看支撑结论的原始证据行',
-          source: {
-            evidenceRefId: 'data:startup:summary:123',
-            artifactId: 'artifact-startup',
-            skillId: 'startup_analysis',
+        uiActionProposals: [
+          {
+            schemaVersion: 1,
+            id: 'ui-open_evidence_table-1',
+            kind: 'open_evidence_table',
+            title: '打开启动证据表',
+            reason: '查看支撑结论的原始证据行',
+            source: {
+              evidenceRefId: 'data:startup:summary:123',
+              artifactId: 'artifact-startup',
+              skillId: 'startup_analysis',
+            },
+            payload: {
+              artifactId: 'artifact-startup',
+              evidenceRefId: 'data:startup:summary:123',
+            },
+            requiresConfirmation: true,
           },
-          payload: {
-            artifactId: 'artifact-startup',
-            evidenceRefId: 'data:startup:summary:123',
+          {
+            schemaVersion: 1,
+            id: 'ui-pin_evidence-1',
+            kind: 'pin_evidence',
+            title: '保存启动证据快照',
+            reason: '保存到当前会话',
+            source: {evidenceRefId: 'data:startup:summary:123'},
+            payload: {evidenceRefId: 'data:startup:summary:123'},
+            requiresConfirmation: true,
           },
-          requiresConfirmation: true,
-        }],
+        ],
       },
     });
 
@@ -260,10 +307,79 @@ describe('HTMLReportGenerator', () => {
     expect(html).toContain('Evidence refs');
     expect(html).toContain('report-receipt');
     expect(html).toContain('snapshot-receipt');
+    expect(html).toContain('Capability Manifest');
+    expect(html).toContain('manifest&amp;lt;unsafe');
+    expect(html).toContain('hash&quot;unsafe');
+    expect(html).toContain('trace&gt;unsafe');
+    expect(html).toContain('processor&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('Hits');
+    expect(html).not.toContain('must-not-render');
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('Trace Summary');
+    expect(html).toContain('自适应路由');
+    expect(html).toContain('L0 → L0');
+    expect(html).toContain('deterministic_direct_evidence');
+    expect(html).toContain('2048');
+    expect(html).toContain('smartperfetto.core.v1&lt;script&gt;alert(2)&lt;/script&gt;');
+    expect(html).toContain('metric_a');
+    expect(html).toContain('metric_b');
+    expect(html).not.toContain('<script>alert(2)</script>');
     expect(html).toContain('UI 动作提案');
+    expect(html).toContain('收藏证据');
     expect(html).toContain('打开启动证据表');
     expect(html).toContain('artifact-startup');
     expect(html).not.toContain('SELECT ');
+  });
+
+  test.each([
+    ['Unavailable', 'unavailable', 'identity_resolution_failed'],
+    ['Failed', 'failed', 'capability_manifest_build_failed'],
+  ] as const)('renders fixed capability %s reason without detail codes', (_label, status, reason) => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-capability-status',
+      query: 'analyze',
+      timestamp: 1,
+      hypotheses: [],
+      dialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [],
+      result: {
+        sessionId: 'session-capability-status',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'ok',
+        confidence: 1,
+        rounds: 1,
+        totalDurationMs: 1,
+        analysisReceipt: {
+          schemaVersion: 1,
+          runId: 'run-capability-status',
+          sessionId: 'session-capability-status',
+          traceId: 'trace-capability-status',
+          mode: 'full',
+          resolvedMode: 'full',
+          providerId: null,
+          generatedAt: 1,
+          traceEvidence: {sqlCount: 0, skillCount: 0, dataEnvelopeCount: 0, artifactCount: 0, evidenceRefCount: 0},
+          nonEvidenceContext: {frontendPrequeryCount: 0, memoryHintCount: 0, conversationContextCount: 0, strategyHintCount: 0},
+          claimAudit: {totalClaims: 0, verifiedClaims: 0, unsupportedClaims: 0, uncertainClaims: 0},
+          qualityGates: {finalReportContract: 'not_applicable', claimVerification: 'not_applicable', identityResolution: 'not_applicable'},
+          outputs: {},
+          capabilityManifest: {
+            schemaVersion: 'capability_manifest_attribution@1',
+            resolution: status === 'unavailable'
+              ? {status, reason, detailCode: 'must_not_render'}
+              : {status, reason},
+            probeCache: {hits: 0, misses: 0, bypasses: 1},
+          },
+        },
+      },
+    });
+
+    expect(html).toContain(reason);
+    expect(html).not.toContain('must_not_render');
   });
 
   test('formats layered duration-like keys in ms only', () => {
@@ -400,8 +516,17 @@ describe('HTMLReportGenerator', () => {
     expect(html).toContain('execute_sql_on:1:params_hash:reference');
     expect(html).toContain('total_rows');
     expect(html).toContain('10');
-    expect(html).toContain('smartperfetto-report-layout-fix-v1');
+    expect(html).toContain('smartperfetto-report-layout-fix-v2');
     expect(html).toContain('grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))');
+    expect(html).toContain('.header .meta .badge');
+    expect(html).toContain('.summary-box .metric-card .metric-label');
+    expect(html).toContain('.summary-box .metric-card .metric-value');
+    expect(html).toMatch(
+      /\.summary-box \.metric-card \.metric-value \{[\s\S]*?font-size: 14px;/,
+    );
+    expect(html).toMatch(
+      /\.metric-card \.value,[\s\S]*?font-size: 28px;/,
+    );
     expect(html).toContain('class="metric-label label"');
     expect(html).toContain('class="metric-value value"');
     expect(html).not.toContain('无汇总数据');

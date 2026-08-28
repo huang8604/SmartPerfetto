@@ -39,6 +39,7 @@ A[foo] --> B[bar]</pre>
       <html>
       <head>
         <style>
+          /* smartperfetto-report-layout-fix-v1 */
           .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
           .metric-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
         </style>
@@ -56,8 +57,48 @@ A[foo] --> B[bar]</pre>
 
     const upgraded = upgradeLegacyReportHtml(legacy);
     expect(upgraded).toContain('smartperfetto-report-layout-fix-v1');
+    expect(upgraded).toContain('smartperfetto-report-layout-fix-v2');
+    expect(upgraded.match(/smartperfetto-report-layout-fix-v2/g)).toHaveLength(1);
     expect(upgraded).toContain('.metrics-grid');
     expect(upgraded).toContain('grid-template-columns: repeat(auto-fit, minmax(180px, 1fr))');
+    const upgradedAgain = upgradeLegacyReportHtml(upgraded);
+    expect(upgradedAgain).toBe(upgraded);
+    expect(upgradedAgain.match(/smartperfetto-report-layout-fix-v2/g)).toHaveLength(1);
+  });
+
+  test('removes the Mermaid library gate from persisted causal-map reports', () => {
+    const previouslyGatedScript = `
+if (typeof mermaid !== 'undefined') {
+  function decodeMermaidSource(text) {
+    return String(text || '');
+  }
+
+  function parseMermaidFlowSource(source) {
+    return source;
+  }
+
+  const mermaidTargets = Array.from(document.querySelectorAll('pre.mermaid'));
+  if (mermaidTargets.length > 0) {
+    mermaid.initialize({
+      startOnLoad: false,
+    });
+  }
+}
+`.trim();
+    const persisted = `
+      <html>
+      <body>
+        <div class="mermaid-wrapper"><pre class="mermaid">graph TB
+A[foo] --> B[bar]</pre></div>
+        <script>${previouslyGatedScript}</script>
+      </body>
+      </html>
+    `;
+
+    const upgraded = upgradeLegacyReportHtml(persisted);
+    expect(upgraded).toContain('(function() {\n  function decodeMermaidSource');
+    expect(upgraded).toContain('if (typeof mermaid === \'undefined\')');
+    expect(upgraded).not.toContain("if (typeof mermaid !== 'undefined') {\n  function decodeMermaidSource");
     expect(upgradeLegacyReportHtml(upgraded)).toBe(upgraded);
   });
 

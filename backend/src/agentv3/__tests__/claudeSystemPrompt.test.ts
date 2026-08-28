@@ -65,7 +65,7 @@ jest.mock('../strategyLoader', () => ({
   }),
   loadSelectionTemplate: jest.fn((kind: string) => {
     if (kind === 'area') return '## 用户选区\n\n时间范围: {{startNs}} - {{endNs}} ({{durationMs}}ms)\nTrack 数: {{trackCount}}{{trackSummary}}';
-    if (kind === 'slice') return '## 用户选区\n\n选中 Slice: eventId={{eventId}}, ts={{ts}}, dur={{durationStr}}';
+    if (kind === 'slice') return '## 用户选区\n\n选中 Slice 身份: trackUri={{trackUri}}, eventId={{eventId}}, ts={{ts}}, dur={{durationStr}}';
     return null;
   }),
   renderTemplate: jest.fn((template: string, vars: Record<string, any>) => {
@@ -158,8 +158,8 @@ describe('buildSystemPrompt', () => {
       expect(parts.fullPrompt).toContain('TEMPLATE 对比模式');
       expect(parts.fullPrompt).toContain('### 窗口映射');
       expect(parts.fullPrompt).toContain('- 布局: 上下');
-      expect(parts.fullPrompt).toContain('- 上方: 当前 Trace (before.trace)，当前焦点，可视窗口');
-      expect(parts.fullPrompt).toContain('- 下方: 参考 Trace (after.trace)，可视窗口');
+      expect(parts.fullPrompt).toContain('- 上方: 基线 Trace (before.trace)，当前焦点，可视窗口');
+      expect(parts.fullPrompt).toContain('- 下方: 对比 Trace (after.trace)，可视窗口');
       expect(parts.fullPrompt).toContain('共有表/视图');
       expect(parts.fullPrompt).toContain('TEMPLATE 对比分析方法论');
       expect(parts.fullPrompt).toContain('compare_skill');
@@ -402,6 +402,32 @@ describe('buildSystemPrompt', () => {
       expect(prompt).toContain('1000.00'); // durationMs
     });
 
+    it('formats bounded area track identities without trusting client names', () => {
+      const prompt = buildSystemPrompt(makeContext({
+        selectionContext: {
+          kind: 'area',
+          startNs: 100,
+          endNs: 200,
+          tracks: [{
+            uri: '/process_1/thread_2',
+            utid: 2,
+            upid: 1,
+            cpu: 6,
+            kind: 'thread_slice',
+            threadName: 'untrusted-main',
+            processName: 'untrusted-app',
+          } as any, {uri: '/custom_track'}],
+        },
+      }));
+
+      expect(prompt).toContain('uri=/custom_track');
+      expect(prompt).toContain('utid=2');
+      expect(prompt).toContain('upid=1');
+      expect(prompt).toContain('cpu=6');
+      expect(prompt).not.toContain('untrusted-main');
+      expect(prompt).not.toContain('untrusted-app');
+    });
+
     it('should format track_event selection', () => {
       const prompt = buildSystemPrompt(makeContext({
         selectionContext: {
@@ -413,6 +439,26 @@ describe('buildSystemPrompt', () => {
       }));
       expect(prompt).toContain('Slice');
       expect(prompt).toContain('42');
+    });
+
+    it('formats a selected event from identity without frontend-resolved facts', () => {
+      const prompt = buildSystemPrompt(makeContext({
+        selectionContext: {
+          kind: 'track_event',
+          trackUri: '/process_1/actual_frames',
+          eventId: 42,
+          ts: 1500000000,
+          dur: 16000000,
+          name: 'untrusted-name',
+          threadName: 'untrusted-main',
+          processName: 'untrusted-app',
+        } as any,
+      }));
+
+      expect(prompt).toContain('trackUri=/process_1/actual_frames');
+      expect(prompt).not.toContain('untrusted-name');
+      expect(prompt).not.toContain('untrusted-main');
+      expect(prompt).not.toContain('untrusted-app');
     });
   });
 
@@ -666,6 +712,68 @@ describe('buildSystemPrompt', () => {
    * (when SDK adds support) can route through it.
    */
   describe('buildSystemPromptParts (Phase 1.2 structured API)', () => {
+    it('ignores shadow capability manifest resolution in prompt parts and text', () => {
+      const legacyTraceCompleteness = {
+        available: [],
+        missingConfig: [{
+          id: 'startup',
+          displayName: '启动性能分析',
+          status: 'missing_config_suspected' as const,
+          primaryTable: 'android_startups',
+          reason: '表不存在',
+        }],
+        notApplicable: [],
+        insufficient: [],
+        diagnosedAt: 1_000,
+      };
+      const readyContext = makeContext({
+        sceneType: 'startup',
+        traceCompleteness: {
+          ...legacyTraceCompleteness,
+          capabilityManifestResolution: {
+            status: 'ready',
+            manifest: {
+              content: {
+                schemaVersion: 'capability_manifest@1',
+                traceProcessor: {source: 'bundled', gitRevision: 'b'.repeat(40)},
+                trace: {
+                  fingerprintSha256: 'a'.repeat(64),
+                  fingerprintKind: 'trace_bytes_sha256',
+                  traceSide: 'current',
+                },
+                capabilities: [],
+              },
+              provenance: {traceId: 'trace-1', diagnosedAt: 1_000, generatedAt: 2_000},
+              manifestId: `capability_manifest:${'c'.repeat(64)}`,
+              contentHash: 'c'.repeat(64),
+            },
+          },
+        } as any,
+      });
+      const unavailableContext = makeContext({
+        sceneType: 'startup',
+        traceCompleteness: {
+          ...legacyTraceCompleteness,
+          capabilityManifestResolution: {
+            status: 'unavailable',
+            reason: 'identity_resolution_failed',
+          },
+        } as any,
+      });
+
+      const readyParts = buildSystemPromptParts(readyContext);
+      const unavailableParts = buildSystemPromptParts(unavailableContext);
+      const readyPrompt = buildSystemPrompt(readyContext);
+      const unavailablePrompt = buildSystemPrompt(unavailableContext);
+
+      expect(readyParts).toEqual(unavailableParts);
+      expect(readyPrompt).toBe(unavailablePrompt);
+      expect(readyPrompt).not.toContain('capability_manifest:');
+      expect(readyPrompt).not.toContain('a'.repeat(64));
+      expect(readyPrompt).not.toContain('c'.repeat(64));
+      expect(readyPrompt).not.toContain('identity_resolution_failed');
+    });
+
     it('full output is byte-equal to buildSystemPrompt', () => {
       const ctx = makeContext({
         sceneType: 'scrolling',

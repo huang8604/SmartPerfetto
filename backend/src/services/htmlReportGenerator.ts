@@ -43,6 +43,17 @@ interface ClaimSourceLookupEntry {
   count: number;
 }
 
+export interface AgentReportSourceDescriptor {
+  codebaseId: string;
+  displayName?: string;
+  kind?: string;
+}
+
+export interface AgentReportSourceContext {
+  selected: AgentReportSourceDescriptor[];
+  usedCodebaseIds?: string[];
+}
+
 type ReportTraceSide = 'current' | 'reference';
 type ReportPaneSide = NonNullable<DataEnvelope['meta']['paneSide']>;
 
@@ -167,6 +178,8 @@ export interface AgentDrivenReportData {
   comparisonReportSection?: ComparisonReportSection;
   /** Public explanatory citations; never current-trace evidence. */
   backgroundKnowledgeReferences?: BackgroundKnowledgeReference[];
+  /** Safe selected-vs-used source provenance for code-aware sessions. */
+  sourceContext?: AgentReportSourceContext;
 }
 
 export class HTMLReportGenerator {
@@ -4405,6 +4418,16 @@ export class HTMLReportGenerator {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size: 12px; color: #334155; word-break: break-word;
     }
+    .source-context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    .source-context-column { border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 12px; }
+    .source-context-title { font-weight: 700; color: #1e3a8a; margin-bottom: 8px; }
+    .source-context-list { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
+    .source-context-item { font-size: 12px; color: #334155; line-height: 1.45; }
+    .source-context-name { font-weight: 700; color: #111827; }
+    .source-context-meta {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color: #64748b; word-break: break-word;
+    }
     .patch-status {
       display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; margin-left: 6px;
     }
@@ -4628,6 +4651,8 @@ export class HTMLReportGenerator {
     ${this.renderFindingsSection(result.findings, dataEnvelopes)}
 
     ${this.renderCodeAwareReferencesSection(result.conclusionContract, outputLanguage)}
+
+    ${this.renderSourceContextSection(data.sourceContext, outputLanguage)}
 
     ${this.renderBackgroundKnowledgeReferencesSection(
       data.backgroundKnowledgeReferences,
@@ -4859,6 +4884,77 @@ export class HTMLReportGenerator {
       receipt.outputs.cliTurnPath ? ['CLI', receipt.outputs.cliTurnPath] : undefined,
       receipt.outputs.reportError ? [localize(outputLanguage, '报告错误', 'Report error'), receipt.outputs.reportError] : undefined,
     ].filter((row): row is string[] => Boolean(row));
+    const capabilityManifest = receipt.capabilityManifest;
+    const capabilityResolution = capabilityManifest?.resolution;
+    const processorIdentity = capabilityResolution?.status === 'ready'
+      ? capabilityResolution.traceProcessor.source === 'bundled'
+        ? `bundled:${capabilityResolution.traceProcessor.gitRevision}`
+        : capabilityResolution.traceProcessor.source === 'custom'
+          ? `custom:${capabilityResolution.traceProcessor.binarySha256}`
+          : `unknown:${capabilityResolution.traceProcessor.unavailableReason}`
+      : undefined;
+    const capabilityRows = capabilityManifest
+      ? [
+          [localize(outputLanguage, '状态', 'Status'), capabilityManifest.resolution.status],
+          ...(capabilityResolution?.status === 'unavailable' ||
+            capabilityResolution?.status === 'failed'
+            ? [[localize(outputLanguage, '原因', 'Reason'), capabilityResolution.reason]]
+            : []),
+          ...(capabilityResolution?.status === 'ready'
+            ? [
+                ['Manifest ID', capabilityResolution.manifestId],
+                ['Content hash', capabilityResolution.contentHash],
+                ['Trace fingerprint', capabilityResolution.traceFingerprintSha256],
+                ['Trace processor', processorIdentity!],
+              ]
+            : []),
+          ['Hits', String(capabilityManifest.probeCache.hits)],
+          ['Misses', String(capabilityManifest.probeCache.misses)],
+          ['Bypasses', String(capabilityManifest.probeCache.bypasses)],
+        ]
+      : [];
+    const traceSummary = receipt.traceSummary;
+    const traceSummaryProcessor = traceSummary?.traceProcessor?.source === 'bundled'
+      ? `bundled:${traceSummary.traceProcessor.gitRevision}`
+      : traceSummary?.traceProcessor?.source === 'custom'
+        ? `custom:${traceSummary.traceProcessor.binarySha256}`
+        : traceSummary?.traceProcessor?.source === 'unknown'
+          ? `unknown:${traceSummary.traceProcessor.unavailableReason}`
+          : undefined;
+    const traceSummaryRows = traceSummary
+      ? [
+          [localize(outputLanguage, '状态', 'Status'), traceSummary.status],
+          ['Spec', traceSummary.specId],
+          ['Spec digest', traceSummary.specDigestSha256],
+          ...(traceSummary.traceFingerprintSha256
+            ? [['Trace fingerprint', traceSummary.traceFingerprintSha256]]
+            : []),
+          ...(traceSummaryProcessor ? [['Trace processor', traceSummaryProcessor]] : []),
+          ...(traceSummary.resultDigestSha256
+            ? [['Result digest', traceSummary.resultDigestSha256]]
+            : []),
+          ['Available metrics', traceSummary.availableMetricIds.join(', ') || '-'],
+          ['Missing metrics', traceSummary.missingMetricIds.join(', ') || '-'],
+          ...(traceSummary.reason
+            ? [[localize(outputLanguage, '原因', 'Reason'), traceSummary.reason]]
+            : []),
+        ]
+      : [];
+    const routing = receipt.adaptiveRouting;
+    const routingRows = routing
+      ? [
+          [localize(outputLanguage, '模式', 'Mode'), `${routing.requestedMode} → ${routing.resolvedMode}`],
+          [localize(outputLanguage, '证据等级', 'Evidence tier'), `${routing.currentTier} → ${routing.recommendedTier}`],
+          [localize(outputLanguage, '决策', 'Decision'), `${routing.decision} (shadow)`],
+          [localize(outputLanguage, '原因', 'Reasons'), routing.reasons.join(', ') || '-'],
+          [localize(outputLanguage, '义务', 'Obligations'), routing.obligations.join(', ') || '-'],
+          [localize(outputLanguage, '证据', 'Evidence'), `${routing.evidence.observed}/${routing.evidence.required} observed; ${routing.evidence.missing} missing`],
+          [localize(outputLanguage, '预算', 'Budget'), routing.budget.dispatchUtilization],
+          ...(routing.outputCap === undefined
+            ? []
+            : [[localize(outputLanguage, '输出上限', 'Output cap'), String(routing.outputCap)]]),
+        ]
+      : [];
     return `
     <div class="section">
       <h2 class="section-title">${localize(outputLanguage, '分析回执', 'Analysis Receipt')}</h2>
@@ -4897,6 +4993,24 @@ export class HTMLReportGenerator {
           ${outputRows.map(([label, value]) => `
           <div class="receipt-row"><span>${this.escapeHtml(label)}</span><span>${this.escapeHtml(value)}</span></div>`).join('')}
         </div>` : ''}
+        ${capabilityRows.length > 0 ? `
+        <div class="receipt-card">
+          <div class="receipt-card-title">Capability Manifest</div>
+          ${capabilityRows.map(([label, value]) => `
+          <div class="receipt-row"><span>${this.escapeHtml(label)}</span><span>${this.escapeHtml(value)}</span></div>`).join('')}
+        </div>` : ''}
+        ${traceSummaryRows.length > 0 ? `
+        <div class="receipt-card">
+          <div class="receipt-card-title">Trace Summary</div>
+          ${traceSummaryRows.map(([label, value]) => `
+          <div class="receipt-row"><span>${this.escapeHtml(label)}</span><span>${this.escapeHtml(value)}</span></div>`).join('')}
+        </div>` : ''}
+        ${routingRows.length > 0 ? `
+        <div class="receipt-card">
+          <div class="receipt-card-title">${localize(outputLanguage, '自适应路由', 'Adaptive Routing')}</div>
+          ${routingRows.map(([label, value]) => `
+          <div class="receipt-row"><span>${this.escapeHtml(label)}</span><span>${this.escapeHtml(value)}</span></div>`).join('')}
+        </div>` : ''}
       </div>
     </div>`;
   }
@@ -4915,7 +5029,7 @@ export class HTMLReportGenerator {
         case 'open_evidence_table':
           return localize(outputLanguage, '打开证据表', 'Open evidence table');
         case 'pin_evidence':
-          return localize(outputLanguage, '固定证据', 'Pin evidence');
+          return localize(outputLanguage, '收藏证据', 'Save evidence');
         default:
           return kind;
       }
@@ -5102,6 +5216,57 @@ export class HTMLReportGenerator {
         'These references explain system background only and do not replace current-trace SQL/Skill evidence.',
       )}</div>
       ${items}
+    </div>`;
+  }
+
+  private renderSourceContextSection(
+    sourceContext: AgentReportSourceContext | undefined,
+    outputLanguage: OutputLanguage,
+  ): string {
+    if (!sourceContext?.selected?.length) return '';
+    const selected = [...sourceContext.selected]
+      .filter(source => source.codebaseId)
+      .sort((left, right) => left.codebaseId.localeCompare(right.codebaseId));
+    if (selected.length === 0) return '';
+    const usedIds = new Set(sourceContext.usedCodebaseIds ?? []);
+    const used = selected.filter(source => usedIds.has(source.codebaseId));
+    const renderItem = (source: AgentReportSourceDescriptor) => {
+      const shortId = source.codebaseId.slice(0, 12);
+      const label = source.displayName || shortId;
+      const kind = source.kind || localize(outputLanguage, '未知类型', 'unknown kind');
+      return `
+        <li class="source-context-item">
+          <div class="source-context-name">${this.escapeHtml(label)}</div>
+          <div class="source-context-meta">${this.escapeHtml(kind)} · ${this.escapeHtml(shortId)}</div>
+        </li>`;
+    };
+    const emptyUsed = localize(
+      outputLanguage,
+      '本次没有返回源码或图引用的成功查询。',
+      'No successful lookup returned source or graph references in this run.',
+    );
+    return `
+    <div class="section">
+      <h2 class="section-title">${localize(outputLanguage, '源码上下文', 'Source Context')}</h2>
+      <div class="claim-source-note">
+        ${this.escapeHtml(localize(
+          outputLanguage,
+          '源码/图查询只定位候选机制；最终判断仍以 Trace、Skill 和 SQL 证据为准。',
+          'Source and graph lookup only locate candidate mechanisms; Trace, Skill, and SQL evidence remain authoritative.',
+        ))}
+      </div>
+      <div class="source-context-grid">
+        <div class="source-context-column">
+          <div class="source-context-title">${localize(outputLanguage, '已选择', 'Selected')}</div>
+          <ul class="source-context-list">${selected.map(renderItem).join('')}</ul>
+        </div>
+        <div class="source-context-column">
+          <div class="source-context-title">${localize(outputLanguage, '实际使用/查询到', 'Actually used/consulted')}</div>
+          ${used.length
+            ? `<ul class="source-context-list">${used.map(renderItem).join('')}</ul>`
+            : `<div class="empty-state">${this.escapeHtml(emptyUsed)}</div>`}
+        </div>
+      </div>
     </div>`;
   }
 

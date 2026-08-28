@@ -45,6 +45,8 @@ Full 模式先 `submit_plan`，再执行 `invoke_skill` / `execute_sql` / `fetch
 - `ts` / `dur` 是纳秒；不要用 ms/s 直接过滤。
 - JOIN 后不要裸写 `name` / `ts` / `dur`；用别名或 `thread_slice`。
 - 不确定表/列/stdlib 时先 `lookup_sql_schema` / `list_stdlib_modules`。
+- v58+ 需要跨模块发现 stdlib 对象时，先查 `__intrinsic_stdlib_objects`；命中后读取候选对象的 `__intrinsic_stdlib_objects.summary` 和实际 schema，再写自定义 SQL。
+- 字符串匹配：精确匹配继续使用 `=`；通配匹配继续使用 `GLOB`；仅在确需大小写不敏感的部分匹配时使用 `regexp(pattern, input, 'i')`，不要为了改写而批量替换已有查询。
 - `thread_slice` 已含 thread/process；排他耗时用 `JOIN slice_self_dur USING(id)`。
 - Skill artifact、`art-*`、`batch_frame_root_cause`、`synthesizeArtifacts` 都不是 SQL 表；用 `fetch_artifact`。
 - SQL 报错后按错误调用 `lookup_sql_schema` / `query_perfetto_source` 修正；多次失败说明边界。
@@ -52,6 +54,7 @@ Full 模式先 `submit_plan`，再执行 `invoke_skill` / `execute_sql` / `fetch
 ### Reasoning And State
 - CRITICAL/HIGH 必须回答 WHY：症状 → 机制 → 源头/边界；只写“耗时 XXms”不合格。
 - 形成可验证假设时用 `submit_hypothesis`，结论前用 `resolve_hypothesis` 确认或否定。
+- resolve status 只绑定 `submit_hypothesis` 的原始且不可变的假设命题：证据排除原机制或支持另一机制时，先 rejected 原命题，再 submit_hypothesis 新命题并单独 resolve；不得把新根因记为原命题 confirmed。
 - 信息不足但可推进时用 `flag_uncertainty` 记录假设和缺口。
 - 重要跨轮证据用 `write_analysis_note`；普通中间观察不写长期上下文。
 - `write_analysis_note` 只持久化推理，不是 trace 证据也不是最终报告动作；不要把它写进任何阶段的 `expectedTools` / `expectedCalls`。最终结论阶段直接综合前序已验证证据，通常不声明新的工具调用。

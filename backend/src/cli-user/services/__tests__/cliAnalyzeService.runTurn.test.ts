@@ -3,6 +3,9 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 import type { AnalysisResult } from '../../../agent/core/orchestratorTypes';
 import type { StreamingUpdate } from '../../../agent/types';
@@ -32,6 +35,18 @@ const mockCodebaseGet = jest.fn();
 const mockKnowledgeSourceGet = jest.fn();
 const mockPrepareSession = jest.fn();
 const mockRunManifestLifecycles: any[] = [];
+const capabilityManifest = {
+  schemaVersion: 'capability_manifest_attribution@1',
+  resolution: {
+    status: 'ready',
+    manifestId: `capability_manifest:${'a'.repeat(64)}`,
+    contentHash: 'a'.repeat(64),
+    manifestSchemaVersion: 'capability_manifest@1',
+    traceFingerprintSha256: 'b'.repeat(64),
+    traceProcessor: {source: 'bundled', gitRevision: 'd'.repeat(40)},
+  },
+  probeCache: {hits: 1, misses: 1, bypasses: 0},
+} as const;
 
 let mockPreparedSession: any;
 
@@ -146,6 +161,7 @@ jest.mock('../../../services/selfEvolution/runManifestLifecycle', () => ({
         return {
           runManifestId: 'manifest-cli-test',
           runId: input.runId,
+          capabilityManifest,
         };
       }),
       dispose: jest.fn(() => {
@@ -238,6 +254,8 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
   it('defaults codebase-only CLI analysis to private metadata mode', async () => {
     mockCodebaseGet.mockReturnValue({
       codebaseId: 'cb-cli',
+      lifecycleState: 'active',
+      rootRealpath: fs.realpathSync(process.cwd()),
       indexGeneration: 3,
       activeGeneration: 'codebase_3_test',
       contentFingerprint: 'a'.repeat(64),
@@ -299,6 +317,8 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
   ) => {
     mockCodebaseGet.mockReturnValue({
       codebaseId: 'cb-cli',
+      lifecycleState: 'active',
+      rootRealpath: fs.realpathSync(process.cwd()),
       indexGeneration: 3,
       activeGeneration: 'codebase_3_test',
       contentFingerprint: 'a'.repeat(64),
@@ -349,9 +369,39 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
     expect(mockAnalyze).not.toHaveBeenCalled();
   });
 
-  it('rejects a selected codebase that has no active indexed generation', async () => {
+  it('allows a selected codebase without an index when its registered root is available', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-on-demand-source-'));
+    const rootRealpath = fs.realpathSync(root);
+    try {
+      mockCodebaseGet.mockReturnValue({
+        codebaseId: 'cb-unindexed',
+        lifecycleState: 'active',
+        rootRealpath,
+        indexGeneration: 1,
+        chunkCount: 0,
+        consent: {sendToProvider: false, consentHash: 'consent'},
+      });
+
+      await expect(new CliAnalyzeService().runTurn({
+        ...cliTurnBinding,
+        traceId: 'trace-cli',
+        query: 'analyze source',
+        codebaseIds: ['cb-unindexed'],
+        onEvent: jest.fn(),
+      })).resolves.toEqual(expect.objectContaining({
+        result: expect.objectContaining({success: true}),
+      }));
+      expect(mockAnalyze).toHaveBeenCalled();
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('rejects a selected codebase whose registered root is unavailable', async () => {
     mockCodebaseGet.mockReturnValue({
-      codebaseId: 'cb-unindexed',
+      codebaseId: 'cb-missing-root',
+      lifecycleState: 'active',
+      rootRealpath: '/definitely/missing/smartperfetto/source',
       indexGeneration: 1,
       chunkCount: 0,
       consent: {sendToProvider: false, consentHash: 'consent'},
@@ -361,9 +411,9 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
       ...cliTurnBinding,
       traceId: 'trace-cli',
       query: 'analyze source',
-      codebaseIds: ['cb-unindexed'],
+      codebaseIds: ['cb-missing-root'],
       onEvent: jest.fn(),
-    })).rejects.toThrow('ANALYSIS_CONTEXT_CODEBASE_UNAVAILABLE');
+    })).rejects.toThrow('ANALYSIS_CONTEXT_CODEBASE_ROOT_UNAVAILABLE');
     expect(mockAnalyze).not.toHaveBeenCalled();
   });
 
@@ -403,6 +453,12 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
     expect(output.result.analysisReceipt).toEqual(expect.objectContaining({
       schemaVersion: 2,
       runManifestId: 'manifest-cli-test',
+      capabilityManifest,
+      traceSummary: expect.objectContaining({
+        schemaVersion: 'trace_summary_attribution@1',
+        status: 'unavailable',
+        reason: 'trace_source_unavailable',
+      }),
       outputs: expect.objectContaining({
         cliTurnPath: '/tmp/turns/001.md',
       }),
@@ -410,6 +466,9 @@ describe('CliAnalyzeService runTurn final quality gate', () => {
     expect(output.result.confidence).toBe(0.55);
     expect(output.result.terminationMessage).toContain('最终结果质量闸门');
     expect(mockPreparedSession.result).toBe(output.result);
+    expect(mockPreparedSession.traceSummary).toEqual(expect.objectContaining({
+      status: 'unavailable', reason: 'trace_source_unavailable',
+    }));
     expect(mockPersistAgentTurn).toHaveBeenCalledWith(expect.objectContaining({
       result: expect.objectContaining({
         conclusion: expect.stringContaining('分阶段证据摘要'),

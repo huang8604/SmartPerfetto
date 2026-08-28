@@ -3,6 +3,7 @@
 [English](usage.en.md) | [中文](usage.md)
 
 For the full feature map, entry points, and expected outputs, see [Feature Overview](features.en.md).
+For the Windows portable path from download through first analysis, see the [Windows guide](windows.en.md).
 
 ## Recommended Trace Content
 
@@ -17,14 +18,40 @@ SmartPerfetto works best with Android 12+ traces, especially traces that include
 
 ## UI Analysis Flow
 
-1. Open `http://localhost:10000`.
+1. Open the URL supplied by the runtime; Windows portable uses the actual `Open:` URL printed by the launcher, while Docker defaults to `http://localhost:10000`.
 2. Load a `.pftrace` or `.perfetto-trace` file.
 3. Open the SmartPerfetto AI Assistant panel.
-4. Choose an analysis mode: fast, full, or auto.
+4. Choose an analysis mode: conversation, fast, full, or auto.
 5. Ask a natural-language question.
 6. Wait for SSE streaming output, table evidence, and the final conclusion.
 
 Auto mode first returns a scene inventory for mixed-action traces. The timeline lists detected startup, scrolling, click, navigation, device-state, ANR, and related scenes, then shows scope buttons. Select all scenes or one scene family before SmartPerfetto runs the matching startup, scrolling, click, or other deep-dive analysis.
+
+## Converse Before Starting Analysis
+
+`Conversation` is the default entry. Without an open trace, the top-bar AI
+entry opens a dedicated conversation page. With a trace open, the same mode
+attaches the current trace inside the AI Assistant panel. Use it to clarify a
+goal, discuss performance concepts, or query authorized source code. It asks an
+explicit question when context is missing and produces a confirmable full-
+analysis handoff only when trace-level causal work is actually needed; it never
+starts that heavy analysis by itself.
+
+Rapid follow-ups reuse one session and stop the older run first. New
+conversation, clear, Provider, output-language, Workspace, source-authorization,
+or attached-trace changes establish a new security boundary. A no-trace
+conversation has no trace-query tools. An authorized registered local source
+root remains searchable/readable on demand even without an index; the index is
+an optional graph and retrieval accelerator.
+
+## Use Analysis-Result Actions
+
+Actions below a completed analysis run only after an explicit click. **Go to
+timestamp** centers and visibly zooms the target time, **Open table** returns to
+the evidence rows behind the conclusion, and **Save evidence** stores an
+evidence or result snapshot in the current conversation. Use `/pins` to view saved results.
+Saving evidence does not pin a Perfetto timeline track or automatically add it
+to later AI context. The same action evidence is saved only once.
 
 ## Agent-Assisted External Feedback
 
@@ -70,7 +97,7 @@ Analyze startup performance
 Analyze this ANR
 What is the app package name and main process in this trace?
 Why is the main thread blocked in my selected range?
-Compare scrolling behavior between this trace and the reference trace
+Compare scrolling behavior between the baseline and comparison traces
 Compare with the other result
 Compare AR-1234abcd
 ```
@@ -78,16 +105,29 @@ Compare AR-1234abcd
 ## Live Raw Trace Comparison
 
 To query two raw traces in one conversation, click `compare_arrows` in the AI
-Assistant header, open the current + reference dual view, and select one
-workspace-history trace. You can then refer to current/reference or use the
-actual left/right/top/bottom layout.
+Assistant header. Left/top is the baseline and right/bottom is the comparison;
+both selectors can choose any trace in the current workspace, and `Swap`
+reverses the comparison direction. You can refer to baseline/comparison or use
+the actual left/right/top/bottom layout.
 
-Dual view supports the current page trace plus one history reference, not two
-arbitrary history traces. Closing the visual dual view may retain AI comparison
-context; `Exit Comparison` clears the reference. The CLI equivalent is:
+With no trace open, enter the trace-free AI Assistant page and click
+`Dual Trace` to open two empty panes. Each pane can upload a local trace
+directly; a successful upload remains in the current workspace and is selected
+in that pane. Occupied panes expose `Replace file`. The two uploads are
+independent, while an active analysis locks upload and replacement controls.
+
+The current page trace is only the initial baseline. It is not required to stay
+in the pair, so two historical traces can be compared directly. Closing the
+visual dual view may retain AI comparison context; `Exit Comparison` clears the
+pair. The CLI equivalent is:
+
+The most recent pair, layout, and completed analysis references are stored per
+workspace. Browser reload or a normal backend restart restores them while the
+trace assets remain available. An unfinished run is reported as interrupted
+and must be started again.
 
 ```bash
-smp compare current.pftrace reference.pftrace \
+smp compare baseline.pftrace comparison.pftrace \
   --query "Compare startup and scrolling" --mode full
 ```
 
@@ -108,6 +148,7 @@ This compares completed analysis results and does not require the other Perfetto
 
 | Mode | Good for | Avoid for |
 |---|---|---|
+| Conversation | Goal clarification, performance concepts, authorized source, and deciding whether trace analysis is needed | Requests that should immediately run full trace causal analysis |
 | Fast | Package name, process name, trace overview, simple facts | Heavy analysis such as startup or scrolling jank |
 | Full | Startup, scrolling, ANR, complex rendering root cause | A single simple fact query |
 | Auto | Mixed-script traces where you want to inspect scenes before choosing a deep-dive scope | Cases where you already know the single scene and want to run full analysis directly |
@@ -118,14 +159,16 @@ complex investigations should use full mode.
 
 ## Selection and Follow-Up
 
-The frontend sends area selections or track-event selections to the backend as `selectionContext`. Good prompts include:
+The frontend sends area selections or track-event selections to the backend as `selectionContext`, containing only event/track identity and time bounds. Card display queries are not attached as hidden evidence; the backend re-queries names, thread/process identity, and anomaly status. Good prompts include:
 
 ```text
 Only inspect my selected time range. Why did the UI thread slow down?
 Is there a Binder or scheduling problem around this slice?
 ```
 
-Follow-up questions reuse the current session. Switching between fast, full, and auto starts a new SDK session so lightweight and full contexts do not mix.
+Follow-up questions reuse the current session. Switching between conversation, fast, full, and auto starts a new SDK session so lightweight and full contexts do not mix.
+
+`/anr` and `/jank` use the same backend evidence, claim-verification, and report path as ordinary analysis. They are blocked when backend policy disables AI.
 
 ## Source And Android Internals Background
 

@@ -20,7 +20,12 @@ users should use durable API keys with explicit roles and scopes.
 | `GET` | `/api/auth/oidc/login` | Create signed state, nonce, and PKCE values, then redirect to the OIDC provider |
 | `GET` | `/api/auth/oidc/callback` | Validate the callback, establish the HttpOnly session cookie, and redirect to the frontend |
 | `GET` | `/api/auth/session` | Return login state, read-only user/tenant/workspace, roles/scopes, expiry, and the CSRF token |
+| `POST` | `/api/auth/onboarding/workspace` | Select an allowed workspace during OIDC onboarding; requires cookie mutation protection |
 | `POST` | `/api/auth/logout` | Validate CSRF for the cookie session, revoke it, and clear the cookie |
+| `GET` | `/api/auth/api-keys` | List API keys in the current tenant/workspace scope; requires API-key read permission |
+| `POST` | `/api/auth/api-keys` | Create a scoped API key; the plaintext token is returned only in the creation response |
+| `POST` | `/api/auth/api-keys/:id/revoke` | Revoke an API key |
+| `DELETE` | `/api/auth/api-keys/:id` | Compatibility route for revoking an API key |
 
 The OIDC session is the sole identity authority. Browser requests must use
 `credentials: include`, and mutations also require `X-CSRF-Token`. Browser
@@ -81,6 +86,7 @@ npm registry, or Docker Hub; clients cannot supply a URL. With
 |---|---|---|
 | `GET` | `/api/traces/health` | Trace service health |
 | `POST` | `/api/traces/upload` | Upload a trace file with field name `file` |
+| `POST` | `/api/traces/upload-url` | Fetch a trace server-side from an HTTP(S) URL after public-network URL validation |
 | `GET` | `/api/traces` | List known traces |
 | `GET` | `/api/traces/stats` | Trace statistics |
 | `POST` | `/api/traces/cleanup` | Cleanup trace data |
@@ -88,6 +94,8 @@ npm registry, or Docker Hub; clients cannot supply a URL. With
 | `GET` | `/api/traces/:id` | Trace metadata |
 | `DELETE` | `/api/traces/:id` | Delete a trace |
 | `GET` | `/api/traces/:id/file` | Download a trace file |
+| `POST` | `/api/traces/:id/viewer` | Create an isolated trace-processor viewer lease for the current page |
+| `GET` | `/api/traces/leases/:leaseId/connection` | Read the safe connection state for a lease held by the current page |
 
 Upload example:
 
@@ -262,6 +270,10 @@ Base path: `/api/agent/v1`
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/analyze` | Start analysis |
+| `POST` | `/conversation` | Start or continue a lightweight conversation with optional trace and authorized source context |
+| `GET` | `/conversation/:sessionId/stream` | Conversation SSE by `runId`, with `Last-Event-ID` replay |
+| `POST` | `/conversation/:sessionId/cancel` | Cancel the exact conversation run |
+| `GET` | `/conversation/:sessionId/full-handoff` | Read a recommended full-analysis handoff |
 | `POST` | `/sessions/:sessionId/runs` | Start a new run in an existing session |
 | `GET` | `/:sessionId/stream` | Subscribe to SSE |
 | `GET` | `/runs/:runId/stream` | Subscribe to SSE by run id |
@@ -288,6 +300,23 @@ Base path: `/api/agent/v1`
 The workspace-scoped agent base is `/api/workspaces/:workspaceId/agent`, with
 the same child paths as the table above. `/api/agent/v1` still exists and is
 tracked by legacy telemetry with a migration target.
+
+### Lightweight Conversation
+
+All four `/conversation` endpoints require `agent:run` and revalidate tenant,
+workspace, and user ownership on every request. `POST /conversation` returns a
+`sessionId` and exact `runId`. A new turn in the same session cancels the older
+run before reserving the new run. Without `traceId`, the runtime exposes no
+trace tools. Codebase and knowledge-source selections still use the same
+permission, registered-root, rights, and provider-send authorization as
+`/analyze`. Private queries, tool bodies, and errors are projected before SSE
+replay or durable persistence.
+
+Terminal SSE events are `run_completed` and `run_failed`. Reconnecting clients
+can send `Last-Event-ID` or the `lastEventId` query parameter; replay uses
+monotonic event ids for deduplication. `full-handoff` succeeds only after a
+`recommend_full` outcome; otherwise it returns
+`409 FULL_ANALYSIS_NOT_RECOMMENDED`.
 
 ### Agent-Assisted External Issue
 
@@ -357,10 +386,39 @@ The terminal `analysis_completed` event can include `analysisReceipt` and
 `uiActionProposals`. `uiActionProposals` only
 contains safe UI proposals derived from DataEnvelope evidence and column click
 metadata, such as navigating to a time range, opening an evidence table, or
-pinning evidence. Clients must execute them only after an explicit user click;
-they are not automatic commands.
+`pin_evidence`. The `pin_evidence` action only saves an evidence or result snapshot
+in the current UI conversation for `/pins`; it does not pin a timeline track or
+automatically add the result to later AI context. Clients must execute actions
+only after an explicit user click; they are not automatic commands.
 
-Dual-trace comparison requires `referenceTraceId`, and it must be different from `traceId`.
+Supported `selectionContext` values contain identity and time bounds only:
+
+```json
+{
+  "selectionContext": {
+    "kind": "area",
+    "startNs": 1000000000,
+    "endNs": 2000000000
+  }
+}
+```
+
+```json
+{
+  "selectionContext": {
+    "kind": "track_event",
+    "trackUri": "/process_1/actual_frames",
+    "eventId": 123,
+    "ts": 1000000000
+  }
+}
+```
+
+Names, thread/process labels, depth, or child counts sent by older clients are
+stripped during request normalization and do not enter runtime prompts or
+evidence state.
+
+Dual-trace comparison requires `referenceTraceId`, and it must be different from `traceId`. `traceId` is the baseline and `referenceTraceId` is the comparison; either may be a workspace-history trace.
 
 Smart analysis uses the same `/analyze` endpoint. The first request should usually run only the scene inventory:
 
@@ -527,15 +585,52 @@ Base path: `/api/rag`
 | `GET` | `/codebases` | List registered codebases |
 | `GET` | `/codebases/directory-picker` | Report whether the backend can open a local system folder picker |
 | `POST` | `/codebases/directory-picker` | Open the local system picker and return a short-lived, scope-bound directory authorization |
-| `POST` | `/codebases/preview` | Preview files accepted by the path security gate |
+| `POST` | `/codebases/preview` | Preview source files and enumeration coverage with the same selection policy used by indexing |
 | `POST` | `/codebases/register` | Register a local codebase |
 | `GET` | `/codebases/:id` | Codebase detail |
 | `GET` | `/codebases/:id/symbols` | Resolve symbols |
 | `GET` | `/codebases/:id/excerpt` | Read an indexed excerpt |
 | `POST` | `/codebases/:id/reindex` | Reindex |
 | `GET` | `/codebases/:id/audit` | Index audit |
-| `PATCH` | `/codebases/:id/consent` | Explicitly grant or revoke provider-send consent |
+| `PATCH` | `/codebases/:id/consent` | Perform exactly one action: set `sendToProvider`, authorize new languages with `authorizeAvailableExtensions: true`, or authorize the current path scope with `authorizeCurrentSelection: true` |
+| `PATCH` | `/codebases/:id/selection` | Change include prefixes / exclude globs, immediately revoke the old active generation, and require reindexing |
+| `POST` | `/codebases/:id/pending/accept` | Echo `candidateGenerationId`, `selectionPolicyRevision`, and `grantRevision` to explicitly accept a truncated candidate generation with CAS |
+| `POST` | `/codebases/:id/pending/reject` | Echo `candidateGenerationId` to reject a candidate generation with CAS and remove its staged chunks |
 | `DELETE` | `/codebases/:id` | Retire the registration and remove every staged, active, and superseded generation in the current scope |
+
+Preview, registration, and reindexing share one source-selection policy. Their
+responses report `enumerationBackend`, `backendFidelity`,
+`enumerationComplete`, `deterministic`, enumerated/selected file and byte
+counts, and an explicit truncation reason. Git ignore rules participate in
+candidate discovery only; they never expand provider authorization. Source
+text can leave the backend only when both the current selection policy and the
+consent grant admit its relative path. A successful AOSP/OEM preview preserves
+enumeration when optional manifest metadata is unavailable and reports
+`manifestUnavailableReason`; `codebase_root_realpath_drift` still blocks. Codebase
+summaries expose `providerGrantScopeCurrent` to show whether the current path
+filters/exclude globs match the frozen grant. Any selection change sets
+`reindexRequired=selection_scope_changed`; the legacy
+`selection_scope_narrowed` value remains readable. Extensions added by a later version are
+reported as `availableNotConsentedExtensions` until the consent endpoint is
+called explicitly with `authorizeAvailableExtensions: true`. That operation
+requires existing provider-send consent and never turns source-text sending on
+for the user. With an active index it sets `reindexRequired` to
+`provider_language_scope_expanded`. Selection changes also never expand consent
+automatically; `authorizeCurrentSelection: true` copies only the current include
+prefixes and exclude globs into the grant and preserves language consent.
+
+Incomplete or nondeterministic enumeration cannot activate an index. A
+deterministic file/byte-budget truncation is staged as `pendingGeneration` when
+a complete active generation already exists. Acceptance must echo the current
+`candidateGenerationId`, `selectionPolicyRevision`, and `grantRevision` from
+list/detail; rejection must echo `candidateGenerationId`. The candidate ID is
+the compare-and-swap guard for concurrent replacement: an operation using a
+stale ID fails instead of acting on a newer candidate after replacement,
+acceptance, rejection, or expiry. Candidates are retained for seven days and
+lazily expired with their staged chunks during list reads. When there is no
+older active generation, a truncated index may be
+used only as an explicitly degraded result with
+`activeIndexCoverage.complete=false`.
 
 Codebase deletion is a retryable two-phase lifecycle. Under the ingest lease,
 the backend first marks the registration `deleting`, revokes provider consent,
@@ -607,15 +702,18 @@ repository readability rules.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/reports/:reportId` | Fetch report |
+| `GET` | `/api/reports/:reportId/export` | Download the persisted HTML report artifact |
 | `DELETE` | `/api/reports/:reportId` | Delete report |
 | `POST` | `/api/export/result` | Export one result |
 | `POST` | `/api/export/session` | Export session |
 | `POST` | `/api/export/analysis` | Export analysis |
 | `GET` | `/api/export/formats` | Supported formats |
+| `GET` | `/api/export/tenant` | Export a tenant compliance bundle without trace file bodies or secrets |
 
 ## Legacy and Compatibility APIs
 
-The following APIs still exist, but new integrations should prefer `/api/agent/v1/*`:
+The following global APIs still exist. New workspace product integrations
+should prefer the `/api/workspaces/:workspaceId/*` paths above:
 
 - `/api/traces/*`; prefer `/api/workspaces/:workspaceId/traces/*`
 - `/api/reports/*`; prefer `/api/workspaces/:workspaceId/reports/*`

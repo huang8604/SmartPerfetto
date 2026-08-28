@@ -20,6 +20,7 @@
 
 import { sanitizeQueryReview, type QueryReviewV1 } from './queryReviewContract';
 import type {AgentRuntimeKind} from '../agentRuntime/runtimeKinds';
+import type {CapabilityManifestAttributionV1} from './capabilityManifest';
 
 // =============================================================================
 // Column Definition System (Phase 0 - DataEnvelope Refactoring)
@@ -379,6 +380,14 @@ export interface DataEnvelopeMeta {
   /** Short producer intent for explaining why this table exists */
   intent?: string;
 }
+
+const VALID_DATA_ENVELOPE_META_TYPES: readonly DataEnvelopeMeta['type'][] = [
+  'skill_result',
+  'sql_result',
+  'ai_response',
+  'diagnostic',
+  'chart',
+];
 
 /**
  * DataEnvelope Display Config - How to render this data
@@ -1024,6 +1033,7 @@ export interface AnalysisReceiptBase {
   traceId: string;
   mode: 'fast' | 'full' | 'auto';
   resolvedMode: 'quick' | 'full';
+  adaptiveRouting?: import('./adaptiveRouting').AdaptiveRoutingReceiptV1;
   runtime?: AnalysisReceiptRuntime;
   providerId: string | null;
   generatedAt: number;
@@ -1058,6 +1068,8 @@ export interface AnalysisReceiptBase {
     cliTurnPath?: string;
     reportError?: string;
   };
+  capabilityManifest?: CapabilityManifestAttributionV1;
+  traceSummary?: import('./traceSummaryAttribution').TraceSummaryAttributionV1;
 }
 
 export interface AnalysisReceiptV1 extends AnalysisReceiptBase {
@@ -1564,29 +1576,44 @@ export function validateColumnDefinition(column: any): ValidationError[] {
 export function validateDataEnvelope(envelope: any): ValidationError[] {
   const errors: ValidationError[] = [];
 
-  if (!envelope) {
-    errors.push({ path: '', message: 'DataEnvelope is null or undefined' });
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    errors.push({ path: '', message: 'DataEnvelope must be a non-array object' });
     return errors;
   }
 
   // Validate meta
-  if (!envelope.meta) {
-    errors.push({ path: 'meta', message: 'meta is required' });
+  if (!envelope.meta || typeof envelope.meta !== 'object' || Array.isArray(envelope.meta)) {
+    errors.push({ path: 'meta', message: 'meta must be a non-array object' });
   } else {
-    if (!envelope.meta.type) {
-      errors.push({ path: 'meta.type', message: 'meta.type is required' });
+    if (!VALID_DATA_ENVELOPE_META_TYPES.includes(envelope.meta.type)) {
+      errors.push({
+        path: 'meta.type',
+        message: `Invalid meta.type. Valid values: ${VALID_DATA_ENVELOPE_META_TYPES.join(', ')}`,
+        value: envelope.meta.type,
+      });
     }
-    if (!envelope.meta.source) {
-      errors.push({ path: 'meta.source', message: 'meta.source is required' });
+    if (typeof envelope.meta.source !== 'string' || envelope.meta.source.trim().length === 0) {
+      errors.push({ path: 'meta.source', message: 'meta.source must be a non-empty string' });
     }
-    if (!envelope.meta.version) {
-      errors.push({ path: 'meta.version', message: 'meta.version is required' });
+    if (typeof envelope.meta.version !== 'string' || envelope.meta.version.trim().length === 0) {
+      errors.push({ path: 'meta.version', message: 'meta.version must be a non-empty string' });
+    }
+    if (
+      typeof envelope.meta.timestamp !== 'number' ||
+      !Number.isFinite(envelope.meta.timestamp) ||
+      envelope.meta.timestamp < 0
+    ) {
+      errors.push({
+        path: 'meta.timestamp',
+        message: 'meta.timestamp must be a finite non-negative number',
+        value: envelope.meta.timestamp,
+      });
     }
   }
 
   // Validate display
-  if (!envelope.display) {
-    errors.push({ path: 'display', message: 'display is required' });
+  if (!envelope.display || typeof envelope.display !== 'object' || Array.isArray(envelope.display)) {
+    errors.push({ path: 'display', message: 'display must be a non-array object' });
   } else {
     if (!envelope.display.layer || !isValidDisplayLayer(envelope.display.layer)) {
       errors.push({
@@ -1609,8 +1636,8 @@ export function validateDataEnvelope(envelope: any): ValidationError[] {
         value: envelope.display.level,
       });
     }
-    if (!envelope.display.title) {
-      errors.push({ path: 'display.title', message: 'display.title is required' });
+    if (typeof envelope.display.title !== 'string' || envelope.display.title.trim().length === 0) {
+      errors.push({ path: 'display.title', message: 'display.title must be a non-empty string' });
     }
 
     // Validate columns if present
@@ -1652,9 +1679,9 @@ export function validateDataEnvelope(envelope: any): ValidationError[] {
     }
   }
 
-  // Validate data exists
-  if (envelope.data === undefined) {
-    errors.push({ path: 'data', message: 'data is required' });
+  // Validate data container
+  if (!envelope.data || typeof envelope.data !== 'object' || Array.isArray(envelope.data)) {
+    errors.push({ path: 'data', message: 'data must be a non-array object' });
   }
 
   return errors;

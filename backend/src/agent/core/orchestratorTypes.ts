@@ -324,6 +324,10 @@ export interface AnalysisOptions {
    * - 'auto' or undefined: defer to queryComplexityClassifier
    */
   analysisMode?: 'fast' | 'full' | 'auto';
+  /** Internal surface hint; dedicated conversation routes never accept this from request JSON. */
+  assistantSurface?: 'conversation';
+  /** Whether the dedicated conversation has a real Trace attached. */
+  conversationTraceAttached?: boolean;
   /** UI/backend preset selector. Smart preset is dispatched by route layer. */
   preset?: 'smart';
 
@@ -427,6 +431,7 @@ export interface QuickRunReceipt {
   evidence: QuickRunEvidenceCounts;
   contextInjected: QuickRunContextInjectedCounts;
   verifierStatus: QuickRunVerifierStatus;
+  adaptiveRouting?: import('../../types/adaptiveRouting').AdaptiveRoutingReceiptV1;
 }
 
 // =============================================================================

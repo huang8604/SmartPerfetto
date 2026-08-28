@@ -94,6 +94,9 @@ logic, use Plan -> independent read-only review -> Revise -> Execute.
   structured self-review plus post-diff review, note the fallback, and rely on
   the relevant verification tier from `.claude/rules/testing.md`.
 - Reviewers must not edit files.
+- When delegation or parallel work can help a non-trivial task, read
+  `.claude/rules/agent-orchestration.md`; it extends this gate without
+  replacing Plan -> independent review -> Revise -> Execute.
 
 ## Detailed Rules
 
@@ -104,6 +107,7 @@ Read the relevant detailed rule before touching that area:
 - `.claude/rules/prompts.md`
 - `.claude/rules/skills.md`
 - `.claude/rules/codebase-aware.md`
+- `.claude/rules/agent-orchestration.md`
 - `.claude/rules/product-surface.md`
 - `.claude/rules/perfetto-sync.md`
 - `.claude/rules/release.md`
@@ -116,7 +120,7 @@ landing a PR, run `npm run verify:pr` from the repository root.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **SmartPerfetto** (47377 symbols, 142809 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **SmartPerfetto** (51181 symbols, 153885 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

@@ -14,8 +14,9 @@ Key files:
 - `ai_panel.ts`: main AI assistant panel.
 - `ai_sidebar_panel.ts`: sidebar integration.
 - `ai_floating_window.ts`, `ai_floating_state.ts`: floating assistant window.
-- `ai_service.ts`: backend communication.
-- `assistant_api_v1.ts`: Agent API v1 client.
+- `assistant_api_v1.ts`: backend Agent API URL boundary.
+- `agent_sse_transport.ts`: authenticated Agent SSE URL/header/replay cursor.
+- `conversation_client.ts`: lightweight conversation API and stream client.
 - `sse_event_handlers.ts`: SSE event handling.
 - `session_manager.ts`: localStorage session persistence.
 - `assistant_command_bus.ts`: cross-component command bus.
@@ -54,8 +55,12 @@ After any change under `perfetto/ui/src/plugins/com.smartperfetto.AIAssistant/`:
 1. Run `./scripts/start-dev.sh`.
 2. Verify the UI change in the browser at `http://localhost:10000`.
 3. Run relevant Perfetto UI tests/typecheck for the touched code.
-4. Run `./scripts/update-frontend.sh`.
-5. Commit the plugin source, `frontend/index.html`, the active `frontend/v*`
+4. Stop `./scripts/start-dev.sh`. Its HMR server intentionally does not emit
+   the production `frontend_bundle.js` and `frontend.css` artifacts.
+5. Run `(cd perfetto && tools/node ui/build.mjs)` to produce the standalone
+   production bundle.
+6. Run `./scripts/update-frontend.sh`.
+7. Commit the plugin source, `frontend/index.html`, the active `frontend/v*`
    bundle, and any SmartPerfetto static assistant assets that changed.
 
 `scripts/update-frontend.sh` is the supported way to refresh `frontend/`. It

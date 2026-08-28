@@ -13,17 +13,25 @@ describe('code-aware.template golden rules', () => {
   });
 
   it('locks the source lookup order and domain split', () => {
-    expect(rendered).toContain('resolve_symbol(kind="app")');
+    expect(rendered).toContain('search_codebase');
+    expect(rendered).toContain('不要求预先建立索引');
+    expect(rendered).toContain('read_codebase_file');
+    expect(rendered).toContain('query_code_graph');
+    expect(rendered).toContain('inspect_code_symbol');
+    expect(rendered).toContain('可选加速器');
+    expect(rendered).toContain('freshness="stale"');
+    expect(rendered).toContain('resolve_symbol');
     expect(rendered).toContain('lookup_app_source');
-    expect(rendered).toContain('resolve_symbol(kind="native")');
     expect(rendered).toContain('lookup_aosp_source');
-    expect(rendered).toContain('resolve_symbol(kind="kernel")');
     expect(rendered).toContain('lookup_kernel_source');
+    expect(rendered).toContain('inspect_code_symbol` 的 `referenceId` 不授予 patch 能力');
   });
 
   it('locks degraded and metadata-only output discipline', () => {
     expect(rendered).toContain('metadata_only');
     expect(rendered).toContain('provider_send_disabled_for_session');
+    expect(rendered).toContain('GitNexus 结果只能作为导航提示');
+    expect(rendered).toContain('不能单独当作 trace 真相');
     expect(rendered).toContain('symbol_only_low_confidence');
     expect(rendered).toContain('不能生成 patch');
   });
@@ -31,6 +39,9 @@ describe('code-aware.template golden rules', () => {
   it('requires successful source lookups to remain locatable in the final report', () => {
     const contract = loadPromptTemplate('prompt-code-reference-contract-zh') ?? '';
     expect(contract).toContain('成功返回源码 CodeRef');
+    expect(contract).toContain('search_codebase');
+    expect(contract).toContain('read_codebase_file');
+    expect(contract).toContain('referenceId');
     expect(contract).toContain('relative/path/File.kt:L10-L20');
     expect(contract).toContain('不能只写文件名');
     expect(contract).toContain('不得编造行号');

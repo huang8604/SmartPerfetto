@@ -19,7 +19,12 @@ API key。
 | `GET` | `/api/auth/oidc/login` | 创建签名 state、nonce 和 PKCE，跳转到 OIDC Provider |
 | `GET` | `/api/auth/oidc/callback` | 校验回调、建立 HttpOnly Session Cookie，并跳回前端 |
 | `GET` | `/api/auth/session` | 返回登录状态、只读 user/tenant/workspace、roles/scopes、过期时间和 CSRF Token |
+| `POST` | `/api/auth/onboarding/workspace` | 在 OIDC onboarding 中选择允许的 workspace；需要 Cookie mutation protection |
 | `POST` | `/api/auth/logout` | 校验 Cookie Session 的 CSRF Token，撤销 Session 并清除 Cookie |
+| `GET` | `/api/auth/api-keys` | 按当前 tenant/workspace scope 列出 API keys；需要 API-key 读取权限 |
+| `POST` | `/api/auth/api-keys` | 创建 scoped API key；明文 token 只在创建响应中返回 |
+| `POST` | `/api/auth/api-keys/:id/revoke` | 撤销 API key |
+| `DELETE` | `/api/auth/api-keys/:id` | 撤销 API key 的兼容入口 |
 
 OIDC Session 是请求身份的唯一来源。浏览器请求必须使用
 `credentials: include`，写请求还必须携带 `X-CSRF-Token`。浏览器提供的
@@ -75,6 +80,7 @@ registry 或 Docker Hub 的固定 HTTPS endpoint，不接受客户端 URL。设�
 |---|---|---|
 | `GET` | `/api/traces/health` | trace 服务健康状态 |
 | `POST` | `/api/traces/upload` | 上传 trace 文件，字段名 `file` |
+| `POST` | `/api/traces/upload-url` | 由后端从经过公网 URL 安全校验的 HTTP(S) 地址拉取 trace |
 | `GET` | `/api/traces` | 列出已知 trace |
 | `GET` | `/api/traces/stats` | trace 统计 |
 | `POST` | `/api/traces/cleanup` | 清理 trace |
@@ -82,6 +88,8 @@ registry 或 Docker Hub 的固定 HTTPS endpoint，不接受客户端 URL。设�
 | `GET` | `/api/traces/:id` | trace 信息 |
 | `DELETE` | `/api/traces/:id` | 删除 trace |
 | `GET` | `/api/traces/:id/file` | 下载 trace 文件 |
+| `POST` | `/api/traces/:id/viewer` | 为当前页面创建隔离的 trace-processor viewer lease |
+| `GET` | `/api/traces/leases/:leaseId/connection` | 读取当前页面持有 lease 的安全连接状态 |
 
 上传示例：
 
@@ -244,6 +252,10 @@ Base path: `/api/agent/v1`
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/analyze` | 启动分析 |
+| `POST` | `/conversation` | 启动或继续轻量对话；可选附加 Trace 与已授权源码 |
+| `GET` | `/conversation/:sessionId/stream` | 对话 SSE，使用 `runId` 并支持 `Last-Event-ID` 重放 |
+| `POST` | `/conversation/:sessionId/cancel` | 取消精确对话 run |
+| `GET` | `/conversation/:sessionId/full-handoff` | 读取已建议的完整分析交接 |
 | `POST` | `/sessions/:sessionId/runs` | 在已有 session 下启动新 run |
 | `GET` | `/:sessionId/stream` | SSE 流 |
 | `GET` | `/runs/:runId/stream` | 按 run id 订阅 SSE |
@@ -268,6 +280,18 @@ Base path: `/api/agent/v1`
 | `GET` | `/logs` | agent logs，受 feature flag 控制 |
 
 Workspace-scoped agent base 为 `/api/workspaces/:workspaceId/agent`，其子路径与上表一致。`/api/agent/v1` 当前仍存在，但会通过 legacy telemetry 标记迁移目标。
+
+### 轻量对话
+
+四个 `/conversation` 接口都要求 `agent:run`，并在每次访问时重验 tenant、workspace、
+user owner。`POST /conversation` 返回 `sessionId` 和精确 `runId`；同一 session 的新消息
+会先取消旧 run，再占用新 run。没有 `traceId` 时 runtime 不暴露 Trace 工具；传入
+codebase/knowledge source 仍须通过与 `/analyze` 相同的权限、注册根目录、权利确认和
+provider 发送同意。私有 query、工具正文和错误在进入 SSE 重放或持久化前完成投影。
+
+SSE 终态是 `run_completed` 或 `run_failed`。客户端重连可发送 `Last-Event-ID`，或使用
+`lastEventId` query；服务端按单调 `id` 去重重放。只有 outcome 为 `recommend_full` 时，
+`full-handoff` 才返回交接，否则返回 `409 FULL_ANALYSIS_NOT_RECOMMENDED`。
 
 ### Agent 辅助外部 Issue
 
@@ -329,9 +353,13 @@ curl -X POST http://localhost:3000/api/agent/v1/<sessionId>/cancel \
 终态 `analysis_completed` 事件可能携带 `analysisReceipt` 和
 `uiActionProposals`。`uiActionProposals` 只包含从
 DataEnvelope 证据和列点击元数据派生的安全 UI 提案，例如跳转到时间范围、打开证据表
-或固定证据；客户端必须等待用户点击后再执行，不能把它当成自动命令。
+或 `pin_evidence`。其中 `pin_evidence` 只把证据或结果快照收藏到当前 UI 会话并供 `/pins`
+查看，不会固定时间线泳道，也不会自动加入后续 AI 上下文。客户端必须等待用户点击后
+再执行，不能把它当成自动命令。
 
 支持的 `selectionContext`：
+
+该对象只接受身份和时间边界。旧客户端附带的名称、线程、进程、深度或子项数量会在请求归一化时被丢弃，不会进入 runtime prompt 或证据状态。
 
 ```json
 {
@@ -353,7 +381,7 @@ DataEnvelope 证据和列点击元数据派生的安全 UI 提案，例如跳转
 }
 ```
 
-双 trace 对比需要传 `referenceTraceId`，且不能与 `traceId` 相同。
+双 trace 对比需要传 `referenceTraceId`，且不能与 `traceId` 相同。`traceId` 表示基线，`referenceTraceId` 表示对比；两者都可以来自 workspace 历史 Trace。
 
 智能分析通过同一个 `/analyze` 入口启动。第一次请求建议只做场景盘点：
 
@@ -514,15 +542,42 @@ Base path: `/api/rag`
 | `GET` | `/codebases` | 列出已注册 codebase |
 | `GET` | `/codebases/directory-picker` | 返回当前后端是否支持本机系统文件夹选择 |
 | `POST` | `/codebases/directory-picker` | 打开本机系统选择器并返回短时、当前 scope 绑定的目录授权 |
-| `POST` | `/codebases/preview` | 预览 path security gate 接受的文件 |
+| `POST` | `/codebases/preview` | 用与索引相同的 selection policy 预览源码文件与枚举覆盖率 |
 | `POST` | `/codebases/register` | 注册本机代码库 |
 | `GET` | `/codebases/:id` | codebase 详情 |
 | `GET` | `/codebases/:id/symbols` | 符号解析 |
 | `GET` | `/codebases/:id/excerpt` | 读取已索引片段 |
 | `POST` | `/codebases/:id/reindex` | 重新索引 |
 | `GET` | `/codebases/:id/audit` | 索引审计 |
-| `PATCH` | `/codebases/:id/consent` | 显式授予或撤销 provider-send 同意 |
+| `PATCH` | `/codebases/:id/consent` | 三选一：设置 `sendToProvider`、用 `authorizeAvailableExtensions: true` 授权新语言，或用 `authorizeCurrentSelection: true` 授权当前路径范围 |
+| `PATCH` | `/codebases/:id/selection` | 修改 include prefix / exclude glob；立即撤销旧 active generation 并要求重建 |
+| `POST` | `/codebases/:id/pending/accept` | 回传 `candidateGenerationId`、`selectionPolicyRevision` 和 `grantRevision`，以 CAS 显式接受被截断的候选 generation |
+| `POST` | `/codebases/:id/pending/reject` | 回传 `candidateGenerationId`，以 CAS 拒绝候选 generation 并清理 staged chunks |
 | `DELETE` | `/codebases/:id` | 退役注册项并删除当前 scope 内的全部 staged/active/superseded generation |
+
+preview、register 和 reindex 共用同一份源码选择策略；响应会报告
+`enumerationBackend`、`backendFidelity`、`enumerationComplete`、`deterministic`、
+已枚举/已选择文件与字节数，以及明确的截断原因。Git ignore 只参与候选召回，
+不会扩大 provider 授权；最终源码正文必须同时满足当前 selection policy 与 consent grant。
+成功的 AOSP/OEM preview 在可选 manifest 元数据不可用时保留枚举结果，并返回
+`manifestUnavailableReason`；`codebase_root_realpath_drift` 仍然阻塞。注册项摘要通过
+`providerGrantScopeCurrent` 表明当前 path filter/exclude glob 是否与冻结授权一致。
+任何 selection 变化会把 `reindexRequired` 设为 `selection_scope_changed`；旧注册表中的
+`selection_scope_narrowed` 仍兼容读取。
+新版本增加的语言扩展默认显示为 `availableNotConsentedExtensions`，只有显式调用
+consent 接口并传 `authorizeAvailableExtensions: true` 才加入授权；该操作要求注册项已
+开启 provider-send，绝不会替用户开启正文发送权限。若已有活动索引，响应会把
+`reindexRequired` 设为 `provider_language_scope_expanded`。路径选择变更同样不会自动授权；
+`authorizeCurrentSelection: true` 只把当前 include prefixes/exclude globs 写入 consent grant，
+保留原语言授权。
+
+不完整或非确定性的枚举不会激活索引。确定性但被 file/byte budget 截断的重建在已有
+完整 active generation 时只写入 `pendingGeneration`；接受时必须回传列表/详情中的
+`candidateGenerationId`、`selectionPolicyRevision` 和 `grantRevision`，拒绝时必须回传
+`candidateGenerationId`。候选 ID 是并发 replacement 的 CAS：如果待处理候选已被更新、
+接受、拒绝或过期，旧 ID 的操作会失败，不会误操作新候选。候选保留 7 天，列表读取会
+惰性过期并清理 staged chunks。没有旧 active generation 时，截断索引可作为明确标有
+`activeIndexCoverage.complete=false` 的可用降级结果。
 
 删除 codebase 使用可重试的两阶段生命周期：先在 ingest lease 内把注册项标记为
 `deleting`、撤销 provider 同意并切断 active generation，然后清理所有索引分片并删除
@@ -585,15 +640,18 @@ trace 的诊断证据或 root-cause 证明。接口复用当前 workspace scope�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/reports/:reportId` | 获取报告 |
+| `GET` | `/api/reports/:reportId/export` | 下载持久化的 HTML 报告 artifact |
 | `DELETE` | `/api/reports/:reportId` | 删除报告 |
 | `POST` | `/api/export/result` | 导出单个结果 |
 | `POST` | `/api/export/session` | 导出 session |
 | `POST` | `/api/export/analysis` | 导出分析 |
 | `GET` | `/api/export/formats` | 支持格式 |
+| `GET` | `/api/export/tenant` | 导出不含 trace 文件正文或 secret 的 tenant compliance bundle |
 
 ## Legacy 与兼容接口
 
-以下接口仍存在，但新集成应优先使用 `/api/agent/v1/*`：
+以下全局接口仍存在；新的 workspace 产品集成应优先使用上文
+`/api/workspaces/:workspaceId/*` 路径：
 
 - `/api/traces/*`，优先迁移到 `/api/workspaces/:workspaceId/traces/*`
 - `/api/reports/*`，优先迁移到 `/api/workspaces/:workspaceId/reports/*`

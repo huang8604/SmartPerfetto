@@ -11,6 +11,174 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Commit prefixes follow [Conventional Commits](https://www.conventionalcommits.org/).
 Detailed commit-level history is available via `git log`.
 
+## [1.8.4] - 2026-08-27
+
+### Fixed
+- npm packages now declare the exact SmartPerfetto GitHub repository metadata
+  required for Sigstore provenance validation during Trusted Publishing.
+
+## [1.8.3] - 2026-08-27
+
+### Added
+- Codebase selections that expand after registration can now be explicitly
+  authorized from the AI Assistant with a confirmation that shows the current
+  include and exclude scope.
+
+### Changed
+- npm releases now use a hash-bound GitHub Actions Trusted Publishing workflow
+  with isolated OIDC credentials and an immutable public-release recovery path.
+
+### Fixed
+- Source enumeration and on-demand search now distinguish valid empty results,
+  partial traversal failures, and complete results across ripgrep, Git, and Node
+  backends without treating normal symlinks, sparse entries, deleted files, or
+  uninitialized submodules as permanent reindex failures.
+- Indexed code lookup now reapplies the current source selection and session
+  provider consent, while optional AOSP manifest failures degrade with visible
+  diagnostics instead of blocking an otherwise valid preview.
+
+## [1.8.2] - 2026-08-26
+
+### Fixed
+- Source enumeration now preserves `time_budget` when a bounded `.gitmodules`
+  metadata read reaches its real wall-clock deadline, while unsafe or malformed
+  submodule declarations continue to report `traversal_error`.
+
+## [1.8.1] - 2026-08-26
+
+### Added
+- Code-aware analysis can preview and register bounded app, AOSP/OEM, and
+  kernel source trees, search or read selected files without a prebuilt index,
+  and build optional indexed generations with explicit coverage metadata.
+- The AI Assistant now exposes codebase scope suggestions, language-consent
+  changes, active and pending generation status, downgrade confirmation,
+  maintenance warnings, audit details, and accessible operation feedback.
+
+### Changed
+- Trace-corpus verification now binds executable SQL to source-pinned
+  provenance, realistic constructed evidence, and semantic result assertions
+  instead of treating registration or row-only execution as correctness.
+- Local source selection, provider disclosure, Git/ripgrep/Node discovery, and
+  generation activation now share canonical policy and consent contracts across
+  CLI, API, MCP, reports, and the committed Perfetto frontend.
+
+### Fixed
+- Codebase reindex, candidate replacement, expiry, cleanup, deletion, and
+  provider-consent changes are fenced against stale generations and concurrent
+  requests without deleting active or in-flight source chunks.
+- Metadata reads, Git provenance, subprocess output, directory traversal, and
+  local RAG persistence now have bounded cross-platform deadlines and capacity;
+  Windows path casing, open flags, and Trace CLI expectations are portable.
+
+## [1.8.0] - 2026-08-25
+
+### Added
+- The AI Assistant can open a dual-Trace workspace before any Trace is loaded,
+  upload or replace baseline and comparison files independently, hand the pair
+  into the main Viewer, and restore the pair and layout after page reload.
+- Analysis receipts and reports now carry versioned trace-processor capability
+  attribution, canonical trace summaries, deterministic evidence-relation
+  checks, and shared selection evidence across comparison consumers.
+- Offline golden evaluation and production shadow-routing foundations now record
+  accuracy experiments and escalation recommendations without silently changing
+  the public `fast`, `full`, or `auto` provider budget.
+
+### Changed
+- Live raw-Trace comparison now supports any two distinct workspace traces,
+  stable baseline/comparison roles, explicit swapping, pane-local upload state,
+  and persisted local/API-key workspaces while retaining OIDC page-local Trace
+  isolation.
+- The bundled Perfetto UI, trace processor, SQL documentation/indexes, and
+  global trace sanity contracts are synchronized to Perfetto v58.2.
+
+### Fixed
+- Invalid DataEnvelope, pipeline-detection, capability-manifest, and evidence
+  inputs now fail closed, while correlation evidence remains explicitly below
+  causal claims.
+- Dual-Trace browser diagnostics now tolerate bounded cold-backend readiness
+  delays without hiding authentication failures, and stale pane uploads cannot
+  overwrite a reset workspace lifecycle.
+
+## [1.7.0] - 2026-08-21
+
+### Added
+- Qoder runtime integration now supports bring-your-own-key provider and model
+  routing while preserving Provider Manager pinning and runtime boundaries.
+
+### Changed
+- The six maintained real-trace fixtures now carry explicit
+  `AGPL-3.0-or-later` licensing, owner-approved publication consent, and
+  completed privacy and sanitization reviews.
+
+### Fixed
+- DeepSeek reasoning-model tool continuations now retain the required
+  `reasoning_content` across OpenAI-compatible multi-turn requests.
+- Pi final correction now receives semantic final-result quality failures,
+  including comparison-identity defects, before producing its terminal report.
+
+## [1.6.0] - 2026-08-14
+
+### Added
+- Page-scoped OIDC analysis connections now preserve explicit Trace, provider,
+  and session isolation across navigation and reload. Thanks to @cipherTing
+  for the original contribution in #239.
+- The Pi runtime now uses provider-explicit `pi-agent-core` and `pi-ai`
+  integration with aligned dependencies and a dedicated runtime gate.
+- Windows portable installs can select a fixed, writable `D:` drive for user
+  data and conservatively migrate an existing default `C:` data directory
+  without merging, overwriting, or deleting the source.
+
+### Changed
+- Claude-compatible and OpenAI runtimes now apply configurable full-request
+  and provider-idle deadlines, bounded external tool projections, answer
+  fallbacks, and retained continuation history.
+- The setup, update, Windows, portable packaging, troubleshooting, and platform
+  compatibility guides now use a shorter quick-start path with dedicated
+  bilingual application-update guidance.
+- Runtime and development dependencies were refreshed while preserving the
+  committed frontend, Node.js 24, and provider-pinning contracts.
+
+### Fixed
+- Timed-out or history-limited analysis retains genuine partial conclusions,
+  evidence, reports, snapshots, and provenance while still finalizing terminal
+  `analysis_completed` and `end` events.
+- Claude stream cleanup and OpenAI provider close no longer leave completed or
+  partial sessions waiting indefinitely after a terminal result.
+- Windows DPAPI portable smoke preserves PowerShell paths and the host provider
+  profile, and frontend refresh tests now honor required local build tools.
+
+## [1.5.0] - 2026-08-10
+
+### Added
+- The AI Assistant now supports evidence-aware conversation sessions with
+  trace, Provider, runtime, source, and RAG context boundaries that are pinned
+  and revalidated across turns.
+- Analysis results can propose working timeline navigation, table opening, and
+  session-scoped evidence collection actions. Non-table insights retain a
+  bounded provenance snapshot, while table results retain their structured
+  rows and columns.
+- Windows portable installs now have a documented user-data layout, legacy
+  migration path, runtime health checks, and target-native release evidence.
+
+### Changed
+- OpenAI Agents, Pi, and OpenCode runtimes share stricter plan-completion,
+  final-report, claim-verification, and real DeepSeek regression contracts.
+- Code-aware analysis can use GitNexus graph navigation while keeping private
+  source queries out of persisted browser and backend projections.
+- Provider/runtime changes and Trace attachment changes establish explicit new
+  conversation identities instead of silently reusing stale model sessions.
+
+### Fixed
+- Timeline point/range actions now focus the intended timestamp or interval,
+  table actions reveal the referenced result, and collected evidence survives
+  reload without duplicate or legacy workspace shadow writes.
+- Conversation handoff evidence is intersected with authoritative backend
+  evidence, and previous private queries remain redacted from later model
+  output and durable UI storage.
+- Provider pinning, external-issue retries, public HTTP address validation,
+  portable data migration, Mermaid fallback rendering, and bounded report
+  continuation now fail closed at their documented boundaries.
+
 ## [1.4.0] - 2026-08-03
 
 ### Added
@@ -296,8 +464,14 @@ Detailed commit-level history is available via `git log`.
 - HTML report generation and CSV / JSON export.
 - AGPL v3.0 licensing throughout.
 
-[Unreleased]: https://github.com/Gracker/SmartPerfetto/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/Gracker/SmartPerfetto/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.8...v1.3.0
+[1.2.8]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.7...v1.2.8
+[1.2.7]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.4...v1.2.7
 [1.2.4]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.3...v1.2.4
 [1.2.1]: https://github.com/Gracker/SmartPerfetto/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Gracker/SmartPerfetto/compare/v1.1.1...v1.2.0

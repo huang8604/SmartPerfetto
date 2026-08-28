@@ -75,7 +75,7 @@ and frontend readiness.
 | Strategies | `backend/strategies/` | Scene strategies, prompt templates, knowledge templates |
 | Self-Evolution | `backend/src/services/selfEvolution/`, `backend/src/routes/selfEvolutionAdminRoutes.ts` | RunManifest, feedback projection, eval/replay, proposal gates, overlays, reconciliation, and the RBAC control plane |
 | Agent external feedback | `backend/src/services/externalIssueReporting/`, `agentExternalIssueRoutes.ts`, AI Assistant plugin | Source-run signals, pinned-provider triage, strict validation, and deidentified GitHub drafts with no automatic submission |
-| Code-aware analysis | `backend/src/services/codebase/`, `backend/src/services/rag/`, `backend/src/services/symbol/` | Local codebase registry, source ingestion, symbol resolution, lookup filtering, and patch status verification |
+| Code-aware analysis | `backend/src/services/codebase/`, `backend/src/services/rag/`, `backend/src/services/symbol/` | Local path registration, index-free on-demand search/read, optional source indexing, symbol resolution, private projection, and patch status verification |
 | External Android knowledge | `backend/src/services/androidInternalsWiki/`, `externalKnowledgeSourceRegistry.ts`, `ragStore.ts` | Full-corpus Wiki audit, version/fingerprint identity, generation indexing, license/consent/scope, and private-content projection |
 | Trace processor | `backend/src/services/traceProcessorService.ts` | Trace loading, RPC management, SQL query execution |
 | Reports | `backend/src/services/htmlReportGenerator.ts` | HTML report generation |
@@ -106,6 +106,40 @@ A table, module, input format, or SQL capability added to browser WASM must not
 be claimed by Skills, Strategies, the CLI, or AI reports until the native pin
 passes the five-platform prebuild, regression, and release gates.
 
+## Web Assistant Surfaces And Identity Lifecycle
+
+The two Web UI assistant surfaces share one authentication boundary but do not
+share a trace prerequisite:
+
+- `/assistant` hosts the Conversation-first `ConversationPage`. It supports
+  ordinary multi-turn conversation without a loaded trace and becomes
+  trace-aware only after the user attaches one.
+- With a loaded trace, `AIPanel`, the sidebar, and the floating window share the
+  page- and trace-scoped `AnalysisBackendConnection`. A completed background
+  upload creates only a connection candidate; AI analysis can use the backend
+  only after the scoped lease's native processor reports ready.
+- The Viewer always continues to use in-browser `trace_processor.wasm`. A page
+  lease governs only AI-backend authorization, status, and lifetime; it neither
+  installs a global HTTP RPC target nor converts the Viewer to a native trace
+  processor. `/api/workspaces/:workspaceId/traces/leases/:leaseId/connection`
+  returns coarse status only and never exposes ports, credentials, file paths,
+  or cross-tenant details.
+
+In OIDC mode, session, trace, lease, connection, run/receipt, and transient
+connection state remain in page memory only. Persisted messages first remove
+runtime bindings and private source text, then use a tenant/user/workspace-
+scoped namespace; changing identity or workspace cannot restore another
+scope's history. Logout, 401, cross-tab authority invalidation, identity/context
+changes, and page disposal abort start/stream work, advance the runtime
+generation, and clear page state so late results cannot write into a new
+identity.
+
+Local/API-key mode keeps its existing browser request and resume behavior: the
+shared helper does not add cookie credentials unconditionally, and a non-OIDC
+401 is not treated as OIDC authority loss. This integration adds no environment
+variables or configuration keys; providers, runtimes, and endpoints continue
+to come from the existing configuration sources.
+
 ## Main Analysis Data Flow
 
 In OIDC mode, the static entry point gates startup through `/api/auth/session`
@@ -126,6 +160,8 @@ metadata-only visibility.
    UI -> POST /api/agent/v1/analyze
       -> AgentAnalyzeSessionService.prepareSession()
       -> selected runtime analyze()
+      -> shared TraceCompleteness probe
+         -> shadow capability_manifest@1 probe-time snapshot
 
 3. Agent gathers evidence
    Runtime -> MCP tools
@@ -154,10 +190,20 @@ metadata-only visibility.
 
 6. Finish and report
    conclusion -> analysis_completed -> sanitized CodeRef/patch metadata
-      -> AnalysisReceiptV1
+      -> AnalysisReceiptV2 (including runManifestId)
       -> HTML report + CLI artifacts + analysis-result snapshot
       -> /api/reports/:id
 ```
+
+`capability_manifest@1` sits between shared completeness probing and Agent
+evidence collection. It binds the trace bytes, the identity of the trace
+processor that is actually running, and the capability states. The current
+system prompt and visible chat intentionally ignore this shadow snapshot.
+Before activation, Claude/OpenAI caches keyed only by `traceId` must be re-keyed
+or invalidated by trace + running-processor identity so they cannot reuse
+capabilities from an older processor. HTML-report, analysis-result-snapshot,
+and CLI persistence are wired in the next task; this step does not change those
+output contracts.
 
 CLI `smp run` / `smp ask` / `smp compare` reuse the same session, runtime,
 Skill, report, and trace-processor path. The difference is local storage under
@@ -208,6 +254,10 @@ code-aware results cannot create public drafts, and security reports use a
 private advisory. See
 [Agent-Assisted GitHub Feedback](../getting-started/agent-assisted-feedback.en.md).
 
+## Four-Layer Codebase Import Boundary
+
+Codebase import has four boundaries that must not collapse: `PathSecurityGate` owns root/file identity and bounded safe reads; `SourceSelectionPolicy` provides one canonical IR for path scope, extensions, and exclusions; `SourceEnumerator` produces untrusted candidates through `ripgrep > git > node-walk` and reports coverage; `sourceDisclosure` intersects the live selection policy with the frozen consent grant at every source-text exit. On-demand reads and indexed lookups share that disclosure predicate, while active/pending index generations remain orthogonal to live-root availability.
+
 ## Runtime And Provider Boundaries
 
 | Runtime | Providers | Key boundary |
@@ -250,7 +300,7 @@ reports or snapshots.
 
 | Mode | Entry | Data source | Contract |
 |---|---|---|---|
-| Raw Trace Compare | frontend reference trace, CLI `smp compare` | live current trace + reference trace queries | shared comparison identity, evidence pack, session snapshot, and report section |
+| Raw Trace Compare | frontend baseline/comparison traces, CLI `smp compare` | live queries over any two raw traces in the same workspace | shared comparison identity, evidence pack, session snapshot, and report section; API compatibility roles remain current/reference |
 | Analysis Result Compare | frontend multi-result comparison API | persisted completed-analysis snapshots | keeps workspace/RBAC/matrix behavior and reuses the shared report section |
 
 For the Web UI dual trace workspace state machine, see
