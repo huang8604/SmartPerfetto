@@ -13,6 +13,7 @@ import type {ClaimVerificationResult} from '../../types/claimVerification';
 import type {IdentityResolutionV1} from '../../types/identityContract';
 import {sanitizeCodeAwareText} from './codeAwareOutputRegistry';
 import type {CodeLookupSummary} from '../codebase/codeLookupLedger';
+import {sanitizeSourceUseDecision} from '../codebase/sourceUseDecision';
 import {isCodebaseKind} from '../codebase/codebaseRegistry';
 import {sanitizeStoredCapabilityManifestAttribution} from '../capabilityManifest';
 import {sanitizeStoredTraceSummaryAttribution} from '../traceSummaryAttribution';
@@ -70,6 +71,7 @@ function boundedDisplayName(value: unknown): string | undefined {
 
 function projectPrivateCodeLookupSummary(
   summary: CodeLookupSummary | undefined,
+  currentSelectedCodebaseIds: readonly string[],
 ): CodeLookupSummary | undefined {
   if (!summary) return undefined;
   const referencedCodebaseIds = summary.referencedCodebaseIds
@@ -94,12 +96,17 @@ function projectPrivateCodeLookupSummary(
     })
     .filter((value): value is NonNullable<typeof value> => Boolean(value))
     .slice(0, MAX_PRIVATE_PROVENANCE_IDS);
+  const sourceUseDecision = sanitizeSourceUseDecision(
+    summary.sourceUseDecision,
+    currentSelectedCodebaseIds,
+  );
   return {
     lookupCount: Math.max(0, Math.min(1_000_000, Math.floor(summary.lookupCount || 0))),
     patchCount: Math.max(0, Math.min(1_000_000, Math.floor(summary.patchCount || 0))),
     referencedCodebaseIds,
     ...(usedCodebaseIds?.length ? {usedCodebaseIds} : {}),
     ...(usedKnowledgeSources?.length ? {usedKnowledgeSources} : {}),
+    ...(sourceUseDecision ? {sourceUseDecision} : {}),
   };
 }
 
@@ -416,9 +423,24 @@ export function projectPrivateAnalysisResult(
 export function projectPrivateSessionStateSnapshot(
   snapshot: SessionStateSnapshot,
 ): SessionStateSnapshot {
-  const codeLookupSummary = projectPrivateCodeLookupSummary(snapshot.codeLookupSummary);
-  const codebaseSnapshot = projectPrivateCodebaseSnapshot(snapshot.codebaseSnapshot);
   const codebaseIds = projectPrivateIdList(snapshot.codebaseIds);
+  const currentSelectedCodebaseIds = codebaseIds ?? [];
+  const projectedCodeLookupSummary = projectPrivateCodeLookupSummary(
+    snapshot.codeLookupSummary,
+    currentSelectedCodebaseIds,
+  );
+  const sourceUseDecision = sanitizeSourceUseDecision(
+    snapshot.sourceUseDecision,
+    currentSelectedCodebaseIds,
+  ) ??
+    projectedCodeLookupSummary?.sourceUseDecision;
+  const codeLookupSummary = projectedCodeLookupSummary
+    ? {
+        ...projectedCodeLookupSummary,
+        ...(sourceUseDecision ? {sourceUseDecision} : {}),
+      }
+    : undefined;
+  const codebaseSnapshot = projectPrivateCodebaseSnapshot(snapshot.codebaseSnapshot);
   const knowledgeSourceIds = projectPrivateIdList(snapshot.knowledgeSourceIds);
   const analysisReceipt = projectPrivateAnalysisReceipt(snapshot.analysisReceipt);
   const traceSummary = sanitizeStoredTraceSummaryAttribution(snapshot.traceSummary);
@@ -467,6 +489,7 @@ export function projectPrivateSessionStateSnapshot(
       ? {knowledgeSourceSnapshot: snapshot.knowledgeSourceSnapshot.map(item => ({...item}))}
       : {}),
     ...(codeLookupSummary ? {codeLookupSummary} : {}),
+    ...(sourceUseDecision ? {sourceUseDecision} : {}),
     runSequence: snapshot.runSequence,
     conversationOrdinal: snapshot.conversationOrdinal,
   };

@@ -20,6 +20,11 @@
         "id": "sf",
         "name": "/system/bin/surfaceflinger",
         "uid": 1000
+      },
+      {
+        "id": "app-child",
+        "name": "com.smartperfetto.fixture:worker",
+        "uid": 10999
       }
     ],
     "threads": [
@@ -64,6 +69,12 @@
         "id": "sf-main",
         "process": "sf",
         "name": "surfaceflinger",
+        "is_main": true
+      },
+      {
+        "id": "child-main",
+        "process": "app-child",
+        "name": "main",
         "is_main": true
       }
     ]
@@ -196,6 +207,65 @@
       "thread": "main",
       "cpu": 0,
       "end_state": "S"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "520000000",
+      "duration_ns": "80000000",
+      "process": "app",
+      "thread": "main",
+      "name": "ChaosTask"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "610000000",
+      "duration_ns": "75000000",
+      "process": "app",
+      "thread": "main",
+      "name": "StartupLoadMarker"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "700000000",
+      "duration_ns": "70000000",
+      "process": "app",
+      "thread": "main",
+      "name": "generic trace span"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "780000000",
+      "duration_ns": "10000000",
+      "process": "app",
+      "thread": "main",
+      "name": "Lcom/smartperfetto/fixture/Marker;"
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "800000000",
+      "duration_ns": "10000000",
+      "process": "app",
+      "thread": "main",
+      "name": "lowercaseLabel"
+    },
+    {
+      "type": "perf-sample",
+      "at_ns": "830000000",
+      "process": "app",
+      "thread": "main",
+      "function_name": "SmartPerfettoFrameworkHotFunction",
+      "module_name": "libsmartperfetto_framework_fixture.so",
+      "sample_count": 12,
+      "sample_interval_ns": "1000000",
+      "cpu": 0
+    },
+    {
+      "type": "atrace-slice",
+      "at_ns": "860000000",
+      "duration_ns": "20000000",
+      "process": "app-child",
+      "thread": "child-main",
+      "name": "WorkerLoadMarker"
     }
   ]
 }

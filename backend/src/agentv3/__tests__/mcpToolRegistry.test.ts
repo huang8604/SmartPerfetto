@@ -10,6 +10,7 @@ import {
   MCP_NAME_PREFIX,
   buildAllowedTools,
   filterByExposure,
+  resolveMcpToolPlanCapability,
   type McpToolDefinition,
   type McpToolRegistration,
 } from '../mcpToolRegistry';
@@ -28,6 +29,22 @@ function stub(name: string): unknown {
 }
 
 describe('McpToolRegistry — basic registration', () => {
+  it('accepts legacy exported definitions without plan capability and derives a safe default', () => {
+    const registry = new McpToolRegistry();
+    registry.registerSdk(stub('legacy'), 'legacy_runtime_tool', 'public');
+    const registered = registry.list()[0];
+    const legacyDefinition: McpToolDefinition = {
+      name: registered.name,
+      shared: registered.shared,
+      tool: registered.tool,
+      exposure: registered.exposure,
+    };
+
+    expect(legacyDefinition.planCapability).toBeUndefined();
+    expect(resolveMcpToolPlanCapability(legacyDefinition)).toBe('evidence');
+    expect(registry.list()[0].planCapability).toBe('evidence');
+  });
+
   it('register preserves insertion order', () => {
     const registry = new McpToolRegistry();
     registry.registerSdk(stub('a'), 'execute_sql', 'public');
@@ -125,6 +142,37 @@ describe('McpToolRegistry — allowedTools shape', () => {
       `${MCP_NAME_PREFIX}one`,
       `${MCP_NAME_PREFIX}two`,
     ]);
+  });
+
+  it('keeps the source-use control classification and request-shaped views in parity', () => {
+    const registry = new McpToolRegistry();
+    registry.registerSdk(stub('trace'), 'execute_sql', 'public');
+    registry.registerSdk(
+      stub('source-control'),
+      'record_source_use_decision',
+      'requires_codebase_permission',
+    );
+    const denied = {sessionId: 's1', hasCodebaseAccess: false};
+    const allowed = {sessionId: 's1', hasCodebaseAccess: true};
+
+    expect(registry.listForRequest(denied).map(def => def.name))
+      .toEqual(['execute_sql']);
+    expect(registry.buildAllowedTools(denied))
+      .toEqual([`${MCP_NAME_PREFIX}execute_sql`]);
+    expect(registry.listForRequest(allowed)).toContainEqual(expect.objectContaining({
+      name: 'record_source_use_decision',
+      planCapability: 'control',
+    }));
+    expect(registry.buildAllowedTools(allowed)).toContain(
+      `${MCP_NAME_PREFIX}record_source_use_decision`,
+    );
+
+    const deniedTools = ((registry.buildSdkServer({scope: denied}) as any).instance?.tools ?? [])
+      .map((entry: {name: string}) => entry.name.replace(MCP_NAME_PREFIX, ''));
+    const allowedTools = ((registry.buildSdkServer({scope: allowed}) as any).instance?.tools ?? [])
+      .map((entry: {name: string}) => entry.name.replace(MCP_NAME_PREFIX, ''));
+    expect(deniedTools).not.toContain('record_source_use_decision');
+    expect(allowedTools).toContain('record_source_use_decision');
   });
 });
 

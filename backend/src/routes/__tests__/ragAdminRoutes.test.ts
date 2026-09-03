@@ -20,6 +20,7 @@ import {
 import {PathSecurityGate} from '../../services/codebase/pathSecurityGate';
 import {NativeDirectoryPicker} from '../../services/codebase/nativeDirectoryPicker';
 import {SourceEnumerator} from '../../services/codebase/sourceEnumerator';
+import {CodebaseManagementService} from '../../services/codebase/codebaseManagementService';
 import {ExternalKnowledgeSourceRegistry} from '../../services/externalKnowledgeSourceRegistry';
 import {AndroidInternalsWikiIngester} from '../../services/androidInternalsWiki/androidInternalsWikiIngester';
 
@@ -29,6 +30,7 @@ let registry: CodebaseRegistry;
 let externalKnowledgeRegistry: ExternalKnowledgeSourceRegistry;
 let app: express.Express;
 let directoryPicker: NativeDirectoryPicker;
+let codebaseManagementService: CodebaseManagementService;
 let pickerSelectedRoot: string;
 let pickerSelectionSequence: number;
 let externalPickerDir: string | undefined;
@@ -46,6 +48,12 @@ beforeEach(() => {
     path.join(tmpDir, 'external-knowledge-sources.json'),
   );
   const gate = new PathSecurityGate({allowlistRoots: [tmpDir]});
+  codebaseManagementService = new CodebaseManagementService({
+    registry,
+    store,
+    gate,
+    sourceEnumerator: new SourceEnumerator(),
+  });
   pickerSelectedRoot = tmpDir;
   pickerSelectionSequence = 0;
   directoryPicker = new NativeDirectoryPicker({
@@ -96,6 +104,7 @@ beforeEach(() => {
   app.use('/api/rag', createRagAdminRoutes(store, {
     registry,
     gate,
+    codebaseManagementService,
     directoryPicker,
     externalKnowledgeRegistry,
     androidInternalsWikiIngester: new AndroidInternalsWikiIngester(
@@ -509,6 +518,110 @@ describe('Android Internals Wiki routes', () => {
 });
 
 describe('codebase routes', () => {
+  it('uses the same safe preview projection as the management service', async () => {
+    const root = path.join(tmpDir, 'aosp-parity');
+    fs.mkdirSync(path.join(root, '.repo'), {recursive: true});
+    fs.mkdirSync(path.join(root, 'frameworks/base'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'frameworks/base/Foo.java'), 'class Foo {}\n');
+    fs.writeFileSync(path.join(root, '.repo/manifest.xml'), [
+      '<manifest>',
+      '  <project name="platform/frameworks/base" path="frameworks/base" groups="default,pdk" />',
+      '</manifest>',
+    ].join('\n'));
+
+    const expected = await codebaseManagementService.preview({
+      rootPath: root,
+      kind: 'aosp',
+    }, DEFAULT_SCOPE);
+    const response = await request(app)
+      .post('/api/rag/codebases/preview')
+      .send({rootPath: root, kind: 'aosp'});
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({success: true, preview: expected});
+    expect(JSON.stringify(response.body)).not.toContain(root);
+  });
+
+  it('sanitizes manifest degradation reasons while keeping known codes and root drift', async () => {
+    const root = path.join(tmpDir, 'aosp-manifest-reason');
+    fs.mkdirSync(root, {recursive: true});
+    fs.writeFileSync(path.join(root, 'Foo.java'), 'class Foo {}\n');
+    const requestPreview = async (reason: string) => {
+      const previewGate = new PathSecurityGate({allowlistRoots: [tmpDir]});
+      const previewService = new CodebaseManagementService({
+        registry,
+        store,
+        gate: previewGate,
+        sourceEnumerator: new SourceEnumerator(),
+        readAospManifestProjects: async () => {
+          throw new Error(reason);
+        },
+      });
+      const previewApp = express();
+      previewApp.use(express.json());
+      previewApp.use('/api/rag', createRagAdminRoutes(store, {
+        registry,
+        gate: previewGate,
+        codebaseManagementService: previewService,
+        directoryPicker,
+        externalKnowledgeRegistry,
+      }));
+      return request(previewApp)
+        .post('/api/rag/codebases/preview')
+        .send({rootPath: root, kind: 'aosp'});
+    };
+
+    const secretCanary = 'secret_token_canary';
+    const unknown = await requestPreview(secretCanary);
+    expect(unknown.status).toBe(200);
+    expect(unknown.body.preview.manifestUnavailableReason)
+      .toBe('aosp_manifest_discovery_failed');
+    expect(JSON.stringify(unknown.body)).not.toContain(secretCanary);
+
+    const known = await requestPreview('source_metadata_too_large');
+    expect(known.status).toBe(200);
+    expect(known.body.preview.manifestUnavailableReason).toBe('source_metadata_too_large');
+
+    const drift = await requestPreview('codebase_root_realpath_drift');
+    expect(drift.status).toBe(400);
+    expect(drift.body.error).toBe('codebase_root_realpath_drift');
+  });
+
+  it('independently sanitizes token-shaped diagnostics in list, detail, and audit JSON', async () => {
+    const ref = registry.register({
+      kind: 'app_source',
+      displayName: 'Diagnostic Route',
+      rootPath: tmpDir,
+      rootRealpath: tmpDir,
+      ...DEFAULT_SCOPE,
+    });
+    const tokenCanary = 'ROUTE_TOKEN_SECRET_CANARY_123456';
+    registry.updateIngestStatus(ref.codebaseId, {
+      lastIngestStatus: 'failed',
+      lastIngestError: tokenCanary,
+    }, DEFAULT_SCOPE);
+
+    const list = await request(app).get('/api/rag/codebases');
+    const detail = await request(app).get(`/api/rag/codebases/${ref.codebaseId}`);
+    const audit = await request(app).get(`/api/rag/codebases/${ref.codebaseId}/audit`);
+    const unknown = JSON.stringify({list: list.body, detail: detail.body, audit: audit.body});
+
+    expect(list.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(audit.status).toBe(200);
+    expect(unknown).not.toContain(tokenCanary);
+    expect(unknown).not.toContain('rootAuthorization');
+    expect(unknown).toContain('codebase_operation_failed');
+
+    registry.updateIngestStatus(ref.codebaseId, {
+      lastIngestStatus: 'blocked_by_security',
+      lastIngestError: 'codebase_root_realpath_drift',
+    }, DEFAULT_SCOPE);
+    const knownAudit = await request(app).get(`/api/rag/codebases/${ref.codebaseId}/audit`);
+    expect(knownAudit.body.audit.lastIngestError).toBe('codebase_root_realpath_drift');
+    expect(JSON.stringify(knownAudit.body)).not.toContain(tokenCanary);
+  });
+
   it('keeps AOSP preview available when optional manifest metadata is too large', async () => {
     const root = path.join(tmpDir, 'aosp-large-manifest');
     fs.mkdirSync(path.join(root, '.repo'), {recursive: true});
@@ -612,14 +725,16 @@ describe('codebase routes', () => {
     expect(listed.body.codebases).toEqual(expect.arrayContaining([
       expect.objectContaining({
         codebaseId: registered.body.codebase.codebaseId,
-        rootAuthorization: 'native_picker',
       }),
     ]));
+    expect(listed.body.codebases).toEqual(await codebaseManagementService.list(DEFAULT_SCOPE));
+    expect(JSON.stringify(listed.body)).not.toContain('rootAuthorization');
     const audit = await request(app)
       .get(`/api/rag/codebases/${registered.body.codebase.codebaseId}/audit`);
-    expect(audit.body.audit).toMatchObject({
-      rootAuthorization: 'native_picker',
-    });
+    expect(audit.body.audit).toEqual(
+      codebaseManagementService.audit(registered.body.codebase.codebaseId, DEFAULT_SCOPE),
+    );
+    expect(JSON.stringify(audit.body)).not.toContain('rootAuthorization');
 
     const reused = await request(app)
       .post('/api/rag/codebases/register')

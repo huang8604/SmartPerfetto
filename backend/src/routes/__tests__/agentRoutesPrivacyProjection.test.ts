@@ -7,6 +7,7 @@ import {EventEmitter} from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import ts from 'typescript';
 import {
   agentRoutesPrivacyProjectionTestSeam,
   agentRoutesReceiptTestSeam,
@@ -24,9 +25,149 @@ import {routeAdaptiveEvidencePreflight} from '../../agentRuntime/adaptiveEvidenc
 
 const sessionId = 'private-route-projection';
 
+function completedSnapshotInputFromRoute(): ts.ObjectLiteralExpression | undefined {
+  const routePath = path.resolve(__dirname, '../agentRoutes.ts');
+  const sourceText = fs.readFileSync(routePath, 'utf8');
+  const sourceFile = ts.createSourceFile(
+    routePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const finalizer = sourceFile.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === 'ensureCompletedAnalysisFinalArtifacts',
+  );
+  if (!finalizer) return undefined;
+
+  let snapshotInput: ts.ObjectLiteralExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'persistCompletedAnalysisResultSnapshot' &&
+      ts.isObjectLiteralExpression(node.arguments[0])
+    ) {
+      snapshotInput = node.arguments[0];
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(finalizer);
+  return snapshotInput;
+}
+
 afterEach(() => clearCodeAwareOutputGuards(sessionId));
 
 describe('agent route private projections', () => {
+  it('does not publish valid-looking source provenance without a current-run accessor', () => {
+    const fabricated = {
+      schemaVersion: 'conclusion_contract_v1',
+      mode: 'focused_answer',
+      conclusions: [],
+      clusters: [],
+      evidenceChain: [],
+      claims: [{id: 'claim-stale', text: 'trace fact', references: []}],
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['stale-app'],
+        status: 'corroborated',
+        attemptedTools: ['read_codebase_file'],
+        queriedCodebaseIds: ['stale-app'],
+        usedCodebaseIds: ['stale-app'],
+        references: [{
+          referenceId: 'stale-lookup',
+          codebaseId: 'stale-app',
+          filePath: 'src/Stale.kt',
+          lookupKind: 'body',
+          rootPath: '/Users/chris/SECRET_STALE_ROOT',
+          snippet: 'SECRET_STALE_SNIPPET',
+          query: 'SECRET_STALE_QUERY',
+        }],
+      },
+      sourceReferences: [{
+        referenceId: 'stale-lookup',
+        codebaseId: 'stale-app',
+        filePath: 'src/Stale.kt',
+        lookupKind: 'body',
+      }],
+      sourceClaimBindings: [{
+        claimId: 'claim-stale',
+        mechanismStatus: 'corroborated',
+        sourceReferenceIds: ['stale-lookup'],
+        traceEvidenceRefIds: ['trace-stale'],
+        reason: 'SECRET_STALE_REASON',
+      }],
+      uncertainties: [],
+      nextSteps: [],
+    };
+    const projected = (
+      agentRoutesPrivacyProjectionTestSeam.analysisCompletedData as (
+        data: any,
+        actualSourceUseDecision?: unknown,
+      ) => any
+    )({
+      conclusion: 'trace-only conclusion',
+      conclusionContract: fabricated,
+      findings: [],
+    }, undefined);
+
+    expect(projected.conclusion).toBe('trace-only conclusion');
+    expect(projected.conclusionContract).not.toHaveProperty('sourceUseDecision');
+    expect(projected.conclusionContract).not.toHaveProperty('sourceReferences');
+    expect(projected.conclusionContract).not.toHaveProperty('sourceClaimBindings');
+    expect(JSON.stringify(projected)).not.toContain('SECRET_');
+    expect(JSON.stringify(projected)).not.toContain('/Users/chris');
+
+    const persisted = agentRoutesPrivacyProjectionTestSeam.sanitizePersistedAnalysisCompletedEvent(
+      {
+        sessionId: 'session-stale-no-accessor',
+        query: 'trace-only query',
+        traceId: 'trace-stale-no-accessor',
+        codeAwareMode: 'provider_send',
+        codebaseIds: ['stale-app'],
+        dataEnvelopes: [],
+      } as any,
+      {
+        eventType: 'analysis_completed',
+        eventData: JSON.stringify({
+          type: 'analysis_completed',
+          data: {
+            privateProjectionVersion: 1,
+            conclusion: 'trace-only conclusion',
+            conclusionContract: fabricated,
+            findings: [],
+          },
+          timestamp: 1,
+        }),
+        createdAt: 1,
+      } as any,
+    );
+    const persistedContract = JSON.parse(persisted.eventData).data.conclusionContract;
+    expect(persistedContract).not.toHaveProperty('sourceUseDecision');
+    expect(persistedContract).not.toHaveProperty('sourceReferences');
+    expect(persistedContract).not.toHaveProperty('sourceClaimBindings');
+    expect(persisted.eventData).not.toContain('SECRET_');
+    expect(persisted.eventData).not.toContain('/Users/chris');
+  });
+
+  it('passes the durable actual source decision into completed snapshot persistence', () => {
+    const snapshotInput = completedSnapshotInputFromRoute();
+    const sourceUseDecision = snapshotInput?.properties.find(
+      (property): property is ts.PropertyAssignment =>
+        ts.isPropertyAssignment(property) &&
+        property.name.getText() === 'sourceUseDecision',
+    );
+
+    expect(snapshotInput).toBeDefined();
+    expect(sourceUseDecision?.initializer.getText()).toBe(
+      'durableResultForClient.sourceUseDecision',
+    );
+  });
+
   it('whitelists stored capability attribution in private persisted SSE projection', () => {
     const canary = '/private/SSE_CAPABILITY_CANARY';
     const hash = 'a'.repeat(64);

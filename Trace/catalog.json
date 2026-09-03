@@ -1496,7 +1496,7 @@
       "trace": {
         "file": "trace.overlay.pftrace",
         "format": "perfetto-protobuf",
-        "sha256": "3218045053164aa342f1a70dc8bc684d41dfab7846ea0a814fb804622fc91ae4",
+        "sha256": "2472d73dd70e3a358077bfcfa7bfbbfeb281b5e0b421a1251cbfd337369c3c57",
         "materialization": "base-plus-overlay"
       },
       "android": {
@@ -1644,24 +1644,50 @@
             "target": "code_pinpoint",
             "mode": "semantic",
             "source_file": "backend/skills/composite/code_pinpoint.skill.yaml",
-            "parameters": {},
+            "parameters": {
+              "package": "com.smartperfetto.fixture"
+            },
             "required_steps": [
               "hot_slices",
-              "native_modules"
+              "native_symbols"
             ],
             "required_sql_steps": [
               "hot_slices",
-              "native_modules"
+              "native_symbols"
             ],
             "forced_sql_steps": [],
             "isolated_sql_probes": [],
             "expected_condition_skips": [],
             "semantic_step": "hot_slices",
             "required_columns": [
+              "slice_id",
+              "ts",
+              "dur_ms",
+              "upid",
+              "utid",
               "process_name",
               "thread_name",
               "slice_name",
-              "dur_ms"
+              "anchor_kind",
+              "source_query_hint"
+            ],
+            "min_rows": 1,
+            "assertions": [
+              {
+                "column": "slice_name",
+                "operator": "eq",
+                "value": "StartupLoadMarker"
+              },
+              {
+                "column": "anchor_kind",
+                "operator": "eq",
+                "value": "app_trace_label"
+              },
+              {
+                "column": "source_query_hint",
+                "operator": "eq",
+                "value": "StartupLoadMarker"
+              }
             ],
             "required_marker": "SmartPerfetto::CASE::framework-pipelines"
           },
@@ -8344,6 +8370,68 @@
       },
       "case_dir": "Trace/constructed/scheduler-cpu-contention",
       "manifest_path": "Trace/constructed/scheduler-cpu-contention/case.json"
+    },
+    {
+      "schema_version": 1,
+      "id": "source-analysis-semantic",
+      "kind": "constructed",
+      "title": "Source analysis semantic ground truth",
+      "description": "Deterministic source analysis semantic ground truth signals over the android-startup-light real base trace.",
+      "scene": "startup",
+      "tags": [
+        "android",
+        "constructed",
+        "startup"
+      ],
+      "aliases": [],
+      "trace": {
+        "file": "trace.overlay.pftrace",
+        "format": "perfetto-protobuf",
+        "sha256": "3aa6460dde5cc6a6410732a76a183185ea0e13e9758d682e7fdbd00688a9774f",
+        "materialization": "base-plus-overlay"
+      },
+      "android": {
+        "release": "16",
+        "api_level": 36,
+        "device": "Google raven base",
+        "build_fingerprint": null,
+        "compatibility": {
+          "min_api": 35,
+          "max_api": 36
+        }
+      },
+      "source": {
+        "origin": "SmartPerfetto deterministic trace generator",
+        "captured_at": null,
+        "imported_at": "2026-07-13T00:00:00.000Z",
+        "license": "AGPL-3.0-or-later",
+        "consent": "generated",
+        "privacy_review": "not-applicable",
+        "sanitization_review": "not-applicable",
+        "publication": "public",
+        "evidence_tier": "R3"
+      },
+      "analysis": {
+        "results": [
+          "analysis/expected.json"
+        ],
+        "logs": []
+      },
+      "construction": {
+        "base_case_id": "android-startup-light",
+        "scenario_file": "scenario.json",
+        "generator_version": 1,
+        "seed": "source-analysis-semantic-v1",
+        "output": "Trace/.generated/constructed/source-analysis-semantic/trace.pftrace",
+        "runtime_revision": "add693d8b338ba9599dbcbc3e300b1ab8c000897"
+      },
+      "coverage": {
+        "skills": [],
+        "strategies": [],
+        "expectations": []
+      },
+      "case_dir": "Trace/constructed/source-analysis-semantic",
+      "manifest_path": "Trace/constructed/source-analysis-semantic/case.json"
     },
     {
       "schema_version": 1,

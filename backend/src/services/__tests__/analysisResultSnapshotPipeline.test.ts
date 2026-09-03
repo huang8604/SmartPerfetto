@@ -14,6 +14,14 @@ import {
 import { ENTERPRISE_DB_PATH_ENV, openEnterpriseDb } from '../enterpriseDb';
 import {clearCodeAwareOutputGuards, registerCodeAwareCanary} from '../security/codeAwareOutputRegistry';
 import type {CapabilityManifestAttributionV1} from '../../types/capabilityManifest';
+import {createClaudeMcpServer} from '../../agentv3/claudeMcpServer';
+import {finalizeSourceAwareAnalysisResult} from '../codebase/sourceClaimVerifier';
+import {sanitizeSourceReference} from '../codebase/sourceUseDecision';
+import {
+  createRuntimeSourceFinalizationFixture,
+  createSourceAuthoredAnalysisResult,
+  SOURCE_FINALIZATION_CANARY,
+} from '../../agentRuntime/__tests__/sourceFinalizationFixture';
 
 const originalDbPath = process.env[ENTERPRISE_DB_PATH_ENV];
 const tmpDirs: string[] = [];
@@ -701,6 +709,9 @@ describe('analysis result snapshot pipeline', () => {
     useTempEnterpriseDb();
     const sessionId = 'session-private-snapshot';
     const canary = 'PRIVATE_SNAPSHOT_DB_CANARY';
+    const canaryCodebaseId = `private-${canary}`;
+    const rawRoot = `/private/root/${canary}`;
+    const rawSnippet = `private source snippet ${canary}`;
     registerCodeAwareCanary(sessionId, canary);
     try {
       const snapshot = persistCompletedAnalysisResultSnapshot({
@@ -713,9 +724,56 @@ describe('analysis result snapshot pipeline', () => {
         query: `query ${canary}`,
         traceLabel: `label ${canary}`,
         conclusion: `conclusion ${canary}`,
-        conclusionContract: {claims: [{statement: canary}]},
+        conclusionContract: {
+          schemaVersion: 'conclusion_contract_v1',
+          mode: 'focused_answer',
+          conclusions: [{rank: 1, statement: `trace conclusion ${canary}`}],
+          clusters: [],
+          evidenceChain: [],
+          claims: [{id: 'claim-private', text: `trace claim ${canary}`, references: []}],
+          uncertainties: [],
+          nextSteps: [],
+        },
+        sourceUseDecision: {
+          schemaVersion: 'source_use_decision@1',
+          codeAwareMode: 'provider_send',
+          selectedCodebaseIds: ['app-safe', canaryCodebaseId],
+          status: 'located',
+          attemptedTools: ['read_codebase_file', `tool-${canary}`],
+          queriedCodebaseIds: ['app-safe', canaryCodebaseId],
+          usedCodebaseIds: ['app-safe', canaryCodebaseId],
+          references: [{
+            id: 'model-safe-id',
+            referenceId: 'lookup-safe',
+            codebaseId: 'app-safe',
+            filePath: 'src/Safe.kt',
+            lookupKind: 'body',
+          }, {
+            id: `model-${canary}`,
+            referenceId: `lookup-${canary}`,
+            codebaseId: canaryCodebaseId,
+            filePath: `src/${canary}.kt`,
+            sourceGeneration: `generation-${canary}`,
+            lookupKind: 'body',
+            rootPath: rawRoot,
+            snippet: rawSnippet,
+          } as any],
+        },
         claimSupport: [{claimId: canary}] as any,
-        claimVerificationResult: {status: canary} as any,
+        claimVerificationResult: {
+          schemaVersion: 'claim_verifier@1',
+          status: 'passed',
+          policy: 'record_only',
+          passed: true,
+          checkedClaimCount: 1,
+          unsupportedClaimCount: 0,
+          claimResults: [{
+            claimId: 'claim-private',
+            status: 'verified',
+            referenceResults: [],
+          }],
+          issues: [{message: canary}],
+        } as any,
         identityResolutions: [{identityRefId: canary}] as any,
         dataEnvelopes: [{
           ...envelope(),
@@ -777,6 +835,22 @@ describe('analysis result snapshot pipeline', () => {
       expect(snapshot?.capabilityManifest).toEqual(receiptCapabilityManifest);
       expect(snapshot?.summary.analysisReceipt?.capabilityManifest).toEqual(receiptCapabilityManifest);
       expect(snapshot?.summary.analysisReceipt?.outputs).toEqual({});
+      const storedSourceDecision = (snapshot?.conclusionContract as any)?.sourceUseDecision;
+      expect(storedSourceDecision).toEqual(expect.objectContaining({
+        schemaVersion: 'source_use_decision@1',
+        selectedCodebaseIds: ['app-safe'],
+        queriedCodebaseIds: ['app-safe'],
+        usedCodebaseIds: ['app-safe'],
+        references: [expect.objectContaining({
+          codebaseId: 'app-safe',
+          filePath: 'src/Safe.kt',
+          referenceId: 'lookup-safe',
+        })],
+      }));
+      expect(storedSourceDecision.references[0]).not.toHaveProperty('rootPath');
+      expect(storedSourceDecision.references[0]).not.toHaveProperty('snippet');
+      expect(JSON.stringify(storedSourceDecision)).not.toContain(rawRoot);
+      expect(JSON.stringify(storedSourceDecision)).not.toContain(rawSnippet);
 
       const db = openEnterpriseDb();
       try {
@@ -801,5 +875,254 @@ describe('analysis result snapshot pipeline', () => {
     } finally {
       clearCodeAwareOutputGuards(sessionId);
     }
+  });
+
+  test('persists the same real-handler finalized result without raw source echo', async () => {
+    useTempEnterpriseDb();
+    const fixture = createRuntimeSourceFinalizationFixture({
+      createMcpServer: createClaudeMcpServer,
+      sessionId: 'session-task7-finalized-snapshot',
+    });
+    try {
+      const {decision} = await fixture.executeProviderSourceLookup();
+      const result = finalizeSourceAwareAnalysisResult(
+        createSourceAuthoredAnalysisResult(fixture.sessionId),
+        fixture.sourceUse,
+      );
+      const snapshot = persistCompletedAnalysisResultSnapshot({
+        tenantId: 'tenant-task7',
+        workspaceId: 'workspace-task7',
+        userId: 'user-task7',
+        traceId: 'trace-task7',
+        sessionId: fixture.sessionId,
+        runId: 'run-task7',
+        query: 'analyze Task7Source',
+        conclusion: result.conclusion,
+        conclusionContract: result.conclusionContract,
+        sourceUseDecision: result.sourceUseDecision,
+        confidence: result.confidence,
+        partial: result.partial,
+        terminationReason: result.terminationReason,
+        terminationMessage: result.terminationMessage,
+        privateKnowledge: true,
+        outputLanguage: 'en',
+      });
+
+      expect(result.sourceUseDecision).toEqual(decision);
+      expect(JSON.stringify(result)).not.toContain(SOURCE_FINALIZATION_CANARY);
+      expect(JSON.stringify(snapshot)).not.toContain(SOURCE_FINALIZATION_CANARY);
+      expect((snapshot?.conclusionContract as any)?.sourceUseDecision).toEqual(decision);
+
+      const db = openEnterpriseDb();
+      try {
+        const row = db.prepare(`
+          SELECT summary_json, conclusion_contract_json
+          FROM analysis_result_snapshots
+          WHERE session_id = ?
+        `).get(fixture.sessionId);
+        expect(JSON.stringify(row)).not.toContain(SOURCE_FINALIZATION_CANARY);
+      } finally {
+        db.close();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('keeps only sanitized source-claim provenance in completed snapshots', () => {
+    useTempEnterpriseDb();
+    const actualSourceUseDecision = {
+      schemaVersion: 'source_use_decision@1' as const,
+      codeAwareMode: 'provider_send' as const,
+      selectedCodebaseIds: ['app-source'],
+      status: 'corroborated' as const,
+      attemptedTools: ['read_codebase_file'],
+      queriedCodebaseIds: ['app-source'],
+      usedCodebaseIds: ['app-source'],
+      references: [{
+        id: 'model-controlled-id',
+        referenceId: 'lookup-1',
+        codebaseId: 'app-source',
+        filePath: 'src/main/Foo.kt',
+        lookupKind: 'body' as const,
+        rootPath: '/private/raw-root-canary',
+        snippet: 'raw-source-canary',
+      } as any],
+    };
+    const snapshot = persistCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      traceId: 'trace-source',
+      sessionId: 'session-source',
+      runId: 'run-source',
+      query: 'analyze Foo.run',
+      conclusion: 'Foo.run matches the verified trace occurrence',
+      sourceUseDecision: actualSourceUseDecision,
+      conclusionContract: {
+        schemaVersion: 'conclusion_contract_v1',
+        mode: 'focused_answer',
+        conclusions: [{rank: 1, statement: 'Foo.run matches the verified trace occurrence'}],
+        clusters: [],
+        evidenceChain: [],
+        claims: [{
+          id: 'claim-1',
+          text: 'Foo.run matches the verified trace occurrence',
+          references: [{evidenceRefId: 'data:trace-1'}],
+        }],
+        sourceUseDecision: actualSourceUseDecision,
+        sourceReferences: [{
+          id: 'model-controlled-id',
+          referenceId: 'lookup-1',
+          codebaseId: 'app-source',
+          filePath: 'src/main/Foo.kt',
+          lookupKind: 'body',
+          text: 'raw-source-canary',
+        }],
+        sourceClaimBindings: [{
+          claimId: 'claim-1',
+          mechanismStatus: 'compatible',
+          sourceReferenceIds: ['model-controlled-id'],
+          traceEvidenceRefIds: ['data:trace-1'],
+          reason: 'raw-source-canary',
+        }],
+        uncertainties: [],
+        nextSteps: [],
+      },
+      claimVerificationResult: {
+        schemaVersion: 'claim_verifier@1',
+        status: 'passed',
+        policy: 'record_only',
+        passed: true,
+        checkedClaimCount: 1,
+        unsupportedClaimCount: 0,
+        claimResults: [{
+          claimId: 'claim-1',
+          status: 'verified',
+          referenceResults: [{evidenceRefId: 'data:trace-1', status: 'matched'}],
+        }],
+        issues: [],
+      },
+    });
+
+    const contract = snapshot?.conclusionContract as any;
+    expect(contract.sourceReferences[0].id).toMatch(/^source-ref-v1-/);
+    expect(contract.sourceClaimBindings[0].sourceReferenceIds).toEqual([
+      contract.sourceReferences[0].id,
+    ]);
+    expect(JSON.stringify(contract)).not.toContain('model-controlled-id');
+    expect(JSON.stringify(contract)).not.toContain('raw-source-canary');
+    expect(JSON.stringify(contract)).not.toContain('/private/raw-root-canary');
+
+    const db = openEnterpriseDb();
+    try {
+      const row = db.prepare(`
+        SELECT conclusion_contract_json AS conclusionContractJson
+        FROM analysis_result_snapshots
+        WHERE id = ?
+      `).get(snapshot!.id) as {conclusionContractJson: string};
+      expect(JSON.parse(row.conclusionContractJson)).toEqual(contract);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('keeps source-free completed snapshot contracts backward compatible', () => {
+    useTempEnterpriseDb();
+    const legacyContract = {
+      schemaVersion: 'conclusion_contract_v1' as const,
+      mode: 'focused_answer' as const,
+      conclusions: [{rank: 1, statement: 'Trace-only conclusion'}],
+      clusters: [],
+      evidenceChain: [],
+      claims: [{id: 'claim-trace-only', text: 'Trace-only conclusion', references: []}],
+      uncertainties: [],
+      nextSteps: [],
+      metadata: {legacy: true},
+    };
+
+    const snapshot = persistCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-a',
+      workspaceId: 'workspace-a',
+      userId: 'user-a',
+      traceId: 'trace-source-free',
+      sessionId: 'session-source-free',
+      runId: 'run-source-free',
+      query: 'trace-only analysis',
+      conclusion: 'Trace-only conclusion',
+      conclusionContract: legacyContract,
+    });
+
+    expect(snapshot?.conclusionContract).toEqual(legacyContract);
+    expect(snapshot?.conclusionContract).not.toHaveProperty('sourceUseDecision');
+    expect(snapshot?.conclusionContract).not.toHaveProperty('sourceReferences');
+    expect(snapshot?.conclusionContract).not.toHaveProperty('sourceClaimBindings');
+
+    const db = openEnterpriseDb();
+    try {
+      const row = db.prepare(`
+        SELECT conclusion_contract_json AS conclusionContractJson
+        FROM analysis_result_snapshots
+        WHERE id = ?
+      `).get(snapshot!.id) as {conclusionContractJson: string};
+      expect(JSON.parse(row.conclusionContractJson)).toEqual(legacyContract);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('does not persist body use or corroborated mechanisms for metadata-only source decisions', () => {
+    const bodyReference = sanitizeSourceReference({
+      referenceId: 'metadata-body-invalid',
+      codebaseId: 'app-source',
+      filePath: 'src/main/Foo.kt',
+      lookupKind: 'body',
+    })!;
+    const sourceUseDecision = {
+      schemaVersion: 'source_use_decision@1' as const,
+      codeAwareMode: 'metadata_only' as const,
+      selectedCodebaseIds: ['app-source'],
+      status: 'corroborated' as const,
+      attemptedTools: ['read_codebase_file'],
+      queriedCodebaseIds: ['app-source'],
+      usedCodebaseIds: ['app-source'],
+      references: [bodyReference],
+    };
+    const snapshot = buildCompletedAnalysisResultSnapshot({
+      tenantId: 'tenant-metadata-only',
+      workspaceId: 'workspace-metadata-only',
+      traceId: 'trace-metadata-only',
+      sessionId: 'session-metadata-only',
+      runId: 'run-metadata-only',
+      query: 'metadata-only analysis',
+      conclusion: 'Trace-only mechanism result',
+      sourceUseDecision,
+      conclusionContract: {
+        schemaVersion: 'conclusion_contract_v1',
+        mode: 'focused_answer',
+        conclusions: [],
+        clusters: [],
+        evidenceChain: [],
+        claims: [{id: 'claim-1', text: 'Trace-only mechanism result', references: []}],
+        sourceUseDecision,
+        sourceReferences: [bodyReference],
+        sourceClaimBindings: [{
+          claimId: 'claim-1',
+          mechanismStatus: 'corroborated',
+          sourceReferenceIds: [bodyReference.id],
+          traceEvidenceRefIds: ['trace-evidence-1'],
+        }],
+        uncertainties: [],
+        nextSteps: [],
+      },
+    });
+
+    const storedContract = snapshot?.conclusionContract as any;
+    expect(storedContract.sourceUseDecision.status).toBe('located');
+    expect(storedContract.sourceUseDecision.references).toEqual([]);
+    expect(storedContract.sourceReferences).toEqual([]);
+    expect(storedContract.sourceClaimBindings).toEqual([]);
+    expect(JSON.stringify(storedContract)).not.toContain('"lookupKind":"body"');
+    expect(JSON.stringify(storedContract)).not.toContain('"mechanismStatus":"corroborated"');
   });
 });

@@ -34,6 +34,20 @@ import {
   projectPrivateTerminationReason,
   projectPrivateUiActionProposals,
 } from './security/privateAnalysisProjection';
+import type {ConclusionContract} from '../agent/core/conclusionContract';
+import {
+  sanitizeSourceUseDecision,
+  type SourceUseDecisionV1,
+} from './codebase/sourceUseDecision';
+import {
+  projectSafeSourceProvenance,
+  sanitizeConclusionSourceContract,
+  verifySourceClaimBindings,
+} from './codebase/sourceClaimVerifier';
+import {
+  collectMatchedTraceEvidenceRefIdsByClaimId,
+  collectVerifiedTraceOccurrenceRefIdsByClaimId,
+} from './verifier/claimVerificationRunner';
 
 export interface CompletedAnalysisSnapshotInput {
   tenantId?: string;
@@ -47,6 +61,7 @@ export interface CompletedAnalysisSnapshotInput {
   traceLabel?: string;
   conclusion?: string;
   conclusionContract?: unknown;
+  sourceUseDecision?: SourceUseDecisionV1;
   claimSupport?: import('../types/evidenceContract').ClaimSupportV1[];
   claimVerificationResult?: import('../types/claimVerification').ClaimVerificationResult;
   identityResolutions?: import('../types/identityContract').IdentityResolutionV1[];
@@ -485,6 +500,42 @@ export function buildCompletedAnalysisResultSnapshot(
       ? input.traceSummary
       : storedAnalysisReceipt?.traceSummary,
   );
+  let conclusionContract = input.conclusionContract;
+  if (
+    conclusionContract &&
+    typeof conclusionContract === 'object' &&
+    !Array.isArray(conclusionContract) &&
+    (conclusionContract as Record<string, unknown>).schemaVersion === 'conclusion_contract_v1'
+  ) {
+    const sanitized = sanitizeConclusionSourceContract(conclusionContract as ConclusionContract, {
+      actualSourceUseDecision: input.sourceUseDecision ?? null,
+    });
+    const verification = verifySourceClaimBindings({
+      conclusionContract: sanitized,
+      actualSourceUseDecision: input.sourceUseDecision,
+      matchedTraceEvidenceRefIdsByClaimId: input.claimVerificationResult
+        ? collectMatchedTraceEvidenceRefIdsByClaimId(input.claimVerificationResult)
+        : {},
+      verifiedTraceOccurrenceRefIdsByClaimId: input.claimVerificationResult
+        ? collectVerifiedTraceOccurrenceRefIdsByClaimId(input.claimVerificationResult)
+        : {},
+    });
+    const verifiedContract = verification.status === 'not_checked'
+      ? sanitized
+      : {...sanitized, sourceClaimBindings: verification.bindings};
+    const sourceProvenance = projectSafeSourceProvenance({
+      conclusionContract: verifiedContract,
+      actualSourceUseDecision: input.sourceUseDecision,
+    });
+    conclusionContract = sourceProvenance
+      ? {
+          ...verifiedContract,
+          sourceUseDecision: sourceProvenance.sourceUseDecision,
+          sourceReferences: sourceProvenance.sourceUseDecision.references,
+          sourceClaimBindings: sourceProvenance.sourceClaimBindings,
+        }
+      : verifiedContract;
+  }
 
   return {
     id: `analysis-result-${crypto.randomUUID()}`,
@@ -509,7 +560,7 @@ export function buildCompletedAnalysisResultSnapshot(
       ...(traceSummary ? {traceSummary} : {}),
       ...(input.uiActionProposals && input.uiActionProposals.length > 0 ? { uiActionProposals: input.uiActionProposals } : {}),
     },
-    ...(input.conclusionContract ? { conclusionContract: input.conclusionContract } : {}),
+    ...(conclusionContract ? { conclusionContract } : {}),
     ...(input.claimSupport ? { claimSupport: input.claimSupport } : {}),
     ...(input.claimVerificationResult ? { claimVerificationResult: input.claimVerificationResult } : {}),
     ...(input.identityResolutions ? { identityResolutions: input.identityResolutions } : {}),
@@ -625,6 +676,11 @@ export function persistCompletedAnalysisResultSnapshot(
         }),
         conclusionContract: input.conclusionContract
           ? projectPrivateStructuredValue(input.sessionId, input.conclusionContract)
+          : undefined,
+        sourceUseDecision: input.sourceUseDecision
+          ? sanitizeSourceUseDecision(
+              projectPrivateStructuredValue(input.sessionId, input.sourceUseDecision),
+            )
           : undefined,
         claimSupport: projectPrivateClaimSupport(input.sessionId, input.claimSupport),
         claimVerificationResult: projectPrivateClaimVerification(

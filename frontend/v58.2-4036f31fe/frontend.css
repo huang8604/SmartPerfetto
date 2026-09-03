@@ -6601,6 +6601,32 @@ kbd.pf-keycap.pf-spacing-large {
   font-size: 12px;
 }
 
+.ai-conversation-source-enrichment {
+  margin-top: 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--chat-border);
+  color: var(--chat-text-secondary);
+  font-size: 12px;
+}
+.ai-conversation-source-enrichment summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.ai-conversation-source-enrichment-content {
+  margin-top: 8px;
+  color: var(--chat-text);
+  font-size: 13px;
+}
+
+.ai-conversation-source-enrichment.is-running {
+  border-left-color: var(--chat-accent, #0b57d0);
+}
+
+.ai-conversation-source-enrichment.is-muted {
+  opacity: 0.8;
+}
+
 .ai-conversation-page-empty {
   max-width: 520px;
   margin: 18vh auto 0;
@@ -10875,6 +10901,24 @@ tr.detail-row .expanded-empty.compact .empty-sections {
 }
 .ai-message-content details > *:not(summary) {
   padding: 8px 12px;
+}
+
+.ai-message-content.ai-message-content-summary {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ai-message-content.ai-message-content-summary h2 {
+  margin: 4px 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.ai-message-content.ai-message-content-summary h3 {
+  margin: 5px 0 3px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ai-message-content.ai-message-content-summary p {
+  margin: 3px 0;
 }
 
 .ai-severity-badge {

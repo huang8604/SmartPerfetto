@@ -76,6 +76,102 @@ function createPlan(): AnalysisPlanV3 {
 }
 
 describe('recordPlanToolCall', () => {
+  it('records source-use decisions as control calls without satisfying source or trace evidence', () => {
+    const plan: AnalysisPlanV3 = {
+      phases: [
+        {
+          id: 'source',
+          name: 'Source decision',
+          goal: 'Investigate the trace-supported source candidate',
+          expectedTools: ['search_codebase'],
+          expectedCalls: [{tool: 'search_codebase'}],
+          status: 'completed',
+          completedAt: 10,
+          summary: 'Recorded a bounded source-use control decision for this run.',
+        },
+        {
+          id: 'trace',
+          name: 'Trace evidence',
+          goal: 'Collect trace evidence with the required Skill',
+          expectedTools: ['invoke_skill'],
+          expectedCalls: [{tool: 'invoke_skill', skillId: 'scrolling_analysis'}],
+          status: 'completed',
+          completedAt: 20,
+          summary: 'Attempted to close the trace phase without running its Skill.',
+        },
+      ],
+      successCriteria: 'Control calls remain separate from evidence calls',
+      submittedAt: 1,
+      toolCallLog: [],
+    };
+
+    const record = recordPlanToolCall(plan, {
+      toolName: 'record_source_use_decision',
+      input: {
+        status: 'not_needed',
+        reason: 'Trace evidence already resolves the question without source lookup.',
+      },
+      resultText: JSON.stringify({success: true, status: 'not_needed'}),
+      returnedCodeReferences: true,
+      timestamp: 30,
+    });
+
+    expect(record).toMatchObject({
+      toolName: 'record_source_use_decision',
+      planCapability: 'control',
+      matchedPhaseId: 'source',
+      success: true,
+    });
+    expect(record).not.toHaveProperty('returnedCodeReferences');
+    expect(findCompletedPhaseEvidenceGaps(plan).map(gap => gap.phase.id))
+      .toEqual(['source', 'trace']);
+  });
+
+  it('retains pre-plan source-use controls without replaying them as evidence', () => {
+    const tracker: {current: AnalysisPlanV3 | null; prePlanToolCallLog?: AnalysisPlanV3['toolCallLog']} = {
+      current: null,
+    };
+    const recorded = recordPlanOrPrePlanToolCall(tracker, {
+      toolName: 'record_source_use_decision',
+      input: {
+        status: 'unverified',
+        reason: 'No stable source anchor can be verified within the bounded run.',
+      },
+      resultText: JSON.stringify({success: true, status: 'unverified'}),
+    });
+
+    expect(recorded).toMatchObject({planCapability: 'control'});
+    expect(tracker.prePlanToolCallLog).toHaveLength(1);
+
+    const plan: AnalysisPlanV3 = {
+      phases: [{
+        id: 'trace',
+        name: 'Trace evidence',
+        goal: 'Collect trace-only evidence',
+        expectedTools: ['execute_sql'],
+        status: 'completed',
+        completedAt: 10,
+        summary: 'Closed only after collecting the required trace SQL evidence.',
+      }],
+      successCriteria: 'Trace evidence remains mandatory',
+      submittedAt: 1,
+      toolCallLog: [{
+        toolName: 'execute_sql',
+        timestamp: 5,
+        success: true,
+        matchedPhaseId: 'trace',
+      }],
+    };
+    tracker.current = plan;
+
+    expect(replayPrePlanToolCalls(tracker)).toBe(1);
+    expect(plan.toolCallLog).toContainEqual(expect.objectContaining({
+      toolName: 'record_source_use_decision',
+      planCapability: 'control',
+    }));
+    expect(findCompletedPhaseEvidenceGaps(plan)).toEqual([]);
+  });
+
   it('backfills a completed phase expectedCall gap before trusting a returned active phase id', () => {
     const plan = createPlan();
 
@@ -775,6 +871,173 @@ describe('recordPlanToolCall', () => {
     expect(findCompletedPhaseEvidenceGaps(plan)).toEqual([]);
     expect(getAnalysisPlanCompletionStatus(plan, {minSummaryChars: 10}).complete).toBe(true);
   });
+
+  it.each(['pending', 'attempted'])('keeps final completion blocked while source use is %s', status => {
+    const plan: AnalysisPlanV3 = {
+      phases: [{
+        id: 'source',
+        name: 'Source investigation',
+        goal: 'Look up the trace-supported source anchor',
+        expectedTools: ['search_codebase'],
+        expectedCalls: [{tool: 'search_codebase'}],
+        status: 'completed',
+        completedAt: 100,
+        summary: 'The source phase was closed before its source-use decision resolved.',
+      }],
+      successCriteria: 'Resolve source use before final completion',
+      submittedAt: 1,
+      toolCallLog: [{
+        toolName: 'search_codebase',
+        timestamp: 10,
+        success: true,
+        matchedPhaseId: 'source',
+      }],
+    };
+    plan.sourceUseDecisionStatus = status as AnalysisPlanV3['sourceUseDecisionStatus'];
+
+    expect(getAnalysisPlanCompletionStatus(plan, {minSummaryChars: 10})).toMatchObject({
+      complete: false,
+      sourceUseDecisionPending: true,
+      pendingPhases: [plan.phases[0]],
+    });
+  });
+
+  it('returns the first existing plan phase when a pending source decision has no source phase', () => {
+    const plan: AnalysisPlanV3 = {
+      phases: [
+        {
+          id: 'trace-overview',
+          name: 'Trace overview',
+          goal: 'Collect the trace overview evidence',
+          expectedTools: ['execute_sql'],
+          status: 'completed',
+          completedAt: 100,
+          summary: 'Collected the trace overview evidence and closed the phase.',
+        },
+        {
+          id: 'conclusion',
+          name: 'Conclusion',
+          goal: 'Write the final conclusion',
+          expectedTools: [],
+          status: 'completed',
+          completedAt: 200,
+          summary: 'Prepared the final conclusion after the trace overview phase.',
+        },
+      ],
+      successCriteria: 'Never return an empty pending loop',
+      submittedAt: 1,
+      sourceUseDecisionStatus: 'pending',
+      toolCallLog: [{
+        toolName: 'execute_sql',
+        timestamp: 10,
+        success: true,
+        matchedPhaseId: 'trace-overview',
+      }],
+    };
+
+    expect(getAnalysisPlanCompletionStatus(plan, {minSummaryChars: 10})).toMatchObject({
+      complete: false,
+      sourceUseDecisionPending: true,
+      pendingPhases: [plan.phases[0]],
+    });
+  });
+
+  it('returns every existing source candidate in plan order for a pending source decision', () => {
+    const plan: AnalysisPlanV3 = {
+      phases: [
+        {
+          id: 'source-search',
+          name: 'Source search',
+          goal: 'Search the selected source tree',
+          expectedTools: ['search_codebase'],
+          expectedCalls: [{tool: 'search_codebase'}],
+          status: 'completed',
+          completedAt: 100,
+          summary: 'Completed the bounded search against the selected source tree.',
+        },
+        {
+          id: 'trace-evidence',
+          name: 'Trace evidence',
+          goal: 'Collect the trace evidence',
+          expectedTools: ['execute_sql'],
+          status: 'completed',
+          completedAt: 200,
+          summary: 'Collected the trace evidence independently from source control.',
+        },
+        {
+          id: 'source-read',
+          name: 'Source read',
+          goal: 'Read the selected source file',
+          expectedTools: ['read_codebase_file'],
+          expectedCalls: [{tool: 'read_codebase_file'}],
+          status: 'completed',
+          completedAt: 300,
+          summary: 'Completed the bounded read against the selected source file.',
+        },
+      ],
+      successCriteria: 'Preserve every actionable source phase in plan order',
+      submittedAt: 1,
+      sourceUseDecisionStatus: 'attempted',
+      toolCallLog: [
+        {
+          toolName: 'search_codebase',
+          timestamp: 10,
+          success: true,
+          matchedPhaseId: 'source-search',
+        },
+        {
+          toolName: 'execute_sql',
+          timestamp: 20,
+          success: true,
+          matchedPhaseId: 'trace-evidence',
+        },
+        {
+          toolName: 'read_codebase_file',
+          timestamp: 30,
+          success: true,
+          matchedPhaseId: 'source-read',
+        },
+      ],
+    };
+
+    expect(getAnalysisPlanCompletionStatus(plan, {minSummaryChars: 10})).toMatchObject({
+      complete: false,
+      sourceUseDecisionPending: true,
+      pendingPhases: [plan.phases[0], plan.phases[2]],
+    });
+  });
+
+  it.each(['located', 'corroborated', 'not_needed', 'search_incomplete', 'unverified'])(
+    'allows final completion after source use resolves as %s',
+    status => {
+      const plan: AnalysisPlanV3 = {
+        phases: [{
+          id: 'source',
+          name: 'Source investigation',
+          goal: 'Look up the trace-supported source anchor',
+          expectedTools: ['search_codebase'],
+          expectedCalls: [{tool: 'search_codebase'}],
+          status: 'completed',
+          completedAt: 100,
+          summary: 'The source-use decision is resolved with a bounded run outcome.',
+        }],
+        successCriteria: 'Resolve source use before final completion',
+        submittedAt: 1,
+        toolCallLog: [{
+          toolName: 'search_codebase',
+          timestamp: 10,
+          success: true,
+          matchedPhaseId: 'source',
+        }],
+      };
+      plan.sourceUseDecisionStatus = status as AnalysisPlanV3['sourceUseDecisionStatus'];
+
+      expect(getAnalysisPlanCompletionStatus(plan, {minSummaryChars: 10})).toMatchObject({
+        complete: true,
+        pendingPhases: [],
+      });
+    },
+  );
 
   it('lets a pure conclusion phase reuse valid evidence from a non-conclusion phase only', () => {
     const createConclusionPlan = (toolCallLog: AnalysisPlanV3['toolCallLog']): AnalysisPlanV3 => ({

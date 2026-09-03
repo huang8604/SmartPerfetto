@@ -5,6 +5,7 @@
 import {describe, expect, it} from '@jest/globals';
 
 import {HTMLReportGenerator, type AgentDrivenReportData} from '../htmlReportGenerator';
+import {sanitizeSourceReference} from '../codebase/sourceUseDecision';
 
 function makeReportData(contract: unknown): AgentDrivenReportData {
   return {
@@ -91,14 +92,20 @@ describe('HTMLReportGenerator code-aware rendering', () => {
         displayName: 'Kernel Source',
         kind: 'kernel_source',
       }],
+      lookupCount: 2,
+      queriedCodebaseIds: [
+        'codebase-app-1234567890',
+        'codebase-kernel-1234567890',
+      ],
       usedCodebaseIds: ['codebase-app-1234567890'],
-    };
+    } as any;
 
     const html = new HTMLReportGenerator().generateAgentDrivenHTML(data);
 
     expect(html).toContain('源码上下文');
     expect(html).toContain('已选择');
     expect(html).toContain('实际使用/查询到');
+    expect(html).toContain('本次查询 2 个源码库，1 个源码库成功返回引用');
     expect(html).toContain('Demo App');
     expect(html).toContain('Kernel Source');
     expect(html).toContain('codebase-app');
@@ -107,6 +114,75 @@ describe('HTMLReportGenerator code-aware rendering', () => {
     expect(html).not.toContain('raw source text');
   });
 
+  it('distinguishes no source lookup from lookups that returned no references', () => {
+    const generator = new HTMLReportGenerator();
+    const noLookup = makeReportData({});
+    noLookup.sourceContext = {
+      selected: [{codebaseId: 'codebase-app-1234567890', displayName: 'Demo App'}],
+      lookupCount: 0,
+      queriedCodebaseIds: [],
+      usedCodebaseIds: [],
+    } as any;
+    const noLookupHtml = generator.generateAgentDrivenHTML(noLookup);
+    expect(noLookupHtml).toContain('本次分析未发起源码或图查询');
+    expect(noLookupHtml).toContain('源码上下文已接入');
+
+    const emptyLookup = makeReportData({});
+    emptyLookup.sourceContext = {
+      selected: [{codebaseId: 'codebase-app-1234567890', displayName: 'Demo App'}],
+      lookupCount: 2,
+      queriedCodebaseIds: ['codebase-app-1234567890'],
+      usedCodebaseIds: [],
+    } as any;
+    const emptyLookupHtml = generator.generateAgentDrivenHTML(emptyLookup);
+    expect(emptyLookupHtml).toContain('本次已查询 1 个源码库');
+    expect(emptyLookupHtml).toContain('没有成功返回源码或图引用');
+    expect(emptyLookupHtml).not.toContain('本次分析未发起源码或图查询');
+  });
+
+  it('renders canonical source-use status and mechanism bindings without model-authored source prose', () => {
+    const reference = sanitizeSourceReference({
+      referenceId: 'lookup-1',
+      codebaseId: 'codebase-app',
+      filePath: 'src/main/Foo.kt',
+      lookupKind: 'body',
+    })!;
+    const data = makeReportData({});
+    data.sourceContext = {
+      selected: [{codebaseId: 'codebase-app', displayName: 'Demo App', kind: 'app_source'}],
+      lookupCount: 1,
+      queriedCodebaseIds: ['codebase-app'],
+      usedCodebaseIds: ['codebase-app'],
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['codebase-app'],
+        status: 'corroborated',
+        attemptedTools: ['read_codebase_file'],
+        queriedCodebaseIds: ['codebase-app'],
+        usedCodebaseIds: ['codebase-app'],
+        coverageComplete: true,
+        references: [reference],
+      },
+      sourceClaimBindings: [{
+        claimId: 'claim-1',
+        mechanismStatus: 'compatible',
+        sourceReferenceIds: [reference.id],
+        traceEvidenceRefIds: ['trace-evidence-1'],
+        reason: 'SECRET_BINDING_REASON_CANARY',
+      }],
+    } as any;
+
+    const html = new HTMLReportGenerator().generateAgentDrivenHTML(data);
+
+    expect(html).toContain('source_use_decision@1');
+    expect(html).toContain('provider_send');
+    expect(html).toContain('corroborated');
+    expect(html).toContain('compatible');
+    expect(html).toContain('claim-1');
+    expect(html).toContain(reference.id);
+    expect(html).not.toContain('SECRET_BINDING_REASON_CANARY');
+  });
   it('leaves legacy reports without source context unchanged', () => {
     const html = new HTMLReportGenerator().generateAgentDrivenHTML(makeReportData({}));
 

@@ -225,6 +225,9 @@ export interface AnalysisResult {
   conclusionContract?: ConclusionContract;
   claimSupport?: ClaimSupportV1[];
   claimVerificationResult?: ClaimVerificationResult;
+  sourceUseDecision?: import('../../services/codebase/sourceUseDecision').SourceUseDecisionV1;
+  sourceReferences?: import('../../services/codebase/sourceUseDecision').SourceReferenceV1[];
+  sourceClaimVerificationResult?: import('../../services/codebase/sourceClaimVerifier').SourceClaimVerificationResult;
   identityResolutions?: IdentityResolutionV1[];
   confidence: number;
   rounds: number;
@@ -346,6 +349,13 @@ export interface AnalysisOptions {
   codebaseIds?: string[];
   /** Explicit external knowledge-source allowlist for this analysis session. */
   knowledgeSourceIds?: string[];
+  /** Internal source phase and optional hard tool budget. */
+  sourceUsePolicy?: {
+    phase: 'explicit' | 'automatic_enrichment' | 'deep_enrichment';
+    maxSearchCalls?: number;
+    maxReadCalls?: number;
+    maxDurationMs?: number;
+  };
   /** Internal non-secret partition for source/RAG capability continuity. */
   analysisContextFingerprint?: string;
   /** Internal immutable public Knowledge Pack identity pinned to this session. */

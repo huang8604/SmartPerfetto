@@ -19,6 +19,15 @@ const MAX_AGGREGATE_GUARD_PATTERN_BYTES = 64 * 1024 * 1024;
 const REVOKED_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_REVOKED_SESSION_MARKERS = 4_096;
 const PRIVATE_OUTPUT_SUPPRESSED = '[PRIVATE_OUTPUT_SUPPRESSED]';
+const MAX_STRUCTURED_TEXT_DEPTH = 24;
+const MAX_STRUCTURED_TEXT_ITEMS = 10_000;
+const MAX_STRUCTURED_TEXT_STRING_BYTES = 1024 * 1024;
+const DANGEROUS_STRUCTURED_TEXT_KEYS = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+const STRUCTURED_TEXT_VALUE_DROPPED = Symbol('structured-text-value-dropped');
 
 class SessionCodeAwareOutputGuard {
   private readonly registrations: GuardRegistration[] = [];
@@ -229,6 +238,40 @@ export function registerCodeAwareLookupForEcho(sessionId: string | undefined, re
   }
 }
 
+export interface OnDemandEchoReference {
+  referenceId: string;
+  codebaseId: string;
+  filePath: string;
+  lineRange?: {start: number; end: number};
+  symbol?: string;
+  text?: string;
+}
+
+/**
+ * Registers provider-sent source returned by bounded on-demand tools. These
+ * references do not have RAG chunk ids, so use their stable reference ids for
+ * a relative CodeRef replacement instead of retaining source text in output.
+ */
+export function registerOnDemandSourceLookupForEcho(
+  sessionId: string | undefined,
+  references: readonly OnDemandEchoReference[],
+): void {
+  if (!sessionId) return;
+  for (const reference of references) {
+    if (!reference.text?.trim()) continue;
+    registerForSession(sessionId, {
+      kind: 'snippet',
+      snippet: reference.text,
+      ref: {
+        chunkId: reference.referenceId,
+        codebaseId: reference.codebaseId,
+        filePath: reference.filePath,
+        ...(reference.lineRange ? {lineRange: reference.lineRange} : {}),
+      },
+    });
+  }
+}
+
 export function registerCodeAwareCanary(sessionId: string | undefined, canary: string): void {
   if (!sessionId || !canary) return;
   registerForSession(sessionId, {kind: 'canary', canary});
@@ -256,6 +299,113 @@ export function sanitizeCodeAwareText(sessionId: string | undefined, text: strin
   const guard = touchGuard(sessionId);
   if (!guard && sessionWasRevoked(sessionId)) return PRIVATE_OUTPUT_SUPPRESSED;
   return guard ? guard.projectComplete(text) : text;
+}
+
+function sanitizeStructuredTextValue(
+  sessionId: string | undefined,
+  value: unknown,
+  state: {items: number; seen: WeakSet<object>},
+  depth: number,
+): unknown | typeof STRUCTURED_TEXT_VALUE_DROPPED {
+  if (depth > MAX_STRUCTURED_TEXT_DEPTH || state.items >= MAX_STRUCTURED_TEXT_ITEMS) {
+    return STRUCTURED_TEXT_VALUE_DROPPED;
+  }
+  state.items += 1;
+  if (typeof value === 'string') {
+    if (
+      value.length > MAX_STRUCTURED_TEXT_STRING_BYTES ||
+      Buffer.byteLength(value, 'utf8') > MAX_STRUCTURED_TEXT_STRING_BYTES
+    ) {
+      return PRIVATE_OUTPUT_SUPPRESSED;
+    }
+    return sanitizeCodeAwareText(sessionId, value);
+  }
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (typeof value !== 'object') return STRUCTURED_TEXT_VALUE_DROPPED;
+  if (state.seen.has(value)) return STRUCTURED_TEXT_VALUE_DROPPED;
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (!isArray && prototype !== Object.prototype && prototype !== null) {
+    return STRUCTURED_TEXT_VALUE_DROPPED;
+  }
+
+  state.seen.add(value);
+  try {
+    const sanitized: Record<PropertyKey, unknown> | unknown[] = isArray
+      ? []
+      : Object.create(prototype);
+    for (const key of Reflect.ownKeys(value)) {
+      if (state.items >= MAX_STRUCTURED_TEXT_ITEMS) break;
+      if (isArray && key === 'length') continue;
+      state.items += 1;
+      if (
+        typeof key !== 'string' ||
+        DANGEROUS_STRUCTURED_TEXT_KEYS.has(key)
+      ) {
+        continue;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+        continue;
+      }
+      const projected = sanitizeStructuredTextValue(
+        sessionId,
+        descriptor.value,
+        state,
+        depth + 1,
+      );
+      if (projected === STRUCTURED_TEXT_VALUE_DROPPED) continue;
+      Object.defineProperty(sanitized, key, {
+        value: projected,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (isArray) {
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+      if (
+        lengthDescriptor &&
+        Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') &&
+        typeof lengthDescriptor.value === 'number'
+      ) {
+        Object.defineProperty(sanitized, 'length', {
+          value: Math.min(lengthDescriptor.value, MAX_STRUCTURED_TEXT_ITEMS),
+          enumerable: false,
+          configurable: false,
+          writable: true,
+        });
+      }
+    }
+    return sanitized;
+  } finally {
+    state.seen.delete(value);
+  }
+}
+
+/**
+ * Applies the session echo guard to every string in a model-authored value.
+ * Traversal is bounded and cycle-safe; ordinary serializable values retain
+ * their keys and byte-identical strings when no registered pattern matches.
+ */
+export function sanitizeCodeAwareStructuredText<T>(
+  sessionId: string | undefined,
+  value: T,
+): T {
+  const sanitized = sanitizeStructuredTextValue(
+    sessionId,
+    value,
+    {items: 0, seen: new WeakSet<object>()},
+    0,
+  );
+  return (sanitized === STRUCTURED_TEXT_VALUE_DROPPED ? undefined : sanitized) as T;
 }
 
 export interface CodeAwareStreamingTextProjection {

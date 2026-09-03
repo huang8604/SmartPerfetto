@@ -12,6 +12,7 @@ import {makeSparkProvenance, type RagChunk, type RagRetrievalResult} from '../..
 import {createDataEnvelope} from '../../types/dataContract';
 import {CodebaseRegistry} from '../codebase/codebaseRegistry';
 import {CodeLookupLedger} from '../codebase/codeLookupLedger';
+import {SOURCE_USE_DECISION_SCHEMA_VERSION} from '../codebase/sourceUseDecision';
 import {filterRagLookup} from '../rag/lookupResponseFilter';
 import {SessionToolResultRegistry, projectedSidecarMissing} from '../rag/sessionToolResultRegistry';
 import {
@@ -23,7 +24,9 @@ import {
   clearAllCodeAwareOutputGuards,
   createCodeAwareStreamingTextProjection,
   registerCodeAwareCanary,
+  registerOnDemandSourceLookupForEcho,
   registerPrivateAnalysisQueryForEcho,
+  sanitizeCodeAwareStructuredText,
   sanitizeCodeAwareText,
 } from '../security/codeAwareOutputRegistry';
 import {projectCodeAwareStreamingUpdate} from '../security/codeAwareStreamingUpdateProjection';
@@ -247,6 +250,151 @@ describe('CodeLookupLedger', () => {
       patchCount: 0,
       referencedCodebaseIds: ['cb_old'],
     });
+  });
+
+  it('migrates old JSONL entries without restoring source decisions across authorization partitions', () => {
+    const ledgerPath = path.join(tmpDir, 'migrated-partition-ledger.jsonl');
+    fs.writeFileSync(ledgerPath, [
+      JSON.stringify({
+        turn: 1,
+        ts: 1714600000000,
+        toolName: 'search_codebase',
+        codebaseId: 'cb_legacy',
+        chunkIds: [],
+        consentApplied: true,
+        tokensSpent: 0,
+        outcome: 'success',
+        legacyPath: false,
+        query: 'PRIVATE_LEGACY_QUERY_CANARY',
+      }),
+      JSON.stringify({
+        turn: 2,
+        ts: 1714600000001,
+        toolName: 'read_codebase_file',
+        codebaseId: 'cb_old_partition',
+        chunkIds: [],
+        consentApplied: true,
+        tokensSpent: 1,
+        outcome: 'success',
+        legacyPath: false,
+        authorizationFingerprint: 'context-old',
+        sourceUseDecision: {
+          schemaVersion: SOURCE_USE_DECISION_SCHEMA_VERSION,
+          codeAwareMode: 'provider_send',
+          selectedCodebaseIds: ['cb_old_partition'],
+          status: 'located',
+          attemptedTools: ['read_codebase_file'],
+          queriedCodebaseIds: ['cb_old_partition'],
+          usedCodebaseIds: ['cb_old_partition'],
+          references: [],
+        },
+      }),
+    ].join('\n') + '\n');
+
+    const restored = CodeLookupLedger.restore(
+      'session-migrated-partition',
+      100,
+      1,
+      ledgerPath,
+      'context-new',
+    );
+
+    expect(restored.getEntries()).toEqual([]);
+    expect(restored.toSnapshotSummary()).toEqual({
+      lookupCount: 2,
+      patchCount: 0,
+      referencedCodebaseIds: ['cb_legacy', 'cb_old_partition'],
+    });
+    expect(JSON.stringify(restored)).not.toContain('PRIVATE_LEGACY_QUERY_CANARY');
+  });
+
+  it('persists only bounded source decisions and references in the active partition', async () => {
+    const ledgerPath = path.join(tmpDir, 'source-decision-ledger.jsonl');
+    const ledger = new CodeLookupLedger(
+      'session-source-decision',
+      100,
+      1,
+      ledgerPath,
+      'context-current',
+    );
+    ledger.record({
+      turn: 1,
+      ts: 1714600000000,
+      toolName: 'search_codebase',
+      codebaseId: 'cb_current',
+      chunkIds: [],
+      returnedReferenceCount: 1,
+      consentApplied: true,
+      tokensSpent: 2,
+      outcome: 'success',
+      legacyPath: false,
+      sourceReferences: [{
+        id: 'caller-controlled',
+        referenceId: 'source-safe',
+        codebaseId: 'cb_current',
+        filePath: 'src/Main.kt',
+        lineRange: {start: 4, end: 7},
+        lookupKind: 'body',
+        snippet: 'PRIVATE_REFERENCE_SNIPPET_CANARY',
+        rootPath: '/PRIVATE_REFERENCE_ROOT_CANARY',
+      }],
+      coverageComplete: false,
+      incompleteReason: 'backend_degraded',
+      sourceUseDecision: {
+        schemaVersion: SOURCE_USE_DECISION_SCHEMA_VERSION,
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['cb_current'],
+        status: 'search_incomplete',
+        reasonCode: 'search_incomplete',
+        attemptedTools: ['search_codebase'],
+        queriedCodebaseIds: ['cb_current'],
+        usedCodebaseIds: ['cb_current'],
+        coverageComplete: false,
+        incompleteReasons: ['backend_degraded'],
+        references: [{
+          referenceId: 'source-safe',
+          codebaseId: 'cb_current',
+          filePath: 'src/Main.kt',
+          lineRange: {start: 4, end: 7},
+          lookupKind: 'body',
+        }],
+      },
+      query: 'PRIVATE_LEDGER_QUERY_CANARY',
+      text: 'PRIVATE_LEDGER_TEXT_CANARY',
+    } as any);
+    await ledger.flush();
+
+    const persisted = fs.readFileSync(ledgerPath, 'utf8');
+    const restored = CodeLookupLedger.restore(
+      'session-source-decision',
+      100,
+      1,
+      ledgerPath,
+      'context-current',
+    );
+
+    expect(persisted).not.toContain('PRIVATE_');
+    expect(restored.getEntries()[0]).toEqual(expect.objectContaining({
+      coverageComplete: false,
+      incompleteReason: 'backend_degraded',
+      sourceReferences: [expect.objectContaining({
+        id: expect.stringMatching(/^source-ref-v1-/),
+        codebaseId: 'cb_current',
+        filePath: 'src/Main.kt',
+      })],
+    }));
+    expect(restored.toSnapshotSummary()).toEqual(expect.objectContaining({
+      lookupCount: 1,
+      patchCount: 0,
+      referencedCodebaseIds: ['cb_current'],
+      usedCodebaseIds: ['cb_current'],
+      sourceUseDecision: expect.objectContaining({
+        schemaVersion: SOURCE_USE_DECISION_SCHEMA_VERSION,
+        status: 'search_incomplete',
+        incompleteReasons: ['backend_degraded'],
+        references: [expect.objectContaining({filePath: 'src/Main.kt'})],
+      }),
+    }));
   });
 });
 
@@ -519,7 +667,164 @@ describe('filterRagLookup', () => {
   });
 });
 
+describe('registerOnDemandSourceLookupForEcho', () => {
+  it('replaces provider-sent on-demand source text with its relative reference', () => {
+    const sourceBody = 'const ON_DEMAND_OUTPUT_GUARD_CANARY = true;';
+
+    registerOnDemandSourceLookupForEcho('session-on-demand-output', [
+      {
+        referenceId: 'source-on-demand-1',
+        codebaseId: 'cb-on-demand',
+        filePath: 'src/SourceGuard.kt',
+        lineRange: {start: 4, end: 4},
+        symbol: 'shouldNotBeUsedForOnDemandReplacement',
+        text: sourceBody,
+      },
+      {
+        referenceId: 'source-without-text',
+        codebaseId: 'cb-on-demand',
+        filePath: 'src/SourceGuard.kt',
+      },
+    ]);
+
+    const projected = sanitizeCodeAwareText(
+      'session-on-demand-output',
+      `Model echoed: ${sourceBody}`,
+    );
+
+    expect(projected).not.toContain('ON_DEMAND_OUTPUT_GUARD_CANARY');
+    expect(projected).toContain('[Code: source-on-demand-1 @ src/SourceGuard.kt:4-4]');
+  });
+});
+
 describe('code-aware output registry bounds', () => {
+  it('never executes object getters or array accessor indices', () => {
+    let objectGetterReads = 0;
+    const objectInput: Record<string, unknown> = {safe: 'ordinary'};
+    Object.defineProperty(objectInput, 'incrementing', {
+      enumerable: true,
+      get: () => {
+        objectGetterReads += 1;
+        return 'must not be read';
+      },
+    });
+    Object.defineProperty(objectInput, 'throwing', {
+      enumerable: true,
+      get: () => {
+        throw new Error('object getter executed');
+      },
+    });
+
+    let objectProjected: Record<string, unknown> | undefined;
+    expect(() => {
+      objectProjected = sanitizeCodeAwareStructuredText('session-object-accessor', objectInput);
+    }).not.toThrow();
+    expect(objectGetterReads).toBe(0);
+    expect(objectProjected).toEqual({safe: 'ordinary'});
+
+    let arrayGetterReads = 0;
+    const arrayInput = ['safe'];
+    Object.defineProperty(arrayInput, 1, {
+      enumerable: true,
+      get: () => {
+        arrayGetterReads += 1;
+        throw new Error('array getter executed');
+      },
+    });
+    let arrayProjected: string[] | undefined;
+    expect(() => {
+      arrayProjected = sanitizeCodeAwareStructuredText('session-array-accessor', arrayInput);
+    }).not.toThrow();
+    expect(arrayGetterReads).toBe(0);
+    expect(arrayProjected).toHaveLength(2);
+    expect(arrayProjected?.[0]).toBe('safe');
+    expect(Object.prototype.hasOwnProperty.call(arrayProjected!, 1)).toBe(false);
+  });
+
+  it('drops dangerous keys without prototype mutation and preserves safe object prototypes', () => {
+    const ordinary: Record<string, unknown> = {safe: 'ordinary', nested: {value: 7}};
+    for (const key of ['__proto__', 'prototype', 'constructor']) {
+      Object.defineProperty(ordinary, key, {
+        value: {pollutedByTask7: key},
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    const originalObjectPrototype = Object.getPrototypeOf(ordinary);
+    const projectedOrdinary = sanitizeCodeAwareStructuredText(
+      'session-dangerous-keys',
+      ordinary,
+    ) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(projectedOrdinary)).toBe(originalObjectPrototype);
+    expect(projectedOrdinary).toEqual({safe: 'ordinary', nested: {value: 7}});
+    expect(Object.prototype.hasOwnProperty.call(projectedOrdinary, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(projectedOrdinary, 'prototype')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(projectedOrdinary, 'constructor')).toBe(false);
+    expect((Object.prototype as {pollutedByTask7?: string}).pollutedByTask7).toBeUndefined();
+    expect(({} as {pollutedByTask7?: string}).pollutedByTask7).toBeUndefined();
+
+    const nullPrototype = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(nullPrototype, 'safe', {
+      value: 'null-prototype ordinary text',
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(nullPrototype, '__proto__', {
+      value: {pollutedByTask7: 'null-prototype'},
+      enumerable: true,
+    });
+    const projectedNullPrototype = sanitizeCodeAwareStructuredText(
+      'session-null-prototype',
+      nullPrototype,
+    ) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(projectedNullPrototype)).toBeNull();
+    expect(Reflect.ownKeys(projectedNullPrototype)).toEqual(['safe']);
+    expect(projectedNullPrototype.safe).toBe('null-prototype ordinary text');
+    expect((Object.prototype as {pollutedByTask7?: string}).pollutedByTask7).toBeUndefined();
+  });
+
+  it('keeps ordinary structured values byte-for-shape identical including shared subobjects', () => {
+    const shared = {text: 'ordinary source-free text', traceId: 'trace-ordinary'};
+    const input = {
+      first: shared,
+      second: shared,
+      values: ['ordinary source-free text', 7, true, null],
+    };
+
+    expect(sanitizeCodeAwareStructuredText('session-no-guard', input)).toEqual(input);
+  });
+
+  it('bounds structured depth, item count, string size, and cycles without serialization', () => {
+    class ModelContainer {
+      constructor(readonly text: string) {}
+    }
+    const cyclic: Record<string, unknown> = {text: 'ordinary'};
+    cyclic.self = cyclic;
+    const oversized = 'x'.repeat(1024 * 1024 + 1);
+    const projected = sanitizeCodeAwareStructuredText('session-structured-bounds', {
+      cyclic,
+      oversized,
+      date: new Date(0),
+      bytes: Buffer.from('private bytes'),
+      instance: new ModelContainer('private class text'),
+      items: Array.from({length: 10_100}, (_, index) => `item-${index}`),
+    }) as {
+      cyclic: Record<string, unknown>;
+      oversized: string;
+      items: string[];
+    };
+
+    expect(projected.cyclic).toEqual({text: 'ordinary'});
+    expect(projected.oversized).toBe('[PRIVATE_OUTPUT_SUPPRESSED]');
+    expect(projected.items.length).toBeLessThanOrEqual(10_000);
+    expect(projected).not.toHaveProperty('date');
+    expect(projected).not.toHaveProperty('bytes');
+    expect(projected).not.toHaveProperty('instance');
+  });
+
   it('evicts least-recently-used guards and fails closed for their continuations', () => {
     registerCodeAwareCanary('guard-0', 'PRIVATE_CANARY_0');
     const inFlightProjection = createCodeAwareStreamingTextProjection(
@@ -998,6 +1303,33 @@ describe('code-aware streaming application boundary', () => {
     expect(conclusion.content).not.toHaveProperty('rawAnswer');
     expect(conclusion.content).not.toHaveProperty('findings');
     expect(conclusion.content.confidence).toBe(0.8);
+  });
+
+  it('allows only sanitized source supplement text and numeric metrics', () => {
+    registerCodeAwareCanary('session-stream', 'SOURCE_SUPPLEMENT_PRIVATE_CANARY');
+    const projected = projectCodeAwareStreamingUpdate(
+      'session-stream',
+      {
+        type: 'analysis_source_enrichment_completed',
+        content: {
+          message: 'before SOURCE_SUPPLEMENT_PRIVATE_CANARY after',
+          metrics: {searchCalls: 3, readCalls: 7, durationMs: 9000},
+          rawToolPayload: 'PRIVATE_TOOL_PAYLOAD_CANARY',
+        },
+        timestamp,
+      },
+      true,
+      'en',
+    );
+
+    expect(projected.type).toBe('analysis_source_enrichment_completed');
+    expect(projected.content.message).not.toContain('SOURCE_SUPPLEMENT_PRIVATE_CANARY');
+    expect(projected.content.metrics).toEqual({
+      searchCalls: 3,
+      readCalls: 7,
+      durationMs: 9000,
+    });
+    expect(projected.content).not.toHaveProperty('rawToolPayload');
   });
 
   it('fails closed when one long-lived session exceeds the guard pattern budget', () => {

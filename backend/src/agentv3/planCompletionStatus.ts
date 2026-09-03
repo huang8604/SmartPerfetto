@@ -7,12 +7,14 @@ import {
   findCompletedPhaseEvidenceGaps,
   type PlanEvidenceGap,
 } from './planToolCallRecorder';
+import {isSourceLookupToolName} from '../services/codebase/sourceLookupTools';
 
 export interface AnalysisPlanCompletionStatus {
   complete: boolean;
   hasPlan: boolean;
   pendingPhases: PlanPhase[];
   evidenceGaps?: PlanEvidenceGap[];
+  sourceUseDecisionPending?: true;
 }
 
 export function hasAdequateClosedPhaseSummary(
@@ -39,14 +41,29 @@ export function getAnalysisPlanCompletionStatus(
 
   const evidenceGaps = findCompletedPhaseEvidenceGaps(plan);
   const evidenceGapPhaseIds = new Set(evidenceGaps.map(gap => gap.phase.id));
-  const pendingPhases = plan.phases.filter(phase =>
+  const pendingPhaseIds = new Set(plan.phases.filter(phase =>
     !hasAdequateClosedPhaseSummary(phase, options.minSummaryChars) ||
     evidenceGapPhaseIds.has(phase.id),
-  );
+  ).map(phase => phase.id));
+  const sourceUseDecisionPending = plan.sourceUseDecisionStatus === 'pending' ||
+    plan.sourceUseDecisionStatus === 'attempted';
+  if (sourceUseDecisionPending) {
+    const sourcePhases = plan.phases.filter(phase => [
+      ...(phase.expectedTools ?? []),
+      ...(phase.expectedCalls ?? []).map(call => call.tool),
+    ].some(isSourceLookupToolName));
+    if (sourcePhases.length > 0) {
+      sourcePhases.forEach(phase => pendingPhaseIds.add(phase.id));
+    } else if (pendingPhaseIds.size === 0) {
+      pendingPhaseIds.add(plan.phases[0].id);
+    }
+  }
+  const pendingPhases = plan.phases.filter(phase => pendingPhaseIds.has(phase.id));
   return {
-    complete: pendingPhases.length === 0,
+    complete: pendingPhases.length === 0 && !sourceUseDecisionPending,
     hasPlan: true,
     pendingPhases,
     ...(evidenceGaps.length > 0 ? { evidenceGaps } : {}),
+    ...(sourceUseDecisionPending ? {sourceUseDecisionPending: true as const} : {}),
   };
 }

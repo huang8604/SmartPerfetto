@@ -37,6 +37,7 @@ import {
 import {
   createSseBridge,
   extractSdkToolResultBlocks,
+  isSdkToolResultFailure,
   stringifySdkToolResult,
 } from './claudeSseBridge';
 import {
@@ -112,10 +113,12 @@ import {
 import {projectToolResultForExternalSurface} from '../../../services/rag/toolResultProjectionFilter';
 import {completeFinalReportCodeReferences} from '../../../services/codebase/codeReferenceContract';
 import {extractSourceLookupCodeReferences} from '../../../services/codebase/sourceLookupTools';
+import {finalizeSourceAwareAnalysisResult} from '../../../services/codebase/sourceClaimVerifier';
 import {diagnosticLogIdentity} from '../../../utils/logger';
 import { runSnapshots } from '../../../agentv3/selfImprove/strategyFingerprint';
 import { verifyConclusion, generateCorrectionPrompt, isConclusionIncomplete } from './claudeVerifier';
 import {recoverInterruptedFinalReport} from '../../runtimeFinalReportRecovery';
+import {isRuntimeCandidateAdmitted} from '../../runtimeCandidateAdmission';
 import { backendLogPath } from '../../../runtimePaths';
 import {
   applyFinalResultQualityGate,
@@ -134,9 +137,12 @@ import {
 } from '../../runtimeLimits';
 import { buildFocusAppEvidencePayload } from '../../focusAppEvidence';
 import {
-  buildRuntimeQuickEvidenceDirectAnswer,
+  buildRuntimeQuickEvidenceAttempt,
+  selectReusableRuntimeQuickEvidenceAttempt,
   combineRuntimeQuickEvidenceDirectAnswers,
   countRuntimeQuickEvidenceCitedRefs,
+  sanitizeRuntimeQuickEvidenceRoutingContext,
+  type RuntimeQuickEvidenceAttempt,
 } from '../../quickEvidenceDirectAnswer';
 import {
   buildQuickDirectAcknowledgementAnalysisResult,
@@ -162,6 +168,8 @@ import {
 } from '../../quickTraceFactEvidence';
 import { deriveRuntimeQuickPreEvidenceFlags } from '../../quickModeResolution';
 import {buildRuntimeTracePairComparisonContext} from '../../runtimePromptContext';
+import { RuntimeExecutionGuard, type RuntimeExecutionLease } from '../../runtimeExecutionGuard';
+import { CLAUDE_AGENT_RUNTIME_KIND } from '../../runtimeKinds';
 
 function looksLikeProcessNarration(text: string): boolean {
   return /(?:我来|我需要|我将|接下来|先重新|重新读取|继续调用|首先.*提交|计划已提交|工具|tool|let me|i need to|i will|next i)/i
@@ -519,6 +527,12 @@ import {
 } from '../../analysisRunSpec';
 import {buildAdaptiveRoutingForModeDecision} from '../../adaptiveRoutingProjection';
 import type { RuntimeSelection } from '../../runtimeSelection';
+import {
+  createRuntimePerformanceRun,
+  runtimeOutcomeFromError,
+  type RuntimePerformanceOutcome,
+  type RuntimePerformanceRun,
+} from '../../runtimePerformance';
 
 const SESSION_MAP_FILE = backendLogPath('claude_session_map.json');
 /** Max age for session map entries before pruning (24 hours). */
@@ -773,6 +787,10 @@ interface RuntimeAbortHandle {
   abort(): void;
 }
 
+interface SdkQueryRuntimeReceiptState {
+  sdkStartRecorded: boolean;
+}
+
 /**
  * Wrap sdkQuery with exponential backoff retry for transient API errors
  * and expose a `close()` handle so timeout/abort paths can terminate the
@@ -790,9 +808,22 @@ function sdkQueryWithRetry(
     baseDelayMs?: number;
     emitUpdate?: (update: StreamingUpdate) => void;
     outputLanguage?: import('../../../agentv3/outputLanguage').OutputLanguage;
+    runtimePerformance?: RuntimePerformanceRun;
+    signal?: AbortSignal;
+    recordSdkStartPhase?: boolean;
+    runtimeReceiptState?: SdkQueryRuntimeReceiptState;
   } = {},
 ): SdkQueryHandle {
-  const { maxRetries = 2, baseDelayMs = 2000, emitUpdate, outputLanguage = loadClaudeConfig().outputLanguage } = options;
+  const {
+    maxRetries = 2,
+    baseDelayMs = 2000,
+    emitUpdate,
+    outputLanguage = loadClaudeConfig().outputLanguage,
+    runtimePerformance,
+    signal,
+    recordSdkStartPhase = false,
+    runtimeReceiptState,
+  } = options;
   const queryOptions = params.options ?? {};
   const binaryOpt = getSdkBinaryOption(queryOptions.env);
   const mergedParams = binaryOpt.pathToClaudeCodeExecutable
@@ -803,6 +834,8 @@ function sdkQueryWithRetry(
   // forward termination to the underlying SDK subprocess across retries.
   let currentQuery: ReturnType<typeof sdkQuery> | undefined;
   let closed = false;
+  const localRuntimeReceiptState = runtimeReceiptState ?? {sdkStartRecorded: false};
+  let activeAttemptEnd: ((outcome: RuntimePerformanceOutcome) => void) | undefined;
 
   // We can't directly retry an async iterable, so we use a generator wrapper.
   // On the first call to next(), we attempt sdkQuery. If it throws, we retry.
@@ -811,30 +844,61 @@ function sdkQueryWithRetry(
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (closed) return;
       let terminalResultObserved = false;
+      let attemptOutcome: RuntimePerformanceOutcome = 'ok';
+      const sdkStartPhase = recordSdkStartPhase && !localRuntimeReceiptState.sdkStartRecorded
+        ? runtimePerformance?.startPhase('sdk_start')
+        : undefined;
+      if (sdkStartPhase) {
+        localRuntimeReceiptState.sdkStartRecorded = true;
+      }
+      const providerPhase = runtimePerformance?.startPhase('provider');
+      let providerEnded = false;
+      const endProviderPhase = (outcome: RuntimePerformanceOutcome) => {
+        if (providerEnded) return;
+        providerEnded = true;
+        providerPhase?.end(outcome);
+        if (activeAttemptEnd === endProviderPhase) {
+          activeAttemptEnd = undefined;
+        }
+      };
+      activeAttemptEnd = endProviderPhase;
       try {
         if (currentEvaluationInjectionContract()) {
           commitEvaluationExposureSince(0, 'sdk_handoff_observed');
         }
         currentQuery = sdkQuery(mergedParams);
+        sdkStartPhase?.end(closed || signal?.aborted ? 'cancelled' : 'ok');
         // Yield all messages from the stream
         for await (const msg of currentQuery) {
-          if (closed) return;
+          if (closed) {
+            endProviderPhase('cancelled');
+            return;
+          }
           if ((msg as any)?.type === 'result') {
             const subtype = (msg as any).subtype;
             terminalResultObserved = subtype === 'success' || isSdkMaxTurnsSubtype(subtype);
+            if (!terminalResultObserved && getSdkResultErrorMessage(msg)) {
+              attemptOutcome = 'error';
+            }
           }
           yield msg;
         }
+        endProviderPhase(closed || signal?.aborted ? 'cancelled' : attemptOutcome);
         return; // Success — exit generator
       } catch (err) {
         lastErr = err as Error;
         if (terminalResultObserved) {
+          sdkStartPhase?.end(closed || signal?.aborted ? 'cancelled' : 'ok');
+          endProviderPhase('ok');
           console.warn(
             '[ClaudeRuntime] Ignoring SDK iterator cleanup error after terminal result:',
             diagnosticLogIdentity(lastErr.message),
           );
           return;
         }
+        const outcome = runtimeOutcomeFromError(lastErr, signal);
+        sdkStartPhase?.end(outcome);
+        endProviderPhase(outcome);
         // If the caller invoked close(), treat the resulting error as
         // intentional termination rather than a retryable failure.
         if (closed) return;
@@ -870,6 +934,7 @@ function sdkQueryWithRetry(
     close: () => {
       if (closed) return; // Idempotent — safe to call from timeout handler AND finally.
       closed = true;
+      activeAttemptEnd?.('cancelled');
       try {
         currentQuery?.close();
       } catch (err) {
@@ -909,6 +974,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   private activeAnalyses: Set<string> = new Set();
   /** In-flight SDK subprocess handles keyed by SmartPerfetto session. */
   private readonly activeAbortHandles: Map<string, Set<RuntimeAbortHandle>> = new Map();
+  private readonly executionGuard = new RuntimeExecutionGuard();
   private readonly runtimeSelection: RuntimeSelection;
   private readonly runtimeCapabilities: EngineCapabilities;
 
@@ -1031,7 +1097,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     errorMessage: string;
     mode: 'full' | 'fast';
     outputLanguage: import('../../../agentv3/outputLanguage').OutputLanguage;
-  }): Promise<AnalysisResult> {
+  }): Promise<void> {
     this.forgetSdkSessionMapping(params.sessionId, params.sessionMapKey, params.errorMessage, params.options);
     this.emitUpdate({
       type: 'degraded',
@@ -1047,12 +1113,6 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         ),
       },
       timestamp: Date.now(),
-    });
-    this.activeAnalyses.delete(params.sessionId);
-    runSnapshots.release(params.sessionId);
-    return this.analyze(params.query, params.sessionId, params.traceId, {
-      ...params.options,
-      outputLanguage: params.outputLanguage,
     });
   }
 
@@ -1075,11 +1135,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       ...options,
       analysisMode: resolveEffectiveAnalysisMode(options.analysisMode, options),
     };
-    // Prevent concurrent analyze() calls for the same session
-    if (this.activeAnalyses.has(sessionId)) {
-      throw new Error(`Analysis already in progress for session ${sessionId}`);
-    }
-    this.activeAnalyses.add(sessionId);
+    const executionLease = this.executionGuard.begin({
+      runtime: CLAUDE_AGENT_RUNTIME_KIND,
+      sessionId,
+      referenceTraceId: options.referenceTraceId,
+      runId: options.runId,
+    });
+    const runtimePerformance = createRuntimePerformanceRun(
+      options.runManifestAttributionSink,
+    );
+    let runtimePerformanceOutcome: RuntimePerformanceOutcome = 'ok';
 
     const startTime = Date.now();
     const allFindings: Finding[][] = [];
@@ -1088,6 +1153,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     let rounds = 0;
     let delegatedRetry = false;
     let outputLanguage = options.outputLanguage ?? this.config.outputLanguage;
+    let sourceUse: ReturnType<typeof createClaudeMcpServer>['sourceUse'] | undefined;
     const metricsCollector = new AgentMetricsCollector(sessionId);
     let interruptionRecoveryState: {
       streamStarted: boolean;
@@ -1098,6 +1164,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     } | undefined;
 
     try {
+      executionLease.throwIfAborted();
       // Phase 0: Complexity classification — runs in parallel with early context prep
       const sessionContext = sessionContextManager.getOrCreate(sessionId, traceId);
       const previousTurns = sessionContext.getAllTurns?.() || [];
@@ -1123,16 +1190,29 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         ? {...resolvedRuntimeConfig, outputLanguage: options.outputLanguage}
         : resolvedRuntimeConfig;
       outputLanguage = runtimeConfig.outputLanguage;
-      const emptyFocusResult = { apps: [], primaryApp: undefined, method: 'none' as const };
+      const selectionTimeRange = focusAppTimeRangeFromSelection(options.selectionContext);
+      const emptyFocusResult = {
+        apps: [],
+        primaryApp: undefined,
+        method: 'none' as const,
+        timeRange: selectionTimeRange,
+      };
       const conversationSurface = options.assistantSurface === 'conversation';
       let focusPromise: Promise<Awaited<ReturnType<typeof detectFocusApps>>> | undefined;
       const startFocusDetection = () => {
-        focusPromise ??= detectFocusApps(this.traceProcessorService, traceId, {
-          timeRange: focusAppTimeRangeFromSelection(options.selectionContext),
-        }).catch((err) => {
-          console.warn('[ClaudeRuntime] Focus app detection failed (graceful):', diagnosticLogIdentity((err as Error).message));
-          return emptyFocusResult;
-        });
+        if (!focusPromise) {
+          const focusPhase = runtimePerformance.startPhase('focus');
+          focusPromise = detectFocusApps(this.traceProcessorService, traceId, {
+            timeRange: selectionTimeRange,
+          }).then((result) => {
+            focusPhase.end(executionLease.signal.aborted ? 'cancelled' : 'ok');
+            return result;
+          }).catch((err) => {
+            focusPhase.end(runtimeOutcomeFromError(err, executionLease.signal));
+            console.warn('[ClaudeRuntime] Focus app detection failed (graceful):', diagnosticLogIdentity((err as Error).message));
+            return emptyFocusResult;
+          });
+        }
         return focusPromise;
       };
 
@@ -1191,7 +1271,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         }
       } else {
         const classifierResult = localClassifierResult
-          ?? await classifyQueryComplexity(classifierInput, runtimeConfig);
+          ?? await classifyQueryComplexity(classifierInput, {
+            ...runtimeConfig,
+            providerId: options.providerId,
+            providerScope,
+          });
         queryComplexity = classifierResult.complexity;
         classifierSource = classifierResult.source;
         classifierReason = classifierResult.reason;
@@ -1216,6 +1300,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           quickProcessIdentityPreEvidence || quickTraceFactPreEvidence
         );
       }
+      executionLease.throwIfAborted();
 
       if (conversationSurface) {
         quickAcknowledgementDirectAnswer = false;
@@ -1267,8 +1352,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         `(mode: ${displayMode}, source: ${classifierSource}, reason: ${classifierReason})`,
       );
       metricsCollector.recordAnalysisMode(displayMode, classifierSource);
+      runtimePerformance.finishClassification('ok');
 
       if (queryComplexity === 'quick' && quickAcknowledgementDirectAnswer) {
+        executionLease.throwIfAborted();
         const sdkEnv = createSdkEnv(options.providerId, providerScope);
         const quickConfig = createQuickConfig(runtimeConfig, sdkEnv);
         const quickBudget = resolveQuickTurnBudget({
@@ -1312,6 +1399,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           },
           quickResult.findings,
         );
+        runtimePerformance.recordFirstOutput();
         emitQuickDirectAnswerEvents({
           emitUpdate: update => this.emitUpdate(update),
           result: quickResult,
@@ -1328,6 +1416,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       const focusResult = skipFocusDetection
         ? emptyFocusResult
         : await startFocusDetection();
+      executionLease.throwIfAborted();
 
       // Quick path: lightweight analysis for simple factual queries
       if (queryComplexity === 'quick') {
@@ -1346,6 +1435,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           quickTraceFactPreEvidence,
           quickScrollingTriagePreEvidence,
           outputLanguage,
+          executionLease,
+          runtimePerformance,
         });
       }
 
@@ -1357,7 +1448,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         sceneType,
         runtimeConfig,
         analysisRunSpec,
+        executionLease,
+        runtimePerformance,
       });
+      sourceUse = ctx.sourceUse;
+      executionLease.throwIfAborted();
 
       const {
         handleMessage: bridge,
@@ -1370,6 +1465,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           ctx.sceneType,
           runtimeConfig.outputLanguage,
         );
+        if (normalizedUpdate.type === 'answer_token' || normalizedUpdate.type === 'thought') {
+          runtimePerformance.recordFirstOutput();
+        }
         this.emitUpdate(normalizedUpdate);
         if (normalizedUpdate.type === 'agent_response' && normalizedUpdate.content?.result) {
           try {
@@ -1414,77 +1512,95 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       // Reuse composite key from prepareAnalysisContext for comparison mode session identity isolation
       const privateAnalysisContext = analysisContextUsesPrivateKnowledge(options);
-      const existingSessionMapEntry = privateAnalysisContext
+      let existingSessionMapEntry = privateAnalysisContext
         ? undefined
         : this.sessionMap.get(ctx.sessionMapKey);
-      const existingSdkSessionId = isFreshFullSdkSessionEntry(existingSessionMapEntry)
+      let existingSdkSessionId = isFreshFullSdkSessionEntry(existingSessionMapEntry)
         ? existingSessionMapEntry.sdkSessionId
         : undefined;
       let missingSdkConversationError: string | undefined;
-      if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
-        this.persistSessionMapEntry(sessionId, traceId, ctx.sessionMapKey, existingSessionMapEntry, options);
-      }
-
-      // When resuming an SDK session, systemPrompt is ignored by the SDK (mutually exclusive).
-      // Prepend selectionContext directly into the prompt so the AI sees it in the conversation.
-      let effectivePrompt = query;
-      if (privateAnalysisContext) {
-        const localConversationContext = buildQuickConversationContext(
-          ctx.previousTurns,
-          outputLanguage,
-        );
-        if (localConversationContext) {
-          effectivePrompt = `${localConversationContext}\n\n${effectivePrompt}`;
-        }
-      }
-      if (existingSdkSessionId && options.selectionContext) {
-        const selSection = buildSelectionContextSection(options.selectionContext);
-        if (selSection) {
-          effectivePrompt = `${selSection}\n\n${query}`;
-        }
-      }
-      // Prepend pre-queried trace data so the AI has all context without spending turns on SQL
-      if (ctx.analysisRunSpec?.traceContext.promptSection) {
-        const traceSection = ctx.analysisRunSpec.traceContext.promptSection;
-        effectivePrompt = `${traceSection}\n\n${effectivePrompt}`;
-      }
-
-      const sdkEnv = createSdkEnv(options.providerId, analysisRunSpec.scopes.provider);
-
-      const { stream, close: closeSdk } = sdkQueryWithRetry({
-        prompt: effectivePrompt,
-        options: {
-          model: runtimeConfig.model,
-          maxTurns: runtimeConfig.maxTurns,
-          systemPrompt: ctx.sdkSystemPrompt,
-          mcpServers: { smartperfetto: ctx.mcpServer },
-          includePartialMessages: true,
-          settingSources: [],
-          ...buildClaudeSdkToolOptions(ctx.allowedTools, ctx.agents),
-          ...resolveClaudeSdkPermissionOptions(),
-          cwd: runtimeConfig.cwd,
-          effort: ctx.effectiveEffort,
-          env: sdkEnv,
-          persistSession: !privateAnalysisContext,
-          stderr: (data: string) => {
-            console.warn(
-              `[ClaudeRuntime] SDK stderr [${sessionId}]: ${diagnosticLogIdentity(data.trimEnd())}`,
-            );
-          },
-          ...(runtimeConfig.maxBudgetUsd ? { maxBudgetUsd: runtimeConfig.maxBudgetUsd } : {}),
-          ...(existingSdkSessionId ? { resume: existingSdkSessionId } : {}),
-          ...(ctx.agents ? { agents: ctx.agents } : {}),
-        },
-      }, {
-        emitUpdate: (update) => this.emitUpdate(update),
-        outputLanguage: outputLanguage,
-      });
-      const unregisterSdkAbortHandle = this.registerAbortHandle(sessionId, { abort: closeSdk });
-
       let finalResult: string | undefined;
       let terminationReason: AnalysisResult['terminationReason'];
       let terminationMessage: string | undefined;
       let sdkStreamErrorMessage: string | undefined;
+      let timedOut = false;
+      const timeoutState: {kind: RuntimeTimeoutKind} = {kind: 'request'};
+      const isStreamIdleTimeout = () => (timeoutState.kind as RuntimeTimeoutKind) === 'stream_idle';
+      const sdkEnv = createSdkEnv(options.providerId, analysisRunSpec.scopes.provider);
+      const failedApproaches: FailedApproach[] = [];
+      let sdkCompactDetected = false;
+      const sdkRuntimeReceiptState: SdkQueryRuntimeReceiptState = {sdkStartRecorded: false};
+      for (;;) {
+        executionLease.throwIfAborted();
+        missingSdkConversationError = undefined;
+        sdkStreamErrorMessage = undefined;
+        finalResult = undefined;
+        terminationReason = undefined;
+        terminationMessage = undefined;
+        timedOut = false;
+        timeoutState.kind = 'request';
+        if (existingSessionMapEntry && existingSdkSessionId && enterpriseSessionMapDbWritesEnabled()) {
+          this.persistSessionMapEntry(sessionId, traceId, ctx.sessionMapKey, existingSessionMapEntry, options);
+        }
+
+        // When resuming an SDK session, systemPrompt is ignored by the SDK (mutually exclusive).
+        // Prepend selectionContext directly into the prompt so the AI sees it in the conversation.
+        let effectivePrompt = query;
+        if (privateAnalysisContext) {
+          const localConversationContext = buildQuickConversationContext(
+            ctx.previousTurns,
+            outputLanguage,
+          );
+          if (localConversationContext) {
+            effectivePrompt = `${localConversationContext}\n\n${effectivePrompt}`;
+          }
+        }
+        if (existingSdkSessionId && options.selectionContext) {
+          const selSection = buildSelectionContextSection(options.selectionContext);
+          if (selSection) {
+            effectivePrompt = `${selSection}\n\n${query}`;
+          }
+        }
+        // Prepend pre-queried trace data so the AI has all context without spending turns on SQL
+        if (ctx.analysisRunSpec?.traceContext.promptSection) {
+          const traceSection = ctx.analysisRunSpec.traceContext.promptSection;
+          effectivePrompt = `${traceSection}\n\n${effectivePrompt}`;
+        }
+
+        executionLease.throwIfAborted();
+        const { stream, close: closeSdk } = sdkQueryWithRetry({
+            prompt: effectivePrompt,
+            options: {
+              model: runtimeConfig.model,
+              maxTurns: runtimeConfig.maxTurns,
+              systemPrompt: ctx.sdkSystemPrompt,
+              mcpServers: { smartperfetto: ctx.mcpServer },
+              includePartialMessages: true,
+              settingSources: [],
+              ...buildClaudeSdkToolOptions(ctx.allowedTools, ctx.agents),
+              ...resolveClaudeSdkPermissionOptions(),
+              cwd: runtimeConfig.cwd,
+              effort: ctx.effectiveEffort,
+              env: sdkEnv,
+              persistSession: !privateAnalysisContext,
+              stderr: (data: string) => {
+                console.warn(
+                  `[ClaudeRuntime] SDK stderr [${sessionId}]: ${diagnosticLogIdentity(data.trimEnd())}`,
+                );
+              },
+              ...(runtimeConfig.maxBudgetUsd ? { maxBudgetUsd: runtimeConfig.maxBudgetUsd } : {}),
+              ...(existingSdkSessionId ? { resume: existingSdkSessionId } : {}),
+              ...(ctx.agents ? { agents: ctx.agents } : {}),
+            },
+        }, {
+            emitUpdate: (update) => this.emitUpdate(update),
+            outputLanguage: outputLanguage,
+          runtimePerformance,
+          signal: executionLease.signal,
+          recordSdkStartPhase: true,
+          runtimeReceiptState: sdkRuntimeReceiptState,
+        });
+      const unregisterSdkAbortHandle = this.registerAbortHandle(sessionId, { abort: closeSdk });
 
       // Safety timeout with stream cancellation via Promise.race.
       // Per-turn budget is env-configurable (CLAUDE_FULL_PER_TURN_MS, default 60s) so slower
@@ -1495,9 +1611,6 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         runtimeConfig.maxTurns || 15,
         runtimeConfig.fullRequestTimeoutMs,
       );
-      let timedOut = false;
-      const timeoutState: {kind: RuntimeTimeoutKind} = {kind: 'request'};
-
       // Sub-agent timeout tracking — stop tasks that exceed subAgentTimeoutMs
       const activeSubAgentTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
       const subAgentTimeoutMs = runtimeConfig.subAgentTimeoutMs;
@@ -1524,12 +1637,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       let lastCircuitBreakerFireIdx = -Infinity;
 
       // P1: Negative memory — collect failed approaches for cross-session learning
-      const failedApproaches: FailedApproach[] = [];
-
       /** Track whether SDK auto-compact has fired during this turn.
        *  When true, the SDK has summarized prior conversation history,
        *  potentially losing early-turn details. We log this for diagnostics. */
-      let sdkCompactDetected = false;
+      sdkCompactDetected = false;
 
       // ── Per-turn metrics collection ──
       // Turn boundary: assistant message = start, next assistant message = end of previous turn.
@@ -1709,6 +1820,17 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             console.warn('[ClaudeRuntime] SSE bridge error (non-fatal):', diagnosticLogIdentity((bridgeErr as Error).message));
           }
 
+          if (msg.type === 'assistant' && Array.isArray((msg as any).message?.content)) {
+            const assistantText = (msg as any).message.content
+              .map((block: any) => typeof block?.text === 'string' ? block.text : '')
+              .filter(Boolean)
+              .join('\n')
+              .trim();
+            if (assistantText) {
+              runtimePerformance.recordFirstOutput();
+            }
+          }
+
           // ── Per-turn metrics: track stream_event signals ──
           if (msg.type === 'stream_event' && currentTurnMetrics) {
             const event = (msg as any).event;
@@ -1771,9 +1893,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               if (currentTurnMetrics) {
                 currentTurnMetrics.toolResultPayloadBytes += Buffer.byteLength(resultStr, 'utf-8');
               }
-              const isFailed = observed.isError === true ||
-                resultStr.includes('"success":false') ||
-                resultStr.includes('"isError":true');
+              const isFailed = isSdkToolResultFailure(observed.result, observed.isError);
               const matchedTool = findToolCallForResult(observed.toolUseId);
               if (matchedTool) {
                 matchedTool.success = !isFailed;
@@ -1999,7 +2119,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       if (timedOut) {
         terminationReason = 'timeout';
-        terminationMessage = timeoutState.kind === 'stream_idle'
+        terminationMessage = isStreamIdleTimeout()
           ? localize(
             outputLanguage,
             `AI provider 连续 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒没有流事件，已取消并保留部分结果。`,
@@ -2014,8 +2134,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
 
       if (!timedOut && missingSdkConversationError && existingSdkSessionId) {
-        delegatedRetry = true;
-        return await this.retryWithoutSdkResume({
+        await this.retryWithoutSdkResume({
           query,
           sessionId,
           traceId,
@@ -2025,17 +2144,27 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           mode: 'full',
           outputLanguage,
         });
+        existingSessionMapEntry = privateAnalysisContext
+          ? undefined
+          : this.sessionMap.get(ctx.sessionMapKey);
+        existingSdkSessionId = undefined;
+        sdkSessionId = undefined;
+        continue;
       }
       if (sdkStreamErrorMessage && !timedOut) {
         throw new Error(sdkStreamErrorMessage);
       }
+      break;
+      }
 
+      executionLease.throwIfAborted();
       // Prefer a deliverable streamed report over a short SDK terminal summary.
       // Some compatible providers put the full report in answer_token chunks but
       // return only a terse summary in the terminal result.
       const accumulatedAnswerBeforeVerification = getAccumulatedAnswer();
+      const terminalResult = finalResult as string | undefined;
       conclusionText = chooseClaudeConclusionText({
-        finalResult: finalResult || '',
+        finalResult: terminalResult || '',
         accumulatedAnswer: accumulatedAnswerBeforeVerification,
       });
       conclusionText = ensureClaudeFinalReportHeading(
@@ -2046,13 +2175,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       if (!finalResult && conclusionText) {
         console.warn(`[ClaudeRuntime] Session ${sessionId}: SDK result was empty, recovered ${conclusionText.length} chars from streamed answer tokens`);
       } else if (
-        finalResult &&
+        terminalResult &&
         conclusionText === sanitizeClaudeConclusionText(accumulatedAnswerBeforeVerification) &&
-        conclusionText !== sanitizeClaudeConclusionText(finalResult)
+        conclusionText !== sanitizeClaudeConclusionText(terminalResult)
       ) {
         console.warn(
           `[ClaudeRuntime] Session ${sessionId}: SDK result was a short terminal summary ` +
-          `(${finalResult.length} chars), using streamed report (${conclusionText.length} chars) before verification`,
+          `(${terminalResult.length} chars), using streamed report (${conclusionText.length} chars) before verification`,
         );
       }
       allFindings.push(extractFindingsFromText(conclusionText));
@@ -2129,7 +2258,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             });
             mergedFindings = mergeFindings([extractFindingsFromText(conclusionText)]);
             const reportIsAlreadyDeliverable = correctionResultLooksUsable(conclusionText);
-            const verification = await verifyConclusion(mergedFindings, conclusionText, {
+            executionLease.throwIfAborted();
+            const verificationPhase = runtimePerformance.startPhase('verification');
+            let verification: Awaited<ReturnType<typeof verifyConclusion>>;
+            try {
+              verification = await verifyConclusion(mergedFindings, conclusionText, {
               emitUpdate: (update) => this.emitUpdate(update),
               enableLLM: !reportIsAlreadyDeliverable,
               plan: ctx.analysisPlan.current,
@@ -2137,11 +2270,19 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               sceneType: ctx.sceneType,
               lightModel: runtimeConfig.lightModel,
               verifierTimeoutMs: runtimeConfig.verifierTimeoutMs,
+              providerId: options.providerId,
+              providerScope,
               outputLanguage: outputLanguage,
               query,
               emitIssueProgress: !reportIsAlreadyDeliverable,
               allowPersistentLearning: !analysisContextUsesPrivateKnowledge(options),
             });
+              verificationPhase.end('ok');
+            } catch (error) {
+              verificationPhase.end(runtimeOutcomeFromError(error, executionLease.signal));
+              throw error;
+            }
+            executionLease.throwIfAborted();
 
             const allIssues = [...verification.heuristicIssues, ...(verification.llmIssues || [])];
             const errorIssues = allIssues.filter(i => i.severity === 'error');
@@ -2222,6 +2363,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 'You are the SmartPerfetto final-report corrector. Rewrite the final report only from the provided verification issues and original conclusion. Do not call tools, rerun queries, or narrate process.',
               );
 
+              executionLease.throwIfAborted();
               const { stream: correctionStream, close: closeCorrection } = sdkQueryWithRetry({
                 prompt: correctionPrompt,
                 options: {
@@ -2246,6 +2388,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               }, {
                 emitUpdate: (update) => this.emitUpdate(update),
                 outputLanguage: outputLanguage,
+                runtimePerformance,
+                signal: executionLease.signal,
               });
               const unregisterCorrectionAbortHandle = this.registerAbortHandle(sessionId, { abort: closeCorrection });
 
@@ -2269,6 +2413,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
               const correctionAnswerBridge = createSseBridge(() => undefined, outputLanguage);
               try {
                 for await (const msg of correctionStream) {
+                  executionLease.throwIfAborted();
                   if (correctionTimedOut) break;
                   correctionAnswerBridge.handleMessage(msg);
                   if (msg.type === 'result' && (msg as any).subtype === 'success') {
@@ -2297,6 +2442,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
                 }
                 correctionAnswerBridge.dispose();
               }
+              executionLease.throwIfAborted();
               correctedResult = ensureClaudeFinalReportHeading(
                 correctedResult,
                 ctx.sceneType,
@@ -2427,7 +2573,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             }
           : {
               type: 'strategy_failure',
-              approach: `analysis exceeded ${timeoutState.kind === 'stream_idle' ? 'provider stream idle' : 'request'} timeout`,
+              approach: `analysis exceeded ${isStreamIdleTimeout() ? 'provider stream idle' : 'request'} timeout`,
               reason: 'SDK stream was cancelled before a normal success result',
             });
         this.emitUpdate({
@@ -2503,6 +2649,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         terminationReason,
         terminationMessage,
       };
+      finalizeSourceAwareAnalysisResult(finalAnalysisResult, ctx.sourceUse);
       const gateIssue = applyFinalResultQualityGate({ result: finalAnalysisResult, query, sceneType });
       if (gateIssue) {
         this.emitUpdate({
@@ -2517,6 +2664,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         });
       }
 
+      executionLease.throwIfAborted();
       ctx.sessionContext.addTurn(
         query,
         {
@@ -2616,6 +2764,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       return finalAnalysisResult;
     } catch (error) {
+      runtimePerformanceOutcome = runtimeOutcomeFromError(
+        error,
+        executionLease.signal,
+      );
       const rawErrorMessage = (error as Error).message || 'Unknown error';
       const errMsg = explainClaudeRuntimeError(
         rawErrorMessage,
@@ -2697,7 +2849,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             },
             timestamp: Date.now(),
           });
-          return {
+          return finalizeSourceAwareAnalysisResult({
             sessionId,
             success: true,
             findings,
@@ -2709,7 +2861,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             partial: true,
             terminationReason,
             terminationMessage: errMsg,
-          };
+          }, sourceUse);
         }
       }
 
@@ -2745,7 +2897,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           },
           timestamp: Date.now(),
         });
-        return {
+        return finalizeSourceAwareAnalysisResult({
           sessionId,
           success: true, // partial success — downstream can check confidence < 1
           findings: safePartialFindings,
@@ -2760,7 +2912,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           partial: true,
           terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
           terminationMessage: errMsg,
-        };
+        }, sourceUse);
       }
 
       this.emitUpdate({
@@ -2770,7 +2922,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         },
         timestamp: Date.now(),
       });
-      return {
+      return finalizeSourceAwareAnalysisResult({
         sessionId,
         success: false,
         findings: partialFindings,
@@ -2785,25 +2937,32 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         totalDurationMs: Date.now() - startTime,
         terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
         terminationMessage: errMsg,
-      };
+      }, sourceUse);
     } finally {
-      interruptionRecoveryState?.dispose();
-      this.activeAnalyses.delete(sessionId);
-      runSnapshots.release(sessionId);
-      // Notes persistence now handled by unified SessionStateSnapshot in the route layer.
-      // No separate disk I/O needed here.
-
-      // Persist session metrics (fire-and-forget, non-blocking)
+      const finalizationPhase = runtimePerformance.startPhase('finalization');
       try {
-        if (!delegatedRetry) {
-          metricsCollector.recordTurn(); // Record final turn
-          persistSessionMetrics(
-            metricsCollector.summarize(),
-            analysisContextUsesPrivateKnowledge(options),
-          );
+        interruptionRecoveryState?.dispose();
+        this.activeAnalyses.delete(sessionId);
+        runSnapshots.release(sessionId);
+        executionLease.settle();
+        // Notes persistence now handled by unified SessionStateSnapshot in the route layer.
+        // No separate disk I/O needed here.
+
+        // Persist session metrics (fire-and-forget, non-blocking)
+        try {
+          if (!delegatedRetry) {
+            metricsCollector.recordTurn(); // Record final turn
+            persistSessionMetrics(
+              metricsCollector.summarize(),
+              analysisContextUsesPrivateKnowledge(options),
+            );
+          }
+        } catch (metricsErr) {
+          console.warn('[ClaudeRuntime] Failed to persist metrics:', (metricsErr as Error).message);
         }
-      } catch (metricsErr) {
-        console.warn('[ClaudeRuntime] Failed to persist metrics:', (metricsErr as Error).message);
+      } finally {
+        finalizationPhase.end(runtimePerformanceOutcome);
+        runtimePerformance.finalize(runtimePerformanceOutcome);
       }
     }
   }
@@ -2833,6 +2992,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       quickTraceFactPreEvidence: boolean;
       quickScrollingTriagePreEvidence: boolean;
       outputLanguage: import('../../../agentv3/outputLanguage').OutputLanguage;
+      executionLease: RuntimeExecutionLease;
+      runtimePerformance: RuntimePerformanceRun;
     },
   ): Promise<AnalysisResult> {
     const {
@@ -2850,10 +3011,14 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       quickTraceFactPreEvidence,
       quickScrollingTriagePreEvidence,
       outputLanguage,
+      executionLease,
+      runtimePerformance,
     } = precomputed;
     let delegatedRetry = false;
+    let sourceUse: ReturnType<typeof createClaudeMcpServer>['sourceUse'] | undefined;
 
     try {
+      executionLease.throwIfAborted();
       let effectivePackageName = options.packageName;
       if (!effectivePackageName && focusResult.primaryApp) {
         effectivePackageName = focusResult.primaryApp;
@@ -2873,13 +3038,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         enforcement: 'turn_cap',
       });
 
-      const runtimeDirectEvidenceAnswer = (
+      const runtimeQuickEvidenceAttempt: RuntimeQuickEvidenceAttempt | undefined = (
         quickFocusAppPreEvidence ||
         quickProcessIdentityPreEvidence ||
         quickTraceFactPreEvidence ||
         quickScrollingTriagePreEvidence
       )
-        ? await buildRuntimeQuickEvidenceDirectAnswer({
+        ? await (async () => {
+            const quickEvidencePhase = runtimePerformance.startPhase('quick_evidence');
+            try {
+              const answer = await buildRuntimeQuickEvidenceAttempt({
             query,
             traceId,
             packageName: options.packageName,
@@ -2892,9 +3060,17 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             quickScrollingTriagePreEvidence,
             focusResult,
             emitUpdate: update => this.emitUpdate(update),
-          })
+              });
+              quickEvidencePhase.end('ok');
+              return answer;
+            } catch (error) {
+              quickEvidencePhase.end(runtimeOutcomeFromError(error, executionLease.signal));
+              throw error;
+            }
+          })()
         : undefined;
-      if (runtimeDirectEvidenceAnswer) {
+      executionLease.throwIfAborted();
+      if (runtimeQuickEvidenceAttempt?.directAnswer) {
         const quickResult = buildQuickDirectEvidenceAnalysisResult({
           query,
           sessionId,
@@ -2902,8 +3078,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           startedAt: startTime,
           analysisRunSpec,
           budget: quickBudget,
-          directAnswer: runtimeDirectEvidenceAnswer.directAnswer,
-          evidenceCounts: runtimeDirectEvidenceAnswer.evidenceCounts,
+          directAnswer: runtimeQuickEvidenceAttempt.directAnswer,
+          evidenceCounts: runtimeQuickEvidenceAttempt.evidenceCounts,
           previousTurns,
         });
         emitQuickDirectQualityGateIssue({
@@ -2931,6 +3107,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           },
           quickResult.findings,
         );
+        runtimePerformance.recordFirstOutput();
         emitQuickDirectAnswerEvents({
           emitUpdate: update => this.emitUpdate(update),
           result: quickResult,
@@ -2941,6 +3118,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         });
         console.log(`[ClaudeRuntime] Quick direct pre-evidence completed: 0 rounds, ${Date.now() - startTime}ms, ${quickResult.conclusion.length} chars`);
         return quickResult;
+      }
+
+      const reusableRuntimeQuickEvidenceAttempt = selectReusableRuntimeQuickEvidenceAttempt(
+        runtimeQuickEvidenceAttempt,
+      );
+      if (!effectivePackageName && reusableRuntimeQuickEvidenceAttempt?.effectivePackageName) {
+        effectivePackageName = reusableRuntimeQuickEvidenceAttempt.effectivePackageName;
       }
 
       const skipFocusEvidence = !quickFocusAppPreEvidence && (
@@ -2954,7 +3138,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
             && !quickProcessIdentityPreEvidence
             && shouldSkipFocusDetectionForQuickTraceFactEvidence(query)
       );
-      const focusEvidencePayload = skipFocusEvidence
+      const focusEvidencePayload = skipFocusEvidence || reusableRuntimeQuickEvidenceAttempt
         ? undefined
         : buildFocusAppEvidencePayload(focusResult, traceId, 'current', outputLanguage);
       if (focusEvidencePayload?.envelope) {
@@ -2966,7 +3150,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
 
       const promptFocusResult = focusEvidencePayload?.focusResult ?? focusResult;
-      const quickProcessIdentityExecutor = quickProcessIdentityPreEvidence
+      const shouldBuildFallbackQuickEvidence = !reusableRuntimeQuickEvidenceAttempt;
+      const quickProcessIdentityExecutor = quickProcessIdentityPreEvidence && shouldBuildFallbackQuickEvidence
         ? createQuickProcessIdentitySkillExecutor(this.traceProcessorService)
         : undefined;
       const processIdentityEvidencePromise: Promise<
@@ -2982,7 +3167,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         : Promise.resolve({ envelopes: [] });
       const traceFactEvidencePromise: Promise<
         Awaited<ReturnType<typeof buildQuickTraceFactEvidence>>
-      > = quickTraceFactPreEvidence
+      > = quickTraceFactPreEvidence && shouldBuildFallbackQuickEvidence
         ? buildQuickTraceFactEvidence({
             traceProcessor: this.traceProcessorService,
             traceId,
@@ -3029,6 +3214,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         processIdentityEvidencePromise,
         traceFactEvidencePromise,
       ]);
+      executionLease.throwIfAborted();
 
       const knowledgeScope = analysisRunSpec.scopes.knowledge;
       const sqlErrorPartition = analysisContextMemoryPartitionKey(options);
@@ -3051,6 +3237,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sqlErrors ??= [];
 
       if (processIdentityEvidence.envelopes.length > 0) {
+        executionLease.throwIfAborted();
         this.emitUpdate({
           type: 'data',
           content: processIdentityEvidence.envelopes,
@@ -3058,6 +3245,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         });
       }
       if (traceFactEvidence.envelopes.length > 0) {
+        executionLease.throwIfAborted();
         this.emitUpdate({
           type: 'data',
           content: traceFactEvidence.envelopes,
@@ -3107,6 +3295,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       ) {
         architecture = await detectQuickArchitecture();
         sqlErrors = ensureSqlErrorsLoaded();
+        executionLease.throwIfAborted();
       }
 
       const quickTraceFeatures = useEvidenceOnlyQuick
@@ -3192,6 +3381,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           },
           quickResult.findings,
         );
+        runtimePerformance.recordFirstOutput();
         emitQuickDirectAnswerEvents({
           emitUpdate: update => this.emitUpdate(update),
           result: quickResult,
@@ -3207,7 +3397,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       let mcpServer: ReturnType<typeof createClaudeMcpServer>['server'] | undefined;
       let allowedTools: string[] = [];
       if (!useEvidenceOnlyQuick) {
+        executionLease.throwIfAborted();
         await (skillRegistryReady ?? ensureSkillRegistryInitialized());
+        executionLease.throwIfAborted();
         const skillExecutor = createSkillExecutor(this.traceProcessorService);
         const effectiveSkillRegistry =
           resolveEffectiveSkillRegistryForRuntime(skillRegistry);
@@ -3247,11 +3439,13 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           codeAwareMode: options.codeAwareMode,
           codebaseIds: options.codebaseIds,
           knowledgeSourceIds: options.knowledgeSourceIds,
+          sourceUsePolicy: options.sourceUsePolicy,
           analysisContextFingerprint: options.analysisContextFingerprint,
           androidInternalsPackPin: options.androidInternalsPackPin,
         });
         mcpServer = mcp.server;
         allowedTools = mcp.allowedTools;
+        sourceUse = mcp.sourceUse;
       }
 
       const systemPrompt = buildQuickSystemPrompt({
@@ -3261,11 +3455,17 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         focusMethod: promptFocusResult.method,
         selectionContext: options.selectionContext,
         runtimeEvidenceContext: joinRuntimeEvidenceContexts(
+          sanitizeRuntimeQuickEvidenceRoutingContext(
+            reusableRuntimeQuickEvidenceAttempt?.runtimeEvidenceContext,
+            outputLanguage,
+          ),
           processIdentityEvidence.promptContext,
           traceFactEvidence.promptContext,
         ),
         quickMemoryContext,
         outputLanguage: outputLanguage,
+        codeAwareMode: options.codeAwareMode,
+        codebaseIds: options.codebaseIds,
       });
       const quickConversationContext = buildQuickConversationContext(previousTurns, outputLanguage);
 
@@ -3275,12 +3475,16 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         flushPendingAnswer,
         dispose: disposeBridge,
       } = createSseBridge((update: StreamingUpdate) => {
+        if (update.type === 'answer_token' || update.type === 'thought') {
+          runtimePerformance.recordFirstOutput();
+        }
         this.emitUpdate(update);
       }, outputLanguage, {
         tracePairContext: options.tracePairContext,
       }, ((options.codeAwareMode && options.codeAwareMode !== 'off') || options.knowledgeSourceIds?.length)
         ? createCodeAwareStreamingTextProjection(sessionId, 'claude-quick-answer')
         : undefined);
+      executionLease.throwIfAborted();
 
       this.emitUpdate({
         type: 'progress',
@@ -3308,32 +3512,36 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       if (analysisRunSpec.traceContext.promptSection) {
         quickPrompt = `${analysisRunSpec.traceContext.promptSection}\n\n${quickPrompt}`;
       }
+      executionLease.throwIfAborted();
 
-      const { stream, close: closeSdk } = sdkQueryWithRetry({
-        prompt: quickPrompt,
-        options: {
-          model: quickConfig.model,
-          maxTurns: quickConfig.maxTurns,
-          systemPrompt,
-          ...(mcpServer ? { mcpServers: { smartperfetto: mcpServer } } : {}),
-          includePartialMessages: true,
-          settingSources: [],
-          tools: [],
-          ...resolveClaudeSdkPermissionOptions(),
-          cwd: quickConfig.cwd,
-          effort: quickConfig.effort,
-          allowedTools,
-          env: sdkEnv,
-          persistSession: false,
-          stderr: (data: string) => {
-            console.warn(
-              `[ClaudeRuntime] Quick SDK stderr [${sessionId}]: ${diagnosticLogIdentity(data.trimEnd())}`,
-            );
+      const {stream, close: closeSdk} = sdkQueryWithRetry({
+          prompt: quickPrompt,
+          options: {
+            model: quickConfig.model,
+            maxTurns: quickConfig.maxTurns,
+            systemPrompt,
+            ...(mcpServer ? { mcpServers: { smartperfetto: mcpServer } } : {}),
+            includePartialMessages: true,
+            settingSources: [],
+            tools: [],
+            ...resolveClaudeSdkPermissionOptions(),
+            cwd: quickConfig.cwd,
+            effort: quickConfig.effort,
+            allowedTools,
+            env: sdkEnv,
+            persistSession: false,
+            stderr: (data: string) => {
+              console.warn(
+                `[ClaudeRuntime] Quick SDK stderr [${sessionId}]: ${diagnosticLogIdentity(data.trimEnd())}`,
+              );
+            },
           },
-        },
       }, {
-        emitUpdate: (update) => this.emitUpdate(update),
-        outputLanguage: outputLanguage,
+          emitUpdate: (update) => this.emitUpdate(update),
+          outputLanguage: outputLanguage,
+        runtimePerformance,
+        signal: executionLease.signal,
+        recordSdkStartPhase: true,
       });
       const unregisterSdkAbortHandle = this.registerAbortHandle(sessionId, { abort: closeSdk });
 
@@ -3342,6 +3550,12 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       let quickRounds = 0;
       let terminationReason: AnalysisResult['terminationReason'];
       let terminationMessage: string | undefined;
+      const quickToolCalls: Array<{
+        id?: string;
+        name: string;
+        startedAt: number;
+        completed: boolean;
+      }> = [];
 
       // Quick path per-turn budget from env CLAUDE_QUICK_PER_TURN_MS (default 40s/turn).
       const timeoutMs = quickConfig.maxTurns * quickConfig.quickPathPerTurnMs;
@@ -3360,12 +3574,44 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
       const processStream = async () => {
         for await (const msg of stream) {
+          executionLease.throwIfAborted();
           if (timedOut) break;
 
           const sdkResultError = getSdkResultErrorMessage(msg);
           if (sdkResultError) throw new Error(sdkResultError);
 
           try { bridge(msg); } catch { /* non-fatal */ }
+
+          if (msg.type === 'assistant' && Array.isArray((msg as any).message?.content)) {
+            for (const block of (msg as any).message.content) {
+              if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
+              quickToolCalls.push({
+                id: typeof block.id === 'string' ? block.id : undefined,
+                name: block.name.replace(MCP_NAME_PREFIX, ''),
+                startedAt: Date.now(),
+                completed: false,
+              });
+            }
+          }
+          if (msg.type === 'user' && (msg as any).tool_use_result !== undefined) {
+            const resultBlocks = extractSdkToolResultBlocks(msg);
+            const observedResults = resultBlocks.length > 0
+              ? resultBlocks
+              : [{result: (msg as any).tool_use_result, isError: undefined, toolUseId: undefined}];
+            for (const observed of observedResults) {
+              const matched = observed.toolUseId
+                ? quickToolCalls.find(call => call.id === observed.toolUseId && !call.completed)
+                : [...quickToolCalls].reverse().find(call => !call.completed);
+              if (!matched) continue;
+              matched.completed = true;
+              const failed = isSdkToolResultFailure(observed.result, observed.isError);
+              metricsCollector.recordToolFromStream(
+                matched.name,
+                Date.now() - matched.startedAt,
+                !failed,
+              );
+            }
+          }
 
           if (msg.type === 'result') {
             quickRounds = (msg as any).num_turns || quickRounds;
@@ -3412,6 +3658,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
 
       let conclusionText = finalResult || accumulatedAnswerAfterStream || '';
+      executionLease.throwIfAborted();
       let mergedFindings = mergeFindings([extractFindingsFromText(conclusionText)]);
       const isPartialResult = terminationReason === MAX_TURNS_TERMINATION_REASON || terminationReason === 'timeout';
       if (isPartialResult) {
@@ -3501,7 +3748,9 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
           adaptiveRouting: analysisRunSpec.mode.adaptiveRouting,
         }),
       };
+      finalizeSourceAwareAnalysisResult(quickResult, sourceUse);
       const quickGateIssue = applyFinalResultQualityGate({ result: quickResult, query, sceneType });
+      executionLease.throwIfAborted();
       if (quickGateIssue) {
         this.emitUpdate({
           type: 'degraded',
@@ -3520,6 +3769,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       }
 
       // Record turn in session context
+      executionLease.throwIfAborted();
       sessionContext.addTurn(
         query,
         {
@@ -3553,6 +3803,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         quickResult.partial !== true &&
         quickResult.findings.length > 0
       ) {
+        executionLease.throwIfAborted();
         const insights = extractKeyInsights(quickResult.findings, quickResult.conclusion);
         const quickFeatures = extractTraceFeatures({
           architectureType: architecture?.type,
@@ -3585,7 +3836,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         },
         timestamp: Date.now(),
       });
-      return {
+      return finalizeSourceAwareAnalysisResult({
         sessionId,
         success: false,
         findings: [],
@@ -3600,7 +3851,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         totalDurationMs: Date.now() - startTime,
         terminationReason: quotaExceeded ? 'max_budget_usd' : 'execution_error',
         terminationMessage: errMsg,
-      };
+      }, sourceUse);
     } finally {
       this.activeAnalyses.delete(sessionId);
       try {
@@ -3653,6 +3904,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   }
 
   abortSession(sessionId: string): void {
+    void this.executionGuard.abortSession(sessionId);
     const handles = this.activeAbortHandles.get(sessionId);
     if (!handles) return;
     for (const handle of Array.from(handles)) {
@@ -3829,6 +4081,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
   }
 
   reset(): void {
+    this.executionGuard.clear();
     this.abortAllSessions();
     this.architectureCache.clear();
     this.vendorCache.clear();
@@ -3881,6 +4134,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       sceneType?: SceneType;
       runtimeConfig?: ClaudeAgentConfig;
       analysisRunSpec?: AnalysisRunSpec;
+      executionLease?: RuntimeExecutionLease;
+      runtimePerformance?: RuntimePerformanceRun;
     },
   ) {
     const providerScope = precomputed?.analysisRunSpec?.scopes.provider
@@ -3889,6 +4144,66 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       ?? knowledgeScopeFromAnalysisOptions(options);
     const runtimeConfig = precomputed?.runtimeConfig
       ?? resolveRuntimeConfig(this.config, options.providerId, providerScope);
+    const executionLease = precomputed?.executionLease;
+    const runtimePerformance = precomputed?.runtimePerformance;
+    const widenedPreflightDagAdmitted = isRuntimeCandidateAdmitted('task6');
+    const startedPreflights: Promise<unknown>[] = [];
+    const trackPreflight = <T>(promise: Promise<T>): Promise<T> => {
+      startedPreflights.push(promise.then(
+        () => undefined,
+        () => undefined,
+      ));
+      return promise;
+    };
+    let serializedPreflightTail: Promise<void> = Promise.resolve();
+    const schedulePreflight = <T>(work: () => Promise<T>): Promise<T> => {
+      const promise = widenedPreflightDagAdmitted
+        ? Promise.resolve().then(work)
+        : serializedPreflightTail.then(work);
+      if (!widenedPreflightDagAdmitted) {
+        serializedPreflightTail = promise.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+      return trackPreflight(promise);
+    };
+    const settleStartedPreflights = async (): Promise<void> => {
+      await Promise.allSettled(startedPreflights);
+    };
+    const throwIfPreflightAborted = async (): Promise<void> => {
+      if (!executionLease?.signal.aborted) return;
+      await settleStartedPreflights();
+      executionLease.throwIfAborted();
+    };
+    const runPreflightPhase = <T>(
+      phaseName: Parameters<RuntimePerformanceRun['startPhase']>[0],
+      work: () => Promise<T>,
+    ): Promise<T> => {
+      const phase = runtimePerformance?.startPhase(phaseName);
+      return schedulePreflight(async () => {
+        try {
+          executionLease?.throwIfAborted();
+          const value = await work();
+          phase?.end(executionLease?.signal.aborted ? 'cancelled' : 'ok');
+          return value;
+        } catch (err) {
+          phase?.end(runtimeOutcomeFromError(err, executionLease?.signal));
+          throw err;
+        }
+      });
+    };
+    const skillRegistryReady = runPreflightPhase('skill_registry', async () => {
+      await ensureSkillRegistryInitialized();
+    });
+    const knowledgeBaseContextPromise = runPreflightPhase('knowledge', async () => {
+      try {
+        const kb = await getExtendedKnowledgeBase();
+        return kb.getContextForAI(query, 8);
+      } catch {
+        return undefined;
+      }
+    });
 
     // Phase 0: Selection context logging
     if (options.selectionContext) {
@@ -3928,53 +4243,11 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
     // Phase 1: Skill executor setup
     const skillExecutor = createSkillExecutor(this.traceProcessorService);
-    await ensureSkillRegistryInitialized();
-    const effectiveSkillRegistry =
-      resolveEffectiveSkillRegistryForRuntime(skillRegistry);
-    skillExecutor.registerSkills(effectiveSkillRegistry.getAllSkills());
-    skillExecutor.setFragmentRegistry(
-      effectiveSkillRegistry.getFragmentCache(),
-    );
-
-    // Phase 2: Architecture detection (LRU cached per traceId)
-    let architecture = getLruCacheEntry(this.architectureCache, traceId);
-    if (!architecture) {
-      try {
-        const detector = createArchitectureDetector();
-        architecture = await detector.detect({
-          traceId,
-          traceProcessorService: this.traceProcessorService,
-          packageName: effectivePackageName,
-        });
-        if (architecture) {
-          setLruCacheEntry(this.architectureCache, traceId, architecture);
-        }
-        this.emitUpdate({ type: 'architecture_detected', content: { architecture }, timestamp: Date.now() });
-      } catch (err) {
-        console.warn('[ClaudeRuntime] Architecture detection failed:', diagnosticLogIdentity((err as Error).message));
-      }
-    }
-
-    // Phase 2.5: Vendor detection (LRU cached per traceId, reuses SkillAnalysisAdapter.detectVendor)
-    let detectedVendor = getLruCacheEntry(this.vendorCache, traceId) ?? null;
-    if (!detectedVendor) {
-      try {
-        const adapter = getSkillAnalysisAdapter(this.traceProcessorService);
-        await adapter.ensureInitialized();
-        const vendorResult = await adapter.detectVendor(traceId);
-        detectedVendor = vendorResult.vendor;
-        if (detectedVendor && detectedVendor !== 'aosp') {
-          setLruCacheEntry(this.vendorCache, traceId, detectedVendor);
-        }
-      } catch (err) {
-        console.warn('[ClaudeRuntime] Vendor detection failed:', diagnosticLogIdentity((err as Error).message));
-      }
-    }
 
     // Phase 2.8: Comparison context (dual-trace mode)
-    let comparisonContext: import('../../../agentv3/types').ComparisonContext | undefined;
     const referenceTraceId = options.referenceTraceId;
-    if (referenceTraceId) {
+    const comparisonContextPromise = referenceTraceId
+      ? runPreflightPhase('comparison', async () => {
       console.log(`[ClaudeRuntime] Comparison mode: current=${traceId}, reference=${referenceTraceId}`);
       this.emitUpdate({
         type: 'progress',
@@ -3989,7 +4262,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         timestamp: Date.now(),
       });
 
-      comparisonContext = await buildRuntimeTracePairComparisonContext({
+      const comparisonContext = await buildRuntimeTracePairComparisonContext({
         traceProcessorService: this.traceProcessorService,
         currentTraceId: traceId,
         referenceTraceId,
@@ -4016,20 +4289,91 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       console.log(`[ClaudeRuntime] Comparison context built: refApp=${comparisonContext?.referencePackageName || 'unknown'}, ` +
         `refArch=${comparisonContext?.referenceArchitecture?.type || 'unknown'}, commonCaps=${comparisonContext?.commonCapabilities.length ?? 0}, ` +
         `capDiff=${comparisonContext?.capabilityDiff ? `cur=${comparisonContext.capabilityDiff.currentOnly.length}/ref=${comparisonContext.capabilityDiff.referenceOnly.length}` : 'none'}`);
-    }
+      return comparisonContext;
+    })
+      : undefined;
+
+    // Phase 2: Architecture detection (LRU cached per traceId)
+    const architecturePromise = runPreflightPhase('architecture', async () => {
+      let architecture = getLruCacheEntry(this.architectureCache, traceId);
+      if (!architecture) {
+        try {
+          const detector = createArchitectureDetector();
+          architecture = await detector.detect({
+            traceId,
+            traceProcessorService: this.traceProcessorService,
+            packageName: effectivePackageName,
+          });
+          if (architecture) {
+            setLruCacheEntry(this.architectureCache, traceId, architecture);
+          }
+          this.emitUpdate({ type: 'architecture_detected', content: { architecture }, timestamp: Date.now() });
+        } catch (err) {
+          console.warn('[ClaudeRuntime] Architecture detection failed:', diagnosticLogIdentity((err as Error).message));
+        }
+      }
+      return architecture;
+    });
+
+    // Phase 2.5: Vendor detection (LRU cached per traceId, reuses SkillAnalysisAdapter.detectVendor)
+    const detectedVendorPromise = schedulePreflight(async () => {
+      await architecturePromise;
+      executionLease?.throwIfAborted();
+      let detectedVendor = getLruCacheEntry(this.vendorCache, traceId) ?? null;
+      if (!detectedVendor) {
+        try {
+          const adapter = getSkillAnalysisAdapter(this.traceProcessorService);
+          await adapter.ensureInitialized();
+          const vendorResult = await adapter.detectVendor(traceId);
+          detectedVendor = vendorResult.vendor;
+          if (detectedVendor && detectedVendor !== 'aosp') {
+            setLruCacheEntry(this.vendorCache, traceId, detectedVendor);
+          }
+        } catch (err) {
+          console.warn('[ClaudeRuntime] Vendor detection failed:', diagnosticLogIdentity((err as Error).message));
+        }
+      }
+      return detectedVendor;
+    });
 
     // Phase 2.9: Trace data completeness probe (identity-safe shared cache)
-    let traceCompleteness:
-      Awaited<ReturnType<typeof probeTraceCompleteness>> | undefined;
+    const traceCompletenessPromise = runPreflightPhase('completeness', async () => {
+      const architecture = await architecturePromise;
+      try {
+        return await probeTraceCompleteness(
+          this.traceProcessorService,
+          traceId,
+          architecture?.type,
+        );
+      } catch (err) {
+        console.warn('[ClaudeRuntime] Trace completeness probe failed (non-fatal):', diagnosticLogIdentity((err as Error).message));
+        return undefined;
+      }
+    });
+
+    let architecture: Awaited<typeof architecturePromise>;
+    let detectedVendor: Awaited<typeof detectedVendorPromise>;
+    let traceCompleteness: Awaited<typeof traceCompletenessPromise>;
+    let comparisonContext: Awaited<ReturnType<typeof buildRuntimeTracePairComparisonContext>> | undefined;
+    let knowledgeBaseContext: Awaited<typeof knowledgeBaseContextPromise>;
     try {
-      traceCompleteness = await probeTraceCompleteness(
-        this.traceProcessorService,
-        traceId,
-        architecture?.type,
-      );
-    } catch (err) {
-      console.warn('[ClaudeRuntime] Trace completeness probe failed (non-fatal):', diagnosticLogIdentity((err as Error).message));
+      [architecture, detectedVendor, traceCompleteness, comparisonContext, knowledgeBaseContext] = await Promise.all([
+        architecturePromise,
+        detectedVendorPromise,
+        traceCompletenessPromise,
+        comparisonContextPromise ?? Promise.resolve(undefined),
+        knowledgeBaseContextPromise,
+      ]);
+      await skillRegistryReady;
+    } catch (error) {
+      if (executionLease?.signal.aborted) {
+        await settleStartedPreflights();
+        executionLease.throwIfAborted();
+      }
+      throw error;
     }
+    await throwIfPreflightAborted();
+    executionLease?.throwIfAborted();
 
     // Phase 3: Session context + conversation history (reuse precomputed if available)
     const sessionContext = precomputed?.sessionContext ?? sessionContextManager.getOrCreate(sessionId, traceId);
@@ -4145,8 +4489,15 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
 
     // Phase 8: MCP server with all session-scoped state
     // P2-G1: Destructure to get both server and auto-derived allowedTools
+    await skillRegistryReady;
+    const effectiveSkillRegistry =
+      resolveEffectiveSkillRegistryForRuntime(skillRegistry);
+    skillExecutor.registerSkills(effectiveSkillRegistry.getAllSkills());
+    skillExecutor.setFragmentRegistry(
+      effectiveSkillRegistry.getFragmentCache(),
+    );
     const fullNotesBudget = createRuntimeSkillNotesBudget(false);
-    const { server: mcpServer, allowedTools } = createClaudeMcpServer({
+    const { server: mcpServer, allowedTools, toolDefinitions, sourceUse } = createClaudeMcpServer({
       conversationTraceAttached: options.assistantSurface === 'conversation'
         ? options.conversationTraceAttached === true
         : undefined,
@@ -4181,6 +4532,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       codeAwareMode: options.codeAwareMode,
       codebaseIds: options.codebaseIds,
       knowledgeSourceIds: options.knowledgeSourceIds,
+      sourceUsePolicy: options.sourceUsePolicy,
       analysisContextFingerprint: options.analysisContextFingerprint,
       androidInternalsPackPin: options.androidInternalsPackPin,
     });
@@ -4188,14 +4540,8 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
     // Phase 9: (removed — skillCatalog was populated but never used in prompt;
     //           Claude uses list_skills MCP tool on demand instead)
 
-    // Phase 10: Knowledge base context (non-fatal — Claude can use lookup_sql_schema tool)
-    let knowledgeBaseContext: string | undefined;
-    try {
-      const kb = await getExtendedKnowledgeBase();
-      knowledgeBaseContext = kb.getContextForAI(query, 8);
-    } catch {
-      // Non-fatal
-    }
+    // Phase 10: Knowledge base context was prepared before session-state reset
+    // and remains non-fatal — Claude can use lookup_sql_schema tool.
 
     // Phase 11: Sub-agent definitions (feature-gated)
     let agents: Record<string, any> | undefined;
@@ -4204,6 +4550,10 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
         architecture,
         packageName: effectivePackageName,
         allowedTools,
+        toolDefinitions,
+        codeAwareMode: options.codeAwareMode,
+        codebaseIds: options.codebaseIds,
+        outputLanguage: runtimeConfig.outputLanguage,
         subAgentModel: runtimeConfig.subAgentModel,
       });
     }
@@ -4269,6 +4619,7 @@ export class ClaudeRuntime extends EventEmitter implements IOrchestrator {
       analysisContextForRebuild, // Used by correction retry to rebuild prompt with reduced budget
       sessionMapKey, // Composite key for comparison mode session identity isolation
       analysisRunSpec: precomputed?.analysisRunSpec,
+      sourceUse,
     };
   }
 
